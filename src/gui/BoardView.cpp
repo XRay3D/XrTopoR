@@ -21,7 +21,13 @@ BoardView::BoardView(Document* doc, QWidget* parent) : QWidget(parent), doc_(doc
   setMouseTracking(true);
   setFocusPolicy(Qt::StrongFocus);
   setAutoFillBackground(false);
-  connect(doc_, &Document::boardReplaced, this, [this] { fitBoard(); });
+  connect(doc_, &Document::boardReplaced, this, [this] {
+    views_.clear();
+    viewPos_ = -1;
+    viewTimer_.invalidate();
+    cycleSeed_ = -1;
+    fitBoard();
+  });
   connect(doc_, &Document::boardChanged, this, qOverload<>(&QWidget::update));
   connect(doc_, &Document::selectionChanged, this, qOverload<>(&QWidget::update));
   connect(doc_, &Document::layersChanged, this, [this] {
@@ -46,6 +52,7 @@ Vec2 BoardView::toWorld(QPointF s) const {
 
 void BoardView::fitBoard() {
   if (!doc_->hasBoard()) { update(); return; }
+  pushView();
   BBox bb = doc_->board()->bbox();
   if (!bb.valid()) { center_ = {}; scale_ = 1e-5; update(); return; }
   bb = bb.inflated(2 * kNmPerMm);
@@ -56,6 +63,7 @@ void BoardView::fitBoard() {
 
 void BoardView::fitAll() {
   if (!doc_->hasBoard()) return;
+  pushView();
   const Board& b = *doc_->board();
   BBox bb = b.bbox();
   for (auto& t : b.tracks) {
@@ -76,17 +84,20 @@ void BoardView::fitAll() {
 }
 
 void BoardView::centerAtCursor() {
+  pushView();
   center_ = cursor_;
   update();
 }
 
 void BoardView::centerOn(Vec2 p, double widthMm) {
+  pushView();
   center_ = p;
   if (widthMm > 0) scale_ = width() / (widthMm * kNmPerMm);
   update();
 }
 
 void BoardView::zoomBy(double factor) {
+  pushView();
   scale_ = std::clamp(scale_ * factor, 1e-7, 1e-2);
   update();
 }
@@ -170,26 +181,58 @@ BoardView::Pick BoardView::pick(QPointF screen) const {
     }
     return pk;
   }
-  if (!(filter & SelComponents) || !d.flag("showComponents")) return pk;
   // Component by its drawings or pad bounding box.
-  for (int ci = 0; ci < int(b.components.size()); ++ci) {
-    if (!componentVisible(ci)) continue;
-    const Component& c = b.components[ci];
-    BBox bb;
-    for (int pi : c.pads) bb.add(b.pads[pi].shapeGeom().bbox());
-    for (auto& g : c.graphics) {
-      if (g.layer < 0 || !layerVisible(g.layer)) continue;
-      bb.add(g.a);
-      bb.add(g.b);
-      if (g.kind == GraphicKind::Arc) bb.add(g.m);
-      for (auto& p : g.pts) bb.add(p);
+  if ((filter & SelComponents) && d.flag("showComponents"))
+    for (int ci = 0; ci < int(b.components.size()); ++ci) {
+      if (!componentVisible(ci)) continue;
+      const Component& c = b.components[ci];
+      BBox bb;
+      for (int pi : c.pads) bb.add(b.pads[pi].shapeGeom().bbox());
+      for (auto& g : c.graphics)
+        if (g.layer >= 0 && layerVisible(g.layer)) bb.add(graphicBBox(g));
+      if (bb.valid() && bb.inflated(tol).contains(w)) {
+        pk.component = ci;
+        return pk;
+      }
     }
-    if (bb.valid() && bb.inflated(tol).contains(w)) {
-      pk.component = ci;
-      return pk;
+  // Copper area under the cursor (the active layer first).
+  if ((filter & SelCoppers) && d.flag("showCoppers")) {
+    int best = -1;
+    for (int zi = 0; zi < int(b.zones.size()); ++zi) {
+      const Zone& z = b.zones[zi];
+      if (!layerVisible(z.layer) || z.outline.size() < 3 || !pointInPolygon(w, z.outline)) continue;
+      if (best < 0 || z.layer == doc_->activeLayer()) best = zi;
     }
+    if (best >= 0) pk.item = ItemRef{ItemType::Zone, best};
   }
   return pk;
+}
+
+// Extent of a drawing: only the points its kind uses (unused ones are zero).
+BBox BoardView::graphicBBox(const Graphic& g) {
+  BBox bb;
+  switch (g.kind) {
+    case GraphicKind::Line:
+    case GraphicKind::Rect:
+      bb.add(g.a);
+      bb.add(g.b);
+      break;
+    case GraphicKind::Arc:
+      bb.add(g.a);
+      bb.add(g.m);
+      bb.add(g.b);
+      break;
+    case GraphicKind::Circle: {
+      double r = (g.b - g.a).len();
+      bb.add(g.a - Vec2{r, r});
+      bb.add(g.a + Vec2{r, r});
+      break;
+    }
+    case GraphicKind::Poly:
+      for (auto& p : g.pts) bb.add(p);
+      break;
+  }
+  return bb;
 }
 
 bool BoardView::componentVisible(int ci) const {
@@ -224,6 +267,31 @@ void BoardView::paintEvent(QPaintEvent*) {
   p.setRenderHint(QPainter::Antialiasing, true);
   drawBoard(p);
   drawOverlay(p);
+  drawTools(p);
+}
+
+void BoardView::drawTools(QPainter& p) {
+  if (frameStart_) {
+    // Window (→) solid, crossing (←) dashed, as in TopoR.
+    bool crossing = frameEnd_.x() < frameStart_->x();
+    QColor c = crossing ? QColor(0x40, 0xc0, 0x40) : QColor(0x50, 0x90, 0xff);
+    p.setPen(QPen(c, 1, crossing ? Qt::DashLine : Qt::SolidLine));
+    QColor fill = c;
+    fill.setAlpha(40);
+    p.setBrush(fill);
+    p.drawRect(QRectF(*frameStart_, frameEnd_).normalized());
+  }
+  if (mode_ == Mode::Measure && measureA_) {
+    Vec2 b = measureB_ ? *measureB_ : (measureKind_ == MeasureKind::Points ? snapped(cursor_) : cursor_);
+    p.setPen(QPen(QColor(0xff, 0xff, 0x60), 1, Qt::DashLine));
+    p.drawLine(toScreen(*measureA_), toScreen(b));
+    p.setBrush(QColor(0xff, 0xff, 0x60));
+    p.drawEllipse(toScreen(*measureA_), 3, 3);
+    if (measureKind_ == MeasureKind::Points && !measureB_) {
+      Unit u = doc_->unit();
+      p.drawText(toScreen(b) + QPointF(10, -6), formatLength((b - *measureA_).len(), u, 3) + " " + unitName(u));
+    }
+  }
 }
 
 void BoardView::drawGrid(QPainter& p) {
@@ -534,7 +602,18 @@ void BoardView::drawBoard(QPainter& p) {
         case ItemType::Track: drawTrack(p, b.tracks[r.index], lit(b.tracks[r.index].layer)); break;
         case ItemType::Via: drawVia(p, b.vias[r.index], viaLit); break;
         case ItemType::Pad: drawPad(p, b.pads[r.index], -1, litPad(b.pads[r.index])); break;
-        default: break;
+        case ItemType::Zone: {
+          const Zone& z = b.zones[r.index];
+          QColor c = lit(z.layer);
+          p.setPen(QPen(c, 2));
+          QColor fill = c;
+          fill.setAlpha(z.filled.empty() ? 40 : 255);
+          p.setBrush(fill);
+          for (auto& f : z.filled) p.drawPolygon(toPoly(f, [&](Vec2 v) { return toScreen(v); }));
+          p.setBrush(Qt::NoBrush);
+          p.drawPolygon(toPoly(z.outline, [&](Vec2 v) { return toScreen(v); }));
+          break;
+        }
       }
     }
     for (int ci : comps) {
@@ -576,8 +655,14 @@ void BoardView::drawOverlay(QPainter& p) {
 void BoardView::mousePressEvent(QMouseEvent* e) {
   setFocus();
   lastMouse_ = e->position();
-  if (e->button() == Qt::MiddleButton || e->button() == Qt::RightButton) {
+  if (e->button() == Qt::MiddleButton) {
     panning_ = true;
+    return;
+  }
+  if (e->button() == Qt::RightButton) {
+    rightDown_ = true;
+    rightMoved_ = false;
+    rightPos_ = e->position();
     return;
   }
   if (e->button() != Qt::LeftButton || !doc_->hasBoard()) return;
@@ -586,17 +671,20 @@ void BoardView::mousePressEvent(QMouseEvent* e) {
   emit clicked(w);
   switch (mode_) {
     case Mode::Select: {
-      if (pk.item && pk.item->type != ItemType::Pad) {
-        doc_->setSelection({*pk.item}, {});
-      } else if (pk.component >= 0) {
-        doc_->setSelection(pk.item ? std::vector<ItemRef>{*pk.item} : std::vector<ItemRef>{}, {pk.component});
+      bool add = e->modifiers() & (Qt::ShiftModifier | Qt::ControlModifier);
+      if (!pk.item && pk.component < 0) {
+        // Empty spot: a frame selection starts (a click alone clears the selection).
+        frameStart_ = frameEnd_ = e->position();
+        if (!add) doc_->clearSelection();
+        break;
+      }
+      clickSelect(pk, e->modifiers());
+      if (!add && pk.component >= 0 && (!pk.item || pk.item->type == ItemType::Pad)) {
         dragging_ = true;
         dragStart_ = w;
         dragBefore_ = doc_->beginEdit();
         dragOrigins_.clear();
         for (int ci : doc_->selectedComponents()) dragOrigins_.push_back(doc_->board()->components[ci].pos);
-      } else {
-        doc_->clearSelection();
       }
       break;
     }
@@ -619,7 +707,225 @@ void BoardView::mousePressEvent(QMouseEvent* e) {
       doc_->commitEdit(before, tr("Добавить переход"));
       break;
     }
+    case Mode::Measure: measureClick(pk, w); break;
   }
+  update();
+}
+
+void BoardView::clickSelect(const Pick& pk, Qt::KeyboardModifiers mods) {
+  bool add = mods & (Qt::ShiftModifier | Qt::ControlModifier);
+  auto items = add ? doc_->selectedItems() : std::vector<ItemRef>{};
+  auto comps = add ? doc_->selectedComponents() : std::vector<int>{};
+  auto toggle = [&](auto& list, auto v) {
+    if (auto it = std::ranges::find(list, v); it != list.end()) list.erase(it);
+    else list.push_back(v);
+  };
+  if (pk.item && pk.item->type != ItemType::Pad) {
+    toggle(items, *pk.item);
+    cycleSeed_ = pk.item->type == ItemType::Track ? pk.item->index : -1;
+    cycleLevel_ = 0;
+  } else if (pk.component >= 0) {
+    toggle(comps, pk.component);
+    if (pk.item && !add) items.push_back(*pk.item);
+  } else if (pk.item) {
+    toggle(items, *pk.item);  // a pad alone (components filtered out)
+  }
+  doc_->setSelection(std::move(items), std::move(comps));
+}
+
+void BoardView::selectInFrame(QRectF screenRect, bool crossing, bool add) {
+  const Board& b = *doc_->board();
+  const DisplayControl& d = doc_->display();
+  uint32_t filter = doc_->selectionFilter();
+  BBox box;
+  box.add(toWorld(screenRect.topLeft()));
+  box.add(toWorld(screenRect.bottomRight()));
+  // Window (left to right): objects entirely inside; crossing (right to left): touched ones too.
+  auto hit = [&](const BBox& bb) {
+    if (!bb.valid()) return false;
+    if (crossing) return bb.intersects(box);
+    return box.contains({bb.minX, bb.minY}) && box.contains({bb.maxX, bb.maxY});
+  };
+  auto items = add ? doc_->selectedItems() : std::vector<ItemRef>{};
+  auto comps = add ? doc_->selectedComponents() : std::vector<int>{};
+  auto addItem = [&](ItemRef r) {
+    if (!std::ranges::contains(items, r)) items.push_back(r);
+  };
+  if ((filter & SelWires) && d.flag("showWires"))
+    for (int i = 0; i < int(b.tracks.size()); ++i)
+      if (layerVisible(b.tracks[i].layer) && hit(itemBBox(b, {ItemType::Track, i}))) addItem({ItemType::Track, i});
+  if ((filter & SelVias) && d.flag("showVias"))
+    for (int i = 0; i < int(b.vias.size()); ++i)
+      if (hit(itemBBox(b, {ItemType::Via, i}))) addItem({ItemType::Via, i});
+  if ((filter & SelCoppers) && d.flag("showCoppers"))
+    for (int i = 0; i < int(b.zones.size()); ++i) {
+      BBox bb;
+      for (auto& v : b.zones[i].outline) bb.add(v);
+      if (layerVisible(b.zones[i].layer) && hit(bb)) addItem({ItemType::Zone, i});
+    }
+  if (filter & SelComponents)
+    for (int ci = 0; ci < int(b.components.size()); ++ci) {
+      if (!componentVisible(ci)) continue;
+      BBox bb;
+      for (int pi : b.components[ci].pads) bb.add(b.pads[pi].shapeGeom().bbox());
+      if (hit(bb) && !std::ranges::contains(comps, ci)) comps.push_back(ci);
+    }
+  doc_->setSelection(std::move(items), std::move(comps));
+}
+
+std::vector<ItemRef> BoardView::wireOf(int track) const {
+  // A wire: same-net tracks joined end to end (through vias), not passing through pads.
+  const Board& b = *doc_->board();
+  int net = b.tracks[track].net;
+  std::vector<char> seenT(b.tracks.size(), 0), seenV(b.vias.size(), 0);
+  std::vector<ItemRef> out;
+  std::vector<std::pair<Vec2, LayerMask>> todo;
+  auto atPad = [&](Vec2 p, LayerMask lm) {
+    for (auto& pad : b.pads)
+      if (pad.net == net && (pad.copper & lm) && pad.shapeGeom().contains(p)) return true;
+    return false;
+  };
+  auto visit = [&](int ti) {
+    seenT[ti] = 1;
+    out.push_back({ItemType::Track, ti});
+    const Track& t = b.tracks[ti];
+    LayerMask lm = LayerMask(1) << t.layer;
+    for (Vec2 p : {t.a.v(), t.b.v()})
+      if (!atPad(p, lm)) todo.push_back({p, lm});
+  };
+  visit(track);
+  while (!todo.empty()) {
+    auto [p, lm] = todo.back();
+    todo.pop_back();
+    for (int vi = 0; vi < int(b.vias.size()); ++vi)
+      if (!seenV[vi] && b.vias[vi].net == net && (b.vias[vi].pos.v() - p).len() <= b.vias[vi].diameter / 2.0) {
+        seenV[vi] = 1;
+        out.push_back({ItemType::Via, vi});
+        todo.push_back({b.vias[vi].pos.v(), b.vias[vi].layers});
+      }
+    for (int ti = 0; ti < int(b.tracks.size()); ++ti) {
+      const Track& t = b.tracks[ti];
+      if (seenT[ti] || t.net != net || !((lm >> t.layer) & 1)) continue;
+      double tol = t.width / 2.0;
+      if ((t.a.v() - p).len() <= tol || (t.b.v() - p).len() <= tol) visit(ti);
+    }
+  }
+  return out;
+}
+
+void BoardView::selectWire() {
+  if (!doc_->hasBoard()) return;
+  std::vector<ItemRef> items;
+  for (ItemRef r : doc_->selectedItems())
+    if (r.type == ItemType::Track)
+      for (ItemRef w : wireOf(r.index))
+        if (!std::ranges::contains(items, w)) items.push_back(w);
+  if (!items.empty()) doc_->setSelection(std::move(items), {});
+}
+
+void BoardView::selectNet() {
+  if (!doc_->hasBoard()) return;
+  const Board& b = *doc_->board();
+  std::vector<int> nets;
+  for (ItemRef r : doc_->selectedItems())
+    if (int n = itemNet(b, r); n >= 0 && !std::ranges::contains(nets, n)) nets.push_back(n);
+  if (nets.empty()) return;
+  std::vector<ItemRef> items;
+  for (int i = 0; i < int(b.tracks.size()); ++i)
+    if (std::ranges::contains(nets, b.tracks[i].net)) items.push_back({ItemType::Track, i});
+  for (int i = 0; i < int(b.vias.size()); ++i)
+    if (std::ranges::contains(nets, b.vias[i].net)) items.push_back({ItemType::Via, i});
+  for (int i = 0; i < int(b.pads.size()); ++i)
+    if (std::ranges::contains(nets, b.pads[i].net)) items.push_back({ItemType::Pad, i});
+  doc_->setSelection(std::move(items), {});
+}
+
+void BoardView::cycleSelection() {
+  if (!doc_->hasBoard()) return;
+  auto items = doc_->selectedItems();
+  if (items.size() == 1 && items[0].type == ItemType::Track && cycleLevel_ != 1) {
+    cycleSeed_ = items[0].index;
+    cycleLevel_ = 1;
+    selectWire();
+  } else if (cycleLevel_ == 1 && cycleSeed_ >= 0) {
+    cycleLevel_ = 2;
+    selectNet();
+  } else if (cycleLevel_ == 2 && cycleSeed_ >= 0 && cycleSeed_ < int(doc_->board()->tracks.size())) {
+    cycleLevel_ = 0;
+    doc_->setSelection({{ItemType::Track, cycleSeed_}}, {});
+  }
+}
+
+void BoardView::startMeasure(MeasureKind k) {
+  if (mode_ != Mode::Measure) measureReturn_ = mode_;
+  measureKind_ = k;
+  measureA_.reset();
+  measureB_.reset();
+  measureObjA_.reset();
+  setMode(Mode::Measure);
+}
+
+void BoardView::measureClick(const Pick& pk, Vec2 w) {
+  const Board& b = *doc_->board();
+  Unit u = doc_->unit();
+  auto len = [&](double nm) { return formatLength(nm, u, 3) + " " + unitName(u); };
+  if (measureKind_ == MeasureKind::Points) {
+    Vec2 p = pk.item ? pk.snap : w;
+    if (!measureA_ || measureB_) {
+      measureA_ = p;
+      measureB_.reset();
+      emit measured(tr("Расстояние: укажите вторую точку"));
+      return;
+    }
+    measureB_ = p;
+    Vec2 d = *measureB_ - *measureA_;
+    emit measured(tr("Расстояние: %1;  dx: %2;  dy: %3").arg(len(d.len()), len(std::abs(d.x)), len(std::abs(d.y))));
+    return;
+  }
+  if (!pk.item) return;
+  if (!measureObjA_ || measureB_) {
+    measureObjA_ = pk.item;
+    measureA_ = pk.snap;
+    measureB_.reset();
+    emit measured(tr("Расстояние между объектами: укажите второй объект"));
+    return;
+  }
+  double best = std::numeric_limits<double>::max();
+  for (auto& s1 : itemShapes(b, *measureObjA_))
+    for (auto& s2 : itemShapes(b, *pk.item)) best = std::min(best, s1.distance(s2));
+  measureB_ = pk.snap;
+  emit measured(tr("Расстояние между объектами: %1").arg(len(std::max(0.0, best))));
+}
+
+void BoardView::pushView() {
+  // Steps of one gesture (wheel turns) merge into one history entry.
+  bool merge = viewTimer_.isValid() && viewTimer_.elapsed() < 700 && viewPos_ >= 0;
+  viewTimer_.restart();
+  if (merge) return;
+  views_.resize(size_t(viewPos_ + 1));
+  views_.push_back({center_, scale_});
+  if (views_.size() > 100) views_.erase(views_.begin());
+  viewPos_ = int(views_.size()) - 1;
+}
+
+// History: views_[viewPos_] is the view before the latest change; views_[viewPos_ + 1], when present,
+// the current one (recorded on the first step back so that «Следующий вид» returns to it).
+void BoardView::prevView() {
+  if (viewPos_ < 0) return;
+  if (viewPos_ == int(views_.size()) - 1) views_.push_back({center_, scale_});
+  center_ = views_[size_t(viewPos_)].center;
+  scale_ = views_[size_t(viewPos_)].scale;
+  --viewPos_;
+  viewTimer_.invalidate();
+  update();
+}
+
+void BoardView::nextView() {
+  if (viewPos_ + 2 >= int(views_.size())) return;
+  ++viewPos_;
+  center_ = views_[size_t(viewPos_ + 1)].center;
+  scale_ = views_[size_t(viewPos_ + 1)].scale;
+  viewTimer_.invalidate();
   update();
 }
 
@@ -627,10 +933,19 @@ void BoardView::mouseMoveEvent(QMouseEvent* e) {
   QPointF pos = e->position();
   cursor_ = toWorld(pos);
   emit cursorMoved(cursor_);
-  if (panning_) {
+  if (rightDown_ && !rightMoved_ && (pos - rightPos_).manhattanLength() > 4) {
+    rightMoved_ = true;
+    pushView();
+  }
+  if (panning_ || (rightDown_ && rightMoved_)) {
     QPointF d = pos - lastMouse_;
     center_ -= Vec2{d.x() / scale_, d.y() / scale_};
     lastMouse_ = pos;
+    update();
+    return;
+  }
+  if (frameStart_) {
+    frameEnd_ = pos;
     update();
     return;
   }
@@ -643,13 +958,39 @@ void BoardView::mouseMoveEvent(QMouseEvent* e) {
     update();
     return;
   }
-  if (routing_) update();
+  if (routing_ || mode_ == Mode::Measure) update();
   lastMouse_ = pos;
 }
 
 void BoardView::mouseReleaseEvent(QMouseEvent* e) {
-  if (e->button() == Qt::MiddleButton || e->button() == Qt::RightButton) {
+  if (e->button() == Qt::MiddleButton) {
     panning_ = false;
+    return;
+  }
+  if (e->button() == Qt::RightButton) {
+    bool click = rightDown_ && !rightMoved_;
+    rightDown_ = false;
+    if (!click || !doc_->hasBoard()) return;
+    if (routing_ || mode_ == Mode::Measure) {
+      // In a tool the right button ends it, as TopoR's «Вернуться в основной режим».
+      emit contextMenuRequested(e->globalPosition().toPoint());
+      return;
+    }
+    // The object under the cursor becomes the selection unless it is already selected.
+    Pick pk = pick(e->position());
+    bool selected = (pk.item && std::ranges::contains(doc_->selectedItems(), *pk.item)) ||
+                    (pk.component >= 0 && std::ranges::contains(doc_->selectedComponents(), pk.component));
+    if (!selected && (pk.item || pk.component >= 0)) clickSelect(pk, {});
+    emit contextMenuRequested(e->globalPosition().toPoint());
+    return;
+  }
+  if (frameStart_) {
+    QRectF r = QRectF(*frameStart_, frameEnd_).normalized();
+    bool crossing = frameEnd_.x() < frameStart_->x();
+    if (r.width() > 3 || r.height() > 3)
+      selectInFrame(r, crossing, e->modifiers() & (Qt::ShiftModifier | Qt::ControlModifier));
+    frameStart_.reset();
+    update();
     return;
   }
   if (dragging_) {
@@ -670,6 +1011,7 @@ void BoardView::mouseDoubleClickEvent(QMouseEvent* e) {
 }
 
 void BoardView::wheelEvent(QWheelEvent* e) {
+  pushView();
   double f = std::pow(1.0015, e->angleDelta().y());
   Vec2 before = toWorld(e->position());
   scale_ = std::clamp(scale_ * f, 1e-7, 1e-2);
@@ -693,10 +1035,17 @@ void BoardView::setMode(Mode m) {
   if (routing_) cancelTool();
   mode_ = m;
   setCursor(m == Mode::Select ? Qt::ArrowCursor : Qt::CrossCursor);
+  frameStart_.reset();
   emit modeChanged(m);
-  emit status(m == Mode::Select   ? tr("Выделять и перемещать объекты")
-              : m == Mode::Route  ? tr("Прокладка проводника: щёлкните контакт, с которого начать")
-                                  : tr("Создание переходов: щёлкните место перехода"));
+  switch (m) {
+    case Mode::Select: emit status(tr("Выделять и перемещать объекты")); break;
+    case Mode::Route: emit status(tr("Прокладка проводника: щёлкните контакт, с которого начать")); break;
+    case Mode::Via: emit status(tr("Создание переходов: щёлкните место перехода")); break;
+    case Mode::Measure:
+      emit status(measureKind_ == MeasureKind::Points ? tr("Линейка: укажите первую точку")
+                                                      : tr("Линейка: укажите первый объект"));
+      break;
+  }
   update();
 }
 
@@ -731,15 +1080,16 @@ void BoardView::deleteSelection() {
   if (items.empty() && comps.empty()) return;
   Board& b = *doc_->board();
   auto before = doc_->beginEdit();
-  std::vector<int> tracks, vias;
+  std::vector<int> tracks, vias, zones;
   for (ItemRef r : items) {
     if (r.type == ItemType::Track) tracks.push_back(r.index);
     if (r.type == ItemType::Via) vias.push_back(r.index);
+    if (r.type == ItemType::Zone) zones.push_back(r.index);
   }
-  std::ranges::sort(tracks, std::greater{});
-  std::ranges::sort(vias, std::greater{});
+  for (auto* list : {&tracks, &vias, &zones}) std::ranges::sort(*list, std::greater{});
   for (int i : tracks) b.tracks.erase(b.tracks.begin() + i);
   for (int i : vias) b.vias.erase(b.vias.begin() + i);
+  for (int i : zones) b.zones.erase(b.zones.begin() + i);
   doc_->clearSelection();
   doc_->commitEdit(before, tr("Удалить"));
 }
@@ -794,7 +1144,8 @@ void BoardView::cancelTool() {
     update();
     return;
   }
-  if (mode_ != Mode::Select) setMode(Mode::Select);
+  if (mode_ == Mode::Measure) setMode(measureReturn_);
+  else if (mode_ != Mode::Select) setMode(Mode::Select);
   else doc_->clearSelection();
 }
 

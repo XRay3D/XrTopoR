@@ -1,5 +1,7 @@
 #pragma once
-// Interactive board canvas: rendering, zoom/pan, picking, component moves, manual routing and vias.
+// Interactive board canvas: rendering, zoom/pan, picking, selection (click, frame, cyclic), component
+// moves, manual routing, vias and the ruler — with TopoR's mouse conventions.
+#include <QElapsedTimer>
 #include <QWidget>
 #include <optional>
 #include <vector>
@@ -8,7 +10,8 @@
 
 namespace xr::gui {
 
-enum class Mode { Select, Route, Via };
+enum class Mode { Select, Route, Via, Measure };
+enum class MeasureKind { Points, Objects };
 enum class RouteAngle { Free, Deg45, Arc };
 
 class BoardView : public QWidget {
@@ -44,6 +47,12 @@ class BoardView : public QWidget {
   void toggleMetalLayers();           // all copper layers on/off
   void toggleFix();                   // F: lock/unlock the selection
   void selectAll();
+  void cycleSelection();             // X: segment → wire → net
+  void selectWire();                 // whole wires of the selected segments
+  void selectNet();                  // everything of the selected objects' nets
+  void startMeasure(MeasureKind k);  // Ctrl+M: the ruler; Esc returns to the previous mode
+  void prevView();                   // Alt+←
+  void nextView();                   // Alt+→
   void changeTrackWidth();
   void recomputeShapes();  // F5: selected (or all) tracks become sketches and are re-realised
 
@@ -54,6 +63,8 @@ class BoardView : public QWidget {
   void modeChanged(Mode m);
   void routeAngleChanged(RouteAngle a);
   void viewChanged();  // ratsnest / only-active-layer toggles
+  void contextMenuRequested(QPoint globalPos);  // right click (the object under it is selected first)
+  void measured(const QString& text);
 
  protected:
   void paintEvent(QPaintEvent*) override;
@@ -85,7 +96,14 @@ class BoardView : public QWidget {
   void drawLabels(QPainter& p);
   std::optional<QColor> netColor(int net, bool enabledForKind) const;
   bool componentVisible(int ci) const;
+  static BBox graphicBBox(const Graphic& g);
   Vec2 snapped(Vec2 w) const;  // «Привязка к сетке»
+  void pushView();             // records the view for Alt+← / Alt+→
+  void selectInFrame(QRectF screenRect, bool crossing, bool add);
+  void clickSelect(const Pick& pk, Qt::KeyboardModifiers mods);
+  std::vector<ItemRef> wireOf(int track) const;  // connected same-net tracks and vias, up to pads
+  void measureClick(const Pick& pk, Vec2 w);
+  void drawTools(QPainter& p);  // selection frame, ruler
   void drawTrack(QPainter& p, const Track& t, const QColor& c, double extra = 0);
   void drawPad(QPainter& p, const Pad& pad, LayerId l, const QColor& c);
   void drawVia(QPainter& p, const Via& v, const QColor& c);
@@ -107,6 +125,27 @@ class BoardView : public QWidget {
   QPointF lastMouse_;
   Vec2 cursor_;
   bool panning_ = false;
+  // right button: context menu on click, panning on drag
+  bool rightDown_ = false, rightMoved_ = false;
+  QPointF rightPos_;
+  // frame selection (screen coordinates)
+  std::optional<QPointF> frameStart_;
+  QPointF frameEnd_;
+  // X: cyclic selection
+  int cycleSeed_ = -1, cycleLevel_ = 0;
+  // view history
+  struct ViewState {
+    Vec2 center;
+    double scale;
+  };
+  std::vector<ViewState> views_;
+  int viewPos_ = -1;
+  QElapsedTimer viewTimer_;
+  // ruler
+  MeasureKind measureKind_ = MeasureKind::Objects;
+  Mode measureReturn_ = Mode::Select;
+  std::optional<Vec2> measureA_, measureB_;
+  std::optional<ItemRef> measureObjA_;
   // component drag
   bool dragging_ = false;
   Vec2 dragStart_;

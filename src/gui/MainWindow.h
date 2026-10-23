@@ -60,6 +60,9 @@ class MainWindow : public QMainWindow {
   void autoroute();
   void optimize(bool components);  // F7 sub-modes
   void pour(bool fill, bool clear, const QString& title);
+  void pourSelected(int how);  // 0 toggle (Z), 1 remove fill, 2 re-pour
+  void showContextMenu(QPoint globalPos);
+  void describeSelection();    // status hint about the selected objects
   void clearRouting();
 
   void updateTitle();

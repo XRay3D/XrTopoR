@@ -4,6 +4,7 @@
 #include <QMenuBar>
 #include <QMouseEvent>
 #include <QSettings>
+#include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QToolBar>
@@ -313,4 +314,136 @@ TEST(Gui, SelectionFilter) {
   QTest::mouseClick(&view, Qt::LeftButton, {}, p);
   ASSERT_EQ(doc.selectedItems().size(), 1u);
   EXPECT_EQ(doc.selectedItems()[0].type, ItemType::Via);
+}
+
+namespace {
+
+struct Fixture {
+  App& a = app();  // before any widget
+  Document doc;
+  BoardView view{&doc};
+  explicit Fixture(const char* file) {
+    view.resize(800, 600);
+    auto r = io::loadBoard(data(file));
+    EXPECT_TRUE(r) << r.error();
+    doc.setBoard(std::move(*r), file);
+  }
+  const Board& b() { return *doc.board(); }
+  // Shows a window of `widthMm` around `c`; returns the screen point of world `w`.
+  Vec2 c;
+  double scale = 0;
+  void look(Vec2 center, double widthMm) {
+    c = center;
+    view.centerOn(center, widthMm);
+    scale = view.width() / (widthMm * kNmPerMm);
+  }
+  QPoint at(Vec2 w) { return screenOf(view, w, c, scale); }
+  void drag(QPoint from, QPoint to) {
+    QTest::mousePress(&view, Qt::LeftButton, {}, from);
+    moveTo(view, to, Qt::LeftButton);
+    QTest::mouseRelease(&view, Qt::LeftButton, {}, to);
+  }
+};
+
+}  // namespace
+
+// A frame left to right selects objects entirely inside it, right to left also those it crosses.
+TEST(Gui, FrameSelection) {
+  Fixture f("tt.kicad_pcb");
+  BBox bb = f.b().bbox();
+  f.look(bb.center(), bb.width() / kNmPerMm * 1.5);
+  // A frame over the left half of the board, starting well off it.
+  QPoint a = f.at({bb.minX - 5e6, bb.minY - 5e6}), z = f.at({bb.center().x, bb.maxY + 5e6});
+  f.drag(a, z);
+  size_t window = f.doc.selectedItems().size() + f.doc.selectedComponents().size();
+  f.drag(z, a);
+  size_t crossing = f.doc.selectedItems().size() + f.doc.selectedComponents().size();
+  EXPECT_GT(window, 0u);
+  EXPECT_GT(crossing, window);
+  // Everything in the window frame lies inside it.
+  f.drag(a, z);
+  for (ItemRef r : f.doc.selectedItems()) {
+    BBox ib = itemBBox(f.b(), r);
+    EXPECT_LE(ib.maxX, bb.center().x + 1);
+  }
+}
+
+// X: a segment, then its whole wire, then the whole net, then the segment again.
+TEST(Gui, CyclicSelection) {
+  Fixture f("tt.kicad_pcb");
+  const Board& b = f.b();
+  int seed = -1;
+  for (int i = 0; i < int(b.tracks.size()) && seed < 0; ++i)
+    for (int j = 0; j < int(b.tracks.size()); ++j)
+      if (i != j && b.tracks[i].net == b.tracks[j].net && b.tracks[i].layer == b.tracks[j].layer &&
+          (b.tracks[i].b == b.tracks[j].a || b.tracks[i].b == b.tracks[j].b)) {
+        seed = i;
+        break;
+      }
+  ASSERT_GE(seed, 0);
+  f.doc.setSelection({{ItemType::Track, seed}}, {});
+  f.view.cycleSelection();
+  size_t wire = f.doc.selectedItems().size();
+  EXPECT_GT(wire, 1u);
+  for (ItemRef r : f.doc.selectedItems()) EXPECT_EQ(itemNet(b, r), b.tracks[seed].net);
+  f.view.cycleSelection();
+  EXPECT_GE(f.doc.selectedItems().size(), wire);
+  f.view.cycleSelection();
+  ASSERT_EQ(f.doc.selectedItems().size(), 1u);
+  EXPECT_EQ(f.doc.selectedItems()[0].index, seed);
+}
+
+// Alt+← / Alt+→ walk through the views.
+TEST(Gui, ViewHistory) {
+  Fixture f("tt.kicad_pcb");
+  QPoint mid(400, 300);
+  // Two distinct views; going back restores the first, forward the second.
+  f.view.centerOn({10 * kNmPerMm, 0}, 20);
+  QTest::qWait(800);  // separate gestures
+  f.view.centerOn({30 * kNmPerMm, 5 * kNmPerMm}, 10);
+  QSignalSpy spy(&f.view, &BoardView::cursorMoved);
+  auto centerNow = [&] {
+    moveTo(f.view, mid);
+    return spy.isEmpty() ? Vec2{} : spy.takeLast().at(0).value<Vec2>();
+  };
+  Vec2 last = centerNow();
+  f.view.prevView();
+  Vec2 back = centerNow();
+  EXPECT_NEAR(back.x, 10 * kNmPerMm, 1e3);
+  f.view.nextView();
+  Vec2 fwd = centerNow();
+  EXPECT_NEAR(fwd.x, last.x, 1e3);
+  EXPECT_NEAR(fwd.y, last.y, 1e3);
+}
+
+// A right click selects the object under the cursor and asks for the context menu.
+TEST(Gui, RightClickSelectsAndAsksForMenu) {
+  Fixture f("tt.kicad_pcb");
+  Vec2 v = f.b().vias[0].pos.v();
+  f.look(v, 5);
+  QSignalSpy spy(&f.view, &BoardView::contextMenuRequested);
+  QTest::mouseClick(&f.view, Qt::RightButton, {}, f.at(v));
+  EXPECT_EQ(spy.count(), 1);
+  ASSERT_EQ(f.doc.selectedItems().size(), 1u);
+  EXPECT_EQ(f.doc.selectedItems()[0].type, ItemType::Via);
+}
+
+// Ctrl+M «Расстояние между двумя точками».
+TEST(Gui, RulerMeasuresPoints) {
+  Fixture f("tt.kicad_pcb");
+  f.doc.setUnit(Unit::Mm);
+  f.doc.display().alignToGrid = false;
+  BBox bb = f.b().bbox();
+  Vec2 p0{bb.maxX + 20 * kNmPerMm, bb.center().y};  // off the board: nothing to snap to
+  f.look(p0, 40);
+  QSignalSpy spy(&f.view, &BoardView::measured);
+  f.view.startMeasure(MeasureKind::Points);
+  EXPECT_EQ(f.view.mode(), Mode::Measure);
+  QTest::mouseClick(&f.view, Qt::LeftButton, {}, f.at(p0));
+  QTest::mouseClick(&f.view, Qt::LeftButton, {}, f.at(p0 + Vec2{3 * kNmPerMm, 4 * kNmPerMm}));
+  ASSERT_GE(spy.count(), 2);
+  QString text = spy.last().at(0).toString();
+  EXPECT_TRUE(text.contains("Расстояние: 5")) << text.toStdString();
+  f.view.cancelTool();
+  EXPECT_EQ(f.view.mode(), Mode::Select);
 }

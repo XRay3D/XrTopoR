@@ -2,6 +2,7 @@
 
 #include <QApplication>
 #include <QCloseEvent>
+#include <QColorDialog>
 #include <QDialog>
 #include <QDir>
 #include <QDockWidget>
@@ -104,6 +105,9 @@ MainWindow::MainWindow()
     updateCursor(w);
   });
   connect(view_, &BoardView::modeChanged, this, &MainWindow::updateModeButtons);
+  connect(view_, &BoardView::contextMenuRequested, this, &MainWindow::showContextMenu);
+  connect(view_, &BoardView::measured, this, [this](const QString& t) { showHint(t, 0); });
+  connect(doc_, &Document::selectionChanged, this, &MainWindow::describeSelection);
   connect(view_, &BoardView::routeAngleChanged, this, [this](RouteAngle a) {
     stAngle_->setText(a == RouteAngle::Deg45 ? "x45" : a == RouteAngle::Arc ? "Arc" : "Any");
     (*cmds_)["Accel_ToogleOrtho"]->setChecked(a == RouteAngle::Deg45);
@@ -166,7 +170,14 @@ void MainWindow::bindCommands() {
   c.bind("Accel_Fix", [this] { view_->toggleFix(); });
   c.bind("Accel_Layer", [this] { view_->toggleLayer(); });
   c.bind("Accel_Width", [this] { view_->changeTrackWidth(); });
-  c.bind("Accel_Pour", [this] { pour(true, false, tr("Залить")); });
+  c.bind("Accel_Pour", [this] { pourSelected(0); });
+  c.bind("Accel_UnPourWithRestore", [this] { pourSelected(1); });
+  c.bind("Cmd_RePour", [this] { pourSelected(2); });
+  c.bind("Accel_SelCyclic", [this] { view_->cycleSelection(); });
+  c.bind("Accel_PrevView", [this] { view_->prevView(); });
+  c.bind("Accel_NextView", [this] { view_->nextView(); });
+  c.bind("Cmd_MeasureDots", [this] { view_->startMeasure(MeasureKind::Points); });
+  c.bind("Cmd_MeasureObj", [this] { view_->startMeasure(MeasureKind::Objects); });
   c.bind("Accel_RotateLeft", [this] { view_->rotateSelection(90); });
   c.bind("Accel_RotateRight", [this] { view_->rotateSelection(-90); });
 
@@ -461,6 +472,7 @@ void MainWindow::updateModeButtons() {
     case Mode::Select: modeBar_->setActiveMode("Cmd_ModeSelect"); break;
     case Mode::Route: modeBar_->setActiveMode("Accel_RouteMode"); break;
     case Mode::Via: modeBar_->setActiveMode("Cmd_ModeVia"); break;
+    case Mode::Measure: modeBar_->setActiveMode("Accel_Measure"); break;
   }
 }
 
@@ -684,6 +696,139 @@ void MainWindow::pour(bool fill, bool clear, const QString& title) {
                  .arg(st.islandsRemoved));
   }
   doc_->commitEdit(before, title);
+}
+
+void MainWindow::pourSelected(int how) {
+  if (!doc_->hasBoard()) return;
+  Board& b = *doc_->board();
+  std::vector<int> zones;
+  for (ItemRef r : doc_->selectedItems())
+    if (r.type == ItemType::Zone) zones.push_back(r.index);
+  if (zones.empty()) {
+    showHint(tr("Выделите области металлизации"));
+    return;
+  }
+  auto before = doc_->beginEdit();
+  ZoneFillOptions o;
+  for (int z : zones) {
+    // Z toggles: filled areas lose their fill, empty ones are poured.
+    bool filled = !b.zones[z].filled.empty();
+    if (how != 0 || filled) b.zones[z].filled.clear();
+    if (how == 2 || (how == 0 && !filled)) o.only.push_back(z);
+  }
+  if (!o.only.empty()) fillZones(b, o);
+  doc_->commitEdit(before, how == 1 ? tr("Удалить заливку") : how == 2 ? tr("Перезалить") : tr("Залить"));
+}
+
+void MainWindow::showContextMenu(QPoint globalPos) {
+  if (!doc_->hasBoard()) return;
+  const Board& b = *doc_->board();
+  QMenu m(this);
+  Commands& c = *cmds_;
+  // In a tool the menu offers the way back first.
+  if (view_->mode() != Mode::Select) {
+    m.addAction(tr("Вернуться в основной режим редактора"), this, [this] {
+      view_->cancelTool();
+      view_->setMode(Mode::Select);
+    });
+    m.exec(globalPos);
+    return;
+  }
+  auto items = doc_->selectedItems();
+  auto comps = doc_->selectedComponents();
+  bool tracks = false, vias = false, zones = false, pads = false;
+  int net = kNoNet;
+  for (ItemRef r : items) {
+    tracks |= r.type == ItemType::Track;
+    vias |= r.type == ItemType::Via;
+    zones |= r.type == ItemType::Zone;
+    pads |= r.type == ItemType::Pad;
+    if (net == kNoNet) net = itemNet(b, r);
+  }
+  c.fill(&m, {"Accel_Cut", "Accel_Copy", "Accel_Duplicate", "Accel_Paste", "Accel_Delete"});
+  if (!items.empty() || !comps.empty()) m.addSeparator();
+  if (tracks) m.addAction(tr("Выделить весь проводник"), view_, &BoardView::selectWire);
+  if (tracks || vias || pads || zones) m.addAction(tr("Выделить всю цепь"), view_, &BoardView::selectNet);
+  if (tracks || vias || !comps.empty()) m.addAction(c["Accel_Fix"]);
+  if (tracks) m.addAction(c["Accel_Width"]);
+  if (!comps.empty()) {
+    c.fill(m.addMenu(tr("Повернуть")), {"Accel_RotateLeft", "Accel_RotateRight", "Cmd_RotateAngle"});
+    c.fill(m.addMenu(tr("Перевернуть")), {"Accel_FlipHorizontally", "Accel_FlipVertically"});
+  }
+  if (zones) c.fill(&m, {"Accel_Pour", "Accel_UnPourWithRestore", "Cmd_RePour"});
+  if (net != kNoNet) {
+    m.addSeparator();
+    QString name = QString::fromStdString(b.nets[net].name);
+    m.addAction(tr("Задать для цепи особый цвет..."), this, [this, name] {
+      QColor col = QColorDialog::getColor(Qt::red, this, tr("Особый цвет цепи %1").arg(name));
+      if (!col.isValid()) return;
+      auto& list = doc_->display().netColors;
+      std::erase_if(list, [&](const NetColor& nc) { return nc.net == name.toStdString(); });
+      list.push_back({name.toStdString(), uint32_t(col.rgb() & 0xffffff)});
+      doc_->display().colorNets = true;
+      doc_->displayChanged();
+    });
+    m.addAction(tr("Сбросить особые цвета цепей"), this, [this] {
+      doc_->display().netColors.clear();
+      doc_->displayChanged();
+    });
+    m.addAction(tr("Добавить в фильтр отображения связей"), this, [this, name] {
+      auto& list = doc_->display().netlineNets;
+      if (!std::ranges::contains(list, name.toStdString())) list.push_back(name.toStdString());
+      doc_->display().filterNetlines = true;
+      doc_->displayChanged();
+    });
+    m.addAction(tr("Очистить фильтр отображения связей"), this, [this] {
+      doc_->display().netlineNets.clear();
+      doc_->display().filterNetlines = false;
+      doc_->displayChanged();
+    });
+  }
+  // Autoprocedures, with their sub-modes.
+  m.addSeparator();
+  auto group = [&](const QString& title, const QString& id) {
+    QMenu* sub = m.addMenu(title);
+    for (const QString& s : c.group(id)->subs) sub->addAction(c[s]);
+  };
+  group(tr("Рассчитать форму проводников"), "Accel_RecalcWires");
+  group(tr("Переложить проводники"), "Accel_RefineWires");
+  group(tr("Выполнить подвижку"), "Accel_AutoStart");
+  m.exec(globalPos);
+}
+
+void MainWindow::describeSelection() {
+  if (!doc_->hasBoard()) return;
+  const Board& b = *doc_->board();
+  auto items = doc_->selectedItems();
+  auto comps = doc_->selectedComponents();
+  Unit u = doc_->unit();
+  auto len = [&](double nm) { return formatLength(nm, u, 3); };
+  auto netName = [&](int n) { return n >= 0 ? QString::fromStdString(b.nets[n].name) : tr("(без цепи)"); };
+  QString text;
+  if (items.size() == 1 && comps.empty()) {
+    ItemRef r = items[0];
+    switch (r.type) {
+      case ItemType::Track: {
+        // TopoR's Status_Wire: «%1 Сегмент: dx:%2, dy:%3. Длина сегмента: %4 [%5]».
+        const Track& t = b.tracks[r.index];
+        Vec2 d = t.b.v() - t.a.v();
+        double l = t.isArc() ? ArcGeom::fromThreePoints(t.a.v(), t.mid->v(), t.b.v()).length() : d.len();
+        text = tr("%1 Сегмент: dx:%2, dy:%3. Длина сегмента: %4 [%5]")
+                   .arg(netName(t.net), len(std::abs(d.x)), len(std::abs(d.y)), len(l), unitName(u));
+        break;
+      }
+      case ItemType::Via: text = tr("Переход, цепь %1").arg(netName(b.vias[r.index].net)); break;
+      case ItemType::Pad: text = tr("Контакт %1, цепь %2").arg(QString::fromStdString(b.pads[r.index].number), netName(b.pads[r.index].net)); break;
+      case ItemType::Zone: text = tr("Область металлизации, цепь %1").arg(netName(b.zones[r.index].net)); break;
+    }
+  } else if (comps.size() == 1 && items.size() <= 1) {
+    const Component& c = b.components[comps[0]];
+    text = tr("Компонент %1 %2").arg(QString::fromStdString(c.ref), QString::fromStdString(c.value));
+  } else if (!items.empty() || !comps.empty()) {
+    text = tr("Выделено объектов: %1").arg(items.size() + comps.size());
+  }
+  hint_ = text;
+  stHint_->setText(text);
 }
 
 void MainWindow::autoroute() {
