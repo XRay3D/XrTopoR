@@ -18,6 +18,7 @@
 #include <mdspan>
 #include <numeric>
 #include <optional>
+#include <print>
 #include <queue>
 #include <set>
 #include <ranges>
@@ -132,6 +133,7 @@ class Router {
   LayerList layers_;
   int NL_ = 0;
   std::vector<Shape> padShape_, vshape_;
+  std::vector<char> cornerOk_;  // pad corners may carry a track end (corner radius >= width / 2)
   std::vector<std::pair<Vec2, Vec2>> interval_;  // free part of each edge (canonical direction)
   std::vector<std::vector<int>> vertEdges_;
   Grid<double> hist_;
@@ -221,8 +223,12 @@ void Router::setup() {
   m_.build(b_, mo);
 
   padShape_.resize(b_.pads.size());
-  for (auto [i, p] : std::views::enumerate(b_.pads))
+  cornerOk_.resize(b_.pads.size());
+  for (auto [i, p] : std::views::enumerate(b_.pads)) {
     padShape_[i] = (!p.copper && p.drill > 0) ? Shape::circle(p.pos.v(), p.drill / 2.0) : p.shapeGeom();
+    // TopoR rule: tracks attach to the pad anchor; corners only when they are rounded enough.
+    cornerOk_[i] = padShape_[i].r >= b_.classOf(p.net).trackWidth / 2.0;
+  }
   vshape_.resize(m_.verts.size());
   for (auto [i, v] : std::views::enumerate(m_.verts)) {
     if (v.kind == VKind::FixedVia) vshape_[i] = Shape::circle(v.p, b_.vias[v.fixedVia].diameter / 2.0);
@@ -346,6 +352,9 @@ double Router::freeLength(int e, int li, int net, double& cu, bool& ou, double& 
 }
 
 double Router::crossCost(int e, int li, bool& blocked) const {
+  // Edges between two vertices of the wire's own pad lie inside its copper: never a constraint.
+  int pu = m_.verts[m_.edges[e].v[0]].pad, pv = m_.verts[m_.edges[e].v[1]].pad;
+  if (pu >= 0 && pu == pv && b_.pads[pu].net == net_ && b_.pads[pu].onLayer(layers_[li])) return 0;
   double cu, cv;
   bool ou, ov;
   double free = freeLength(e, li, net_, cu, ou, cv, ov);
@@ -436,6 +445,7 @@ bool Router::isTarget(int v, int li) const {
 bool Router::isJunction(int v, int li) const {
   const MVertex& mv = m_.verts[v];
   if (mv.pad < 0 || mv.pad == startPad_ || inTree(v)) return false;
+  if (mv.kind == VKind::PadCorner && !cornerOk_[mv.pad]) return false;
   const Pad& p = b_.pads[mv.pad];
   return p.net == net_ && p.onLayer(layers_[li]);
 }
@@ -452,7 +462,8 @@ void Router::addVertexToTree(int v) {
 }
 
 void Router::addPadToTree(int pad) {
-  for (int v : m_.padVerts[pad]) addVertexToTree(v);
+  for (int v : m_.padVerts[pad])
+    if (m_.verts[v].kind != VKind::PadCorner || cornerOk_[pad]) addVertexToTree(v);
 }
 
 double Router::heuristic(Vec2 p) const {
@@ -489,6 +500,7 @@ std::optional<std::vector<SNode>> Router::search(int pad) {
   for (int v : m_.padVerts[pad])
     for (int li = 0; li < NL_; ++li) {
       if (!sp.onLayer(layers_[li])) continue;
+      if (m_.verts[v].kind == VKind::PadCorner && !cornerOk_[pad]) continue;
       SNode n;
       n.li = li;
       n.atVertex = true;
@@ -756,6 +768,25 @@ void Router::routeJob(int ji) {
       continue;
     }
     auto path = search(pad);
+    if (!path && std::getenv("XR_DEBUG5")) {
+      const Pad& p = b_.pads[pad];
+      std::println(stderr, "no path from {}-{} net {}", b_.components[p.component].ref, p.number, b_.nets[net_].name);
+      for (int v : m_.padVerts[pad]) {
+        std::println(stderr, " vertex {} kind {} at ({:.3f},{:.3f}) tris {}", v, int(m_.verts[v].kind), P(v).x / 1e6,
+                     P(v).y / 1e6, m_.verts[v].tris.size());
+        for (int t : m_.verts[v].tris)
+          for (int i = 0; i < 3; ++i) {
+            int e = m_.tris[t].e[i];
+            bool blocked = false;
+            double cost = crossCost(e, 0, blocked);
+            double cu, cv;
+            bool ou, ov;
+            double free = freeLength(e, 0, net_, cu, ou, cv, ov);
+            std::println(stderr, "   tri {} edge {} ({}-{}) free {:.3f} ends {}/{} blocked {} cost {:.2f} nb {}", t, e,
+                         m_.edges[e].v[0], m_.edges[e].v[1], free / 1e6, ou, ov, blocked, cost / 1e6, m_.tris[t].nb[i]);
+          }
+      }
+    }
     if (!path) {
       // Remember the failure with the nearest pad already in the tree for blocker analysis.
       int nearest = job.pads[0];
@@ -1035,7 +1066,13 @@ RouterResult Router::run() {
     res_.vias = int(bestGeom->vias.size());
   }
   int fails = 0;
-  for (auto& f : s_.failed) fails += int(f.size());
+  for (auto [j, f] : std::views::enumerate(s_.failed)) {
+    fails += int(f.size());
+    for (auto [pa, pb] : f)
+      res_.log.push_back(std::format("failed: {} {}-{} -> {}-{}", b_.nets[jobs_[j].net].name,
+                                     b_.components[b_.pads[pa].component].ref, b_.pads[pa].number,
+                                     b_.components[b_.pads[pb].component].ref, b_.pads[pb].number));
+  }
   res_.failed = fails;
   res_.routed = res_.connections - fails;
   res_.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();

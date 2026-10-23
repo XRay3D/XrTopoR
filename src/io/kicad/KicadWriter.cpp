@@ -39,12 +39,14 @@ struct NetStyle {
   std::map<std::string, int> codes;
 };
 
-Node netNode(const Board& b, const NetStyle& st, int net) {
+// Pads carry (net <code> "<name>"), tracks and vias only (net <code>) in the numeric style.
+Node netNode(const Board& b, const NetStyle& st, int net, bool withName = false) {
   Node n = Node::list("net");
   std::string name = net >= 0 && net < int(b.nets.size()) ? b.nets[net].name : "";
   if (st.numeric) {
     auto it = st.codes.find(name);
     n.addAtom(std::to_string(it == st.codes.end() ? 0 : it->second));
+    if (withName) n.addAtom(name, true);
   } else {
     n.addAtom(name, true);
   }
@@ -213,7 +215,7 @@ Node padNode(const Board& b, const Pad& p, const NetStyle& st, size_t idx) {
     prim.add(std::move(poly));
     n.add(std::move(prim));
   }
-  if (p.net >= 0) n.add(netNode(b, st, p.net));
+  if (p.net >= 0) n.add(netNode(b, st, p.net, true));
   n.add(strNode("uuid", uuidFor(idx, 4)));
   return n;
 }

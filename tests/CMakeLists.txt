@@ -3,6 +3,7 @@ find_package(GTest REQUIRED)
 add_executable(xrtests
   test_geom.cpp
   test_io.cpp
+  test_fst.cpp
   test_drc.cpp
   test_router.cpp
 )

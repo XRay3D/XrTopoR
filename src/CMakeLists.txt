@@ -24,6 +24,9 @@ add_library(xrio STATIC
   io/pcad/PcadReader.cpp
   io/gerber/GerberWriter.cpp
   io/svg/SvgWriter.cpp
+  io/xml/Xml.cpp
+  io/topor/FstReader.cpp
+  io/topor/FstWriter.cpp
 )
 target_link_libraries(xrio PUBLIC xrcore Boost::json)
 

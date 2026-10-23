@@ -18,6 +18,7 @@ Format detectFormat(const std::string& path) {
   if (ext == ".kicad_pcb") return Format::Kicad;
   if (ext == ".dsn") return Format::Dsn;
   if (ext == ".ses") return Format::Ses;
+  if (ext == ".fst") return Format::Fst;
   if (ext == ".pcb") {
     std::ifstream f(path, std::ios::binary);
     char buf[16] = {};
@@ -53,6 +54,7 @@ Result<BoardPtr> loadBoard(const std::string& path) {
     case Format::Kicad: b = readKicad(*text, path); break;
     case Format::Dsn: b = readDsn(*text, path); break;
     case Format::Pcad: b = readPcad(*text, path); break;
+    case Format::Fst: b = readFst(*text, path); break;
     default: return std::unexpected("unsupported file format: " + path);
   }
   if (b && (*b)->name.empty()) (*b)->name = std::filesystem::path(path).stem().string();
@@ -73,6 +75,7 @@ Result<void> saveBoard(const Board& b, const std::string& path) {
     }
     case Format::Dsn: return writeFile(path, writeDsn(b));
     case Format::Ses: return writeFile(path, writeSes(b));
+    case Format::Fst: return writeFile(path, writeFst(b));
     default: return std::unexpected("unsupported output format: " + path);
   }
 }
