@@ -9,6 +9,7 @@
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QProgressDialog>
+#include <QSettings>
 #include <QStatusBar>
 #include <QToolBar>
 #include <QtConcurrent/QtConcurrent>
@@ -153,7 +154,14 @@ bool MainWindow::openFile(const QString& path) {
   }
   doc_->setBoard(std::move(*r), path);
   statusBar()->showMessage(tr("Loaded %1").arg(path), 5000);
+  QSettings().setValue("lastFile", QFileInfo(path).absoluteFilePath());
   return true;
+}
+
+bool MainWindow::openLastFile() {
+  QString last = QSettings().value("lastFile").toString();
+  if (last.isEmpty() || !QFileInfo::exists(last)) return false;
+  return openFile(last);
 }
 
 void MainWindow::open() {

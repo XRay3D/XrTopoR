@@ -16,6 +16,7 @@ class MainWindow : public QMainWindow {
  public:
   MainWindow();
   bool openFile(const QString& path);
+  bool openLastFile();  // the board opened in the previous session, if any
 
  private:
   void buildMenus();

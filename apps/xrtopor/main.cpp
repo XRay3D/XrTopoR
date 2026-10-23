@@ -10,11 +10,13 @@ int main(int argc, char** argv) {
   xr::gui::MainWindow w;
   w.show();
   QString shot;
+  bool opened = false;
   for (int i = 1; i < argc; ++i) {
     QString a = QString::fromLocal8Bit(argv[i]);
     if (a == "--screenshot" && i + 1 < argc) shot = QString::fromLocal8Bit(argv[++i]);
-    else w.openFile(a);
+    else opened = w.openFile(a) || opened;
   }
+  if (!opened) w.openLastFile();
   if (!shot.isEmpty()) {  // headless check: render once and save the window
     QTimer::singleShot(300, &app, [&] {
       w.grab().save(shot);
