@@ -1,5 +1,7 @@
 #include "router/topo/Realizer.h"
 
+#include "core/SpatialIndex.h"
+
 #include <CGAL/Constrained_Delaunay_triangulation_2.h>
 #include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
 #include <CGAL/Triangulation_vertex_base_with_info_2.h>
@@ -10,7 +12,9 @@
 #include <cstdlib>
 #include <map>
 #include <memory>
+#include <numeric>
 #include <optional>
+#include <set>
 #include <print>
 
 namespace xr::topo {
@@ -273,7 +277,7 @@ double sweepOf(const Circle& c, Vec2 in, Vec2 out) {
 }
 
 
-LayerObstacles collect(const Board& b, LayerId layer, const std::vector<RealVia>& vias) {
+LayerObstacles collect(const Board& b, LayerId layer, const std::vector<RealVia>& vias, const RealizeOptions& opt) {
   LayerObstacles ob;
   for (const Pad& pad : b.pads) {
     double clr = double(b.classOf(pad.net).clearance);
@@ -307,18 +311,30 @@ LayerObstacles collect(const Board& b, LayerId layer, const std::vector<RealVia>
     for (auto& p : loop) ob.add(p, 0, double(b.edgeClearance), -2);  // -2: belongs to no net, blocks all
     for (int k = 0; k < n; ++k) ob.link(first + k, first + (k + 1) % n, 0);
   }
+  if (opt.tracksAsObstacles)
+    for (const Track& t : b.tracks) {
+      if (t.layer != layer) continue;
+      double r = t.width / 2.0, clr = double(b.classOf(t.net).clearance);
+      int prev = -1;
+      for (Vec2 p : t.path(20000)) {
+        int o = ob.add(p, r, clr, t.net);
+        if (prev >= 0) ob.link(prev, o, r);
+        prev = o;
+      }
+    }
   return ob;
 }
 
 }  // namespace
 
-RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::vector<RealVia>& vias) {
+RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::vector<RealVia>& vias,
+                     const RealizeOptions& opt) {
   RealizeStats st;
   const int NW = int(wires.size());
   std::map<LayerId, LayerObstacles> obstacles;
   std::flat_map<LayerId, std::vector<int>> byLayer;
   for (int wi = 0; wi < NW; ++wi) byLayer[wires[wi].layer].push_back(wi);
-  for (auto&& [layer, ids] : byLayer) obstacles.emplace(layer, collect(b, layer, vias));
+  for (auto&& [layer, ids] : byLayer) obstacles.emplace(layer, collect(b, layer, vias, opt));
 
   // 1. Crossings of every sketch with the common triangulation of all obstacles of its layer.
   std::vector<std::vector<EdgeHit>> hits(NW);
@@ -613,6 +629,112 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
     b.vias.push_back(bv);
   }
   return st;
+}
+
+
+RealizeStats reshapeTracks(Board& b, std::vector<char> chosen, std::vector<RealWire>* wiresOut) {
+  chosen.resize(b.tracks.size(), 0);
+  // Grow the choice to whole chains of the same net and layer.
+  auto key = [](Point p) { return std::pair{p.x / 1000, p.y / 1000}; };  // 1 um buckets
+  std::map<std::pair<Coord, Coord>, std::vector<int>> ends;
+  for (size_t i = 0; i < b.tracks.size(); ++i) {
+    ends[key(b.tracks[i].a)].push_back(int(i));
+    ends[key(b.tracks[i].b)].push_back(int(i));
+  }
+  auto sameChain = [&](int i, int j) {
+    return b.tracks[i].net == b.tracks[j].net && b.tracks[i].layer == b.tracks[j].layer && !b.tracks[j].locked;
+  };
+  std::vector<int> stack;
+  for (size_t i = 0; i < b.tracks.size(); ++i)
+    if (chosen[i]) stack.push_back(int(i));
+  while (!stack.empty()) {
+    int i = stack.back();
+    stack.pop_back();
+    for (Point p : {b.tracks[i].a, b.tracks[i].b})
+      for (int j : ends[key(p)])
+        if (!chosen[j] && sameChain(i, j)) {
+          chosen[j] = 1;
+          stack.push_back(j);
+        }
+  }
+  // Degree of each end point among chosen tracks of the same net/layer; vias and pads also end chains.
+  std::map<std::pair<Coord, Coord>, int> degree;
+  for (size_t i = 0; i < b.tracks.size(); ++i)
+    if (chosen[i]) {
+      degree[key(b.tracks[i].a)]++;
+      degree[key(b.tracks[i].b)]++;
+    }
+  // Chains end at branch points and wherever a vertex touches a pad or via of its net: manual
+  // routes often enter a pad off-centre, and the taut path must still pass through that copper.
+  SpatialIndex idx;
+  idx.build(b);
+  auto onAnchor = [&](Point p, int net, LayerId layer) {
+    bool hit = false;
+    BBox q;
+    q.add(p.v());
+    idx.query(q.inflated(1000), LayerMask(1) << layer, [&](ItemRef r) {
+      if (hit || (r.type != ItemType::Pad && r.type != ItemType::Via) || itemNet(b, r) != net) return;
+      for (auto& s : itemShapes(b, r))
+        if (s.distance(p.v()) <= 0) hit = true;
+    });
+    return hit;
+  };
+  auto isEnd = [&](Point p, const Track& t) { return degree[key(p)] != 2 || onAnchor(p, t.net, t.layer); };
+  std::vector<char> used(b.tracks.size(), 0);
+  std::vector<RealWire> wires;
+  auto walkFrom = [&](int start, Point from) {
+    RealWire w;
+    const Track& t0 = b.tracks[start];
+    w.net = t0.net;
+    w.layer = t0.layer;
+    w.width = t0.width;
+    w.clearance = b.classOf(t0.net).clearance;
+    Point cur = from;
+    int ti = start;
+    w.sketch.push_back(cur.v());
+    while (true) {
+      used[ti] = 1;
+      const Track& t = b.tracks[ti];
+      Point next = (key(t.a) == key(cur)) ? t.b : t.a;
+      if (t.isArc()) {
+        auto pts = t.path(20000);
+        if (key(Point(pts.front())) != key(cur)) std::ranges::reverse(pts);
+        for (size_t k = 1; k + 1 < pts.size(); ++k) w.sketch.push_back(pts[k]);
+      }
+      w.sketch.push_back(next.v());
+      cur = next;
+      if (isEnd(cur, t)) break;
+      int cont = -1;
+      for (int j : ends[key(cur)])
+        if (chosen[j] && !used[j] && j != ti && sameChain(ti, j)) cont = j;
+      if (cont < 0) break;
+      ti = cont;
+    }
+    wires.push_back(std::move(w));
+  };
+  for (size_t i = 0; i < b.tracks.size(); ++i) {
+    if (!chosen[i] || used[i]) continue;
+    if (isEnd(b.tracks[i].a, b.tracks[i])) walkFrom(int(i), b.tracks[i].a);
+    else if (isEnd(b.tracks[i].b, b.tracks[i])) walkFrom(int(i), b.tracks[i].b);
+  }
+  for (size_t i = 0; i < b.tracks.size(); ++i)
+    if (chosen[i] && !used[i]) walkFrom(int(i), b.tracks[i].a);  // closed loops
+  if (wiresOut) *wiresOut = wires;
+  if (wires.empty()) return {};
+  std::vector<Track> keep;
+  for (size_t i = 0; i < b.tracks.size(); ++i)
+    if (!chosen[i]) keep.push_back(b.tracks[i]);
+  b.tracks = std::move(keep);
+  // Zone fills on the touched layers no longer match the copper: drop them (refill in the CAD).
+  for (auto& z : b.zones)
+    for (auto& w : wires)
+      if (z.layer == w.layer) { z.filled.clear(); break; }
+  RealizeOptions opt;
+  opt.tracksAsObstacles = true;
+  // All wires at once: nesting around shared obstacles keeps them apart. (Sequential realisation
+  // with earlier wires as obstacles was tried and loses: a later sketch may cross an earlier taut
+  // path and end up on the wrong side of it.)
+  return realize(b, wires, {}, opt);
 }
 
 }  // namespace xr::topo

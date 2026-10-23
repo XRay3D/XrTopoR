@@ -19,7 +19,7 @@ std::vector<Shape> itemShapes(const Board& b, ItemRef r, double expand) {
     }
     case ItemType::Track: {
       const Track& t = b.tracks[r.index];
-      auto pts = t.path();
+      auto pts = t.path(200);  // 0.2 um chords: DRC on arcs must not under-read the clearance
       for (size_t i = 1; i < pts.size(); ++i) out.push_back(Shape::capsule(pts[i - 1], pts[i], t.width / 2.0 + expand));
       if (pts.size() == 1) out.push_back(Shape::circle(pts[0], t.width / 2.0 + expand));
       break;

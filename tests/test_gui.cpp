@@ -132,3 +132,29 @@ TEST(Gui, MoveComponentAndVia) {
   QTest::mouseClick(&view, Qt::LeftButton, Qt::NoModifier, screenOf(view, c + Vec2{7 * kNmPerMm, 7 * kNmPerMm}, c, s));
   EXPECT_EQ(doc.board()->vias.size(), vias + 1);
 }
+
+TEST(Gui, RecomputeShapesKeepsConnectivityAndClearance) {
+  app();
+  Document doc;
+  auto b = io::loadBoard(data("astable.kicad_pcb"));
+  ASSERT_TRUE(b);
+  BoardView view(&doc);
+  view.resize(800, 600);
+  doc.setBoard(std::move(*b), "x");
+  size_t tracksBefore = doc.board()->tracks.size();
+  // Zone fills are dropped by the recompute, so the baseline is the board without fills.
+  Board baseline = *doc.board();
+  for (auto& z : baseline.zones) z.filled.clear();
+  size_t unroutedBaseline = Connectivity::compute(baseline).ratsnest.size();
+  view.recomputeShapes();  // nothing selected: every track becomes a sketch
+  const Board& nb = *doc.board();
+  EXPECT_NE(nb.tracks.size(), tracksBefore);
+  bool arc = false;
+  for (auto& t : nb.tracks) arc |= t.isArc();
+  EXPECT_TRUE(arc);
+  EXPECT_EQ(Connectivity::compute(nb).ratsnest.size(), unroutedBaseline);
+  for (auto& v : runDrc(nb))
+    if (v.type != DrcViolation::Type::Unconnected) ADD_FAILURE() << v.message;
+  doc.undoStack()->undo();
+  EXPECT_EQ(doc.board()->tracks.size(), tracksBefore) << "after undo";
+}

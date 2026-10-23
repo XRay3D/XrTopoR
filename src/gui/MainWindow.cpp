@@ -99,6 +99,7 @@ void MainWindow::buildMenus() {
   free->setChecked(true);
   tools->addSeparator();
   tools->addAction(tr("Next layer (L)"), view_, &BoardView::toggleLayer);
+  tools->addAction(tr("Recompute track shapes"), QKeySequence(Qt::Key_F5), view_, &BoardView::recomputeShapes);
   tools->addSeparator();
   tools->addAction(tr("&DRC"), QKeySequence(Qt::Key_F9), this, &MainWindow::runDrc);
 

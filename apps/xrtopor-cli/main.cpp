@@ -12,6 +12,7 @@
 #include "io/BoardIO.h"
 #include "io/gerber/GerberWriter.h"
 #include "io/svg/SvgWriter.h"
+#include "router/topo/Realizer.h"
 #include "router/topo/TopoRouter.h"
 
 using namespace xr;
@@ -28,6 +29,7 @@ void usage() {
       "  import-ses <board> <routes.ses> -o <out>\n"
       "  gerber     <board> <outdir>\n"
       "  svg        <board> <out.svg>\n"
+      "  reshape    <board> -o <out>              recompute track shapes (TopoR F5) for all tracks\n"
       "boards: .kicad_pcb, .dsn, P-CAD ASCII .pcb");
 }
 
@@ -130,6 +132,13 @@ int main(int argc, char** argv) {
     return cmdDrc(b, m.empty() ? 50 : std::stoul(std::string(m)));
   }
   if (cmd == "route") return cmdRoute(b, a);
+  if (cmd == "reshape" && !a.opt("-o").empty()) {
+    std::vector<char> all(b.tracks.size(), 1);
+    auto st = topo::reshapeTracks(b, all);
+    std::println("reshaped {} wires, {} arcs, {} apexes dropped", st.wires, st.arcs, st.droppedApexes);
+    if (auto r = io::saveBoard(b, std::string(a.opt("-o"))); !r) return fail(r.error());
+    return 0;
+  }
   if (cmd == "convert" && !second().empty()) {
     if (auto r = io::saveBoard(b, second()); !r) return fail(r.error());
     std::println("written {}", second());

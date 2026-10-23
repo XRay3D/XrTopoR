@@ -8,9 +8,11 @@
 #include <QWheelEvent>
 #include <algorithm>
 #include <cmath>
+#include <map>
 #include <ranges>
 
 #include "gui/Theme.h"
+#include "router/topo/Realizer.h"
 
 namespace xr::gui {
 
@@ -506,6 +508,7 @@ void BoardView::keyPressEvent(QKeyEvent* e) {
       break;
     case Qt::Key_R: setMode(Mode::Route); break;
     case Qt::Key_W: changeTrackWidth(); break;
+    case Qt::Key_F5: recomputeShapes(); break;
     case Qt::Key_Space: rotateSelection(e->modifiers() & Qt::ShiftModifier ? 90 : -90); break;
     case Qt::Key_N: setRatsnestVisible(!showRatsnest_); break;
     case Qt::Key_O:
@@ -581,6 +584,22 @@ void BoardView::changeTrackWidth() {
   for (ItemRef r : doc_->selectedItems())
     if (r.type == ItemType::Track) b.tracks[r.index].width = mmToNm(w);
   doc_->commitEdit(before, tr("Track width"));
+}
+
+void BoardView::recomputeShapes() {
+  if (!doc_->hasBoard()) return;
+  Board& b = *doc_->board();
+  std::vector<char> chosen(b.tracks.size(), 0);
+  bool any = false;
+  for (ItemRef r : doc_->selectedItems())
+    if (r.type == ItemType::Track) { chosen[r.index] = 1; any = true; }
+  if (!any)
+    for (size_t i = 0; i < b.tracks.size(); ++i) chosen[i] = !b.tracks[i].locked;
+  auto before = doc_->beginEdit();
+  auto st = topo::reshapeTracks(b, std::move(chosen));
+  doc_->clearSelection();
+  doc_->commitEdit(before, tr("Recompute shapes"));
+  emit status(tr("Recomputed %1 wire(s): %2 arcs").arg(st.wires).arg(st.arcs));
 }
 
 void BoardView::cancelTool() {

@@ -36,6 +36,7 @@ class BoardView : public QWidget {
   void routeAddVia();  // via + layer change while routing
   void toggleLayer();  // L: next copper layer (while routing: with a via)
   void changeTrackWidth();
+  void recomputeShapes();  // F5: selected (or all) tracks become sketches and are re-realised
 
  signals:
   void cursorMoved(Vec2 world);

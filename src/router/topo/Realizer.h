@@ -35,7 +35,19 @@ struct RealizeStats {
   std::vector<int> trackWire;  // wire index of every track appended, in order
 };
 
+struct RealizeOptions {
+  // Existing board tracks of other nets act as obstacles (manual re-shaping of a few wires);
+  // the autorouter realises all wires at once and leaves this off.
+  bool tracksAsObstacles = false;
+};
+
+// TopoR "F5": the chosen tracks (chains of one net/layer between pads, vias or branch points)
+// become sketches, are removed from the board and realised again with all other copper as
+// obstacles. Returns the sketches used (for diagnostics) through `wires` when given.
+RealizeStats reshapeTracks(Board& b, std::vector<char> chosen, std::vector<RealWire>* wires = nullptr);
+
 // Appends tracks for the wires and vias to the board.
-RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::vector<RealVia>& vias);
+RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::vector<RealVia>& vias,
+                     const RealizeOptions& opt = {});
 
 }  // namespace xr::topo
