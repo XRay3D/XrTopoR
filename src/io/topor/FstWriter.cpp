@@ -63,6 +63,7 @@ struct Writer {
   std::map<PadKey, std::string> padstacks;
   std::vector<std::string> padPadstack;  // per board pad
   std::map<std::pair<Coord, Coord>, std::string> viastacks;
+  std::vector<std::pair<Coord, Coord>> viastackOrder;  // the first one is the design's default
   std::map<FpKey, std::string> footprints;
   std::vector<std::string> compFootprint;  // per component
   std::set<std::string> fpNames;
@@ -274,10 +275,19 @@ struct Writer {
     if (it != viastacks.end()) return it->second;
     std::string n = "Via" + mm(d) + "_" + mm(drill);
     viastacks[key] = n;
+    viastackOrder.push_back(key);
     return n;
   }
 
   void collectViastacks() {
+    rules_ = b.rules ? *b.rules : rulesFromBoard(b);
+    // Via types keep their names (TopoR's «(Default)» and the like).
+    std::set<std::string> taken;
+    for (auto& t : rules_.viaTypes)
+      if (!viastacks.contains({t.diameter, t.drill}) && taken.insert(t.name).second) {
+        viastacks[{t.diameter, t.drill}] = t.name;
+        viastackOrder.push_back({t.diameter, t.drill});
+      }
     defaultVia = viastackName(b.netClasses[0].viaDiameter, b.netClasses[0].viaDrill);
     for (auto& nc : b.netClasses) viastackName(nc.viaDiameter, nc.viaDrill);
     for (auto& v : b.vias) viastackName(v.diameter, v.drill);
@@ -285,7 +295,8 @@ struct Writer {
 
   void writeViastacks() {
     x.open("Viastacks");
-    for (auto& [k, name] : viastacks) {
+    for (auto& k : viastackOrder) {
+      const std::string& name = viastacks.at(k);
       x.open("Viastack", {{"name", name}, {"holeDiameter", mm(k.second)}});
       x.open("LayerRange");
       x.empty("AllLayers");
@@ -606,51 +617,6 @@ struct Writer {
     x.close();
   }
 
-  // --- groups ---
-  // Rules affect one net or one net group: each non-default class and each multi-net layer rule
-  // gets a NetGroup.
-  std::vector<std::vector<int>> netsOfClass;
-  std::vector<std::string> classGroup, ruleGroup;
-
-  void prepareGroups() {
-    netsOfClass.assign(b.netClasses.size(), {});
-    for (size_t n = 0; n < b.nets.size(); ++n) {
-      int c = b.nets[n].netClass;
-      if (c > 0 && c < int(b.netClasses.size())) netsOfClass[c].push_back(int(n));
-    }
-    std::set<std::string> used;
-    auto unique = [&](std::string name) {
-      std::string u = name;
-      for (int k = 2; !used.insert(u).second; ++k) u = std::format("{}_{}", name, k);
-      return u;
-    };
-    classGroup.assign(b.netClasses.size(), {});
-    for (size_t c = 1; c < b.netClasses.size(); ++c)
-      if (!netsOfClass[c].empty())
-        classGroup[c] = unique(b.netClasses[c].name.empty() ? std::format("Class{}", c) : b.netClasses[c].name);
-    ruleGroup.assign(b.layerRules.size(), {});
-    for (size_t r = 0; r < b.layerRules.size(); ++r)
-      if (b.layerRules[r].nets.size() > 1) ruleGroup[r] = unique(std::format("LayerRule{}", r + 1));
-  }
-
-  void writeGroups() {
-    x.open("Groups", {{"version", "1.1"}});
-    auto group = [&](const std::string& name, const std::vector<int>& nets) {
-      x.open("NetGroup", {{"name", name}});
-      for (int n : nets) x.empty("NetRef", {{"name", b.nets[n].name}});
-      x.close();
-    };
-    if (std::ranges::any_of(classGroup, &std::string::size) || std::ranges::any_of(ruleGroup, &std::string::size)) {
-      x.open("NetGroups");
-      for (size_t c = 0; c < classGroup.size(); ++c)
-        if (!classGroup[c].empty()) group(classGroup[c], netsOfClass[c]);
-      for (size_t r = 0; r < ruleGroup.size(); ++r)
-        if (!ruleGroup[r].empty()) group(ruleGroup[r], b.layerRules[r].nets);
-      x.close();
-    }
-    x.close();
-  }
-
   // --- display settings ---
   static std::string hexColor(uint32_t c) { return std::format("#{:06x}", c & 0xffffff); }
 
@@ -705,78 +671,66 @@ struct Writer {
     x.close();
   }
 
-  // --- rules ---
-  // ObjectNet of a class (0 = all nets) or of a layer rule.
-  void classObject(size_t c) {
-    if (c == 0) x.empty("AllNets");
-    else x.empty("NetGroupRef", {{"name", classGroup[c]}});
+  // --- groups and rules ---
+  // TopoR-style rules of the design: its own, or those equivalent to its net classes.
+  DesignRules rules_;
+
+  void writeGroups() {
+    x.open("Groups", {{"version", "1.1"}});
+    if (!rules_.netGroups.empty()) {
+      x.open("NetGroups");
+      for (auto& g : rules_.netGroups) {
+        x.open("NetGroup", {{"name", g.name}});
+        for (auto& n : g.nets) x.empty("NetRef", {{"name", n}});
+        x.close();
+      }
+      x.close();
+    }
+    x.close();
   }
-  void ruleObject(size_t r) {
-    const LayerRule& lr = b.layerRules[r];
-    if (lr.nets.empty()) x.empty("AllNets");
-    else if (lr.nets.size() == 1) x.empty("NetRef", {{"name", b.nets[lr.nets[0]].name}});
-    else x.empty("NetGroupRef", {{"name", ruleGroup[r]}});
+
+  void ruleObject(const RuleNets& o) {
+    switch (o.kind) {
+      case RuleNets::Kind::All: x.empty("AllNets"); break;
+      case RuleNets::Kind::Net: x.empty("NetRef", {{"name", o.name}}); break;
+      case RuleNets::Kind::Group: x.empty("NetGroupRef", {{"name", o.name}}); break;
+    }
   }
-  void ruleLayers(LayerMask m) {
-    if (!m) {
+
+  void ruleLayers(const std::vector<std::string>& names) {
+    if (names.empty()) {
       x.empty("AllLayers");
       return;
     }
-    for (LayerId l : b.copperLayers())
-      if ((m >> l) & 1) x.empty("LayerRef", {{"name", layerName[l]}});
+    for (auto& n : names)
+      if (LayerId l = b.findLayer(n); l >= 0 && !layerName[l].empty()) x.empty("LayerRef", {{"name", layerName[l]}});
+  }
+
+  std::string viaTypeName(const std::string& type) {
+    for (auto& t : rules_.viaTypes)
+      if (t.name == type) return viastackName(t.diameter, t.drill);
+    return defaultVia;
   }
 
   void writeRules() {
     x.open("Rules", {{"version", "2.0"}});
-    // Later rules take priority: the default class first, specific classes after it, layer rules last.
-    auto objects = [&](size_t cls) {
-      x.open("ObjectsAffected");
-      classObject(cls);
-      x.close();
-    };
     x.open("RulesWidthOfWires");
-    for (size_t c = 0; c < b.netClasses.size(); ++c) {
-      if (c > 0 && netsOfClass[c].empty()) continue;
-      std::string w = mm(b.netClasses[c].trackWidth);
-      x.open("WidthOfWires", {{"enabled", "on"}, {"widthMin", w}, {"widthNom", w}});
-      x.empty("AllLayers");
-      objects(c);
-      x.close();
-    }
-    for (size_t r = 0; r < b.layerRules.size(); ++r) {
-      const LayerRule& lr = b.layerRules[r];
-      if (lr.width <= 0) continue;
-      std::string w = mm(lr.width);
-      x.open("WidthOfWires", {{"enabled", "on"}, {"widthMin", w}, {"widthNom", w}});
-      ruleLayers(lr.layers);
+    for (auto& w : rules_.widths) {
+      x.open("WidthOfWires", {{"enabled", onOff(w.enabled)}, {"widthMin", mm(w.min)}, {"widthNom", mm(w.nom)}});
+      ruleLayers(w.layers);
       x.open("ObjectsAffected");
-      ruleObject(r);
+      ruleObject(w.nets);
       x.close();
       x.close();
     }
     x.close();
     x.open("RulesClearancesNetToNet");
-    for (size_t c = 0; c < b.netClasses.size(); ++c) {
-      if (c > 0 && netsOfClass[c].empty()) continue;
-      std::string clr = mm(b.netClasses[c].clearance);
-      x.open("ClearanceNetToNet", {{"enabled", "on"}, {"clrnMin", clr}, {"clrnNom", clr}});
-      x.empty("AllLayers");
-      // Two object lists: class nets against all nets.
+    for (auto& c : rules_.clearances) {
+      x.open("ClearanceNetToNet", {{"enabled", onOff(c.enabled)}, {"clrnMin", mm(c.min)}, {"clrnNom", mm(c.nom)}});
+      ruleLayers(c.layers);
       x.open("ObjectsAffected");
-      classObject(c);
-      x.empty("AllNets");
-      x.close();
-      x.close();
-    }
-    for (size_t r = 0; r < b.layerRules.size(); ++r) {
-      const LayerRule& lr = b.layerRules[r];
-      if (lr.clearance <= 0) continue;
-      std::string clr = mm(lr.clearance);
-      x.open("ClearanceNetToNet", {{"enabled", "on"}, {"clrnMin", clr}, {"clrnNom", clr}});
-      ruleLayers(lr.layers);
-      x.open("ObjectsAffected");
-      ruleObject(r);
-      x.empty("AllNets");
+      ruleObject(c.a);
+      ruleObject(c.b);
       x.close();
       x.close();
     }
@@ -789,22 +743,53 @@ struct Writer {
     x.close();
     x.close();
     x.close();
-    x.empty("RulesClearancesToBoard", {{"wires", mm(b.edgeClearance)}, {"comps", mm(b.edgeClearance)}});
+    Coord edge = rules_.edgeWires > 0 ? rules_.edgeWires : b.edgeClearance;
+    x.empty("RulesClearancesToBoard",
+            {{"wires", mm(edge)}, {"comps", mm(rules_.edgeComps > 0 ? rules_.edgeComps : edge)}});
     x.open("RulesViastacksOfNets");
-    for (size_t c = 0; c < b.netClasses.size(); ++c) {
-      if (c > 0 && netsOfClass[c].empty()) continue;
-      x.open("ViastacksOfNets", {{"enabled", "on"}});
-      objects(c);
+    for (auto& v : rules_.vias) {
+      x.open("ViastacksOfNets", {{"enabled", onOff(v.enabled)}});
+      x.open("ObjectsAffected");
+      ruleObject(v.nets);
+      x.close();
       x.open("Viastacks");
-      x.empty("ViastackRef", {{"name", viastackName(b.netClasses[c].viaDiameter, b.netClasses[c].viaDrill)}});
+      if (v.viaType.empty()) x.empty("AllViastacks");
+      else x.empty("ViastackRef", {{"name", viaTypeName(v.viaType)}});
       x.close();
       x.close();
     }
     x.close();
+    if (!rules_.planes.empty()) {
+      x.open("RulesPlaneLayersNets");
+      for (auto& p : rules_.planes) {
+        LayerId l = b.findLayer(p.layer);
+        if (l < 0 || layerName[l].empty()) continue;
+        x.open("PlaneLayerNets", {{"enabled", onOff(p.enabled)}});
+        x.empty("LayerRef", {{"name", layerName[l]}});
+        x.open("ObjectsAffected");
+        x.empty("NetRef", {{"name", p.net}});
+        x.close();
+        x.close();
+      }
+      x.close();
+    }
+    if (!rules_.layerNets.empty()) {
+      x.open("RulesSignalLayersNets");
+      for (auto& r : rules_.layerNets) {
+        LayerId l = b.findLayer(r.layer);
+        if (l < 0 || layerName[l].empty()) continue;
+        x.open("SignalLayerNets", {{"enabled", onOff(r.enabled)}});
+        x.empty("LayerRef", {{"name", layerName[l]}});
+        x.open("ObjectsAffected");
+        for (auto& o : r.nets) ruleObject(o);
+        x.close();
+        x.close();
+      }
+      x.close();
+    }
     x.close();
   }
 
-  // --- connectivity ---
   void writeConnectivity() {
     x.open("Connectivity", {{"version", "1.3"}});
     x.open("Vias");
@@ -989,7 +974,6 @@ struct Writer {
     x.blank();
     writeNetList();
     x.blank();
-    prepareGroups();
     writeGroups();
     x.blank();
     x.open("HiSpeedRules", {{"version", "3.0"}});

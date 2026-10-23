@@ -304,7 +304,11 @@ TEST(FstIO, NetAndLayerRules) {
   // A layer rule overrides the class on its layer only.
   int g = a.findNet("G");
   LayerId top = a.topCopper(), bottom = a.bottomCopper();
-  a.layerRules.push_back({{g}, LayerMask(1) << bottom, mmToNm(0.6), mmToNm(0.5)});
+  ASSERT_TRUE(a.rules);
+  RuleNets gnet{RuleNets::Kind::Net, "G"};
+  a.rules->widths.push_back({true, {a.layers[bottom].name}, gnet, mmToNm(0.6), mmToNm(0.6)});
+  a.rules->clearances.push_back({true, {a.layers[bottom].name}, gnet, {}, mmToNm(0.5), mmToNm(0.5)});
+  compileRules(a);
   EXPECT_EQ(a.trackWidth(g, top), mmToNm(1.5));
   EXPECT_EQ(a.trackWidth(g, bottom), mmToNm(0.6));
   EXPECT_EQ(a.clearance(g, bottom), mmToNm(0.5));

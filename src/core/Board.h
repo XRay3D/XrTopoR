@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "core/Display.h"
+#include "core/Rules.h"
 #include "geom/Shape.h"
 
 namespace xr {
@@ -163,6 +164,7 @@ struct Board {
   double designUnitNm = kNmPerMm;  // unit the design was drawn in (lengths are shown in it)
   std::shared_ptr<SourceDoc> source;       // original file tree for lossless round-trip
   std::optional<DisplayControl> display;   // display settings saved with the design (TopoR .fst)
+  std::optional<DesignRules> rules;        // TopoR-style rules the classes are compiled from, if any
 
   // Layers
   LayerList copperLayers() const;  // top to bottom
