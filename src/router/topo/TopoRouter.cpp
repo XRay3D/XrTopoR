@@ -26,6 +26,7 @@
 #include <unordered_map>
 
 #include "drc/Drc.h"
+#include "router/topo/Optimizer.h"
 #include "router/topo/Realizer.h"
 #include "router/topo/TopoMesh.h"
 
@@ -1089,8 +1090,10 @@ RouterResult Router::run() {
         if (pick[j] && !std::ranges::contains(queue, j)) queue.push_back(j);
       if (queue.empty()) break;
       // A different order every pass: with a fixed order the same net encloses the same pins again.
-      std::mt19937 rng(unsigned(pass) * 7919u);
-      std::shuffle(queue.begin() + long(failedJobs.size()), queue.end(), rng);
+      if (soft) {
+        std::mt19937 rng(unsigned(pass) * 7919u);
+        std::shuffle(queue.begin() + long(failedJobs.size()), queue.end(), rng);
+      }
     }
     for (int j : queue) ripup(j);
     int done = 0;
@@ -1166,6 +1169,18 @@ RouterResult Router::run() {
     b_.tracks.insert(b_.tracks.end(), bestGeom->tracks.begin(), bestGeom->tracks.end());
     b_.vias.insert(b_.vias.end(), bestGeom->vias.begin(), bestGeom->vias.end());
     res_.vias = int(bestGeom->vias.size());
+  }
+  if (o_.optimizeIterations > 0 && !cancelled() && !std::getenv("XR_SKETCH")) {
+    OptimizeOptions oo;
+    oo.iterations = o_.optimizeIterations;
+    oo.cancel = o_.cancel;
+    oo.progress = o_.progress;
+    auto r = optimize(b_, oo);
+    res_.vias = int(b_.vias.size());
+    res_.length = r.lengthAfter;
+    res_.log.push_back(std::format("optimised: {} via move(s), conflicts {} -> {}, length {:.1f} -> {:.1f} mm",
+                                   r.viaMoves, r.conflictsBefore, r.conflictsAfter, r.lengthBefore / 1e6,
+                                   r.lengthAfter / 1e6));
   }
   int fails = 0;
   for (auto [j, f] : std::views::enumerate(s_.failed)) {

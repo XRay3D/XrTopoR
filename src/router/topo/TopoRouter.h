@@ -17,6 +17,7 @@ struct RouterOptions {
   bool useVias = true;
   bool ripupExisting = true;         // remove unlocked routing before routing
   bool softPlanarity = false;        // early passes may cross other nets' routes at a growing cost
+  int optimizeIterations = 2;        // final via optimisation (TopoR F7), 0 = off
   std::vector<std::string> nets;     // empty = all nets
   std::vector<int> copperIndices;    // allowed copper layers by index (empty = all)
   double viaPitch = 0;               // via candidate grid pitch (nm), 0 = auto
