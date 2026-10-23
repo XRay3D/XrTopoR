@@ -56,6 +56,7 @@ if(XR_BUILD_GUI)
     gui/BoardView.cpp
     gui/BuiltinSchemes.cpp
     gui/Commands.cpp
+    gui/DesignParamsDialog.cpp
     gui/DisplayPanel.cpp
     gui/Document.cpp
     gui/MainWindow.cpp

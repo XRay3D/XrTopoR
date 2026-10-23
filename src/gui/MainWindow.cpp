@@ -27,6 +27,7 @@
 
 #include "core/ZoneFill.h"
 #include "gui/AppSettings.h"
+#include "gui/DesignParamsDialog.h"
 #include "gui/DisplayPanel.h"
 #include "gui/MessagesPanel.h"
 #include "gui/PropertiesPanel.h"
@@ -220,6 +221,10 @@ void MainWindow::bindCommands() {
   }
 
   // Дизайн
+  c.bind("Accel_ShowDPE", [this] {
+    DesignParamsDialog dlg(doc_, this);
+    dlg.exec();
+  });
   c.bind("Cmd_Summary", [this] { showSummary(); });
 
   // Трассировка

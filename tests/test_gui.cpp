@@ -2,6 +2,8 @@
 #include <QApplication>
 #include <QDir>
 #include <QDockWidget>
+#include <QPushButton>
+#include <QTableWidget>
 #include <QFile>
 #include <QDoubleSpinBox>
 #include <QLineEdit>
@@ -19,6 +21,7 @@
 #include "gui/BoardView.h"
 #include "gui/Commands.h"
 #include "gui/Document.h"
+#include "gui/DesignParamsDialog.h"
 #include "gui/MainWindow.h"
 #include "gui/MessagesPanel.h"
 #include "gui/PropertiesPanel.h"
@@ -534,4 +537,35 @@ TEST(Gui, TopoRProject) {
   p = Project::load(dir.filePath("Example_05.fsproj"), nullptr);
   // Reopening the project returns to the design viewed last.
   EXPECT_EQ(p->openedDocument(), w.document()->path());
+}
+
+// «Редактор параметров дизайна»: a rule edited and applied changes the design's classes; as in TopoR
+// the undo history is cleared and the design is marked modified.
+TEST(Gui, DesignParametersEditor) {
+  Fixture f("topor/Example_02/Placement.fst");
+  f.doc.setUnit(Unit::Mm);
+  auto before = f.doc.beginEdit();
+  f.doc.commitEdit(before, "something to undo");
+  DesignParamsDialog dlg(&f.doc);
+  dlg.resize(1100, 640);
+  dlg.showPage("Ширина проводников");
+  auto* table = dlg.findChild<QTableWidget*>();
+  ASSERT_TRUE(table);
+  ASSERT_GE(table->rowCount(), 3);
+  if (const char* dir = std::getenv("XR_SHOT_DIR")) dlg.grab().save(QString(dir) + "/dpe.png");
+  // Row 0: all nets, 0.4 mm.
+  auto* nom = qobject_cast<QDoubleSpinBox*>(table->cellWidget(0, 5));
+  ASSERT_TRUE(nom);
+  EXPECT_NEAR(nom->value(), 0.4, 1e-9);
+  nom->setValue(0.3);
+  QPushButton* apply = nullptr;
+  for (auto* b : dlg.findChildren<QPushButton*>())
+    if (b->text() == "Применить") apply = b;
+  ASSERT_TRUE(apply && apply->isEnabled());
+  apply->click();
+  const Board& b = f.b();
+  EXPECT_EQ(b.netClasses[0].trackWidth, mmToNm(0.3));
+  EXPECT_EQ(b.trackWidth(b.findNet("+5V"), b.topCopper()), mmToNm(1.5));  // group rules still win
+  EXPECT_EQ(f.doc.undoStack()->count(), 0);
+  EXPECT_FALSE(f.doc.undoStack()->isClean());
 }
