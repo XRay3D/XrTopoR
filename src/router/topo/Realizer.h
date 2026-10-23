@@ -3,6 +3,7 @@
 // taut around the obstacles of other nets (funnel algorithm in a constrained Delaunay
 // triangulation of obstacle points), then thickened into tangent segments + arcs whose
 // radii nest wires that wrap the same obstacle.
+#include <optional>
 #include <vector>
 
 #include "core/Board.h"
@@ -39,12 +40,17 @@ struct RealizeOptions {
   // Existing board tracks of other nets act as obstacles (manual re-shaping of a few wires);
   // the autorouter realises all wires at once and leaves this off.
   bool tracksAsObstacles = false;
+  // Only obstacles intersecting this box are considered (local re-shaping); outline always is.
+  std::optional<BBox> region;
 };
 
 // TopoR "F5": the chosen tracks (chains of one net/layer between pads, vias or branch points)
 // become sketches, are removed from the board and realised again with all other copper as
 // obstacles. Returns the sketches used (for diagnostics) through `wires` when given.
-RealizeStats reshapeTracks(Board& b, std::vector<char> chosen, std::vector<RealWire>* wires = nullptr);
+// `grown` receives the final choice (whole chains) as a mask over the tracks before the call;
+// `local` limits the obstacles to the neighbourhood of the chosen chains (faster, same result).
+RealizeStats reshapeTracks(Board& b, std::vector<char> chosen, std::vector<RealWire>* wires = nullptr,
+                           std::vector<char>* grown = nullptr, bool local = false);
 
 // Appends tracks for the wires and vias to the board.
 RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::vector<RealVia>& vias,

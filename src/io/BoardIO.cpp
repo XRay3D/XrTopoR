@@ -66,12 +66,16 @@ Result<void> saveBoard(const Board& b, const std::string& path) {
     case Format::Kicad: {
       auto r = writeFile(path, writeKicad(b));
       if (!r) return r;
-      // A generated board needs its net classes in the project file; an existing project is kept.
+      // The board's net classes live in the project file: an existing one next to the target is kept,
+      // otherwise the source board's project is copied, or one is generated from the model.
       auto pro = std::filesystem::path(path).replace_extension(".kicad_pro");
-      bool fromKicad = b.source && b.source->format == SourceDoc::Format::Kicad;
       std::error_code ec;
-      if (!fromKicad && !std::filesystem::exists(pro, ec)) return writeFile(pro.string(), writeKicadProject(b));
-      return r;
+      if (std::filesystem::exists(pro, ec)) return r;
+      if (b.source && b.source->format == SourceDoc::Format::Kicad) {
+        auto srcPro = std::filesystem::path(b.source->path).replace_extension(".kicad_pro");
+        if (std::filesystem::exists(srcPro, ec) && std::filesystem::copy_file(srcPro, pro, ec)) return r;
+      }
+      return writeFile(pro.string(), writeKicadProject(b));
     }
     case Format::Dsn: return writeFile(path, writeDsn(b));
     case Format::Ses: return writeFile(path, writeSes(b));

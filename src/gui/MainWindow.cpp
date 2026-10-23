@@ -18,6 +18,7 @@
 #include "io/BoardIO.h"
 #include "io/gerber/GerberWriter.h"
 #include "io/svg/SvgWriter.h"
+#include "router/topo/Optimizer.h"
 #include "router/topo/TopoRouter.h"
 
 namespace xr::gui {
@@ -106,6 +107,8 @@ void MainWindow::buildMenus() {
 
   auto* routeMenu = menuBar()->addMenu(tr("&Route"));
   routeMenu->addAction(tr("&Autoroute..."), QKeySequence(Qt::Key_F10), this, &MainWindow::autoroute);
+  routeMenu->addAction(tr("Move &vias (optimise)"), QKeySequence(Qt::Key_F7), this, [this] { optimize(false); });
+  routeMenu->addAction(tr("Move vias and &components"), QKeySequence(Qt::SHIFT | Qt::Key_F7), this, [this] { optimize(true); });
   routeMenu->addAction(tr("&Clear routing"), this, &MainWindow::clearRouting);
 
   auto* tb = addToolBar(tr("Tools"));
@@ -287,6 +290,49 @@ void MainWindow::autoroute() {
       }, Qt::QueuedConnection);
     };
     return topo::routeBoard(*work, o);
+  }));
+}
+
+void MainWindow::optimize(bool components) {
+  if (!doc_->hasBoard()) return;
+  auto work = std::make_shared<Board>(*doc_->board());
+  cancel_ = std::make_shared<std::atomic<bool>>(false);
+  auto* dlg = new QProgressDialog(tr("Optimising..."), tr("Cancel"), 0, 100, this);
+  dlg->setWindowModality(Qt::WindowModal);
+  dlg->setMinimumDuration(300);
+  auto cancel = cancel_;
+  connect(dlg, &QProgressDialog::canceled, this, [cancel] { cancel->store(true); });
+  auto* watcher = new QFutureWatcher<topo::OptimizeResult>(this);
+  connect(watcher, &QFutureWatcher<topo::OptimizeResult>::finished, this, [this, watcher, dlg, work] {
+    topo::OptimizeResult res = watcher->result();
+    dlg->close();
+    dlg->deleteLater();
+    watcher->deleteLater();
+    auto before = doc_->beginEdit();
+    Board& b = *doc_->board();
+    b.components = work->components;
+    b.pads = work->pads;
+    b.tracks = work->tracks;
+    b.vias = work->vias;
+    doc_->commitEdit(before, tr("Optimise"));
+    statusBar()->showMessage(tr("Moved %1 via(s), %2 component(s); conflicts %3 -> %4; length %5 -> %6 mm")
+                                 .arg(res.viaMoves).arg(res.componentMoves).arg(res.conflictsBefore).arg(res.conflictsAfter)
+                                 .arg(res.lengthBefore / 1e6, 0, 'f', 1).arg(res.lengthAfter / 1e6, 0, 'f', 1),
+                             10000);
+  });
+  QPointer<QProgressDialog> dp(dlg);
+  watcher->setFuture(QtConcurrent::run([work, components, cancel, dp] {
+    topo::OptimizeOptions o;
+    o.components = components;
+    o.cancel = cancel.get();
+    o.progress = [dp](int done, int total, const std::string& stage) {
+      QMetaObject::invokeMethod(qApp, [dp, done, total, stage] {
+        if (!dp) return;
+        dp->setLabelText(QString::fromStdString(stage));
+        dp->setValue(total ? done * 100 / total : 0);
+      }, Qt::QueuedConnection);
+    };
+    return topo::optimize(*work, o);
   }));
 }
 

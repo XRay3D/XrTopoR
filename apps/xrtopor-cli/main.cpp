@@ -12,6 +12,7 @@
 #include "io/BoardIO.h"
 #include "io/gerber/GerberWriter.h"
 #include "io/svg/SvgWriter.h"
+#include "router/topo/Optimizer.h"
 #include "router/topo/Realizer.h"
 #include "router/topo/TopoRouter.h"
 
@@ -30,6 +31,7 @@ void usage() {
       "  gerber     <board> <outdir>\n"
       "  svg        <board> <out.svg>\n"
       "  reshape    <board> -o <out>              recompute track shapes (TopoR F5) for all tracks\n"
+      "  optimize   <board> -o <out> [--iterations N] [--step MM] [--components]   move vias/parts (F7)\n"
       "boards: .kicad_pcb, .dsn, P-CAD ASCII .pcb");
 }
 
@@ -133,6 +135,19 @@ int main(int argc, char** argv) {
     return cmdDrc(b, m.empty() ? 50 : std::stoul(std::string(m)));
   }
   if (cmd == "route") return cmdRoute(b, a);
+  if (cmd == "optimize" && !a.opt("-o").empty()) {
+    topo::OptimizeOptions oo;
+    if (auto p = a.opt("--iterations"); !p.empty()) oo.iterations = std::stoi(std::string(p));
+    if (auto p = a.opt("--step"); !p.empty()) oo.step = std::stod(std::string(p)) * kNmPerMm;
+    oo.components = a.flag("--components");
+    auto res = topo::optimize(b, oo);
+    for (auto& l : res.log) std::println("{}", l);
+    std::println("moved {} via(s), {} component(s); conflicts {} -> {}; length {:.1f} -> {:.1f} mm; {:.2f} s", res.viaMoves,
+                 res.componentMoves, res.conflictsBefore, res.conflictsAfter, res.lengthBefore / 1e6,
+                 res.lengthAfter / 1e6, res.seconds);
+    if (auto r = io::saveBoard(b, std::string(a.opt("-o"))); !r) return fail(r.error());
+    return 0;
+  }
   if (cmd == "reshape" && !a.opt("-o").empty()) {
     std::vector<char> all(b.tracks.size(), 1);
     auto st = topo::reshapeTracks(b, all);

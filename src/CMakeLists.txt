@@ -39,6 +39,7 @@ add_library(xrrouter STATIC
   router/topo/TopoMesh.cpp
   router/topo/TopoRouter.cpp
   router/topo/Realizer.cpp
+  router/topo/Optimizer.cpp
 )
 target_link_libraries(xrrouter PUBLIC xrcore xrdrc CGAL::CGAL)
 

@@ -3,6 +3,7 @@
 #include "core/Connectivity.h"
 #include "drc/Drc.h"
 #include "io/BoardIO.h"
+#include "router/topo/Optimizer.h"
 #include "router/topo/TopoRouter.h"
 
 using namespace xr;
@@ -53,4 +54,20 @@ TEST(Router, SelectedNetsOnly) {
   auto r = topo::routeBoard(**b, o);
   EXPECT_GT(r.routed, 0);
   for (auto& t : (*b)->tracks) EXPECT_EQ((*b)->nets[t.net].name, "GND");
+}
+
+TEST(Optimizer, MovesViasWithoutBreakingAnything) {
+  auto b = io::loadBoard(data("adg508f_single.dsn"));
+  ASSERT_TRUE(b);
+  topo::routeBoard(**b, {});
+  size_t unrouted = Connectivity::compute(**b).ratsnest.size();
+  int before = clearanceViolations(**b);
+  topo::OptimizeOptions o;
+  o.iterations = 2;
+  o.components = true;
+  auto r = topo::optimize(**b, o);
+  EXPECT_GT(r.viaMoves, 0);
+  EXPECT_LE(r.lengthAfter, r.lengthBefore);
+  EXPECT_LE(Connectivity::compute(**b).ratsnest.size(), unrouted);
+  EXPECT_LE(clearanceViolations(**b), before);
 }

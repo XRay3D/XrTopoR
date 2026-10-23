@@ -199,8 +199,10 @@ double sweepOf(const Circle& c, Vec2 in, Vec2 out) {
 
 LayerObstacles collect(const Board& b, LayerId layer, const std::vector<RealVia>& vias, const RealizeOptions& opt) {
   LayerObstacles ob;
+  auto inRegion = [&](const BBox& bb) { return !opt.region || opt.region->intersects(bb); };
   for (const Pad& pad : b.pads) {
     double clr = double(b.classOf(pad.net).clearance);
+    if (!inRegion(pad.shapeGeom().bbox())) continue;
     if (!pad.onLayer(layer)) {
       if (pad.drill > 0 && !pad.copper) ob.add(pad.pos.v(), pad.drill / 2.0, clr, kNoNet);
       continue;
@@ -223,7 +225,8 @@ LayerObstacles collect(const Board& b, LayerId layer, const std::vector<RealVia>
     }
   }
   for (const Via& v : b.vias)
-    if (v.onLayer(layer)) ob.add(v.pos.v(), v.diameter / 2.0, double(b.classOf(v.net).clearance), v.net);
+    if (v.onLayer(layer) && inRegion(Shape::circle(v.pos.v(), v.diameter / 2.0).bbox()))
+      ob.add(v.pos.v(), v.diameter / 2.0, double(b.classOf(v.net).clearance), v.net);
   for (const RealVia& v : vias) ob.add(v.pos, v.diameter / 2.0, double(b.classOf(v.net).clearance), v.net);
   for (auto& loop : b.outline) {
     int first = int(ob.pts.size());
@@ -234,6 +237,13 @@ LayerObstacles collect(const Board& b, LayerId layer, const std::vector<RealVia>
   if (opt.tracksAsObstacles)
     for (const Track& t : b.tracks) {
       if (t.layer != layer) continue;
+      if (opt.region) {
+        BBox tb;
+        tb.add(t.a.v());
+        tb.add(t.b.v());
+        if (t.mid) tb.add(t.mid->v());
+        if (!inRegion(tb.inflated(t.width))) continue;
+      }
       double r = t.width / 2.0, clr = double(b.classOf(t.net).clearance);
       int prev = -1;
       for (Vec2 p : t.path(20000)) {
@@ -695,7 +705,8 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
   return st;
 }
 
-RealizeStats reshapeTracks(Board& b, std::vector<char> chosen, std::vector<RealWire>* wiresOut) {
+RealizeStats reshapeTracks(Board& b, std::vector<char> chosen, std::vector<RealWire>* wiresOut,
+                           std::vector<char>* grownOut, bool local) {
   chosen.resize(b.tracks.size(), 0);
   // Grow the choice to whole chains of the same net and layer.
   auto key = [](Point p) { return std::pair{p.x / 1000, p.y / 1000}; };  // 1 um buckets
@@ -819,6 +830,7 @@ RealizeStats reshapeTracks(Board& b, std::vector<char> chosen, std::vector<RealW
   }
   wires = std::move(split);
   if (wiresOut) *wiresOut = wires;
+  if (grownOut) *grownOut = chosen;
   if (wires.empty()) return {};
   std::vector<Track> keep;
   for (size_t i = 0; i < b.tracks.size(); ++i)
@@ -830,6 +842,12 @@ RealizeStats reshapeTracks(Board& b, std::vector<char> chosen, std::vector<RealW
       if (z.layer == w.layer) { z.filled.clear(); break; }
   RealizeOptions opt;
   opt.tracksAsObstacles = true;
+  if (local) {
+    BBox box;
+    for (auto& w : wires)
+      for (auto& p : w.sketch) box.add(p);
+    opt.region = box.inflated(3 * kNmPerMm);
+  }
   // All wires at once: nesting around shared obstacles keeps them apart. (Sequential realisation
   // with earlier wires as obstacles was tried and loses: a later sketch may cross an earlier taut
   // path and end up on the wrong side of it.)

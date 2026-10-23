@@ -29,6 +29,7 @@ class MainWindow : public QMainWindow {
   void exportSvg();
   void runDrc();
   void autoroute();
+  void optimize(bool components);  // F7 / Shift+F7
   void clearRouting();
   void updateTitle();
 
