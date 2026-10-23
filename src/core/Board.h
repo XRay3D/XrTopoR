@@ -1,0 +1,183 @@
+#pragma once
+// Board data model. Internal frame follows KiCad: Y axis points down, units are nanometres,
+// angles are degrees counter-clockwise as seen on screen.
+#include <cstdint>
+#include <map>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include "geom/Shape.h"
+
+namespace xr {
+
+namespace sexpr { struct Node; }
+
+using LayerId = int;
+using LayerMask = std::uint64_t;
+constexpr int kNoNet = -1;
+
+enum class LayerKind { Copper, Silk, Mask, Paste, Fab, Courtyard, Edge, Other };
+enum class Side { Top, Bottom, None };
+
+struct Layer {
+  std::string name;
+  LayerKind kind = LayerKind::Other;
+  Side side = Side::None;
+  int copperIndex = -1;  // 0 = top copper ... n-1 = bottom copper
+};
+
+struct NetClass {
+  std::string name = "Default";
+  Coord trackWidth = mmToNm(0.25);
+  Coord clearance = mmToNm(0.2);
+  Coord viaDiameter = mmToNm(0.6);
+  Coord viaDrill = mmToNm(0.3);
+};
+
+struct Net {
+  std::string name;
+  int netClass = 0;
+};
+
+enum class PadShapeKind { Circle, Rect, Oval, RoundRect, Polygon };
+
+struct PadShape {
+  PadShapeKind kind = PadShapeKind::Circle;
+  Coord w = 0, h = 0;      // full size
+  double rratio = 0;       // RoundRect corner radius = rratio * min(w, h)
+  std::vector<Vec2> poly;  // Polygon: local outline (pad frame, unrotated)
+};
+
+struct Pad {
+  std::string number;
+  int component = -1;
+  int net = kNoNet;
+  Point pos;              // absolute position
+  double angle = 0;       // absolute orientation (deg)
+  Point localPos;         // relative to component origin, before component rotation
+  double localAngle = 0;  // relative to component
+  PadShape shape;
+  Coord drill = 0;        // 0 = SMD
+  Coord drillH = 0;       // slot height (0 = round)
+  bool plated = true;
+  LayerMask copper = 0;   // mask over board copper layer ids
+
+  bool isThrough() const { return drill > 0; }
+  bool onLayer(LayerId l) const { return (copper >> l) & 1; }
+  Shape shapeGeom(double expand = 0) const;
+};
+
+enum class GraphicKind { Line, Arc, Circle, Rect, Poly };
+
+struct Graphic {
+  GraphicKind kind = GraphicKind::Line;
+  LayerId layer = -1;
+  Vec2 a, b, m;           // Line: a-b; Arc: a (start), m (mid), b (end); Circle: a centre, b on circle; Rect: a-b
+  std::vector<Vec2> pts;  // Poly
+  Coord width = 0;
+  bool filled = false;
+};
+
+struct Component {
+  std::string ref;
+  std::string value;
+  std::string footprint;
+  Point pos;
+  double angle = 0;
+  Side side = Side::Top;
+  bool locked = false;
+  std::vector<int> pads;
+  std::vector<Graphic> graphics;  // absolute coordinates
+};
+
+struct Track {
+  Point a, b;
+  std::optional<Point> mid;  // set for arcs (KiCad-style start/mid/end)
+  Coord width = 0;
+  LayerId layer = 0;
+  int net = kNoNet;
+  bool locked = false;
+  bool isArc() const { return mid.has_value(); }
+  Polyline path(double tol = 2000) const;  // centreline points
+};
+
+struct Via {
+  Point pos;
+  Coord diameter = 0;
+  Coord drill = 0;
+  LayerMask layers = 0;  // copper layers spanned (through via = all copper)
+  int net = kNoNet;
+  bool locked = false;
+  bool onLayer(LayerId l) const { return (layers >> l) & 1; }
+};
+
+struct Zone {
+  int net = kNoNet;
+  LayerId layer = 0;
+  std::string name;
+  std::vector<Vec2> outline;
+  std::vector<std::vector<Vec2>> filled;
+  Coord clearance = 0;
+};
+
+struct SourceDoc;
+
+struct Board {
+  std::string name;
+  std::vector<Layer> layers;
+  std::vector<NetClass> netClasses{NetClass{}};
+  std::vector<Net> nets;
+  std::vector<Component> components;
+  std::vector<Pad> pads;
+  std::vector<Track> tracks;
+  std::vector<Via> vias;
+  std::vector<Zone> zones;
+  std::vector<Graphic> graphics;           // board-level drawings
+  std::vector<std::vector<Vec2>> outline;  // closed board contours (first = outer)
+  Coord edgeClearance = mmToNm(0.25);
+  std::shared_ptr<SourceDoc> source;       // original file tree for lossless round-trip
+
+  // Layers
+  std::vector<LayerId> copperLayers() const;  // top to bottom
+  int copperCount() const;
+  LayerId findLayer(const std::string& name) const;
+  LayerId addLayer(const std::string& name, LayerKind kind, Side side);
+  LayerId copperByIndex(int idx) const;
+  LayerId topCopper() const { return copperByIndex(0); }
+  LayerId bottomCopper() const { return copperByIndex(copperCount() - 1); }
+  LayerMask allCopperMask() const;
+
+  // Nets
+  int findNet(const std::string& name) const;
+  int addNet(const std::string& name);  // returns existing index if present
+  const NetClass& classOf(int net) const;
+  int findNetClass(const std::string& name) const;
+
+  int findComponent(const std::string& ref) const;
+  // Recompute absolute pad positions/angles from component placement and local data.
+  void updatePadPositions(int comp);
+  void moveComponent(int comp, Point newPos);
+  void rotateComponent(int comp, double deltaDeg);
+
+  BBox bbox() const;
+  void rebuildNetIndex();  // fixes cached lookup after edits
+  void clearRouting(bool keepLocked = true);
+
+ private:
+  std::map<std::string, int> netIndex_;
+};
+
+// Rotate a local vector by an angle in degrees using the board (Y-down, CCW on screen) convention.
+Vec2 rotateBoard(Vec2 v, double deg);
+
+// Holds the parsed source document so writers can preserve unknown content.
+struct SourceDoc {
+  enum class Format { None, Kicad, Dsn, Pcad } format = Format::None;
+  std::string path;
+  std::shared_ptr<sexpr::Node> tree;
+  // KiCad: footprint node index (in tree children) for each component.
+  std::vector<int> componentNodes;
+};
+
+}  // namespace xr
