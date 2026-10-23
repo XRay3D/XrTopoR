@@ -11,6 +11,7 @@ const char* drcTypeName(DrcViolation::Type t) {
     case DrcViolation::Type::Short: return "short";
     case DrcViolation::Type::Edge: return "edge";
     case DrcViolation::Type::Unconnected: return "unconnected";
+    case DrcViolation::Type::Width: return "width";
   }
   return "?";
 }
@@ -184,7 +185,7 @@ std::vector<DrcViolation> runDrc(const Board& b, const DrcOptions& opt) {
               }
             }
           }
-        if (best >= req - kDrcTolerance) return;
+        if (best >= req - opt.tolerance) return;
         DrcViolation v;
         v.type = best <= 0 ? DrcViolation::Type::Short : DrcViolation::Type::Clearance;
         v.a = a;
@@ -220,7 +221,7 @@ std::vector<DrcViolation> runDrc(const Board& b, const DrcOptions& opt) {
             sb.add(p1);
             if (!sb.intersects(near)) continue;
             double d = s.distanceToSegment(p0, p1);
-            if (d < ec - kDrcTolerance) {
+            if (d < ec - opt.tolerance) {
               DrcViolation v;
               v.type = DrcViolation::Type::Edge;
               v.a = r;
@@ -237,6 +238,23 @@ std::vector<DrcViolation> runDrc(const Board& b, const DrcOptions& opt) {
     for (int i = 0; i < int(b.tracks.size()); ++i) checkEdge({ItemType::Track, i});
     for (int i = 0; i < int(b.vias.size()); ++i) checkEdge({ItemType::Via, i});
   }
+
+  if (opt.widths)
+    for (int i = 0; i < int(b.tracks.size()); ++i) {
+      const Track& t = b.tracks[i];
+      Coord min = b.minTrackWidth(t.net, t.layer);
+      if (t.width >= min - opt.tolerance) continue;
+      DrcViolation v;
+      v.type = DrcViolation::Type::Width;
+      v.a = {ItemType::Track, i};
+      v.pos = (t.a.v() + t.b.v()) * 0.5;
+      v.layer = t.layer;
+      v.actual = double(t.width);
+      v.required = double(min);
+      v.message = "Width " + mm(double(t.width)) + " < " + mm(double(min)) + " mm: " + itemName(b, v.a) + " [" +
+                  netName(b, t.net) + "]";
+      out.push_back(std::move(v));
+    }
 
   if (opt.unconnected) {
     auto conn = Connectivity::compute(b, idx);

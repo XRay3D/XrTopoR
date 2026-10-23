@@ -30,6 +30,7 @@
 #include "gui/AutorouteWindow.h"
 #include "gui/DesignParamsDialog.h"
 #include "gui/DisplayPanel.h"
+#include "gui/DrcDialog.h"
 #include "gui/MessagesPanel.h"
 #include "gui/PropertiesPanel.h"
 #include "gui/SearchPanel.h"
@@ -825,9 +826,10 @@ void MainWindow::showHotkeys() {
 
 void MainWindow::runDrc() {
   if (!doc_->hasBoard()) return;
-  auto v = xr::runDrc(*doc_->board());
-  showHint(tr("DRC: нарушений — %1").arg(v.size()));
-  doc_->setDrc(std::move(v));
+  DrcDialog dlg(doc_, this);
+  if (dlg.exec() != QDialog::Accepted) return;
+  int n = DrcDialog::run(doc_, this);
+  showHint(tr("DRC: нарушений — %1").arg(n));
 }
 
 void MainWindow::clearRouting() {

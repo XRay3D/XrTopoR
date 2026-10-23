@@ -7,7 +7,7 @@
 namespace xr {
 
 struct DrcViolation {
-  enum class Type { Clearance, Short, Edge, Unconnected };
+  enum class Type { Clearance, Short, Edge, Unconnected, Width };
   Type type = Type::Clearance;
   std::string message;
   Vec2 pos;
@@ -21,6 +21,8 @@ struct DrcOptions {
   bool clearance = true;
   bool edge = true;
   bool unconnected = true;
+  bool widths = true;        // wires narrower than the minimum of their width rules
+  double tolerance = 2000;   // nm: smaller shortfalls are rounding
   size_t maxViolations = 5000;
 };
 

@@ -10,6 +10,9 @@ namespace xr::gui {
 
 class BoardView;
 
+// A DRC violation in words, as the messages window and the DRC report show it.
+QString describeViolation(const Board& b, Unit u, const DrcViolation& v);
+
 class MessagesPanel : public QWidget {
   Q_OBJECT
  public:
@@ -21,7 +24,6 @@ class MessagesPanel : public QWidget {
  private:
   void rebuild();
   void activate(QTreeWidgetItem* it);
-  QString describe(const DrcViolation& v) const;
   Document* doc_;
   BoardView* view_;
   QTreeWidget* tree_;

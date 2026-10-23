@@ -184,6 +184,9 @@ struct Board {
   Coord trackWidth(int net, LayerId layer) const;
   Coord clearance(int net, LayerId layer) const;
   Coord maxClearance() const;  // over all classes and layer rules
+  // The narrowest a wire may be: «Мин.» of the last width rule that applies (Rules.cpp); the class
+  // width for designs without rules.
+  Coord minTrackWidth(int net, LayerId layer) const;
   int findNetClass(const std::string& name) const;
 
   int findComponent(const std::string& ref) const;

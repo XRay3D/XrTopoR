@@ -30,6 +30,37 @@ QIcon bullet() {
 
 }  // namespace
 
+QString describeViolation(const Board& b, Unit u, const DrcViolation& v) {
+  auto len = [&](double nm) { return formatLength(nm, u, 3); };
+  auto name = [&](ItemRef r) {
+    QString net = itemNet(b, r) >= 0 ? QString::fromStdString(b.nets[itemNet(b, r)].name) : QObject::tr("без цепи");
+    switch (r.type) {
+      case ItemType::Track: return QObject::tr("проводник [%1]").arg(net);
+      case ItemType::Via: return QObject::tr("переход [%1]").arg(net);
+      case ItemType::Pad: {
+        const Pad& p = b.pads[r.index];
+        QString ref = p.component >= 0 ? QString::fromStdString(b.components[p.component].ref) + "-" : QString();
+        return QObject::tr("контакт %1%2 [%3]").arg(ref, QString::fromStdString(p.number), net);
+      }
+      case ItemType::Zone: return QObject::tr("область металлизации [%1]").arg(net);
+    }
+    return QString();
+  };
+  QString where = v.layer >= 0 ? QObject::tr(" на слое '%1'").arg(QString::fromStdString(b.layers[v.layer].name)) : QString();
+  QString at = QString(" (%1, %2)[%3]").arg(len(v.pos.x), len(-v.pos.y), unitName(u));
+  switch (v.type) {
+    case DrcViolation::Type::Clearance:
+      return QObject::tr("Зазор %1 < %2: %3 / %4").arg(len(v.actual), len(v.required), name(v.a), name(v.b)) + where + at;
+    case DrcViolation::Type::Short: return QObject::tr("Замыкание: %1 / %2").arg(name(v.a), name(v.b)) + where + at;
+    case DrcViolation::Type::Edge:
+      return QObject::tr("Зазор до края платы %1 < %2: %3").arg(len(v.actual), len(v.required), name(v.a)) + at;
+    case DrcViolation::Type::Unconnected: return QObject::tr("Не соединено: %1").arg(QString::fromStdString(v.message)) + at;
+    case DrcViolation::Type::Width:
+      return QObject::tr("Ширина %1 < %2: %3").arg(len(v.actual), len(v.required), name(v.a)) + where + at;
+  }
+  return QString::fromStdString(v.message);
+}
+
 MessagesPanel::MessagesPanel(Document* doc, BoardView* view, QWidget* parent) : QWidget(parent), doc_(doc), view_(view) {
   auto* lay = new QVBoxLayout(this);
   lay->setContentsMargins(0, 0, 0, 0);
@@ -52,37 +83,6 @@ MessagesPanel::MessagesPanel(Document* doc, BoardView* view, QWidget* parent) : 
     m.exec(tree_->viewport()->mapToGlobal(p));
   });
   rebuild();
-}
-
-QString MessagesPanel::describe(const DrcViolation& v) const {
-  const Board& b = *doc_->board();
-  Unit u = doc_->unit();
-  auto len = [&](double nm) { return formatLength(nm, u, 3); };
-  auto name = [&](ItemRef r) {
-    QString net = itemNet(b, r) >= 0 ? QString::fromStdString(b.nets[itemNet(b, r)].name) : tr("без цепи");
-    switch (r.type) {
-      case ItemType::Track: return tr("проводник [%1]").arg(net);
-      case ItemType::Via: return tr("переход [%1]").arg(net);
-      case ItemType::Pad: {
-        const Pad& p = b.pads[r.index];
-        QString ref = p.component >= 0 ? QString::fromStdString(b.components[p.component].ref) + "-" : QString();
-        return tr("контакт %1%2 [%3]").arg(ref, QString::fromStdString(p.number), net);
-      }
-      case ItemType::Zone: return tr("область металлизации [%1]").arg(net);
-    }
-    return QString();
-  };
-  QString where = v.layer >= 0 ? tr(" на слое '%1'").arg(QString::fromStdString(b.layers[v.layer].name)) : QString();
-  QString at = QString(" (%1, %2)[%3]").arg(len(v.pos.x), len(-v.pos.y), unitName(u));
-  switch (v.type) {
-    case DrcViolation::Type::Clearance:
-      return tr("Зазор %1 < %2: %3 / %4").arg(len(v.actual), len(v.required), name(v.a), name(v.b)) + where + at;
-    case DrcViolation::Type::Short: return tr("Замыкание: %1 / %2").arg(name(v.a), name(v.b)) + where + at;
-    case DrcViolation::Type::Edge:
-      return tr("Зазор до края платы %1 < %2: %3").arg(len(v.actual), len(v.required), name(v.a)) + at;
-    case DrcViolation::Type::Unconnected: return tr("Не соединено: %1").arg(QString::fromStdString(v.message)) + at;
-  }
-  return QString::fromStdString(v.message);
 }
 
 void MessagesPanel::rebuild() {
@@ -154,12 +154,13 @@ void MessagesPanel::rebuild() {
     for (auto& [type, title] : {Kind{DrcViolation::Type::Short, tr("Нарушение DRC: замыкание")},
                                 Kind{DrcViolation::Type::Clearance, tr("Нарушение DRC: зазор")},
                                 Kind{DrcViolation::Type::Edge, tr("Нарушение DRC: зазор до края платы")},
+                                Kind{DrcViolation::Type::Width, tr("Нарушение DRC: ширина проводника")},
                                 Kind{DrcViolation::Type::Unconnected, tr("Нарушение DRC: несоединённые объекты")}}) {
       int n = int(std::ranges::count_if(drc, [&](const DrcViolation& v) { return v.type == type; }));
       if (!n) continue;
       auto* g = group(title, kDrc, n);
       for (int i = 0; i < int(drc.size()); ++i)
-        if (drc[size_t(i)].type == type) child(g, describe(drc[size_t(i)]), kDrc, drc[size_t(i)].pos)->setData(0, DrcIndex, i);
+        if (drc[size_t(i)].type == type) child(g, describeViolation(b, doc_->unit(), drc[size_t(i)]), kDrc, drc[size_t(i)].pos)->setData(0, DrcIndex, i);
     }
   }
 }

@@ -23,6 +23,7 @@
 #include "gui/Document.h"
 #include "gui/AutorouteWindow.h"
 #include "gui/DesignParamsDialog.h"
+#include "gui/DrcDialog.h"
 #include "gui/MainWindow.h"
 #include "gui/MessagesPanel.h"
 #include "gui/PropertiesPanel.h"
@@ -597,4 +598,28 @@ TEST(Gui, AutorouteVariants) {
   EXPECT_TRUE(f.doc.connectivity().ratsnest.empty());
   f.doc.undoStack()->undo();
   EXPECT_FALSE(f.doc.connectivity().ratsnest.empty());
+}
+
+// DRC with the dialog's settings: wire widths against the rules' minimum, checks switched off, report.
+TEST(Gui, DrcSettingsAndReport) {
+  Fixture f("tt.kicad_pcb");
+  f.doc.setUnit(Unit::Mm);
+  f.doc.board()->tracks[0].width = mmToNm(0.05);
+  f.doc.invalidate();
+  QTemporaryDir dir;
+  QSettings s;
+  s.setValue("drc/widths", true);
+  s.setValue("drc/report", true);
+  s.setValue("drc/reportPath", dir.filePath("drc.txt"));
+  int n = DrcDialog::run(&f.doc);
+  ASSERT_GE(n, 1);
+  EXPECT_TRUE(std::ranges::any_of(f.doc.drc(), [](auto& v) { return v.type == DrcViolation::Type::Width; }));
+  QFile report(dir.filePath("drc.txt"));
+  ASSERT_TRUE(report.open(QIODevice::ReadOnly));
+  EXPECT_TRUE(QString::fromUtf8(report.readAll()).contains("Ширина 0.05 <"));
+  s.setValue("drc/widths", false);
+  s.setValue("drc/report", false);
+  DrcDialog::run(&f.doc);
+  EXPECT_TRUE(std::ranges::none_of(f.doc.drc(), [](auto& v) { return v.type == DrcViolation::Type::Width; }));
+  s.remove("drc");
 }

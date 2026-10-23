@@ -44,6 +44,21 @@ std::string mmText(Coord c) { return std::format("{:g}", c / double(kNmPerMm)); 
 
 }  // namespace
 
+Coord Board::minTrackWidth(int net, LayerId layer) const {
+  const Board& b = *this;
+  if (!b.rules) return b.trackWidth(net, layer);
+  const DesignRules& r = *b.rules;
+  Coord w = 0;
+  for (auto& rule : r.widths) {
+    if (!rule.enabled) continue;
+    if (LayerMask lm = layersOf(b, rule.layers); lm && !((lm >> layer) & 1)) continue;
+    auto nets = netsOf(b, r, rule.nets);
+    if (nets && !std::ranges::contains(*nets, net)) continue;
+    w = rule.min > 0 ? rule.min : rule.nom;
+  }
+  return w > 0 ? w : b.trackWidth(net, layer);
+}
+
 void compileRules(Board& b) {
   if (!b.rules) return;
   const DesignRules& r = *b.rules;

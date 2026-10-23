@@ -59,6 +59,7 @@ if(XR_BUILD_GUI)
     gui/Commands.cpp
     gui/DesignParamsDialog.cpp
     gui/DisplayPanel.cpp
+    gui/DrcDialog.cpp
     gui/Document.cpp
     gui/MainWindow.cpp
     gui/MessagesPanel.cpp
