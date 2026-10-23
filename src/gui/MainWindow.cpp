@@ -27,6 +27,7 @@
 
 #include "core/ZoneFill.h"
 #include "gui/AppSettings.h"
+#include "gui/AutorouteWindow.h"
 #include "gui/DesignParamsDialog.h"
 #include "gui/DisplayPanel.h"
 #include "gui/MessagesPanel.h"
@@ -983,66 +984,28 @@ void MainWindow::describeSelection() {
   stHint_->setText(text);
 }
 
+AutorouteWindow* MainWindow::autorouteWindow() {
+  if (!autoroute_) {
+    autoroute_ = new AutorouteWindow(doc_, this);
+    // Variants go next to the project (or the design) and into «Варианты автотрассировки».
+    autoroute_->setProjectHooks(
+        [this] { return project_ ? project_->dir() : QFileInfo(doc_->path()).absolutePath(); },
+        [this](const QString& f) {
+          if (!project_) return;
+          project_->add(f, true);
+          saveProject();
+          projectPanel_->refresh();
+        });
+  }
+  return autoroute_;
+}
+
 void MainWindow::autoroute() {
   if (!doc_->hasBoard()) return;
-  bool ok = false;
-  int passes = QInputDialog::getInt(this, tr("Автотрассировка"), tr("Проходов перекладки:"), 6, 1, 50, 1, &ok);
-  if (!ok) return;
-  double viaCost =
-      QInputDialog::getDouble(this, tr("Автотрассировка"), tr("Стоимость перехода, мм проводника:"), 3.0, 0.0, 100.0, 1, &ok);
-  if (!ok) return;
-
-  auto work = std::make_shared<Board>(*doc_->board());  // routed in a worker thread
-  cancel_ = std::make_shared<std::atomic<bool>>(false);
-  auto* dlg = new QProgressDialog(tr("Автотрассировка..."), tr("Остановить"), 0, 100, this);
-  dlg->setWindowModality(Qt::WindowModal);
-  dlg->setMinimumDuration(0);
-  dlg->setValue(0);
-  auto cancel = cancel_;
-  connect(dlg, &QProgressDialog::canceled, this, [cancel] { cancel->store(true); });
-
-  auto* watcher = new QFutureWatcher<topo::RouterResult>(this);
-  connect(watcher, &QFutureWatcher<topo::RouterResult>::finished, this, [this, watcher, dlg, work] {
-    topo::RouterResult res = watcher->result();
-    dlg->close();
-    dlg->deleteLater();
-    watcher->deleteLater();
-    auto before = doc_->beginEdit();
-    Board& b = *doc_->board();
-    b.tracks = work->tracks;
-    b.vias = work->vias;
-    b.zones = work->zones;
-    doc_->commitEdit(before, tr("Автотрассировка"));
-    QString log;
-    doc_->clearLog(tr("Автотрассировка"));
-    for (auto& l : res.log) {
-      log += QString::fromStdString(l) + "\n";
-      doc_->addLog({LogMessage::Kind::Info, tr("Автотрассировка"), QString::fromStdString(l)});
-    }
-    QMessageBox::information(this, tr("Автотрассировка"),
-                             tr("Разведено %1 из %2 связей, переходов: %3, длина %4 мм, %5 с\n\n%6")
-                                 .arg(res.routed)
-                                 .arg(res.connections)
-                                 .arg(res.vias)
-                                 .arg(res.length / 1e6, 0, 'f', 1)
-                                 .arg(res.seconds, 0, 'f', 2)
-                                 .arg(log));
-  });
-  QPointer<QProgressDialog> dp(dlg);
-  watcher->setFuture(QtConcurrent::run([work, passes, viaCost, cancel, dp] {
-    topo::RouterOptions o;
-    o.maxPasses = passes;
-    o.viaCost = viaCost;
-    o.cancel = cancel.get();
-    o.progress = [dp](int done, int total, const std::string& stage) {
-      QMetaObject::invokeMethod(qApp, [dp, done, total, stage] {
-        if (!dp) return;
-        dp->setLabelText(QString::fromStdString(stage));
-        dp->setValue(total ? done * 100 / total : 0);
-      }, Qt::QueuedConnection);
-    };
-    return topo::routeBoard(*work, o);
-  }));
+  AutorouteWindow* w = autorouteWindow();
+  w->show();
+  w->raise();
+  w->activateWindow();
 }
 
 void MainWindow::optimize(bool components) {

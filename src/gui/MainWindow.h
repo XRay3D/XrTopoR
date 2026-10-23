@@ -16,6 +16,7 @@ class QLabel;
 
 namespace xr::gui {
 
+class AutorouteWindow;
 class DisplayPanel;
 class ModeBar;
 class ProjectPanel;
@@ -28,6 +29,7 @@ class MainWindow : public QMainWindow {
   bool openFile(const QString& path);
   bool openLastFile();  // the project or design opened in the previous session, if any
   Project* project() { return project_ ? &*project_ : nullptr; }
+  AutorouteWindow* autorouteWindow();  // F11, created on first use
   Commands* commands() const { return cmds_; }
   BoardView* view() const { return view_; }
   Document* document() const { return doc_; }
@@ -88,6 +90,7 @@ class MainWindow : public QMainWindow {
   ProjectPanel* projectPanel_ = nullptr;
   std::optional<Project> project_;
   DisplayPanel* display_ = nullptr;
+  AutorouteWindow* autoroute_ = nullptr;
   QLabel* stMain_ = nullptr;
   QLabel* stHint_ = nullptr;
   QLabel* stXY_ = nullptr;

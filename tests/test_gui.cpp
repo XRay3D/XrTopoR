@@ -21,6 +21,7 @@
 #include "gui/BoardView.h"
 #include "gui/Commands.h"
 #include "gui/Document.h"
+#include "gui/AutorouteWindow.h"
 #include "gui/DesignParamsDialog.h"
 #include "gui/MainWindow.h"
 #include "gui/MessagesPanel.h"
@@ -568,4 +569,32 @@ TEST(Gui, DesignParametersEditor) {
   EXPECT_EQ(b.trackWidth(b.findNet("+5V"), b.topCopper()), mmToNm(1.5));  // group rules still win
   EXPECT_EQ(f.doc.undoStack()->count(), 0);
   EXPECT_FALSE(f.doc.undoStack()->isClean());
+}
+
+// «Автотрассировка»: variants are searched until stopped; one opens in the editor as an undoable step.
+TEST(Gui, AutorouteVariants) {
+  Fixture f("astable.kicad_pcb");
+  auto before = f.doc.beginEdit();
+  f.doc.board()->clearRouting(false);
+  f.doc.commitEdit(before, "clear");
+  ASSERT_FALSE(f.doc.connectivity().ratsnest.empty());
+  AutorouteWindow w(&f.doc);
+  QSignalSpy found(&w, &AutorouteWindow::variantFound);
+  QSignalSpy done(&w, &AutorouteWindow::finished);
+  w.start();
+  EXPECT_TRUE(w.running());
+  while (found.count() < 2) ASSERT_TRUE(found.wait(60000));
+  w.stop();
+  if (done.isEmpty()) ASSERT_TRUE(done.wait(60000));
+  EXPECT_FALSE(w.running());
+  ASSERT_GE(w.variants().size(), 2u);
+  if (const char* dir = std::getenv("XR_SHOT_DIR")) w.grab().save(QString(dir) + "/autoroute.png");
+  const RoutingVariant& v = w.variants()[0];
+  EXPECT_EQ(v.unrouted, 0);
+  EXPECT_GT(v.tracks.size(), 0u);
+  w.openInEditor(0);
+  EXPECT_EQ(f.b().tracks.size(), v.tracks.size());
+  EXPECT_TRUE(f.doc.connectivity().ratsnest.empty());
+  f.doc.undoStack()->undo();
+  EXPECT_FALSE(f.doc.connectivity().ratsnest.empty());
 }
