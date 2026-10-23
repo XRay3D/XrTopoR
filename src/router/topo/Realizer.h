@@ -9,6 +9,10 @@
 
 namespace xr::topo {
 
+// Safety margin (nm) the realiser adds to every wire's clearance so that arc tessellation and
+// integer rounding never eat into the rule; the router reserves the same amount per wire.
+constexpr double kRealizeMargin = 2000;
+
 struct RealWire {
   int net = kNoNet;
   LayerId layer = 0;

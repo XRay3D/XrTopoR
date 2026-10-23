@@ -356,7 +356,7 @@ double Router::crossCost(int e, int li, bool& blocked) const {
     blocked = true;
     return 0;
   }
-  double need = u.sumW + width_ + u.n * cc + ends;
+  double need = u.sumW + width_ + u.n * cc + ends + (u.n + 1) * kRealizeMargin;
   double over = need - free;
   double cost = hist_[li, e] * kUnit;
   if (over > 1 && !relaxed_) {
@@ -379,14 +379,12 @@ double Router::viaPenalty(int w, bool& blocked) const {
       auto o = obst(other, li, kNoNet);
       Shape via = Shape::circle(P(w), viaR_);
       double free = o ? o->shape->distance(via) : via.distance(P(other));
-      double need = u.sumW + (u.n - 1) * u.maxC + std::max(viaClr_, u.maxC) + (o ? std::max(o->clr, u.maxC) : 0);
-      double over = need - free;
-      if (over > 1) {
-        if (hardCap_) {
-          blocked = true;
-          return 0;
-        }
-        cost += presFac_ * kUnit * (1 + over / (u.sumW / u.n + u.maxC));
+      double need = u.sumW + (u.n - 1) * u.maxC + std::max(viaClr_, u.maxC) + (o ? std::max(o->clr, u.maxC) : 0) +
+                    u.n * kRealizeMargin;
+      // Wires already crossing the edges at the site cannot be pushed aside by a via: hard block.
+      if (need - free > 1) {
+        blocked = true;
+        return 0;
       }
     }
   return cost;
@@ -786,7 +784,8 @@ bool Router::edgeOverflow(int li, int e) const {
   double cu, cv;
   bool ou, ov;
   double free = freeLength(e, li, net, cu, ou, cv, ov);
-  double need = u.sumW + (u.n - 1) * u.maxC + (ou ? std::max(cu, u.maxC) : 0) + (ov ? std::max(cv, u.maxC) : 0);
+  double need = u.sumW + (u.n - 1) * u.maxC + (ou ? std::max(cu, u.maxC) : 0) + (ov ? std::max(cv, u.maxC) : 0) +
+                u.n * kRealizeMargin;
   return need > free + 1;
 }
 

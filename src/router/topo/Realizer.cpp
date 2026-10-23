@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <map>
 #include <memory>
+#include <optional>
 #include <print>
 
 namespace xr::topo {
@@ -24,7 +25,7 @@ using CDT = CGAL::Constrained_Delaunay_triangulation_2<K, Tds, CGAL::Exact_predi
 using CPoint = CDT::Point;
 
 constexpr int kStart = -1;
-constexpr double kMargin = 5000;  // 5 um safety margin over the clearance (nm rounding of arcs)
+constexpr double kMargin = kRealizeMargin;
 constexpr int kEnd = -2;
 
 // An obstacle point: pads contribute their centre (circles), segment ends (ovals) or core polygon
@@ -322,33 +323,15 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
   // 1. Crossings of every sketch with the common triangulation of all obstacles of its layer.
   std::vector<std::vector<EdgeHit>> hits(NW);
   std::vector<std::flat_map<int, double>> offset(NW);
+  // per layer: edge (u,v) -> (position along u->v, wire)
+  std::map<LayerId, std::map<std::pair<int, int>, std::vector<std::pair<double, int>>>> edgeHits;
   for (auto&& [layer, ids] : byLayer) {
     LayerObstacles& ob = obstacles.at(layer);
     auto cdt = triangulate(ob, kNoNet);
     for (int wi : ids)
       if (cdt->number_of_vertices() >= 3) hits[wi] = crossings(*cdt, wires[wi].sketch);
-    // Nesting: other-net wires crossing an edge between obstacle o and this wire must stay inside
-    // this wire's bend around o. Every end point of a crossed edge may become a bend.
-    std::map<std::pair<int, int>, std::vector<std::pair<double, int>>> edgeHits;
     for (int wi : ids)
-      for (auto& h : hits[wi]) edgeHits[{h.u, h.v}].push_back({h.t, wi});
-    for (int wi : ids) {
-      const RealWire& w = wires[wi];
-      for (auto& h : hits[wi]) {
-        double sumU = 0, sumV = 0;
-        for (auto [t, other] : edgeHits[{h.u, h.v}]) {
-          const RealWire& ow = wires[other];
-          if (other == wi || ow.net == w.net) continue;
-          double space = double(ow.width) + double(std::max(ow.clearance, w.clearance)) + kMargin;
-          (t < h.t ? sumU : sumV) += space;
-          if (std::getenv("XR_DEBUG3"))
-            std::println(stderr, "nest wire {} edge ({},{}) t={:.3f}: inner wire {} net {} t={:.3f}", wi, h.u, h.v, h.t,
-                         other, b.nets[ow.net].name, t);
-        }
-        if (sumU > 0) offset[wi][h.u] = std::max(offset[wi][h.u], sumU);
-        if (sumV > 0) offset[wi][h.v] = std::max(offset[wi][h.v], sumV);
-      }
-    }
+      for (auto& h : hits[wi]) edgeHits[layer][{h.u, h.v}].push_back({h.t, wi});
   }
 
   // 2. Per net: funnel through the triangulation of the other nets' obstacles.
@@ -420,6 +403,7 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
     auto& ti = tin[wi];
     auto& to = tout[wi];
     std::flat_set<int> dropped;  // obstacles removed once are not re-inserted (prevents oscillation)
+    int shrinks = 0;
     for (int iter = 0; iter < 400; ++iter) {
       size_t n = cs.size();
       ti.assign(n, {});
@@ -427,6 +411,20 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
       int bad = -1;
       for (size_t k = 0; k + 1 < n && bad < 0; ++k)
         if (!tangent(cs[k], cs[k + 1], to[k], ti[k + 1])) {
+          // Two opposite bends whose circles overlap by a hair (exact-fit channels): shrink both a
+          // little instead of giving up the bend entirely.
+          if (k > 0 && k + 1 < n - 1 && cs[k].rho * cs[k + 1].rho < 0) {
+            double D = (cs[k + 1].c - cs[k].c).len();
+            double deficit = std::abs(cs[k].rho) + std::abs(cs[k + 1].rho) - D;
+            if (deficit > 0 && deficit < 30000 && shrinks < 8) {
+              double f = (D - 1000) / (std::abs(cs[k].rho) + std::abs(cs[k + 1].rho));
+              cs[k].rho *= f;
+              cs[k + 1].rho *= f;
+              ++shrinks;
+              bad = -2;
+              break;
+            }
+          }
           // An end point inside a bend circle (pad right next to a via): shrink the circle so the
           // path hugs the obstacle instead of cutting through it.
           if (k == 0 || k + 1 == n - 1) {
@@ -443,9 +441,14 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
           else bad = std::abs(cs[k].rho) < std::abs(cs[k + 1].rho) ? int(k) : int(k + 1);
         }
       if (bad == -2) continue;
+      bool tangentFail = bad >= 0;
       for (size_t k = 1; k + 1 < n && bad < 0; ++k)
         if (std::abs(sweepOf(cs[k], ti[k], to[k])) > 1.6 * kPi) bad = int(k);
       if (bad > 0 && bad < int(n) - 1) {
+        if (std::getenv("XR_DEBUG4"))
+          std::println(stderr, "drop wire {} net {} obst {} rho {:.3f} ({}) nbends {} at ({:.3f},{:.3f})", wi,
+                       b.nets[w.net].name, cs[bad].obst, cs[bad].rho / 1e6, tangentFail ? "tangent" : "sweep", n,
+                       cs[bad].c.x / 1e6, cs[bad].c.y / 1e6);
         dropped.insert(cs[bad].obst);
         cs.erase(cs.begin() + bad);
         ++st.droppedApexes;
@@ -488,6 +491,52 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
     }
   };
 
+  // 4. Nesting: a wire that bends around obstacle o outside another wire (by the crossing order on
+  //    the edges at o) must keep that wire's bend, width and clearance inside its own bend. Radii
+  //    propagate outwards, so thickening and offsets are iterated a few times.
+  auto bendRadius = [&](int wi, int o) -> std::optional<double> {
+    for (const Circle& c : bends[wi])
+      if (c.obst == o) return std::abs(c.rho);
+    return std::nullopt;
+  };
+  for (int round = 0; round < 4; ++round) {
+    for (int wi = 0; wi < NW; ++wi)
+      if (walked[wi]) thicken(wi);
+    bool changed = false;
+    if (std::getenv("XR_NONEST")) break;
+    for (int wi = 0; wi < NW; ++wi) {
+      if (!walked[wi]) continue;
+      const RealWire& w = wires[wi];
+      const LayerObstacles& ob = obstacles.at(w.layer);
+      auto& eh = edgeHits[w.layer];
+      for (const Circle& c : bends[wi]) {
+        if (c.obst < 0) continue;
+        int o = c.obst;
+        double base = ob.pts[o].r + std::max(ob.pts[o].clr, double(w.clearance)) + w.width / 2.0 + kMargin;
+        double need = 0;
+        for (auto& h : hits[wi]) {
+          if (h.u != o && h.v != o) continue;
+          for (auto [t, other] : eh[{h.u, h.v}]) {
+            const RealWire& ow = wires[other];
+            if (other == wi || ow.net == w.net || !walked[other]) continue;
+            bool inner = h.u == o ? t < h.t : t > h.t;
+            if (!inner) continue;
+            auto ro = bendRadius(other, o);
+            if (!ro) continue;
+            double r = *ro + ow.width / 2.0 + std::max(double(ow.clearance), double(w.clearance)) + w.width / 2.0 + kMargin;
+            need = std::max(need, r - base);
+          }
+        }
+        double cur = offset[wi].contains(o) ? offset[wi][o] : 0.0;
+        if (need > cur + 1) {
+          offset[wi][o] = need;
+          changed = true;
+        }
+      }
+    }
+    if (!changed) break;
+  }
+
   for (int wi = 0; wi < int(wires.size()); ++wi) {
     const RealWire& w = wires[wi];
     auto emitSeg = [&](Vec2 a, Vec2 c) {
@@ -506,7 +555,6 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
       for (size_t i = 1; i < w.sketch.size(); ++i) emitSeg(w.sketch[i - 1], w.sketch[i]);
       continue;
     }
-    thicken(wi);
     const auto& cs = bends[wi];
     if (std::getenv("XR_DEBUG2")) {
       std::print(stderr, "wire {} final:", wi);
