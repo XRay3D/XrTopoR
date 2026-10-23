@@ -28,9 +28,7 @@ using Tds = CGAL::Triangulation_data_structure_2<Vb, Fb>;
 using CDT = CGAL::Constrained_Delaunay_triangulation_2<K, Tds, CGAL::Exact_predicates_tag>;
 using CPoint = CDT::Point;
 
-constexpr int kStart = -1;
 constexpr double kMargin = kRealizeMargin;
-constexpr int kEnd = -2;
 
 // An obstacle point: pads contribute their centre (circles), segment ends (ovals) or core polygon
 // corners; vias their centre; the outline its vertices.
@@ -111,57 +109,11 @@ struct Apex {
   int portal;  // index in the full portal list (start = 0)
 };
 
-Vec2 posOf(const LayerObstacles& ob, int id, Vec2 s, Vec2 e) {
-  if (id == kStart) return s;
-  if (id == kEnd) return e;
-  return ob.pts[id].p;
-}
-
-// Walks the sketch through the triangulation and returns the sequence of crossed edges as portals
-// (left/right endpoints relative to the direction of travel), with back-and-forth crossings cancelled.
-bool walk(const CDT& cdt, const Polyline& sk, std::vector<Portal>& out) {
-  out.clear();
-  if (sk.size() < 2) return false;
-  CDT::Face_handle f = cdt.locate(CPoint(sk[0].x, sk[0].y));
-  if (f == nullptr) return false;
-  auto P = [](const CDT::Vertex_handle& v) { return Vec2{v->point().x(), v->point().y()}; };
-  for (size_t s = 1; s < sk.size(); ++s) {
-    Vec2 p = sk[s - 1], q = sk[s];
-    if ((q - p).len2() < 1) continue;
-    int entry = -1;
-    for (int guard = 0; guard < 100000; ++guard) {
-      if (cdt.is_infinite(f)) return false;
-      // Is q inside the current face?
-      Vec2 a0 = P(f->vertex(0)), a1 = P(f->vertex(1)), a2 = P(f->vertex(2));
-      if (orient(a0, a1, q) >= 0 && orient(a1, a2, q) >= 0 && orient(a2, a0, q) >= 0) break;
-      int exit = -1;
-      for (int i = 0; i < 3; ++i) {
-        if (i == entry) continue;
-        Vec2 a = P(f->vertex((i + 1) % 3)), b = P(f->vertex((i + 2) % 3));
-        double oa = orient(p, q, a), ob = orient(p, q, b);
-        if (orient(a, b, q) < 0 && ((oa >= 0 && ob <= 0) || (oa <= 0 && ob >= 0))) { exit = i; break; }
-      }
-      if (exit < 0) return false;
-      auto va = f->vertex((exit + 1) % 3), vb = f->vertex((exit + 2) % 3);
-      Vec2 a = P(va);
-      Portal pt = orient(p, q, a) > 0 ? Portal{va->info(), vb->info()} : Portal{vb->info(), va->info()};
-      // An edge through the start or end point is no constraint (pads in a column share x/y).
-      bool touchesEnd = distPointSegment(sk.front(), a, P(vb)) < 1 || distPointSegment(sk.back(), a, P(vb)) < 1;
-      if (touchesEnd) {
-      } else if (!out.empty() && out.back().l == pt.r && out.back().r == pt.l) out.pop_back();  // went back
-      else out.push_back(pt);
-      auto n = f->neighbor(exit);
-      entry = n->index(f);
-      f = n;
-    }
-  }
-  return true;
-}
-
 // Where a sketch crosses the edges of a triangulation (cancelled back-and-forth crossings removed).
 struct EdgeHit {
-  int u, v;  // obstacle ids, u < v
-  double t;  // position along u -> v
+  int u, v;     // obstacle ids, u < v
+  double t;     // position along u -> v
+  bool uLeft;   // u lies to the left of the direction of travel
 };
 
 std::vector<EdgeHit> crossings(const CDT& cdt, const Polyline& sk) {
@@ -190,62 +142,22 @@ std::vector<EdgeHit> crossings(const CDT& cdt, const Polyline& sk) {
       double den = (b - a).cross(q - p);
       double t = std::abs(den) > 0 ? (p - a).cross(q - p) / den : 0.5;
       int u = va->info(), v = vb->info();
-      if (u > v) { std::swap(u, v); t = 1 - t; }
+      bool uLeft = orient(p, q, a) > 0;
+      if (u > v) {
+        std::swap(u, v);
+        t = 1 - t;
+        uLeft = !uLeft;
+      }
       bool touchesEnd = distPointSegment(sk.front(), a, b) < 1 || distPointSegment(sk.back(), a, b) < 1;
       if (touchesEnd) {
       } else if (!out.empty() && out.back().u == u && out.back().v == v) out.pop_back();  // went back
-      else out.push_back({u, v, std::clamp(t, 0.0, 1.0)});
+      else out.push_back({u, v, std::clamp(t, 0.0, 1.0), uLeft});
       auto n = f->neighbor(exit);
       entry = n->index(f);
       f = n;
     }
   }
   return out;
-}
-
-// Simple stupid funnel algorithm over point portals (first = start, last = end).
-// Apex sides: +1 = left, -1 = right.
-std::vector<Apex> funnel(const LayerObstacles& ob, Vec2 s, Vec2 e, const std::vector<Portal>& portals) {
-  std::vector<Apex> path;
-  auto pos = [&](int id) { return posOf(ob, id, s, e); };
-  int apex = kStart, left = kStart, right = kStart;
-  size_t apexIdx = 0, leftIdx = 0, rightIdx = 0;
-  for (size_t i = 1; i < portals.size(); ++i) {
-    int L = portals[i].l, R = portals[i].r;
-    Vec2 A = pos(apex);
-    // Right side.
-    if (orient(A, pos(right), pos(R)) >= 0) {
-      if (apex == right || orient(A, pos(left), pos(R)) < 0) {
-        right = R;
-        rightIdx = i;
-      } else {
-        path.push_back({left, +1, int(leftIdx)});
-        apex = left;
-        apexIdx = leftIdx;
-        right = left = apex;
-        rightIdx = leftIdx = apexIdx;
-        i = apexIdx;
-        continue;
-      }
-    }
-    // Left side.
-    if (orient(A, pos(left), pos(L)) <= 0) {
-      if (apex == left || orient(A, pos(right), pos(L)) > 0) {
-        left = L;
-        leftIdx = i;
-      } else {
-        path.push_back({right, -1, int(rightIdx)});
-        apex = right;
-        apexIdx = rightIdx;
-        right = left = apex;
-        rightIdx = leftIdx = apexIdx;
-        i = apexIdx;
-        continue;
-      }
-    }
-  }
-  std::erase_if(path, [](const Apex& a) { return a.id < 0; });
-  return path;
 }
 
 struct Circle {
@@ -325,101 +237,190 @@ LayerObstacles collect(const Board& b, LayerId layer, const std::vector<RealVia>
   return ob;
 }
 
+
+// Slot of one wire on one crossed edge: the interval of centre-line positions along u -> v that keeps
+// the required spacing to the end obstacles and to the other wires crossing the same edge.
+struct Slot {
+  double lo = 0, hi = 0;  // distances from u
+  double ru = 0, rv = 0;  // bend radii around u and v implied by the slot bounds
+};
+
+struct FunnelApex {
+  int portal;  // index into the portal list (0 = start, last = end)
+  int side;    // +1 left endpoint, -1 right endpoint
+};
+
+// Simple stupid funnel over segment portals; returns the apexes between start and end.
+std::vector<FunnelApex> funnel(const std::vector<std::pair<Vec2, Vec2>>& portals) {
+  std::vector<FunnelApex> path;
+  auto L = [&](int i) { return portals[i].first; };
+  auto R = [&](int i) { return portals[i].second; };
+  int apex = 0, left = 0, right = 0;
+  Vec2 A = L(0), lp = L(0), rp = R(0);
+  for (int i = 1; i < int(portals.size()); ++i) {
+    Vec2 li = L(i), ri = R(i);
+    if (orient(A, rp, ri) >= 0) {
+      if ((rp - A).len2() < 1 || orient(A, lp, ri) < 0) {
+        rp = ri;
+        right = i;
+      } else {
+        path.push_back({left, +1});
+        A = lp;
+        apex = left;
+        lp = rp = A;
+        left = right = apex;
+        i = apex;
+        continue;
+      }
+    }
+    if (orient(A, lp, li) <= 0) {
+      if ((lp - A).len2() < 1 || orient(A, rp, li) > 0) {
+        lp = li;
+        left = i;
+      } else {
+        path.push_back({right, -1});
+        A = rp;
+        apex = right;
+        lp = rp = A;
+        left = right = apex;
+        i = apex;
+        continue;
+      }
+    }
+  }
+  std::erase_if(path, [&](const FunnelApex& a) { return a.portal <= 0 || a.portal + 1 >= int(portals.size()); });
+  return path;
+}
+
 }  // namespace
 
 RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::vector<RealVia>& vias,
                      const RealizeOptions& opt) {
   RealizeStats st;
   const int NW = int(wires.size());
-  std::map<LayerId, LayerObstacles> obstacles;
   std::flat_map<LayerId, std::vector<int>> byLayer;
   for (int wi = 0; wi < NW; ++wi) byLayer[wires[wi].layer].push_back(wi);
-  for (auto&& [layer, ids] : byLayer) obstacles.emplace(layer, collect(b, layer, vias, opt));
 
-  // 1. Crossings of every sketch with the common triangulation of all obstacles of its layer.
+  // Each wire's crossings of the common triangulation of all obstacles of its layer, then the
+  // slot of every crossing from the ordered crossings of that edge.
   std::vector<std::vector<EdgeHit>> hits(NW);
-  std::vector<std::flat_map<int, double>> offset(NW);
-  // per layer: edge (u,v) -> (position along u->v, wire)
-  std::map<LayerId, std::map<std::pair<int, int>, std::vector<std::pair<double, int>>>> edgeHits;
+  std::vector<std::vector<Slot>> slots(NW);
+  std::map<LayerId, LayerObstacles> obstacles;
   for (auto&& [layer, ids] : byLayer) {
-    LayerObstacles& ob = obstacles.at(layer);
+    LayerObstacles& ob = obstacles.emplace(layer, collect(b, layer, vias, opt)).first->second;
     auto cdt = triangulate(ob, kNoNet);
-    for (int wi : ids)
-      if (cdt->number_of_vertices() >= 3) hits[wi] = crossings(*cdt, wires[wi].sketch);
-    for (int wi : ids)
-      for (auto& h : hits[wi]) edgeHits[layer][{h.u, h.v}].push_back({h.t, wi});
-  }
-
-  // 2. Per net: funnel through the triangulation of the other nets' obstacles.
-  std::map<std::pair<LayerId, int>, std::vector<int>> groups;
-  for (int wi = 0; wi < NW; ++wi) groups[{wires[wi].layer, wires[wi].net}].push_back(wi);
-  std::vector<std::vector<Portal>> portals(NW);
-  std::vector<std::vector<Circle>> bends(NW);
-  std::vector<char> walked(NW, 0);
-  auto funnelAll = [&](bool verbose) {
-  for (auto& [key, ids] : groups) {
-    auto [layer, net] = key;
-    const LayerObstacles& ob = obstacles.at(layer);
-    auto cdt = triangulate(ob, net);
+    std::map<std::pair<int, int>, std::vector<std::pair<int, int>>> onEdge;  // edge -> (wire, hit index)
     for (int wi : ids) {
-      const RealWire& w = wires[wi];
-      std::vector<Portal> mid;
-      portals[wi].clear();
-      bends[wi].clear();
-      walked[wi] = 0;
-      if (cdt->number_of_vertices() < 3 || !walk(*cdt, w.sketch, mid)) continue;
-      auto& pl = portals[wi];
-      pl.push_back({kStart, kStart});
-      pl.insert(pl.end(), mid.begin(), mid.end());
-      pl.push_back({kEnd, kEnd});
-      auto& bs = bends[wi];
-      bs.push_back({w.sketch.front(), 0, -1, 0});
-      for (const Apex& a : funnel(ob, w.sketch.front(), w.sketch.back(), pl))
-        bs.push_back({ob.pts[a.id].p, double(a.side), a.id, a.portal});
-      bs.push_back({w.sketch.back(), 0, -1, int(pl.size()) - 1});
-      walked[wi] = 1;
-      if (verbose && std::getenv("XR_DEBUG2")) {
-        std::print(stderr, "wire {} net {} sketch:", wi, b.nets[w.net].name);
-        for (auto& p : w.sketch) std::print(stderr, " ({:.3f},{:.3f})", p.x / 1e6, p.y / 1e6);
-        std::print(stderr, "\n portals:");
-        for (auto& p : pl) {
-          auto P = [&](int id) { return id >= 0 ? ob.pts[id].p : Vec2{}; };
-          std::print(stderr, " [L{}({:.2f},{:.2f}) R{}({:.2f},{:.2f})]", p.l, P(p.l).x / 1e6, P(p.l).y / 1e6, p.r,
-                     P(p.r).x / 1e6, P(p.r).y / 1e6);
+      if (cdt->number_of_vertices() >= 3) hits[wi] = crossings(*cdt, wires[wi].sketch);
+      slots[wi].resize(hits[wi].size());
+      for (int k = 0; k < int(hits[wi].size()); ++k) onEdge[{hits[wi][k].u, hits[wi][k].v}].push_back({wi, k});
+    }
+    for (auto& [uv, list] : onEdge) {
+      const OPt& U = ob.pts[uv.first];
+      const OPt& V = ob.pts[uv.second];
+      double L = (V.p - U.p).len();
+      std::ranges::sort(list, {}, [&](auto wk) { return hits[wk.first][wk.second].t; });
+      int n = int(list.size());
+      // Stack from u: a[k] = centre-line distance of wire k from u when all inner wires are packed.
+      std::vector<double> a(n), bb(n);
+      // Own-net obstacles (the wire's pad corners, its vias) are no constraint: the centre line may
+      // pass through the point itself, so no radius there at all.
+      auto own = [&](const OPt& o, const RealWire& w) { return o.net == w.net && w.net != kNoNet; };
+      auto need = [&](const OPt& o, const RealWire& w) {
+        return own(o, w) ? 0.0 : o.r + std::max(o.clr, double(w.clearance)) + kMargin + w.width / 2.0;
+      };
+      for (int k = 0; k < n; ++k) {
+        const RealWire& w = wires[list[k].first];
+        a[k] = k == 0 ? need(U, w)
+                      : a[k - 1] + wires[list[k - 1].first].width / 2.0 +
+                            std::max(double(wires[list[k - 1].first].clearance), double(w.clearance)) + kMargin +
+                            w.width / 2.0;
+      }
+      for (int k = n - 1; k >= 0; --k) {
+        const RealWire& w = wires[list[k].first];
+        bb[k] = k == n - 1 ? need(V, w)
+                           : bb[k + 1] + wires[list[k + 1].first].width / 2.0 +
+                                 std::max(double(wires[list[k + 1].first].clearance), double(w.clearance)) + kMargin +
+                                 w.width / 2.0;
+      }
+      double slack = L - a[n - 1] - bb[n - 1];
+      for (int k = 0; k < n; ++k) {
+        Slot& sl = slots[list[k].first][list[k].second];
+        if (slack <= 0) {
+          // Overflow: keep the order, share the deficit (a violation the DRC will report).
+          double scale = (L > 0) ? L / (a[n - 1] + bb[n - 1]) : 1.0;
+          sl.lo = sl.hi = a[k] * scale;
+        } else {
+          // Packed bounds: the whole feasible interval. Taut non-crossing paths keep their order on
+          // every edge, and bends around the end obstacles get the packed (minimal) radius.
+          sl.lo = a[k];
+          sl.hi = L - bb[k];
         }
-        std::print(stderr, "\n funnel:");
-        for (auto& c : bs) std::print(stderr, " [o{} s{:+.0f} p{} ({:.2f},{:.2f})]", c.obst, c.rho, c.portal, c.c.x / 1e6, c.c.y / 1e6);
-        std::println(stderr, "");
+        sl.ru = sl.lo;
+        sl.rv = L - sl.hi;
       }
     }
   }
-  };
-  funnelAll(true);
 
-  // 3. Taut thick path: tangent segments + arcs. Obstacles of the corridor (points and sides) that
-  //    the path would violate become new bends; bends whose tangents degenerate are dropped.
-  std::vector<std::vector<Vec2>> tin(NW), tout(NW);
-  auto thicken = [&](int wi) {
+  // Taut path of every wire inside its slots: funnel over the slot segments, apexes become bends
+  // around the edge end obstacles with the slot radius, consecutive bends around one obstacle merge.
+  for (int wi = 0; wi < NW; ++wi) {
     const RealWire& w = wires[wi];
     const LayerObstacles& ob = obstacles.at(w.layer);
-    const auto& extra = offset[wi];
-    auto& cs = bends[wi];
-    auto& pl = portals[wi];
-    double own = std::max(0.0, w.width / 2.0) + kMargin;
-    auto nest = [&](int o) {
-      auto e = extra.find(o);
-      return e != extra.end() ? e->second : 0.0;
+    auto emitSeg = [&](Vec2 p, Vec2 q) {
+      Track t;
+      t.a = Point(p);
+      t.b = Point(q);
+      t.width = w.width;
+      t.layer = w.layer;
+      t.net = w.net;
+      if (t.a == t.b) return;
+      b.tracks.push_back(t);
+      st.trackWire.push_back(wi);
     };
-    auto radius = [&](int o) {
-      const OPt& op = ob.pts[o];
-      return op.r + std::max(op.clr, double(w.clearance)) + own + nest(o);
-    };
-    for (auto& c : cs)
-      if (c.obst >= 0) c.rho = (c.rho > 0 ? 1 : -1) * radius(c.obst);
-    auto& ti = tin[wi];
-    auto& to = tout[wi];
-    std::flat_set<int> dropped;  // obstacles removed once are not re-inserted (prevents oscillation)
+    if (w.sketch.size() < 2) continue;
+    std::vector<std::pair<Vec2, Vec2>> portals;
+    portals.push_back({w.sketch.front(), w.sketch.front()});
+    for (int k = 0; k < int(hits[wi].size()); ++k) {
+      const EdgeHit& h = hits[wi][k];
+      const Slot& sl = slots[wi][k];
+      Vec2 U = ob.pts[h.u].p, V = ob.pts[h.v].p;
+      double L = (V - U).len();
+      Vec2 d = L > 0 ? (V - U) / L : Vec2{};
+      Vec2 nearU = U + d * sl.lo, nearV = U + d * sl.hi;
+      portals.push_back(h.uLeft ? std::pair{nearU, nearV} : std::pair{nearV, nearU});
+    }
+    portals.push_back({w.sketch.back(), w.sketch.back()});
+    auto apexes = funnel(portals);
+
+    std::vector<Circle> cs;
+    cs.push_back({w.sketch.front(), 0, -1, 0});
+    for (const FunnelApex& ap : apexes) {
+      const EdgeHit& h = hits[wi][ap.portal - 1];
+      const Slot& sl = slots[wi][ap.portal - 1];
+      bool atU = (ap.side > 0) == h.uLeft;  // the apex endpoint lies on u's side of the slot
+      int o = atU ? h.u : h.v;
+      double R = atU ? sl.ru : sl.rv;
+      if (!cs.empty() && cs.back().obst == o && (cs.back().rho > 0) == (ap.side > 0)) {
+        cs.back().rho = ap.side * std::max(std::abs(cs.back().rho), R);
+      } else {
+        cs.push_back({ob.pts[o].p, ap.side * R, o, ap.portal});
+      }
+    }
+    cs.push_back({w.sketch.back(), 0, -1, int(portals.size()) - 1});
+    if (std::getenv("XR_DEBUG2")) {
+      std::print(stderr, "wire {} net {} sketch {} hits {} bends:", wi, b.nets[w.net].name, w.sketch.size(), hits[wi].size());
+      for (auto& c : cs) std::print(stderr, " [o{} rho{:+.3f} ({:.3f},{:.3f})]", c.obst, c.rho / 1e6, c.c.x / 1e6, c.c.y / 1e6);
+      std::println(stderr, "");
+    }
+
+    // Tangents between consecutive circles; degenerate configurations drop the weaker bend. A
+    // straight segment between two bends is a chord that may cut inside the slot radius of an
+    // obstacle whose fan edges it crosses (the inner wire's arc bulges there): such an obstacle
+    // becomes a bend too.
+    std::vector<Vec2> ti, to;
     int shrinks = 0;
+    std::flat_set<int> dropped;
     for (int iter = 0; iter < 400; ++iter) {
       size_t n = cs.size();
       ti.assign(n, {});
@@ -427,8 +428,6 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
       int bad = -1;
       for (size_t k = 0; k + 1 < n && bad < 0; ++k)
         if (!tangent(cs[k], cs[k + 1], to[k], ti[k + 1])) {
-          // Two opposite bends whose circles overlap by a hair (exact-fit channels): shrink both a
-          // little instead of giving up the bend entirely.
           if (k > 0 && k + 1 < n - 1 && cs[k].rho * cs[k + 1].rho < 0) {
             double D = (cs[k + 1].c - cs[k].c).len();
             double deficit = std::abs(cs[k].rho) + std::abs(cs[k + 1].rho) - D;
@@ -441,14 +440,12 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
               break;
             }
           }
-          // An end point inside a bend circle (pad right next to a via): shrink the circle so the
-          // path hugs the obstacle instead of cutting through it.
           if (k == 0 || k + 1 == n - 1) {
             Circle& c = cs[k == 0 ? 1 : k];
             double d = (c.c - cs[k == 0 ? 0 : n - 1].c).len();
             if (n > 2 && d > 2000 && std::abs(c.rho) > d - 1000) {
               c.rho = (c.rho > 0 ? 1 : -1) * (d - 1000);
-              bad = -2;  // retry with the reduced radius
+              bad = -2;
               break;
             }
           }
@@ -457,150 +454,61 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
           else bad = std::abs(cs[k].rho) < std::abs(cs[k + 1].rho) ? int(k) : int(k + 1);
         }
       if (bad == -2) continue;
-      bool tangentFail = bad >= 0;
       for (size_t k = 1; k + 1 < n && bad < 0; ++k)
         if (std::abs(sweepOf(cs[k], ti[k], to[k])) > 1.6 * kPi) bad = int(k);
       if (bad > 0 && bad < int(n) - 1) {
-        if (std::getenv("XR_DEBUG4"))
-          std::println(stderr, "drop wire {} net {} obst {} rho {:.3f} ({}) nbends {} at ({:.3f},{:.3f})", wi,
-                       b.nets[w.net].name, cs[bad].obst, cs[bad].rho / 1e6, tangentFail ? "tangent" : "sweep", n,
-                       cs[bad].c.x / 1e6, cs[bad].c.y / 1e6);
         dropped.insert(cs[bad].obst);
+        if (std::getenv("XR_DEBUG4"))
+          std::println(stderr, "drop wire {} net {} bend {} of {}: o{} rho {:+.3f} at ({:.3f},{:.3f}); prev o{} rho {:+.3f} next o{} rho {:+.3f}",
+                       wi, b.nets[w.net].name, bad, n, cs[bad].obst, cs[bad].rho / 1e6, cs[bad].c.x / 1e6, cs[bad].c.y / 1e6,
+                       cs[bad - 1].obst, cs[bad - 1].rho / 1e6, cs[bad + 1].obst, cs[bad + 1].rho / 1e6);
         cs.erase(cs.begin() + bad);
         ++st.droppedApexes;
         continue;
       }
-      if (bad >= 0) break;
-      // Worst corridor obstacle intruding into a straight segment.
-      double worst = 1000;  // 1 um tolerance
+      // Worst slot-radius intrusion of a straight segment.
+      double worst = 1000;
       int at = -1;
       Circle ins;
       for (size_t k = 0; k + 1 < n; ++k) {
-        Vec2 a = k == 0 ? cs[0].c : to[k];
-        Vec2 c = k + 1 == n - 1 ? cs[n - 1].c : ti[k + 1];
-        if ((c - a).len2() < 1) continue;
-        for (int p = cs[k].portal + 1; p < cs[k + 1].portal; ++p)
-          for (auto [o, side] : {std::pair{pl[p].l, +1}, std::pair{pl[p].r, -1}}) {
-            if (o < 0 || dropped.contains(o) || std::ranges::any_of(cs, [&](const Circle& x) { return x.obst == o; }))
+        Vec2 p = k == 0 ? cs[0].c : to[k];
+        Vec2 q = k + 1 == n - 1 ? cs[n - 1].c : ti[k + 1];
+        if ((q - p).len2() < 1) continue;
+        for (int hi = cs[k].portal; hi < cs[k + 1].portal; ++hi) {
+          if (hi < 1 || hi > int(hits[wi].size())) continue;
+          const EdgeHit& h = hits[wi][hi - 1];
+          const Slot& sl = slots[wi][hi - 1];
+          for (auto [o, R] : {std::pair{h.u, sl.ru}, std::pair{h.v, sl.rv}}) {
+            if (R <= 0 || dropped.contains(o) || std::ranges::any_of(cs, [&](const Circle& x) { return x.obst == o; }))
               continue;
-            const OPt& op = ob.pts[o];
-            Vec2 q = op.p;
-            double d = distPointSegment(q, a, c);
-            // Crossing over the obstacle only counts where it projects onto the segment itself.
-            double t = (q - a).dot(c - a) / (c - a).len2();
-            bool wrongSide = t > 0 && t < 1 && orient(a, c, q) * side < 0;
-            double pen = radius(o) + (wrongSide ? d : -d);
-            // Sides (pad edges, outline, stub wires) incident to the point count with their own radius.
-            for (const Side& sd : ob.adj[o]) {
-              double ds = distSegmentSegment(a, c, q, ob.pts[sd.to].p);
-              pen = std::max(pen, sd.r + std::max(op.clr, double(w.clearance)) + own + nest(o) - ds);
-            }
+            Vec2 c = ob.pts[o].p;
+            double t = (c - p).dot(q - p) / (q - p).len2();
+            if (t <= 0 || t >= 1) continue;
+            double pen = R - distPointSegment(c, p, q);
             if (pen > worst) {
               worst = pen;
               at = int(k) + 1;
-              ins = {q, side * radius(o), o, p};
+              ins = {c, (orient(p, q, c) > 0 ? 1 : -1) * R, o, hi};
             }
           }
+        }
       }
       if (at < 0) break;
       cs.insert(cs.begin() + at, ins);
     }
-  };
-
-  // 4. Nesting: a wire that bends around obstacle o outside another wire (by the crossing order on
-  //    the edges at o) must keep that wire's bend, width and clearance inside its own bend. Radii
-  //    propagate outwards, so thickening and offsets are iterated a few times.
-  auto bendRadius = [&](int wi, int o) -> std::optional<double> {
-    for (const Circle& c : bends[wi])
-      if (c.obst == o) return std::abs(c.rho);
-    return std::nullopt;
-  };
-  for (int round = 0; round < 4; ++round) {
-    for (int wi = 0; wi < NW; ++wi)
-      if (walked[wi]) thicken(wi);
-    bool changed = false;
-    if (std::getenv("XR_NONEST")) break;
-    for (int wi = 0; wi < NW; ++wi) {
-      if (!walked[wi]) continue;
-      const RealWire& w = wires[wi];
-      const LayerObstacles& ob = obstacles.at(w.layer);
-      auto& eh = edgeHits[w.layer];
-      for (const Circle& c : bends[wi]) {
-        if (c.obst < 0) continue;
-        int o = c.obst;
-        double base = ob.pts[o].r + std::max(ob.pts[o].clr, double(w.clearance)) + w.width / 2.0 + kMargin;
-        double need = 0;
-        for (auto& h : hits[wi]) {
-          if (h.u != o && h.v != o) continue;
-          for (auto [t, other] : eh[{h.u, h.v}]) {
-            const RealWire& ow = wires[other];
-            if (other == wi || ow.net == w.net || !walked[other]) continue;
-            bool inner = h.u == o ? t < h.t : t > h.t;
-            if (!inner) continue;
-            auto ro = bendRadius(other, o);
-            if (!ro) continue;
-            double r = *ro + ow.width / 2.0 + std::max(double(ow.clearance), double(w.clearance)) + w.width / 2.0 + kMargin;
-            need = std::max(need, r - base);
-          }
-        }
-        double cur = offset[wi].contains(o) ? offset[wi][o] : 0.0;
-        if (need > cur + 1) {
-          offset[wi][o] = need;
-          changed = true;
-        }
-      }
-    }
-    if (!changed) break;
-  }
-
-  for (int wi = 0; wi < int(wires.size()); ++wi) {
-    const RealWire& w = wires[wi];
-    auto emitSeg = [&](Vec2 a, Vec2 c) {
-      Track t;
-      t.a = Point(a);
-      t.b = Point(c);
-      t.width = w.width;
-      t.layer = w.layer;
-      t.net = w.net;
-      if (t.a == t.b) return;
-      b.tracks.push_back(t);
-      st.trackWire.push_back(wi);
-    };
-    if (!walked[wi]) {
-      // Realisation failed: fall back to the sketch polyline.
-      for (size_t i = 1; i < w.sketch.size(); ++i) emitSeg(w.sketch[i - 1], w.sketch[i]);
-      continue;
-    }
-    const auto& cs = bends[wi];
-    if (std::getenv("XR_DEBUG2")) {
-      std::print(stderr, "wire {} final:", wi);
-      for (auto [k, c] : std::views::enumerate(cs))
-        std::print(stderr, " [o{} rho{:+.3f} p{} c({:.3f},{:.3f}) in({:.3f},{:.3f}) out({:.3f},{:.3f})]", c.obst, c.rho / 1e6,
-                   c.portal, c.c.x / 1e6, c.c.y / 1e6, tin[wi][k].x / 1e6, tin[wi][k].y / 1e6, tout[wi][k].x / 1e6,
-                   tout[wi][k].y / 1e6);
-      std::print(stderr, " offsets:");
-      for (auto [o, v] : offset[wi]) std::print(stderr, " o{}={:.3f}", o, v / 1e6);
-      std::println(stderr, "");
-    }
-    if (std::getenv("XR_DEBUG"))
-      std::println(stderr, "wire {} net {} layer {} sketch {} portals {} bends {} ({:.2f},{:.2f})->({:.2f},{:.2f})", wi,
-                   b.nets[w.net].name, b.layers[w.layer].name, w.sketch.size(), portals[wi].size(), cs.size(),
-                   w.sketch.front().x / 1e6, w.sketch.front().y / 1e6, w.sketch.back().x / 1e6, w.sketch.back().y / 1e6);
-    const auto& ti = tin[wi];
-    const auto& to = tout[wi];
     size_t n = cs.size();
     Vec2 cur = cs[0].c;
     for (size_t k = 0; k + 1 < n; ++k) {
-      Vec2 a = (k == 0) ? cs[0].c : to[k];
-      Vec2 c = (k + 1 == n - 1) ? cs[n - 1].c : ti[k + 1];
-      emitSeg(cur, a);  // zero length except after a skipped tiny arc
-      emitSeg(a, c);
-      cur = c;
+      Vec2 p = (k == 0) ? cs[0].c : to[k];
+      Vec2 q = (k + 1 == n - 1) ? cs[n - 1].c : ti[k + 1];
+      emitSeg(cur, p);
+      emitSeg(p, q);
+      cur = q;
       if (k + 1 < n - 1) {
         const Circle& C = cs[k + 1];
         double sw = sweepOf(C, ti[k + 1], to[k + 1]);
         double sagitta = std::abs(C.rho) * (1 - std::cos(sw / 2));
-        if (sagitta > 1000) {  // flatter arcs would not survive rounding to whole nanometres
+        if (sagitta > 1000) {
           auto g = ArcGeom::fromCenter(C.c, ti[k + 1], sw);
           Track t;
           t.a = Point(ti[k + 1]);
@@ -630,7 +538,6 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
   }
   return st;
 }
-
 
 RealizeStats reshapeTracks(Board& b, std::vector<char> chosen, std::vector<RealWire>* wiresOut) {
   chosen.resize(b.tracks.size(), 0);
@@ -719,6 +626,42 @@ RealizeStats reshapeTracks(Board& b, std::vector<char> chosen, std::vector<RealW
   }
   for (size_t i = 0; i < b.tracks.size(); ++i)
     if (chosen[i] && !used[i]) walkFrom(int(i), b.tracks[i].a);  // closed loops
+  // A segment running through a pad or via of its own net (not at a vertex) connects it; the taut
+  // path would leave it, so the chain is split at the point nearest to that anchor.
+  std::vector<RealWire> split;
+  for (auto& w : wires) {
+    RealWire cur = w;
+    cur.sketch.clear();
+    cur.sketch.push_back(w.sketch.front());
+    for (size_t k = 1; k < w.sketch.size(); ++k) {
+      Vec2 p = w.sketch[k - 1], q = w.sketch[k];
+      std::vector<std::pair<double, Vec2>> cuts;  // (parameter along p->q, point)
+      BBox bb;
+      bb.add(p);
+      bb.add(q);
+      idx.query(bb.inflated(w.width), LayerMask(1) << w.layer, [&](ItemRef r) {
+        if ((r.type != ItemType::Pad && r.type != ItemType::Via) || itemNet(b, r) != w.net) return;
+        Vec2 c = r.type == ItemType::Pad ? b.pads[r.index].pos.v() : b.vias[r.index].pos.v();
+        Vec2 on = closestPointOnSegment(c, p, q);
+        if ((on - p).len() < 1000 || (on - q).len() < 1000) return;  // already an end point
+        for (auto& s : itemShapes(b, r))
+          if (s.distance(on) <= 0) {
+            cuts.push_back({(on - p).len(), on});
+            return;
+          }
+      });
+      std::ranges::sort(cuts, {}, [](auto& c) { return c.first; });
+      for (auto& [d, pt] : cuts) {
+        cur.sketch.push_back(pt);
+        split.push_back(cur);
+        cur.sketch.clear();
+        cur.sketch.push_back(pt);
+      }
+      cur.sketch.push_back(q);
+    }
+    split.push_back(cur);
+  }
+  wires = std::move(split);
   if (wiresOut) *wiresOut = wires;
   if (wires.empty()) return {};
   std::vector<Track> keep;

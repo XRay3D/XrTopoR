@@ -902,7 +902,8 @@ std::vector<int> Router::realizeAll() {
     if (t.isArc()) res_.length += ArcGeom::fromThreePoints(t.a.v(), t.mid->v(), t.b.v()).length();
     else res_.length += (t.b.v() - t.a.v()).len();
   }
-  res_.log.push_back(std::format("realised {} wires, {} arcs, {} apexes dropped", st.wires, st.arcs, st.droppedApexes));
+  res_.log.push_back(std::format("realised {} wires ({} alive of {} total), {} arcs, {} apexes dropped", st.wires,
+                                 wires.size(), s_.wires.size(), st.arcs, st.droppedApexes));
   return st.trackWire;
 }
 
