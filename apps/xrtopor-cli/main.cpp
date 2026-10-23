@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "core/Connectivity.h"
+#include "core/ZoneFill.h"
 #include "drc/Drc.h"
 #include "io/BoardIO.h"
 #include "io/gerber/GerberWriter.h"
@@ -26,12 +27,13 @@ void usage() {
       "  info       <board>                        summary of a board\n"
       "  convert    <board> <out.kicad_pcb|.dsn|.ses>\n"
       "  drc        <board> [--max N]               design rule check\n"
-      "  route      <board> [-o out] [--passes N] [--via-cost MM] [--no-vias] [--nets a,b] [--keep] [--soft] [--no-optimize] [--svg out.svg]\n"
+      "  route      <board> [-o out] [--passes N] [--via-cost MM] [--no-vias] [--nets a,b] [--keep] [--soft] [--no-optimize] [--no-fill] [--svg out.svg]\n"
       "  import-ses <board> <routes.ses> -o <out>\n"
       "  gerber     <board> <outdir>\n"
       "  svg        <board> <out.svg>\n"
       "  reshape    <board> -o <out>              recompute track shapes (TopoR F5) for all tracks\n"
       "  optimize   <board> -o <out> [--iterations N] [--step MM] [--components]   move vias/parts (F7)\n"
+      "  fill       <board> -o <out> [--no-thermals]  pour copper zones\n"
       "boards: .kicad_pcb, .dsn, P-CAD ASCII .pcb");
 }
 
@@ -93,6 +95,7 @@ int cmdRoute(Board& b, const Args& a) {
   ro.ripupExisting = !a.flag("--keep");
   ro.softPlanarity = a.flag("--soft");
   if (a.flag("--no-optimize")) ro.optimizeIterations = 0;
+  ro.fillZones = !a.flag("--no-fill");
   if (auto p = a.opt("--nets"); !p.empty())
     ro.nets = p | std::views::split(',') | std::ranges::to<std::vector<std::string>>();
   int lastDecile = -1;
@@ -136,6 +139,14 @@ int main(int argc, char** argv) {
     return cmdDrc(b, m.empty() ? 50 : std::stoul(std::string(m)));
   }
   if (cmd == "route") return cmdRoute(b, a);
+  if (cmd == "fill" && !a.opt("-o").empty()) {
+    ZoneFillOptions zo;
+    zo.thermals = !a.flag("--no-thermals");
+    auto st = fillZones(b, zo);
+    std::println("filled {} zone(s): {} polygon(s), {} island(s) removed", st.zones, st.polygons, st.islandsRemoved);
+    if (auto r = io::saveBoard(b, std::string(a.opt("-o"))); !r) return fail(r.error());
+    return 0;
+  }
   if (cmd == "optimize" && !a.opt("-o").empty()) {
     topo::OptimizeOptions oo;
     if (auto p = a.opt("--iterations"); !p.empty()) oo.iterations = std::stoi(std::string(p));

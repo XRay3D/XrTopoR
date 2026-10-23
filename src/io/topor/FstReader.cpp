@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <map>
 
+#include "core/ZoneFill.h"
 #include "io/topor/Fst.h"
 #include "io/xml/Xml.h"
 
@@ -106,7 +107,10 @@ struct Reader {
       else if (t == "Dielectric") continue;
       else kind = LayerKind::Other;  // Mechanical, Doc
       LayerId id = b.addLayer(name, kind, side);
-      if (t == "Plane") planeLayers |= LayerMask(1) << id;
+      if (t == "Plane") {
+        planeLayers |= LayerMask(1) << id;
+        b.layers[id].plane = true;
+      }
     }
     if (auto* un = layers.find("UnStackLayers"))
       for (auto* l : un->findAll("Layer")) b.addLayer(std::string(l->attr("name")), LayerKind::Other, Side::None);
@@ -632,6 +636,16 @@ struct Reader {
 
   void readRules(const Element& rules) {
     NetClass& d = b.netClasses[0];
+    if (auto* pl = rules.find("RulesPlaneLayersNets"))
+      for (auto* r : pl->findAll("PlaneLayerNets")) {
+        if (!r->flag("enabled", true)) continue;
+        auto* lr = r->find("LayerRef");
+        auto* oa = r->find("ObjectsAffected");
+        if (!lr || !oa) continue;
+        LayerId l = b.findLayer(std::string(lr->attr("name")));
+        auto* nr = oa->find("NetRef");
+        if (l >= 0 && nr) b.layers[l].planeNet = b.addNet(std::string(nr->attr("name")));
+      }
     if (auto* rw = rules.find("RulesWidthOfWires"))
       for (auto* r : rw->findAll("WidthOfWires"))
         if (affectsAllNets(*r) && r->flag("enabled", true)) d.trackWidth = len(r->num("widthNom", r->num("widthMin")));
@@ -741,6 +755,16 @@ struct Reader {
     z.layer = layer;
     if (auto* nr = c.find("NetRef")) z.net = b.addNet(std::string(nr->attr("name")));
     z.clearance = len(c.num("backoff"));
+    z.priority = int(c.num("priority"));
+    std::string cp(c.attr("connectPad"));
+    if (cp == "Direct" || cp == "Solid") z.padConnection = PadConnection::Solid;
+    else if (cp == "None" || cp == "NoConnect") z.padConnection = PadConnection::None;
+    if (auto* tp = c.find("ThermalPad"))
+      if (auto* th = tp->find("Thermal")) {
+        z.spokeWidth = len(th->num("spokeWidth"));
+        z.thermalGap = len(th->num("backoff"));
+        z.spokeAngle = th->num("angle");
+      }
     if (auto* sh = c.find("Shape"))
       for (auto& f : sh->kids) {
         z.outline = filledPolygon(f);
@@ -748,12 +772,27 @@ struct Reader {
       }
     if (z.outline.empty()) return;
     if (auto* is = c.find("Islands"))
-      for (auto* island : is->findAll("Island"))
+      for (auto* island : is->findAll("Island")) {
+        // Island = outer contour + Voids (holes) + thermal spokes (separate copper pieces).
+        Polyline outer;
+        std::vector<Polyline> holes;
         for (auto& f : island->kids) {
-          if (f.is("Voids") || f.is("ThermalSpoke")) continue;
-          auto poly = filledPolygon(f);
-          if (!poly.empty()) z.filled.push_back(std::move(poly));
+          if (f.is("Voids")) {
+            for (auto& v : f.kids) {
+              auto h = filledPolygon(v);
+              if (h.size() >= 3) holes.push_back(std::move(h));
+            }
+          } else if (f.is("ThermalSpoke")) {
+            for (auto& sp : f.kids) {
+              auto poly = filledPolygon(sp);
+              if (poly.size() >= 3) z.filled.push_back(std::move(poly));
+            }
+          } else if (outer.empty()) {
+            outer = filledPolygon(f);
+          }
         }
+        if (outer.size() >= 3) z.filled.push_back(fracture(outer, std::move(holes)));
+      }
     b.zones.push_back(std::move(z));
   }
 };
@@ -789,6 +828,14 @@ Result<BoardPtr> readFst(const std::string& text, const std::string& path) {
   if (auto* rules = root.find("Rules")) r.readRules(*rules);
   else r.applyVia(b->netClasses[0], r.firstViastack);
   if (auto* cn = root.find("Connectivity")) r.readConnectivity(*cn);
+  // Plane layers: board-wide zones of their net, poured right away (TopoR shows them solid).
+  size_t zonesBefore = b->zones.size();
+  addPlaneZones(*b);
+  if (b->zones.size() > zonesBefore) {
+    ZoneFillOptions zo;
+    for (size_t z = zonesBefore; z < b->zones.size(); ++z) zo.only.push_back(int(z));
+    fillZones(*b, zo);
+  }
   if (b->name.empty()) b->name = std::filesystem::path(path).stem().string();
   b->rebuildNetIndex();
   return b;

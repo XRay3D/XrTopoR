@@ -25,6 +25,7 @@
 #include <ranges>
 #include <unordered_map>
 
+#include "core/ZoneFill.h"
 #include "drc/Drc.h"
 #include "router/topo/Optimizer.h"
 #include "router/topo/Realizer.h"
@@ -219,6 +220,7 @@ class Router {
 
 void Router::setup() {
   for (LayerId l : b_.copperLayers()) {
+    if (b_.layers[l].plane) continue;  // plane layers carry their net as a pour, not tracks
     int idx = b_.layers[l].copperIndex;
     if (o_.copperIndices.empty() || std::ranges::contains(o_.copperIndices, idx)) layers_.push_back(l);
   }
@@ -1029,7 +1031,8 @@ RouterResult Router::run() {
   int clearedZones = 0;
   for (auto& z : b_.zones)
     if (!z.filled.empty()) { z.filled.clear(); ++clearedZones; }
-  if (clearedZones) res_.log.push_back(std::format("{} zone fill(s) cleared (refill in the source CAD)", clearedZones));
+  if (clearedZones && !o_.fillZones)
+    res_.log.push_back(std::format("{} zone fill(s) cleared (refill in the source CAD)", clearedZones));
   setup();
   res_.log.push_back(std::format("mesh: {} vertices, {} triangles, {} edges; {} layers; {} nets",
                                  m_.verts.size(), m_.tris.size(), m_.edges.size(), NL_, jobs_.size()));
@@ -1181,6 +1184,10 @@ RouterResult Router::run() {
     res_.log.push_back(std::format("optimised: {} via move(s), conflicts {} -> {}, length {:.1f} -> {:.1f} mm",
                                    r.viaMoves, r.conflictsBefore, r.conflictsAfter, r.lengthBefore / 1e6,
                                    r.lengthAfter / 1e6));
+  }
+  if (o_.fillZones && !b_.zones.empty() && !std::getenv("XR_SKETCH")) {
+    auto zs = xr::fillZones(b_);
+    res_.log.push_back(std::format("poured {} zone(s): {} polygon(s)", zs.zones, zs.polygons));
   }
   int fails = 0;
   for (auto [j, f] : std::views::enumerate(s_.failed)) {

@@ -60,3 +60,29 @@ TEST(Drc, UnconnectedAndShapeMargin) {
   EXPECT_GT(shapeMargin(b, idx, s, 1, b.pads[0].net), 0);           // same net: no conflict
   EXPECT_LT(shapeMargin(b, idx, s, 1, kNoNet), 0);                  // no net: too close to the pads
 }
+
+#include "core/ZoneFill.h"
+#include "io/BoardIO.h"
+
+static std::string dataFile(const char* name) { return std::string(XR_TEST_DATA) + "/" + name; }
+
+TEST(ZoneFill, PourKeepsClearanceAndConnectsThroughThermals) {
+  auto b = io::loadBoard(dataFile("tt.kicad_pcb"));  // routed board with a GND zone on B.Cu
+  ASSERT_TRUE(b);
+  auto st = fillZones(**b);
+  EXPECT_EQ(st.zones, 1);
+  EXPECT_GE(st.polygons, 1);
+  EXPECT_EQ(Connectivity::compute(**b).ratsnest.size(), 0u);
+  EXPECT_TRUE(runDrc(**b).empty());
+}
+
+TEST(ZoneFill, PlaneLayersFromTopoR) {
+  auto b = io::loadBoard(dataFile("topor/Example_06/Signals.fst"));  // GND plane on INT_GND
+  ASSERT_TRUE(b);
+  LayerId plane = (*b)->findLayer("INT_GND");
+  ASSERT_GE(plane, 0);
+  EXPECT_TRUE((*b)->layers[plane].plane);
+  EXPECT_EQ((*b)->nets[(*b)->layers[plane].planeNet].name, "GND");
+  EXPECT_EQ(Connectivity::compute(**b).ratsnest.size(), 0u);
+  EXPECT_TRUE(runDrc(**b).empty());
+}

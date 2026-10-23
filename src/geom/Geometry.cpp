@@ -58,34 +58,76 @@ double polygonArea(const Polyline& poly) {
   return s / 2;
 }
 
+// Hole bridging as in Eberly's ear-clipping notes: holes are merged right to left; a ray from the
+// hole's rightmost vertex M towards +x hits the current outer contour at I on edge (A, B); the bridge
+// goes to the edge end point P with the larger x, or to the reflex vertex inside triangle (M, I, P)
+// with the smallest angle to the ray. Holes still to be merged lie left of M, so no bridge crosses one.
 Polyline fracture(const Polyline& outer, std::vector<Polyline> holes) {
   Polyline res = outer;
   if (polygonArea(res) < 0) std::reverse(res.begin(), res.end());
-  // Process holes right-to-left so bridges rarely cross later holes.
   auto maxX = [](const Polyline& h) {
     double m = std::numeric_limits<double>::lowest();
     for (auto& v : h) m = std::max(m, v.x);
     return m;
   };
+  std::erase_if(holes, [](const Polyline& h) { return h.size() < 3; });
   std::sort(holes.begin(), holes.end(), [&](const Polyline& a, const Polyline& b) { return maxX(a) > maxX(b); });
   for (auto& h0 : holes) {
-    if (h0.size() < 3) continue;
     Polyline h = h0;
-    if (polygonArea(h) > 0) std::reverse(h.begin(), h.end());
-    size_t hj = 0;
+    if (polygonArea(h) > 0) std::reverse(h.begin(), h.end());  // holes clockwise
+    size_t mi = 0;
     for (size_t j = 1; j < h.size(); ++j)
-      if (h[j].x > h[hj].x) hj = j;
-    size_t oi = 0;
-    double best = std::numeric_limits<double>::max();
-    for (size_t i = 0; i < res.size(); ++i) {
-      double d = (res[i] - h[hj]).len2();
-      if (d < best) { best = d; oi = i; }
+      if (h[j].x > h[mi].x || (h[j].x == h[mi].x && h[j].y < h[mi].y)) mi = j;
+    Vec2 M = h[mi];
+    // Nearest edge hit by the ray M + t * (1, 0).
+    size_t n = res.size();
+    double bestT = std::numeric_limits<double>::max();
+    size_t edge = n;
+    Vec2 I;
+    for (size_t k = 0; k < n; ++k) {
+      Vec2 a = res[k], b = res[(k + 1) % n];
+      if ((a.y > M.y) == (b.y > M.y) && a.y != M.y && b.y != M.y) continue;
+      if (a.y == b.y) {
+        if (a.y != M.y) continue;
+        double t = std::min(a.x, b.x) - M.x;
+        if (t >= 0 && t < bestT) { bestT = t; edge = k; I = {M.x + t, M.y}; }
+        continue;
+      }
+      double x = a.x + (M.y - a.y) * (b.x - a.x) / (b.y - a.y);
+      double t = x - M.x;
+      if (t >= 0 && t < bestT) { bestT = t; edge = k; I = {x, M.y}; }
+    }
+    size_t pi;
+    if (edge == n) {  // degenerate (hole outside the contour): nearest vertex
+      pi = 0;
+      for (size_t k = 1; k < n; ++k)
+        if ((res[k] - M).len2() < (res[pi] - M).len2()) pi = k;
+    } else {
+      size_t ka = edge, kb = (edge + 1) % n;
+      pi = res[ka].x > res[kb].x ? ka : kb;
+      Vec2 P = res[pi];
+      if (!(I == P)) {
+        // Vertices strictly inside triangle (M, I, P) would block the view: take the best of them.
+        double bestAng = std::numeric_limits<double>::max();
+        for (size_t k = 0; k < n; ++k) {
+          Vec2 v = res[k];
+          if (k == pi) continue;
+          double o1 = orient(M, I, v), o2 = orient(I, P, v), o3 = orient(P, M, v);
+          bool inside = (o1 > 0 && o2 > 0 && o3 > 0) || (o1 < 0 && o2 < 0 && o3 < 0);
+          if (!inside) continue;
+          double ang = std::atan2(std::abs(v.y - M.y), v.x - M.x);
+          if (ang < bestAng || (ang == bestAng && (v - M).len2() < (res[pi] - M).len2())) {
+            bestAng = ang;
+            pi = k;
+          }
+        }
+      }
     }
     Polyline merged;
     merged.reserve(res.size() + h.size() + 2);
-    merged.insert(merged.end(), res.begin(), res.begin() + oi + 1);
-    for (size_t k = 0; k <= h.size(); ++k) merged.push_back(h[(hj + k) % h.size()]);
-    merged.insert(merged.end(), res.begin() + oi, res.end());
+    merged.insert(merged.end(), res.begin(), res.begin() + long(pi) + 1);
+    for (size_t k = 0; k <= h.size(); ++k) merged.push_back(h[(mi + k) % h.size()]);
+    merged.insert(merged.end(), res.begin() + long(pi), res.end());
     res = std::move(merged);
   }
   return res;

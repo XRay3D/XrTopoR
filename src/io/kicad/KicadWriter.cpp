@@ -94,6 +94,53 @@ void appendRouting(const Board& b, const NetStyle& st, Node& root) {
   }
 }
 
+void appendZones(const Board& b, const NetStyle& st, Node& root) {
+  for (size_t zi = 0; zi < b.zones.size(); ++zi) {
+    const Zone& z = b.zones[zi];
+    if (z.outline.size() < 3) continue;
+    Node n = Node::list("zone");
+    n.add(netNode(b, st, z.net));
+    n.add(strNode("net_name", z.net >= 0 ? b.nets[z.net].name : ""));
+    n.add(strNode("layer", b.layers[z.layer].name));
+    n.add(strNode("uuid", uuidFor(zi, 5)));
+    if (!z.name.empty()) n.add(strNode("name", z.name));
+    Node hatch = Node::list("hatch");
+    hatch.addAtom("edge");
+    hatch.addAtom("0.5");
+    n.add(std::move(hatch));
+    if (z.priority > 0) {
+      Node pr = Node::list("priority");
+      pr.addAtom(std::to_string(z.priority));
+      n.add(std::move(pr));
+    }
+    Node cp = Node::list("connect_pads");
+    if (z.padConnection == PadConnection::Solid) cp.addAtom("yes");
+    else if (z.padConnection == PadConnection::None) cp.addAtom("no");
+    cp.add(numNode("clearance", double(std::max(z.clearance, b.classOf(z.net).clearance))));
+    n.add(std::move(cp));
+    n.add(numNode("min_thickness", double(z.minWidth > 0 ? z.minWidth : mmToNm(0.2))));
+    Node fill = Node::list("fill");
+    fill.addAtom("yes");
+    fill.add(numNode("thermal_gap", double(z.thermalGap > 0 ? z.thermalGap : mmToNm(0.5))));
+    fill.add(numNode("thermal_bridge_width", double(z.spokeWidth > 0 ? z.spokeWidth : mmToNm(0.5))));
+    n.add(std::move(fill));
+    Node poly = Node::list("polygon");
+    Node pts = Node::list("pts");
+    for (auto& p : z.outline) pts.add(xyNode("xy", p));
+    poly.add(std::move(pts));
+    n.add(std::move(poly));
+    for (auto& f : z.filled) {
+      Node fp = Node::list("filled_polygon");
+      fp.add(strNode("layer", b.layers[z.layer].name));
+      Node fpts = Node::list("pts");
+      for (auto& p : f) fpts.add(xyNode("xy", p));
+      fp.add(std::move(fpts));
+      n.add(std::move(fp));
+    }
+    root.add(std::move(n));
+  }
+}
+
 void setAt(Node& at, Vec2 p, double angle, bool withAngle) {
   Node n = Node::list("at");
   n.addAtom(mmS(p.x));
@@ -136,10 +183,20 @@ std::string patchSource(const Board& b) {
     }
   }
   // Zone fills cleared in the model (e.g. by the router) must be dropped so KiCad refills them.
-  bool fillsCleared = std::ranges::all_of(b.zones, [](const Zone& z) { return z.filled.empty(); });
-  if (fillsCleared)
-    for (auto& k : root.kids)
-      if (k.is("zone")) std::erase_if(k.kids, [](const Node& n) { return n.is("filled_polygon"); });
+  // Zone fills are written from the model (refilled or cleared), replacing what the file had.
+  for (auto& k : root.kids)
+    if (k.is("zone")) std::erase_if(k.kids, [](const Node& n) { return n.is("filled_polygon"); });
+  for (size_t zi = 0; zi < b.zones.size() && zi < b.source->zoneNodes.size(); ++zi) {
+    Node& zn = root.kids[b.source->zoneNodes[zi]];
+    for (auto& f : b.zones[zi].filled) {
+      Node fp = Node::list("filled_polygon");
+      fp.add(strNode("layer", b.layers[b.zones[zi].layer].name));
+      Node pts = Node::list("pts");
+      for (auto& p : f) pts.add(xyNode("xy", p));
+      fp.add(std::move(pts));
+      zn.add(std::move(fp));
+    }
+  }
   // Replace routing.
   std::erase_if(root.kids, [](const Node& n) { return n.is("segment") || n.is("arc") || n.is("via"); });
   appendRouting(b, st, root);
@@ -288,7 +345,7 @@ std::string generate(const Board& b) {
     std::string name = i == 0 ? "F.Cu" : (i + 1 == cu.size() ? "B.Cu" : "In" + std::to_string(i) + ".Cu");
     Node l = Node::list(std::to_string(kid));
     l.addAtom(name, true);
-    l.addAtom("signal");
+    l.addAtom(b.layers[cu[i]].plane ? "power" : "signal");
     layers.add(std::move(l));
   }
   const char* tech[][3] = {{"32", "B.Adhes", "user"}, {"33", "F.Adhes", "user"}, {"34", "B.Paste", "user"},
@@ -386,6 +443,7 @@ std::string generate(const Board& b) {
       }
     }
   }
+  appendZones(kb, st, root);
   appendRouting(kb, st, root);
   return sexpr::write(root) + "\n";
 }

@@ -158,7 +158,8 @@ struct Reader {
     std::string type = n.arg(1), shape = n.arg(2);
     const Node* at = n.find("at");
     p.localPos = Point(xy(at));
-    double absAngle = at && at->argc() >= 3 ? at->num(2) : comp.angle;
+    // The pad angle in the file is absolute (footprint + pad); omitted means 0.
+    double absAngle = at && at->argc() >= 3 ? at->num(2) : 0.0;
     p.localAngle = absAngle - comp.angle;
     const Node* size = n.find("size");
     p.shape.w = size ? mm(size->num(0)) : 0;
@@ -278,8 +279,18 @@ struct Reader {
     if (l) layers.push_back(b.findLayer(l->arg(0)));
     else if (const Node* ls = n.find("layers"))
       for (size_t i = 0; i < ls->argc(); ++i) layers.push_back(b.findLayer(ls->arg(i)));
-    if (const Node* cp = n.find("connect_pads"))
+    if (const Node* cp = n.find("connect_pads")) {
       if (const Node* c = cp->find("clearance")) z.clearance = mm(c->num(0));
+      const std::string& mode = cp->arg(0);
+      if (mode == "yes") z.padConnection = PadConnection::Solid;
+      else if (mode == "no") z.padConnection = PadConnection::None;
+    }
+    if (const Node* pr = n.find("priority")) z.priority = int(pr->num(0));
+    if (const Node* mt = n.find("min_thickness")) z.minWidth = mm(mt->num(0));
+    if (const Node* fill = n.find("fill")) {
+      if (const Node* g = fill->find("thermal_gap")) z.thermalGap = mm(g->num(0));
+      if (const Node* w = fill->find("thermal_bridge_width")) z.spokeWidth = mm(w->num(0));
+    }
     if (const Node* poly = n.find("polygon"))
       if (const Node* pts = poly->find("pts"))
         for (auto* p : pts->findAll("xy")) z.outline.push_back(xy(p));
@@ -412,7 +423,11 @@ Result<BoardPtr> readKicad(const std::string& text, const std::string& path) {
     } else if (h == "segment") r.readTrack(n, false);
     else if (h == "arc") r.readTrack(n, true);
     else if (h == "via") r.readVia(n);
-    else if (h == "zone") r.readZone(n);
+    else if (h == "zone") {
+      size_t before = b->zones.size();
+      r.readZone(n);
+      for (size_t z = before; z < b->zones.size(); ++z) src->zoneNodes.push_back(int(k));
+    }
     else if (h.rfind("gr_", 0) == 0 && h != "gr_text") {
       Graphic g;
       if (r.readGraphic(n, {}, 0, g)) b->graphics.push_back(g);

@@ -8,6 +8,7 @@ add_library(xrcore STATIC
   core/Board.cpp
   core/Connectivity.cpp
   core/SpatialIndex.cpp
+  core/ZoneFill.cpp
   io/sexpr/SExpr.cpp
 )
 target_include_directories(xrcore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

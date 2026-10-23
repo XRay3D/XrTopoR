@@ -28,6 +28,8 @@ struct Layer {
   LayerKind kind = LayerKind::Other;
   Side side = Side::None;
   int copperIndex = -1;  // 0 = top copper ... n-1 = bottom copper
+  bool plane = false;    // plane (reference) layer: solid copper of planeNet, not routed on
+  int planeNet = kNoNet;
 };
 
 struct NetClass {
@@ -115,6 +117,8 @@ struct Via {
   bool onLayer(LayerId l) const { return (layers >> l) & 1; }
 };
 
+enum class PadConnection { Thermal, Solid, None };
+
 struct Zone {
   int net = kNoNet;
   LayerId layer = 0;
@@ -122,6 +126,12 @@ struct Zone {
   std::vector<Vec2> outline;
   std::vector<std::vector<Vec2>> filled;
   Coord clearance = 0;
+  int priority = 0;              // higher priority zones are cut out of lower ones
+  PadConnection padConnection = PadConnection::Thermal;
+  Coord thermalGap = 0;          // 0 = fill default
+  Coord spokeWidth = 0;          // 0 = fill default
+  double spokeAngle = 0;         // degrees relative to the pad (TopoR default 45)
+  Coord minWidth = 0;            // 0 = fill default
 };
 
 struct SourceDoc;
@@ -181,6 +191,8 @@ struct SourceDoc {
   std::shared_ptr<sexpr::Node> tree;
   // KiCad: footprint node index (in tree children) for each component.
   std::vector<int> componentNodes;
+  // KiCad: zone node index (in tree children) for each model zone (multi-layer zones map many-to-one).
+  std::vector<int> zoneNodes;
 };
 
 }  // namespace xr
