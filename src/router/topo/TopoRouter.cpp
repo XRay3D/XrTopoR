@@ -798,6 +798,7 @@ void Router::routeJob(int ji) {
         if (d < nd) { nd = d; nearest = q; }
       }
       s_.failed[ji].push_back({pad, nearest});
+      if (std::getenv("XR_DEBUG5")) std::println(stderr, "FAILED job {} pad {}", ji, pad);
       continue;
     }
     std::vector<int> joined;
@@ -812,6 +813,9 @@ bool Router::edgeOverflow(int li, int e) const {
   const EdgeUse& u = s_.use[li, e];
   if (u.n == 0) return false;
   int net = s_.wires[s_.crossings[s_.cross[li, e].front()].wire].net;
+  // Edges inside a pad of the crossing wires' own net carry no constraint (see crossCost).
+  int pu = m_.verts[m_.edges[e].v[0]].pad, pv = m_.verts[m_.edges[e].v[1]].pad;
+  if (pu >= 0 && pu == pv && b_.pads[pu].net == net) return false;
   double cu, cv;
   bool ou, ov;
   double free = freeLength(e, li, net, cu, ou, cv, ov);
