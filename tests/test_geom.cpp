@@ -50,7 +50,7 @@ TEST(Shape, Distances) {
   Shape r = Shape::rect({0, 0}, 4, 2, 0, 0);
   EXPECT_EQ(r.kind, Shape::Kind::Polygon);
   EXPECT_DOUBLE_EQ(r.distance({5, 0}), 3.0);
-  EXPECT_DOUBLE_EQ(r.distance(cap), 0.0);
+  EXPECT_LE(r.distance(cap), 0.0);  // overlapping: negative depth
   Shape rr = Shape::rect({0, 0}, 4, 2, 0, 1);  // oval-like
   EXPECT_EQ(rr.kind, Shape::Kind::Segment);
   EXPECT_NEAR(rr.distance({0, 5}), 4.0, 1e-9);

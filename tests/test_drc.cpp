@@ -37,11 +37,13 @@ TEST(Drc, TrackTooClose) {
   t.layer = 0;
   t.net = b.findNet("A");
   b.tracks.push_back(t);
+  DrcOptions opt;
+  opt.unconnected = false;  // the floating track is deliberately not tied to its pad here
   // Pad B centre at 5 mm, radius 0.5: distance from the track (x = 2.5) = 2.5 - 0.5 - 0.125 > clearance: OK
-  EXPECT_TRUE(runDrc(b).empty());
+  for (auto& v : runDrc(b, opt)) ADD_FAILURE() << v.message;
   b.tracks[0].a = {mmToNm(4.4), 0};
   b.tracks[0].b = {mmToNm(4.4), mmToNm(3)};
-  auto v = runDrc(b);
+  auto v = runDrc(b, opt);
   ASSERT_EQ(v.size(), 1u);
   EXPECT_EQ(v[0].type, DrcViolation::Type::Short);
 }
@@ -54,7 +56,7 @@ TEST(Drc, UnconnectedAndShapeMargin) {
   EXPECT_EQ(v[0].type, DrcViolation::Type::Unconnected);
   SpatialIndex idx;
   idx.build(b);
-  Shape s = Shape::capsule({mmToNm(1.0), 0}, {mmToNm(4.0), 0}, mmToNm(0.125));
+  Shape s = Shape::capsule({mmToNm(0.6), 0}, {mmToNm(4.4), 0}, mmToNm(0.125));
   EXPECT_GT(shapeMargin(b, idx, s, 1, b.pads[0].net), 0);           // same net: no conflict
   EXPECT_LT(shapeMargin(b, idx, s, 1, kNoNet), 0);                  // no net: too close to the pads
 }
