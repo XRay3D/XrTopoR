@@ -247,11 +247,21 @@ void BoardView::drawLayer(QPainter& p, LayerId l, bool dim) {
     for (auto& v : b.vias)
       if (v.onLayer(l)) drawVia(p, v, c);
   } else {
+    // Board outline contours are closed polygons but must never be filled.
+    auto draw = [&](const Graphic& g) {
+      if (L.kind == LayerKind::Edge && g.filled) {
+        Graphic h = g;
+        h.filled = false;
+        drawGraphic(p, h, c);
+      } else {
+        drawGraphic(p, g, c);
+      }
+    };
     for (auto& comp : b.components)
       for (auto& g : comp.graphics)
-        if (g.layer == l) drawGraphic(p, g, c);
+        if (g.layer == l) draw(g);
     for (auto& g : b.graphics)
-      if (g.layer == l) drawGraphic(p, g, c);
+      if (g.layer == l) draw(g);
   }
 }
 

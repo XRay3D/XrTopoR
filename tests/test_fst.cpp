@@ -69,9 +69,9 @@ TEST(FstIO, ReadExample03) {
   for (auto& p : b.outline[0]) bb.add(p);
   EXPECT_NEAR(bb.width(), 102.2e6, 1e3);
   EXPECT_NEAR(bb.height(), 112.2e6, 1e3);
-  // Rules: width 0.2, clearance 0.3 nominal, default via CCTVIA 1.016/0.6
+  // Rules: width 0.2, clearance 0.2 minimum (0.3 nominal), default via CCTVIA 1.016/0.6
   EXPECT_EQ(b.netClasses[0].trackWidth, mmToNm(0.2));
-  EXPECT_EQ(b.netClasses[0].clearance, mmToNm(0.3));
+  EXPECT_EQ(b.netClasses[0].clearance, mmToNm(0.2));
   // Through-hole pads span both layers, SMD pads one layer on the component side.
   int c12 = b.findComponent("C12");
   ASSERT_GE(c12, 0);

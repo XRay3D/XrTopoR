@@ -637,7 +637,9 @@ struct Reader {
         if (affectsAllNets(*r) && r->flag("enabled", true)) d.trackWidth = len(r->num("widthNom", r->num("widthMin")));
     if (auto* rc = rules.find("RulesClearancesNetToNet"))
       for (auto* r : rc->findAll("ClearanceNetToNet"))
-        if (affectsAllNets(*r) && r->flag("enabled", true)) d.clearance = len(r->num("clrnNom", r->num("clrnMin")));
+        // TopoR uses the nominal clearance where there is room and the minimum in tight spots; the
+        // single value our rules carry is the one every spot must satisfy: the minimum.
+        if (affectsAllNets(*r) && r->flag("enabled", true)) d.clearance = len(r->num("clrnMin", r->num("clrnNom")));
     if (auto* rb = rules.find("RulesClearancesToBoard"))
       if (rb->has("wires")) b.edgeClearance = len(rb->num("wires"));
     std::string via = firstViastack;

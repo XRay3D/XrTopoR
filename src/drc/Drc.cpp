@@ -15,6 +15,10 @@ const char* drcTypeName(DrcViolation::Type t) {
   return "?";
 }
 
+// Files store coordinates with 0.1 um (TopoR) or 1 nm (KiCad) precision and arcs are tessellated:
+// deficits below this are rounding, not design errors.
+constexpr double kDrcTolerance = 2000;
+
 double requiredClearance(const Board& b, int netA, int netB) {
   return double(std::max(b.classOf(netA).clearance, b.classOf(netB).clearance));
 }
@@ -117,7 +121,7 @@ std::vector<DrcViolation> runDrc(const Board& b, const DrcOptions& opt) {
             double d = s1.distance(s2);
             if (d < best) { best = d; where = (s1.center() + s2.center()) * 0.5; }
           }
-        if (best >= req - 1) return;  // 1 nm tolerance
+        if (best >= req - kDrcTolerance) return;
         DrcViolation v;
         v.type = best <= 0 ? DrcViolation::Type::Short : DrcViolation::Type::Clearance;
         v.a = a;
@@ -148,7 +152,7 @@ std::vector<DrcViolation> runDrc(const Board& b, const DrcOptions& opt) {
           for (size_t i = 0; i < loop.size(); ++i) {
             Vec2 p0 = loop[i], p1 = loop[(i + 1) % loop.size()];
             double d = s.distanceToSegment(p0, p1);
-            if (d < ec - 1) {
+            if (d < ec - kDrcTolerance) {
               DrcViolation v;
               v.type = DrcViolation::Type::Edge;
               v.a = r;
