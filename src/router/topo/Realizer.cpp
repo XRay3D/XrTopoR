@@ -443,6 +443,9 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
           if (other == wi || ow.net == w.net) continue;
           double space = double(ow.width) + double(std::max(ow.clearance, w.clearance)) + kMargin;
           (t < h.t ? sumU : sumV) += space;
+          if (std::getenv("XR_DEBUG3"))
+            std::println(stderr, "nest wire {} edge ({},{}) t={:.3f}: inner wire {} net {} t={:.3f}", wi, h.u, h.v, h.t,
+                         other, b.nets[ow.net].name, t);
         }
         auto bump = [&](int o, double v) {
           if (v > 0) offset[wi][o] = std::max(offset[wi][o], v);
@@ -477,6 +480,8 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
         std::print(stderr, " [o{} rho{:+.3f} p{} c({:.3f},{:.3f}) in({:.3f},{:.3f}) out({:.3f},{:.3f})]", c.obst, c.rho / 1e6,
                    c.portal, c.c.x / 1e6, c.c.y / 1e6, tin[wi][k].x / 1e6, tin[wi][k].y / 1e6, tout[wi][k].x / 1e6,
                    tout[wi][k].y / 1e6);
+      std::print(stderr, " offsets:");
+      for (auto [o, v] : offset[wi]) std::print(stderr, " o{}={:.3f}", o, v / 1e6);
       std::println(stderr, "");
     }
     if (std::getenv("XR_DEBUG"))

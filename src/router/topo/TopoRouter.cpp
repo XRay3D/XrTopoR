@@ -633,7 +633,10 @@ void Router::commit(const std::vector<SNode>& path, std::vector<int>& joinedPads
   int wire = newWire(path[0].li, path[0].vtx);
   for (const SNode& n : path | std::views::drop(1)) {
     if (n.chordTri < 0) {  // layer change at the same vertex
-      if (n.via) s_.viaNet[n.vtx] = net_;
+      if (n.via) {
+        s_.viaNet[n.vtx] = net_;
+        vshape_[n.vtx] = Shape::circle(P(n.vtx), viaR_);  // occupied site now blocks like a via
+      }
       if (s_.wires[wire].tris.empty()) {  // reuse the empty wire opened at this vertex
         s_.wires[wire].li = n.li;
         s_.wires[wire].v0 = n.vtx;
@@ -694,7 +697,11 @@ void Router::ripup(int job) {
   int net = jobs_[job].net;
   for (int wi = 0; wi < int(s_.wires.size()); ++wi)
     if (s_.wires[wi].alive && s_.wires[wi].net == net) removeWire(wi);
-  std::ranges::replace(s_.viaNet, net, -1);
+  for (auto [v, vn] : std::views::enumerate(s_.viaNet))
+    if (vn == net) {
+      vn = -1;
+      vshape_[v] = Shape::circle(P(int(v)), 0);
+    }
   s_.failed[job].clear();
 }
 
@@ -909,6 +916,9 @@ RouterResult Router::run() {
     if (score == 0) break;
   }
   if (bestScore != std::numeric_limits<int>::max()) s_ = std::move(best);
+  for (auto [v, vn] : std::views::enumerate(s_.viaNet))
+    if (m_.verts[v].kind == VKind::ViaSite)
+      vshape_[v] = Shape::circle(P(int(v)), vn >= 0 ? b_.classOf(vn).viaDiameter / 2.0 : 0.0);
   res_.cancelled = cancelled();
 
   int fails = 0;
