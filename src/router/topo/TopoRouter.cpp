@@ -20,6 +20,7 @@
 #include <optional>
 #include <print>
 #include <queue>
+#include <random>
 #include <set>
 #include <ranges>
 #include <unordered_map>
@@ -33,6 +34,7 @@ namespace xr::topo {
 namespace {
 
 constexpr double kUnit = 1e6;  // congestion cost unit: 1 mm of track
+constexpr double kCrossHistory = 3.0;  // history added to the edges of a triangle with crossings
 constexpr size_t kMaxExpansions = 3'000'000;
 
 // rows x cols table with row-major storage, indexed as grid[r, c] through std::mdspan.
@@ -141,6 +143,10 @@ class Router {
   std::vector<NetJob> jobs_;
   double presFac_ = 1;
   bool hardCap_ = false;
+  // Soft planarity (PathFinder for topology): crossing another net's chord is allowed at a cost in
+  // early passes; the nets involved are ripped up and rerouted until the crossings disappear.
+  bool softPlanar_ = false;
+  double crossPenalty_ = 0;
   RouterResult res_;
 
   // Current search context.
@@ -169,8 +175,12 @@ class Router {
   double endCoord(int li, int t, const End& e) const {
     return e.vertex ? double(e.local) : crossCoord(li, t, e.local, e.cid);
   }
-  bool chordOk(int li, int t, double s, double e) const;
-  std::optional<int> exitGap(int li, int t, int le, double s) const;
+  // Number of other-net chords of triangle t the chord s-e would cross; -1 = impossible (shared end).
+  int chordCrossings(int li, int t, double s, double e) const;
+  bool chordOk(int li, int t, double s, double e) const { return relaxed_ || chordCrossings(li, t, s, e) == 0; }
+  // Exit gap on local edge le with the fewest crossings (only crossing-free ones unless soft).
+  std::optional<std::pair<int, int>> exitGap(int li, int t, int le, double s) const;
+  int countCrossings(std::vector<char>* netsInvolved) const;
   Vec2 intervalPoint(int e, double f) const {
     auto [a, c] = interval_[e];
     return a + (c - a) * f;
@@ -390,10 +400,14 @@ double Router::viaPenalty(int w, bool& blocked) const {
       double free = o ? o->shape->distance(via) : via.distance(P(other));
       double need = u.sumW + (u.n - 1) * u.maxC + std::max(viaClr_, u.maxC) + (o ? std::max(o->clr, u.maxC) : 0) +
                     u.n * kRealizeMargin;
-      // Wires already crossing the edges at the site cannot be pushed aside by a via: hard block.
+      // Wires already crossing the edges at the site cannot be pushed aside by a via: hard block,
+      // except in soft passes where the conflict is negotiated like any other overflow.
       if (need - free > 1) {
-        blocked = true;
-        return 0;
+        if (!softPlanar_) {
+          blocked = true;
+          return 0;
+        }
+        cost += presFac_ * kUnit * (1 + (need - free) / (u.sumW / u.n + u.maxC));
       }
     }
   return cost;
@@ -414,24 +428,55 @@ double Router::gapCoord(int li, int t, int le, int g) const {
   return (le + 1) % 3 + f;
 }
 
-bool Router::chordOk(int li, int t, double s, double e) const {
-  if (relaxed_) return true;
+int Router::chordCrossings(int li, int t, double s, double e) const {
   double lo = std::min(s, e), hi = std::max(s, e);
+  int n = 0;
   for (const Chord& ch : s_.chords[li, t]) {
     if (ch.net == net_) continue;
     double a = endCoord(li, t, ch.a), c = endCoord(li, t, ch.b);
-    if (a == s || a == e || c == s || c == e) return false;
+    if (a == s || a == e || c == s || c == e) return -1;
     bool ia = lo < a && a < hi, ic = lo < c && c < hi;
-    if (ia != ic) return false;
+    if (ia != ic) {
+      if (!softPlanar_) return 1;
+      ++n;
+    }
   }
-  return true;
+  return n;
 }
 
-std::optional<int> Router::exitGap(int li, int t, int le, double s) const {
+std::optional<std::pair<int, int>> Router::exitGap(int li, int t, int le, double s) const {
+  if (relaxed_) return std::pair{0, 0};
   int m = int(s_.cross[li, m_.tris[t].e[le]].size());
-  for (int g = 0; g <= m; ++g)
-    if (chordOk(li, t, s, gapCoord(li, t, le, g))) return g;
-  return std::nullopt;
+  std::optional<std::pair<int, int>> best;
+  for (int g = 0; g <= m; ++g) {
+    int c = chordCrossings(li, t, s, gapCoord(li, t, le, g));
+    if (c == 0) return std::pair{g, 0};
+    if (c > 0 && softPlanar_ && (!best || c < best->second)) best = std::pair{g, c};
+  }
+  return best;
+}
+
+int Router::countCrossings(std::vector<char>* netsInvolved) const {
+  int pairs = 0;
+  for (int li = 0; li < NL_; ++li)
+    for (int t = 0; t < int(m_.tris.size()); ++t) {
+      const auto& chs = s_.chords[li, t];
+      for (size_t i = 0; i < chs.size(); ++i)
+        for (size_t j = i + 1; j < chs.size(); ++j) {
+          if (chs[i].net == chs[j].net) continue;
+          double a = endCoord(li, t, chs[i].a), b = endCoord(li, t, chs[i].b);
+          double c = endCoord(li, t, chs[j].a), d = endCoord(li, t, chs[j].b);
+          double lo = std::min(a, b), hi = std::max(a, b);
+          bool ic = lo < c && c < hi, id = lo < d && d < hi;
+          if (ic == id) continue;
+          ++pairs;
+          if (netsInvolved) {
+            (*netsInvolved)[chs[i].net] = 1;
+            (*netsInvolved)[chs[j].net] = 1;
+          }
+        }
+    }
+  return pairs;
 }
 
 bool Router::isTarget(int v, int li) const {
@@ -518,18 +563,19 @@ std::optional<std::vector<SNode>> Router::search(int pad) {
     bool blocked = false;
     double cc = crossCost(e, n.li, blocked);
     if (blocked) { ++nBlocked; return; }
-    auto g = relaxed_ ? std::optional<int>(0) : exitGap(n.li, t, le2, s);
-    if (!g) { ++nNoGap; return; }
+    auto gx = exitGap(n.li, t, le2, s);
+    if (!gx) { ++nNoGap; return; }
     ++nPushed;
+    int g = gx->first;
     int m = int(s_.cross[n.li, e].size());
     SNode c;
     c.li = n.li;
     c.tri = t2;
     c.le = m_.localEdge(t2, e);
-    c.gap = *g;
+    c.gap = g;
     c.chordTri = t;
-    c.pt = intervalPoint(e, (*g + 1.0) / (m + 2.0));
-    c.g = n.g + (c.pt - n.pt).len() + cc;
+    c.pt = intervalPoint(e, (g + 1.0) / (m + 2.0));
+    c.g = n.g + (c.pt - n.pt).len() + cc + gx->second * crossPenalty_;
     c.parent = from;
     push(c, keyEdge(c.li, t2, c.le, c.gap));
   };
@@ -538,14 +584,15 @@ std::optional<std::vector<SNode>> Router::search(int pad) {
     const SNode& n = nodes[from];
     int w = m_.tris[t].v[lv];
     if (n.atVertex && w == n.vtx) return;
-    if (!chordOk(n.li, t, s, double(lv))) return;
+    int crossings = relaxed_ ? 0 : chordCrossings(n.li, t, s, double(lv));
+    if (crossings < 0 || (crossings > 0 && !softPlanar_)) return;
     SNode c;
     c.li = n.li;
     c.atVertex = true;
     c.vtx = w;
     c.chordTri = t;
     c.pt = P(w);
-    c.g = n.g + (c.pt - n.pt).len();
+    c.g = n.g + (c.pt - n.pt).len() + crossings * crossPenalty_;
     c.parent = from;
     if (isTarget(w, n.li)) {
       c.goal = true;
@@ -991,13 +1038,40 @@ RouterResult Router::run() {
   std::vector<int> queue(jobs_.size());
   std::ranges::iota(queue, 0);
   int maxPasses = std::max(1, o_.maxPasses);
+  bool soft = o_.softPlanarity && maxPasses > 2;
+  // Soft passes first (everything routes, conflicts negotiated), then hard passes (planar, within
+  // capacity) that rip up and repair what is left; the last pass also enforces capacity strictly.
+  int softPasses = soft ? std::max(1, maxPasses * 3 / 5) : 0;
   for (int pass = 0; pass < maxPasses && !cancelled(); ++pass) {
-    presFac_ = std::min(64.0, std::pow(2.0, pass));
+    presFac_ = std::min(64.0, std::pow(2.0, pass < softPasses ? pass : pass - softPasses));
     hardCap_ = pass == maxPasses - 1 && maxPasses > 1;
+    softPlanar_ = pass < softPasses;
+    crossPenalty_ = 5 * kUnit * presFac_;  // a crossing costs like 5 mm of track, doubling each pass
     if (pass > 0) {
       std::vector<char> pick(jobs_.size(), 0);
       std::flat_map<int, int> jobOfNet;
       for (auto [j, job] : std::views::enumerate(jobs_)) jobOfNet[job.net] = int(j);
+      // Nets whose chords cross: ripped up, and the triangles where it happened get history cost.
+      std::vector<char> crossNets(b_.nets.size(), 0);
+      if (countCrossings(&crossNets) > 0) {
+        for (int li = 0; li < NL_; ++li)
+          for (int t = 0; t < int(m_.tris.size()); ++t) {
+            const auto& chs = s_.chords[li, t];
+            bool crossed = false;
+            for (size_t i = 0; i < chs.size() && !crossed; ++i)
+              for (size_t k = i + 1; k < chs.size() && !crossed; ++k) {
+                if (chs[i].net == chs[k].net) continue;
+                double a = endCoord(li, t, chs[i].a), bq = endCoord(li, t, chs[i].b);
+                double c = endCoord(li, t, chs[k].a), d = endCoord(li, t, chs[k].b);
+                double lo = std::min(a, bq), hi = std::max(a, bq);
+                crossed = (lo < c && c < hi) != (lo < d && d < hi);
+              }
+            if (crossed)
+              for (int e : m_.tris[t].e) hist_[li, e] += kCrossHistory;
+          }
+        for (int n = 0; n < int(crossNets.size()); ++n)
+          if (crossNets[n] && jobOfNet.contains(n)) pick[jobOfNet[n]] = 1;
+      }
       for (int li = 0; li < NL_; ++li)
         for (int e = 0; e < int(m_.edges.size()); ++e) {
           if (!edgeOverflow(li, e)) continue;
@@ -1014,6 +1088,9 @@ RouterResult Router::run() {
       for (int j = 0; j < int(jobs_.size()); ++j)
         if (pick[j] && !std::ranges::contains(queue, j)) queue.push_back(j);
       if (queue.empty()) break;
+      // A different order every pass: with a fixed order the same net encloses the same pins again.
+      std::mt19937 rng(unsigned(pass) * 7919u);
+      std::shuffle(queue.begin() + long(failedJobs.size()), queue.end(), rng);
     }
     for (int j : queue) ripup(j);
     int done = 0;
@@ -1025,9 +1102,10 @@ RouterResult Router::run() {
     int fails = 0;
     for (auto& f : s_.failed) fails += int(f.size());
     int over = countOverflow();
-    int score = fails + over;
-    res_.log.push_back(std::format("pass {}: rerouted {} nets, {} failed connections, {} overflowed edges",
-                                   pass + 1, queue.size(), fails, over));
+    int crossings = soft ? countCrossings(nullptr) : 0;
+    int score = fails + over + crossings;
+    res_.log.push_back(std::format("pass {}: rerouted {} nets, {} failed connections, {} overflowed edges, {} crossings",
+                                   pass + 1, queue.size(), fails, over, crossings));
     if (score < bestScore) {
       bestScore = score;
       best = s_;
@@ -1035,6 +1113,8 @@ RouterResult Router::run() {
     if (score == 0) break;
   }
   if (bestScore != std::numeric_limits<int>::max()) s_ = std::move(best);
+  softPlanar_ = false;
+  crossPenalty_ = 0;
   for (auto [v, vn] : std::views::enumerate(s_.viaNet))
     if (m_.verts[v].kind == VKind::ViaSite)
       vshape_[v] = Shape::circle(P(int(v)), vn >= 0 ? b_.classOf(vn).viaDiameter / 2.0 : 0.0);
