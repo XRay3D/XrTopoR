@@ -891,3 +891,22 @@ TEST(Gui, TextsSelectAndMove) {
   f.drag(f.at(mid), f.at(mid + Vec2{2 * kNmPerMm, 0}));
   EXPECT_NEAR(b.texts[ti].pos.x, pos.x + 2 * kNmPerMm, 0.05 * kNmPerMm);
 }
+
+// «Ряд переходов» and «Матрица переходов»: two clicks, vias a diameter plus the clearance apart.
+TEST(Gui, ViaRowAndMatrix) {
+  Fixture f("tt.kicad_pcb");
+  const Board& b = f.b();
+  BBox bb = b.bbox();
+  Vec2 c = bb.center();
+  f.look(c, 40);
+  double pitch = double(b.classOf(kNoNet).viaDiameter + b.clearance(kNoNet, -1));
+  size_t vias = b.vias.size();
+  f.view.startVias(ViaKind::Row);
+  QTest::mouseClick(&f.view, Qt::LeftButton, {}, f.at(c + Vec2{0, 5e6}));
+  QTest::mouseClick(&f.view, Qt::LeftButton, {}, f.at(c + Vec2{pitch * 3.5, 5e6}));
+  EXPECT_EQ(b.vias.size(), vias + 4);
+  f.view.startVias(ViaKind::Matrix);
+  QTest::mouseClick(&f.view, Qt::LeftButton, {}, f.at(c + Vec2{0, -5e6}));
+  QTest::mouseClick(&f.view, Qt::LeftButton, {}, f.at(c + Vec2{pitch * 2.5, -5e6 + pitch * 1.5}));
+  EXPECT_EQ(b.vias.size(), vias + 4 + 6);
+}

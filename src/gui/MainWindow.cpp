@@ -302,6 +302,8 @@ void MainWindow::bindCommands() {
       if (c.contains(id)) c.bind(id, [this, target, shape] { view_->startDraw(target, shape); });
     }
   c.bind("Accel_InsertText", [this] { view_->startText(); });
+  c.bind("Cmd_ViaRow", [this] { view_->startVias(ViaKind::Row); });
+  c.bind("Cmd_ViaMatrix", [this] { view_->startVias(ViaKind::Matrix); });
   c.bind("Cmd_FmNoPush", [this] { view_->startFreestyle(topo::Push::None); });
   c.bind("Cmd_FmPushVias", [this] { view_->startFreestyle(topo::Push::Vias); });
   c.bind("Cmd_FmPushComps", [this] { view_->startFreestyle(topo::Push::ViasAndComponents); });

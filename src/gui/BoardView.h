@@ -17,6 +17,7 @@ enum class Mode { Select, Freestyle, Route, Via, Measure, Draw, Text };
 // Creation tools of the «Вставка» menu: what is drawn and with which figure.
 enum class DrawTarget { Board, Keepout, Copper, Cutout, Detail };
 enum class DrawShape { Poly, Rect, Disk, Circle, Line, ArcC, ArcP };
+enum class ViaKind { Single, Row, Matrix };
 enum class MeasureKind { Points, Objects };
 enum class RouteAngle { Free, Deg45, Arc };
 
@@ -38,6 +39,7 @@ class BoardView : public QWidget {
   // A creation tool; one object unless Shift is held when it is chosen (TopoR's single-shot tools).
   void startDraw(DrawTarget target, DrawShape shape);
   void startText();
+  void startVias(ViaKind kind);  // «Ряд переходов» / «Матрица переходов»: two clicks
   DrawTarget drawTarget() const { return drawTarget_; }
   void finishShape();  // Enter / double click / right click: the polygon or line drawn so far
   void setRouteAngle(RouteAngle a);
@@ -213,6 +215,11 @@ class BoardView : public QWidget {
   std::optional<EditSnapshot> dragBefore_;
   std::optional<Pick> pendingClick_;  // press on a selected object: selects it alone if not dragged
   bool placing_ = false;                // a pasted fragment follows the cursor
+  // vias: a single one, or a row / matrix between two clicks
+  ViaKind viaKind_ = ViaKind::Single;
+  std::optional<Vec2> viaStart_;
+  int viaNet_ = kNoNet;
+  std::vector<Vec2> viaSites(Vec2 to) const;
   // drawing tools
   DrawTarget drawTarget_ = DrawTarget::Board;
   DrawShape drawShape_ = DrawShape::Poly;

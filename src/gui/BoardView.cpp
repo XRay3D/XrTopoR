@@ -330,6 +330,12 @@ void BoardView::paintEvent(QPaintEvent*) {
 
 void BoardView::drawTools(QPainter& p) {
   if (mode_ == Mode::Draw) drawDrawing(p);
+  if (mode_ == Mode::Via && viaStart_) {
+    double r = px(doc_->board()->classOf(viaNet_).viaDiameter / 2.0);
+    p.setPen(QPen(QColor(0xff, 0xff, 0x60), 1));
+    p.setBrush(Qt::NoBrush);
+    for (Vec2 v : viaSites(snapped(cursor_))) p.drawEllipse(toScreen(v), std::max(r, 2.0), std::max(r, 2.0));
+  }
   if (drag_ == Drag::None || !dragMoved_) {
     p.setPen(QPen(QColor(0x20, 0x20, 0x20), 1));
     p.setBrush(QColor(0xf0, 0xf0, 0xf0));
@@ -925,6 +931,30 @@ void BoardView::mousePressEvent(QMouseEvent* e) {
     }
     case Mode::Via: {
       Board& b = *doc_->board();
+      if (viaKind_ != ViaKind::Single) {
+        if (!viaStart_) {
+          viaStart_ = pk.item ? pk.snap : w;
+          viaNet_ = pk.item ? itemNet(b, *pk.item) : kNoNet;
+          emit status(tr("Укажите вторую точку %1").arg(viaKind_ == ViaKind::Row ? tr("ряда") : tr("матрицы")));
+          break;
+        }
+        auto sites = viaSites(w);
+        auto before = doc_->beginEdit();
+        const NetClass& nc = b.classOf(viaNet_);
+        for (Vec2 p : sites) {
+          Via v;
+          v.pos = Point(p);
+          v.net = viaNet_;
+          v.diameter = nc.viaDiameter;
+          v.drill = nc.viaDrill;
+          v.layers = b.allCopperMask();
+          b.vias.push_back(v);
+        }
+        viaStart_.reset();
+        doc_->commitEdit(before, viaKind_ == ViaKind::Row ? tr("Ряд переходов") : tr("Матрица переходов"));
+        emit status(tr("Добавлено переходов: %1").arg(sites.size()));
+        break;
+      }
       auto before = doc_->beginEdit();
       Via v;
       v.pos = Point(w);
@@ -1246,7 +1276,8 @@ void BoardView::mouseMoveEvent(QMouseEvent* e) {
   }
   if (mode_ == Mode::Select && !panning_ && !frameStart_)
     setCursor(markerAt(pos) ? Qt::SizeAllCursor : Qt::ArrowCursor);
-  if (routing_ || mode_ == Mode::Measure || (mode_ == Mode::Draw && !drawPts_.empty())) update();
+  if (routing_ || mode_ == Mode::Measure || (mode_ == Mode::Draw && !drawPts_.empty()) || (mode_ == Mode::Via && viaStart_))
+    update();
   lastMouse_ = pos;
 }
 
@@ -1614,6 +1645,39 @@ void BoardView::startDraw(DrawTarget target, DrawShape shape) {
   drawTarget_ = target;
   drawShape_ = shape;
   setMode(Mode::Draw);
+}
+
+void BoardView::startVias(ViaKind kind) {
+  if (!doc_->hasBoard()) return;
+  viaKind_ = kind;
+  viaStart_.reset();
+  setMode(Mode::Via);
+  if (kind != ViaKind::Single)
+    emit status(kind == ViaKind::Row ? tr("Ряд переходов: щёлкните центр первого перехода")
+                                     : tr("Матрица переходов: щёлкните угол прямоугольника"));
+}
+
+// Via centres of a row (along the line to `to`) or a matrix (filling the rectangle), one via diameter
+// plus the clearance apart.
+std::vector<Vec2> BoardView::viaSites(Vec2 to) const {
+  std::vector<Vec2> out;
+  if (!viaStart_) return out;
+  const Board& b = *doc_->board();
+  const NetClass& nc = b.classOf(viaNet_);
+  double pitch = double(nc.viaDiameter + b.clearance(viaNet_, -1));
+  if (pitch <= 0) return out;
+  Vec2 a = *viaStart_, d = to - a;
+  if (viaKind_ == ViaKind::Row) {
+    int n = int(d.len() / pitch) + 1;
+    Vec2 dir = d.normalized();
+    for (int i = 0; i < n && i < 1000; ++i) out.push_back(a + dir * (pitch * i));
+  } else {
+    int nx = int(std::abs(d.x) / pitch) + 1, ny = int(std::abs(d.y) / pitch) + 1;
+    double sx = d.x < 0 ? -pitch : pitch, sy = d.y < 0 ? -pitch : pitch;
+    for (int j = 0; j < ny && nx * ny <= 10000; ++j)
+      for (int i = 0; i < nx; ++i) out.push_back(a + Vec2{sx * i, sy * j});
+  }
+  return out;
 }
 
 void BoardView::startText() {
@@ -1996,6 +2060,11 @@ void BoardView::cancelTool() {
     update();
     return;
   }
+  if (mode_ == Mode::Via && viaStart_) {
+    viaStart_.reset();
+    update();
+    return;
+  }
   if (mode_ == Mode::Measure) setMode(measureReturn_);
   else if (mode_ != Mode::Select) setMode(Mode::Select);
   else doc_->clearSelection();
@@ -2304,7 +2373,7 @@ void BoardView::invertSelection() {
 
 void BoardView::viaKey() {
   if (routing_) routeAddVia();
-  else setMode(Mode::Via);
+  else startVias(ViaKind::Single);
 }
 
 void BoardView::routeUndoLast() {
