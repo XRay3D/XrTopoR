@@ -23,6 +23,7 @@ add_library(xrio STATIC
   io/dsn/DsnWriter.cpp
   io/dsn/SesIO.cpp
   io/pcad/PcadReader.cpp
+  io/pcad/PcadWriter.cpp
   io/gerber/GerberWriter.cpp
   io/svg/SvgWriter.cpp
   io/xml/Xml.cpp

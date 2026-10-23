@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <filesystem>
 
 #include "core/Connectivity.h"
@@ -87,4 +88,41 @@ TEST(PcadIO, ReadAscii) {
   // The original routing connects everything except a few known opens.
   auto c = Connectivity::compute(**b);
   EXPECT_LE(c.ratsnest.size(), 3u);
+}
+
+TEST(PcadIO, WriterRoundTripAndRouting) {
+  auto b = io::loadBoard(data("el4134_pcad_ascii.pcb"));
+  ASSERT_TRUE(b);
+  auto text = io::writePcad(**b);
+  ASSERT_TRUE(text) << text.error();
+  ASSERT_EQ(text->rfind("ACCEL_ASCII", 0), 0u);
+  auto again = io::readPcad(*text, "x.pcb");
+  ASSERT_TRUE(again) << again.error();
+  EXPECT_EQ((*again)->components.size(), (*b)->components.size());
+  EXPECT_EQ((*again)->tracks.size(), (*b)->tracks.size());
+  EXPECT_EQ((*again)->vias.size(), (*b)->vias.size());
+  EXPECT_EQ((*again)->pads[10].pos, (*b)->pads[10].pos);
+  // Moved component and new arc track survive the round trip.
+  (*b)->moveComponent(3, (*b)->components[3].pos + Point(mmToNm(1), 0));
+  Track arc;
+  arc.a = {mmToNm(60), -mmToNm(90)};
+  arc.mid = Point(mmToNm(61), -mmToNm(91));
+  arc.b = {mmToNm(62), -mmToNm(90)};
+  arc.width = mmToNm(0.3);
+  arc.layer = (*b)->topCopper();
+  arc.net = 0;
+  (*b)->tracks.push_back(arc);
+  auto t2 = io::writePcad(**b);
+  ASSERT_TRUE(t2);
+  auto b2 = io::readPcad(*t2, "y.pcb");
+  ASSERT_TRUE(b2);
+  EXPECT_EQ((*b2)->components[3].pos, (*b)->components[3].pos);
+  // Tracks are read layer by layer: find the arc by its end point.
+  auto it = std::ranges::find_if((*b2)->tracks, [&](const Track& t) {
+    auto near = [](Point p, Point q) { return (p.v() - q.v()).len() < 1000; };
+    return t.isArc() && ((near(t.a, arc.a) && near(t.b, arc.b)) || (near(t.a, arc.b) && near(t.b, arc.a)));
+  });
+  ASSERT_NE(it, (*b2)->tracks.end());
+  EXPECT_NEAR(double(it->mid->x), double(arc.mid->x), 1000);
+  EXPECT_NEAR(double(it->mid->y), double(arc.mid->y), 1000);
 }

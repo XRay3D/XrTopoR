@@ -38,6 +38,9 @@ struct ParseOptions {
 Node parse(std::string_view text, ParseOptions opt = {});
 // KiCad-style pretty printer (tabs, one list per line for nested lists).
 std::string write(const Node& n, int indent = 0);
+// P-CAD style: two-space indentation, lists nested at most two deep stay on one line, strings are
+// written verbatim between quotes (P-CAD has no escapes).
+std::string writeCompact(const Node& n, int indent = 0);
 std::string quote(const std::string& s);
 std::string fmtNum(double v, int maxDecimals = 6);
 

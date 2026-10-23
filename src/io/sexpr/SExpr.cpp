@@ -1,5 +1,6 @@
 #include "io/sexpr/SExpr.h"
 
+#include <algorithm>
 #include <charconv>
 #include <cmath>
 #include <cstdio>
@@ -200,6 +201,50 @@ static void writeImpl(const Node& n, int indent, std::string& out) {
     out.append(indent, '\t');
   }
   out += ')';
+}
+
+static int depth(const Node& n) {
+  if (!n.isList) return 0;
+  int d = 1;
+  for (auto& k : n.kids) d = std::max(d, 1 + depth(k));
+  return d;
+}
+
+static void writeCompactImpl(const Node& n, int indent, std::string& out) {
+  if (!n.isList) {
+    if (n.quoted) {
+      out += '"';
+      out += n.text;
+      out += '"';
+    } else {
+      out += n.text;
+    }
+    return;
+  }
+  bool inl = depth(n) <= 2;
+  out += '(';
+  for (size_t k = 0; k < n.kids.size(); ++k) {
+    const Node& c = n.kids[k];
+    if (c.isList && !inl) {
+      out += '\n';
+      out.append(size_t(indent + 1) * 2, ' ');
+      writeCompactImpl(c, indent + 1, out);
+    } else {
+      if (k > 0) out += ' ';
+      writeCompactImpl(c, indent + 1, out);
+    }
+  }
+  if (!inl) {
+    out += '\n';
+    out.append(size_t(indent) * 2, ' ');
+  }
+  out += ')';
+}
+
+std::string writeCompact(const Node& n, int indent) {
+  std::string out;
+  writeCompactImpl(n, indent, out);
+  return out;
 }
 
 std::string write(const Node& n, int indent) {

@@ -1,6 +1,7 @@
 // P-CAD 2002 ASCII (ACCEL_ASCII) board reader.
 #include <algorithm>
 #include <map>
+#include <tuple>
 
 #include "io/BoardIO.h"
 #include "io/Encoding.h"
@@ -258,6 +259,9 @@ struct Reader {
     return it == layerMap.end() ? -1 : it->second;
   }
 
+  std::vector<int> compNode;  // multiLayer child index of each component's pattern instance
+  int currentNode = -1;
+
   void placePattern(const Node& inst) {
     std::string patName = str(inst.find("patternRef"));
     auto it = patterns.find(patName);
@@ -289,6 +293,7 @@ struct Reader {
     }
     int ci = int(b.components.size());
     b.components.push_back(c);
+    compNode.push_back(currentNode);
     auto cu = b.copperLayers();
     for (auto& pp : pat.pads) {
       auto st = padStyles.find(pp.style);
@@ -455,15 +460,35 @@ Result<BoardPtr> readPcad(const std::string& text, const std::string& path) {
   if (const Node* lib = tree->find("library")) r.readLibrary(*lib);
   if (design)
     if (const Node* ml = design->find("multiLayer"))
-      for (auto* inst : ml->findAll("pattern")) r.placePattern(*inst);
+      for (size_t k = 0; k < ml->kids.size(); ++k)
+        if (ml->kids[k].is("pattern")) {
+          r.currentNode = int(k);
+          r.placePattern(ml->kids[k]);
+        }
   if (const Node* nl = tree->find("netlist")) r.readNetlist(*nl);
   if (design) r.readDesign(*design);
   LayerId edge = r.mapLayer(r.boardNum, false);
   if (edge >= 0) buildOutline(*b, edge);
+  // P-CAD keeps no per-net defaults: take the most common track width and via of the design.
+  {
+    std::map<Coord, int> widths;
+    std::map<std::pair<Coord, Coord>, int> viaKinds;
+    for (auto& t : b->tracks) widths[t.width]++;
+    for (auto& v : b->vias) viaKinds[{v.diameter, v.drill}]++;
+    NetClass& d = b->netClasses[0];
+    auto mode = [](const auto& m) { return std::ranges::max_element(m, {}, [](auto& kv) { return kv.second; })->first; };
+    if (!widths.empty()) d.trackWidth = mode(widths);
+    if (!viaKinds.empty()) std::tie(d.viaDiameter, d.viaDrill) = mode(viaKinds);
+  }
   auto src = std::make_shared<SourceDoc>();
   src->format = SourceDoc::Format::Pcad;
   src->path = path;
   src->tree = tree;
+  src->componentNodes = r.compNode;
+  src->layerNums.assign(b->layers.size(), -1);
+  for (auto [num, id] : r.layerMap)
+    if (id >= 0 && id < LayerId(b->layers.size())) src->layerNums[id] = num;
+  src->unitNm = r.unit;
   b->source = src;
   b->rebuildNetIndex();
   return b;

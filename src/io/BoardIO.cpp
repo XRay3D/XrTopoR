@@ -21,6 +21,7 @@ Format detectFormat(const std::string& path) {
   if (ext == ".fst") return Format::Fst;
   if (ext == ".pcb") {
     std::ifstream f(path, std::ios::binary);
+    if (!f) return Format::Pcad;  // a file to be written
     char buf[16] = {};
     f.read(buf, 11);
     if (std::string(buf, 11) == "ACCEL_ASCII") return Format::Pcad;
@@ -76,6 +77,11 @@ Result<void> saveBoard(const Board& b, const std::string& path) {
         if (std::filesystem::exists(srcPro, ec) && std::filesystem::copy_file(srcPro, pro, ec)) return r;
       }
       return writeFile(pro.string(), writeKicadProject(b));
+    }
+    case Format::Pcad: {
+      auto text = writePcad(b);
+      if (!text) return std::unexpected(text.error());
+      return writeFile(path, *text);
     }
     case Format::Dsn: return writeFile(path, writeDsn(b));
     case Format::Ses: return writeFile(path, writeSes(b));

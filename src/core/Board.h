@@ -193,6 +193,9 @@ struct SourceDoc {
   std::vector<int> componentNodes;
   // KiCad: zone node index (in tree children) for each model zone (multi-layer zones map many-to-one).
   std::vector<int> zoneNodes;
+  // P-CAD: layer number of each board layer (-1 = none) and the file's default unit.
+  std::vector<int> layerNums;
+  double unitNm = 0;
 };
 
 }  // namespace xr

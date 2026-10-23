@@ -33,6 +33,8 @@ std::string writeSes(const Board& b);
 // Applies routing (wires, vias) from a session file to the board. Replaces existing routing.
 Result<void> applySes(Board& b, const std::string& text);
 Result<BoardPtr> readPcad(const std::string& text, const std::string& path);
+// Patches the P-CAD ASCII source of the board (placement, routing, vias).
+Result<std::string> writePcad(const Board& b);
 // TopoR PCB 1.2.0 XML (.fst); see io/topor/Fst.h.
 Result<BoardPtr> readFst(const std::string& text, const std::string& path);
 std::string writeFst(const Board& b);
