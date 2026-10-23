@@ -6,6 +6,8 @@
 #include <map>
 #include <numeric>
 
+#include "core/SpatialIndex.h"
+
 namespace xr::edit {
 
 namespace {
@@ -104,8 +106,21 @@ LayerMask mirrorMask(const Board& b, LayerMask m) {
   return out;
 }
 
+bool Fragment::touchesOutline(const Board& b) const {
+  return std::ranges::any_of(details, [&](int i) {
+    LayerId l = b.graphics[i].layer;
+    return l >= 0 && l < LayerId(b.layers.size()) && b.layers[l].kind == LayerKind::Edge;
+  });
+}
+
 BBox bboxOf(const Board& b, const Fragment& f) {
   BBox bb;
+  for (int ki : f.keepouts)
+    for (auto& s : b.keepouts[ki].shapes()) bb.add(s.bbox());
+  for (int ti : f.texts)
+    for (Vec2 p : b.textBox(b.texts[ti])) bb.add(p);
+  for (int di : f.details)
+    for (auto& s : itemShapes(b, {ItemType::Detail, di})) bb.add(s.bbox());
   for (int ci : f.components) {
     for (int pi : b.components[ci].pads) bb.add(b.pads[pi].shapeGeom().bbox());
     if (b.components[ci].pads.empty()) bb.add(b.components[ci].pos.v());
@@ -122,13 +137,15 @@ BBox bboxOf(const Board& b, const Fragment& f) {
 }
 
 Vec2 pivotOf(const Board& b, const Fragment& f) {
-  if (f.components.size() == 1 && f.tracks.empty() && f.vias.empty() && f.zones.empty())
-    return b.components[f.components[0]].pos.v();
+  Fragment rest = f;
+  rest.components.clear();
+  if (f.components.size() == 1 && rest.empty()) return b.components[f.components[0]].pos.v();
   BBox bb = bboxOf(b, f);
   return bb.valid() ? bb.center() : Vec2{};
 }
 
 bool hasLocked(const Board& b, const Fragment& f) {
+  // Keepouts, texts and drawings have no fixation in the model.
   return std::ranges::any_of(f.components, [&](int i) { return b.components[i].locked; }) ||
          std::ranges::any_of(f.tracks, [&](int i) { return b.tracks[i].locked; }) ||
          std::ranges::any_of(f.vias, [&](int i) { return b.vias[i].locked; });
@@ -286,13 +303,39 @@ bool move(Board& b, const Fragment& f, const Motion& m) {
   for (int zi : f.zones) {
     Zone& z = b.zones[zi];
     for (auto& p : z.outline) p = m.apply(p);
-    for (auto& poly : z.filled)
-      for (auto& p : poly) p = m.apply(p);
+    for (auto* polys : {&z.filled, &z.cutouts})
+      for (auto& poly : *polys)
+        for (auto& p : poly) p = m.apply(p);
     if (m.mirror) {
       z.layer = mirrorLayer(b, z.layer);
       std::ranges::reverse(z.outline);
-      for (auto& poly : z.filled) std::ranges::reverse(poly);
+      for (auto* polys : {&z.filled, &z.cutouts})
+        for (auto& poly : *polys) std::ranges::reverse(poly);
     }
+  }
+  for (int ki : f.keepouts) {
+    Keepout& k = b.keepouts[ki];
+    for (auto& g : k.shape) transform(g, m, rightAngle);
+    if (m.mirror) {
+      k.layers = k.layers ? mirrorMask(b, k.layers) : 0;
+      if (k.side != Side::None) k.side = k.side == Side::Top ? Side::Bottom : Side::Top;
+    }
+  }
+  for (int ti : f.texts) {
+    Text& t = b.texts[ti];
+    t.pos = m.apply(t.pos);
+    if (m.mirror) {
+      t.angle = normDeg(m.rotate - t.angle);
+      t.mirror = !t.mirror;
+      t.layer = mirrorLayer(b, t.layer);
+    } else {
+      t.angle = normDeg(t.angle + m.rotate);
+    }
+  }
+  for (int di : f.details) {
+    Graphic& g = b.graphics[di];
+    transform(g, m, rightAngle);
+    if (m.mirror) g.layer = mirrorLayer(b, g.layer);
   }
   for (auto& t : added) b.tracks.push_back(t);
   return true;
@@ -511,6 +554,9 @@ Clip copy(const Board& b, const Fragment& f) {
   for (int ti : f.tracks) c.tracks.push_back(b.tracks[ti]);
   for (int vi : f.vias) c.vias.push_back(b.vias[vi]);
   for (int zi : f.zones) c.zones.push_back(b.zones[zi]);
+  for (int ki : f.keepouts) c.keepouts.push_back(b.keepouts[ki]);
+  for (int ti : f.texts) c.texts.push_back(b.texts[ti]);
+  for (int di : f.details) c.details.push_back(b.graphics[di]);
   for (auto& n : b.nets) c.nets.push_back(n.name);
   for (auto& l : b.layers) c.layers.push_back(l.name);
   Fragment g = f;
@@ -557,8 +603,36 @@ Fragment paste(Board& b, const Clip& c, Vec2 at) {
     for (auto& p : z.outline) p = m.apply(p);
     for (auto& poly : z.filled)
       for (auto& p : poly) p = m.apply(p);
+    for (auto& poly : z.cutouts)
+      for (auto& p : poly) p = m.apply(p);
     f.zones.push_back(int(b.zones.size()));
     b.zones.push_back(std::move(z));
+  }
+  for (Keepout k : c.keepouts) {
+    LayerMask lm = 0;
+    for (LayerId l = 0; l < 64; ++l)
+      if ((k.layers >> l) & 1)
+        if (LayerId n = layer(l); n >= 0) lm |= LayerMask(1) << n;
+    if (k.layers && !lm) continue;
+    k.layers = lm;
+    for (auto& g : k.shape) transform(g, m, true);
+    f.keepouts.push_back(int(b.keepouts.size()));
+    b.keepouts.push_back(std::move(k));
+  }
+  for (Text t : c.texts) {
+    t.layer = layer(t.layer);
+    if (t.layer < 0) continue;
+    if (t.style >= int(b.textStyles.size())) t.style = 0;
+    t.pos = m.apply(t.pos);
+    f.texts.push_back(int(b.texts.size()));
+    b.texts.push_back(std::move(t));
+  }
+  for (Graphic g : c.details) {
+    g.layer = layer(g.layer);
+    if (g.layer < 0) continue;
+    transform(g, m, true);
+    f.details.push_back(int(b.graphics.size()));
+    b.graphics.push_back(std::move(g));
   }
   return f;
 }
@@ -573,6 +647,9 @@ void erase(Board& b, const Fragment& f) {
   drop(b.tracks, f.tracks);
   drop(b.vias, f.vias);
   drop(b.zones, f.zones);
+  drop(b.keepouts, f.keepouts);
+  drop(b.texts, f.texts);
+  drop(b.graphics, f.details);
 }
 
 std::vector<int> removeDegenerate(Board& b) {

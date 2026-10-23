@@ -408,3 +408,76 @@ TEST(FsProj, ReadResolveWrite) {
   ASSERT_EQ(again->extra.size(), 1u);
   EXPECT_EQ(again->extra[0].name, "Import");
 }
+
+// Keepouts (Placement, Arcs), texts with their styles (MinVia) and copper cutouts survive a round trip.
+TEST(FstIO, KeepoutsTextsCutouts) {
+  auto p = io::loadBoard(data("topor/Example_02/Placement.fst"));
+  ASSERT_TRUE(p) << p.error();
+  ASSERT_EQ((*p)->keepouts.size(), 4u);
+  const Keepout& k = (*p)->keepouts[0];
+  EXPECT_EQ(k.role, Keepout::Role::Route);
+  EXPECT_TRUE(k.wires && k.vias);
+  EXPECT_EQ(k.layers, LayerMask(1) << (*p)->findLayer("Top"));
+  ASSERT_EQ(k.shape.size(), 1u);
+  EXPECT_EQ(k.shape[0].kind, GraphicKind::Line);
+
+  auto m = io::loadBoard(data("topor/Example_05/MinVia.fst"));
+  ASSERT_TRUE(m) << m.error();
+  Board& b = **m;
+  EXPECT_EQ(b.texts.size(), 34u);
+  EXPECT_GT(b.textStyles.size(), 1u);
+  ASSERT_FALSE(b.zones.empty() && b.copperCount() == 0);
+  // A cutout in a copper area of our own.
+  Zone z;
+  z.layer = b.topCopper();
+  z.outline = {{0, 0}, {10e6, 0}, {10e6, 10e6}, {0, 10e6}};
+  z.cutouts.push_back({{2e6, 2e6}, {4e6, 2e6}, {4e6, 4e6}});
+  b.zones.push_back(z);
+  auto again = io::readFst(io::writeFst(b), "rt.fst");
+  ASSERT_TRUE(again) << again.error();
+  const Board& c = **again;
+  ASSERT_EQ(c.texts.size(), b.texts.size());
+  for (size_t i = 0; i < b.texts.size(); ++i) {
+    EXPECT_EQ(c.texts[i].text, b.texts[i].text);
+    EXPECT_EQ(c.layers[c.texts[i].layer].name, b.layers[b.texts[i].layer].name);
+    EXPECT_EQ(c.styleOf(c.texts[i]).name, b.styleOf(b.texts[i]).name);
+    EXPECT_NEAR(c.texts[i].pos.x, b.texts[i].pos.x, 100);
+    EXPECT_NEAR(c.texts[i].pos.y, b.texts[i].pos.y, 100);
+  }
+  ASSERT_FALSE(c.zones.empty());
+  EXPECT_EQ(c.zones.back().cutouts.size(), 1u);
+
+  auto a = io::loadBoard(data("topor/Example_04/Arcs.fst"));
+  ASSERT_TRUE(a) << a.error();
+  ASSERT_EQ((*a)->keepouts.size(), 1u);
+  EXPECT_EQ((*a)->keepouts[0].layers, 0u);  // all layers
+  auto ar = io::readFst(io::writeFst(**a), "rt.fst");
+  ASSERT_TRUE(ar) << ar.error();
+  ASSERT_EQ((*ar)->keepouts.size(), 1u);
+  EXPECT_EQ((*ar)->keepouts[0].shape.size(), (*a)->keepouts[0].shape.size());
+}
+
+// Keepouts go to KiCad as rule areas and come back.
+TEST(FstIO, KeepoutsToKicad) {
+  auto a = io::loadBoard(data("topor/Example_04/Arcs.fst"));
+  ASSERT_TRUE(a) << a.error();
+  Board& b = **a;
+  Keepout k;
+  k.vias = false;
+  k.layers = LayerMask(1) << b.topCopper();
+  Graphic g;
+  g.kind = GraphicKind::Poly;
+  g.filled = true;
+  g.pts = {{0, 0}, {5e6, 0}, {5e6, 5e6}, {0, 5e6}};
+  k.shape.push_back(g);
+  b.keepouts.push_back(k);
+  std::string out = ::testing::TempDir() + "xr_keepouts.kicad_pcb";
+  ASSERT_TRUE(io::saveBoard(b, out));
+  auto r = io::loadBoard(out);
+  ASSERT_TRUE(r) << r.error();
+  ASSERT_EQ((*r)->keepouts.size(), 1u);  // the line keepout of Arcs has no KiCad form
+  EXPECT_TRUE((*r)->keepouts[0].wires);
+  EXPECT_FALSE((*r)->keepouts[0].vias);
+  EXPECT_EQ((*r)->keepouts[0].layers, LayerMask(1) << (*r)->topCopper());
+  EXPECT_EQ((*r)->zones.size(), b.zones.size());
+}

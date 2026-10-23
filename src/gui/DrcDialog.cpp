@@ -25,8 +25,8 @@ namespace xr::gui {
 namespace {
 
 const char* kKindNames[] = {"КП", "ПО", "Проводники", "Запреты", "Металлизация", "Надписи", "Контур ПП"};
-// Kinds the design model has (no keepouts and texts yet).
-bool modelled(int k) { return k != 3 && k != 5; }
+// Kinds the checks cover (texts are not checked yet).
+bool modelled(int k) { return k != 5; }
 
 int kindOf(ItemType t) {
   switch (t) {
@@ -34,6 +34,9 @@ int kindOf(ItemType t) {
     case ItemType::Via: return 1;
     case ItemType::Track: return 2;
     case ItemType::Zone: return 4;
+    case ItemType::Keepout: return 3;
+    case ItemType::Text: return 5;
+    case ItemType::Detail: return 6;
   }
   return 2;
 }
@@ -181,6 +184,7 @@ int DrcDialog::run(Document* doc, QWidget* parent) {
     if (x.type == DrcViolation::Type::Clearance || x.type == DrcViolation::Type::Short)
       return !s.value(pairKey(kindOf(x.a.type), kindOf(x.b.type)), true).toBool();
     if (x.type == DrcViolation::Type::Edge) return !s.value(pairKey(kindOf(x.a.type), 6), true).toBool();
+    if (x.type == DrcViolation::Type::Keepout) return !s.value(pairKey(kindOf(x.a.type), 3), true).toBool();
     return false;
   });
   if (s.value("drc/report", false).toBool() && !s.value("drc/reportPath").toString().isEmpty()) {

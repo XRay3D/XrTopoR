@@ -12,6 +12,7 @@ const char* drcTypeName(DrcViolation::Type t) {
     case DrcViolation::Type::Edge: return "edge";
     case DrcViolation::Type::Unconnected: return "unconnected";
     case DrcViolation::Type::Width: return "width";
+    case DrcViolation::Type::Keepout: return "keepout";
   }
   return "?";
 }
@@ -42,6 +43,9 @@ std::string itemName(const Board& b, ItemRef r) {
     case ItemType::Track: return "track";
     case ItemType::Via: return "via";
     case ItemType::Zone: return "zone";
+    case ItemType::Keepout: return "keepout";
+    case ItemType::Text: return "text";
+    case ItemType::Detail: return "detail";
   }
   return "?";
 }
@@ -254,6 +258,35 @@ std::vector<DrcViolation> runDrc(const Board& b, const DrcOptions& opt) {
       v.message = "Width " + mm(double(t.width)) + " < " + mm(double(min)) + " mm: " + itemName(b, v.a) + " [" +
                   netName(b, t.net) + "]";
       out.push_back(std::move(v));
+    }
+
+  if (opt.keepouts)
+    for (int ki = 0; ki < int(b.keepouts.size()); ++ki) {
+      const Keepout& k = b.keepouts[ki];
+      if (k.role != Keepout::Role::Route) continue;
+      auto ks = k.shapes();
+      BBox kb;
+      for (auto& s : ks) kb.add(s.bbox());
+      LayerMask lm = k.layers ? k.layers : b.allCopperMask();
+      idx.query(kb, lm, [&](ItemRef r) {
+        bool kept = (r.type == ItemType::Track && k.wires) || (r.type == ItemType::Via && k.vias) ||
+                    (r.type == ItemType::Zone && k.wires);
+        if (!kept || out.size() >= opt.maxViolations) return;
+        for (auto& s1 : itemShapes(b, r))
+          for (auto& s2 : ks)
+            if (s1.distance(s2) < -opt.tolerance) {
+              DrcViolation v;
+              v.type = DrcViolation::Type::Keepout;
+              v.a = r;
+              v.b = {ItemType::Keepout, ki};
+              v.hasB = true;
+              v.pos = s1.center();
+              if (r.type == ItemType::Track) v.layer = b.tracks[r.index].layer;
+              v.message = "Keepout: " + itemName(b, r) + " [" + netName(b, itemNet(b, r)) + "]";
+              out.push_back(std::move(v));
+              return;
+            }
+      });
     }
 
   if (opt.unconnected) {

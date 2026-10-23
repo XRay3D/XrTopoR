@@ -270,7 +270,43 @@ struct Reader {
     b.vias.push_back(v);
   }
 
+  // A rule area with (keepout …): what it forbids on which copper layers.
+  void readKeepout(const Node& n, const Node& ko) {
+    Keepout k;
+    auto denied = [&](const char* what) {
+      const Node* w = ko.find(what);
+      return w && w->arg(0) == "not_allowed";
+    };
+    k.wires = denied("tracks") || denied("copperpour");
+    k.vias = denied("vias");
+    if (!k.wires && !k.vias) return;
+    std::vector<std::string> names;
+    if (const Node* l = n.find("layer")) names.push_back(l->arg(0));
+    else if (const Node* ls = n.find("layers"))
+      for (size_t i = 0; i < ls->argc(); ++i) names.push_back(ls->arg(i));
+    for (auto& nm : names) {
+      if (nm == "*.Cu" || nm == "F&B.Cu") {
+        k.layers = 0;
+        break;
+      }
+      if (LayerId l = b.findLayer(nm); l >= 0 && b.layers[l].kind == LayerKind::Copper) k.layers |= LayerMask(1) << l;
+    }
+    Graphic g;
+    g.kind = GraphicKind::Poly;
+    g.filled = true;
+    if (const Node* poly = n.find("polygon"))
+      if (const Node* pts = poly->find("pts"))
+        for (auto* p : pts->findAll("xy")) g.pts.push_back(xy(p));
+    if (g.pts.size() < 3) return;
+    k.shape.push_back(std::move(g));
+    b.keepouts.push_back(std::move(k));
+  }
+
   void readZone(const Node& n) {
+    if (const Node* ko = n.find("keepout")) {
+      readKeepout(n, *ko);
+      return;
+    }
     Zone z;
     z.net = netOf(n.find("net"));
     if (const Node* nm = n.find("name")) z.name = nm->arg(0);

@@ -188,6 +188,45 @@ void Board::rotateComponent(int comp, double deltaDeg) {
   updatePadPositions(comp);
 }
 
+std::vector<Shape> Keepout::shapes() const {
+  std::vector<Shape> out;
+  for (const Graphic& g : shape) switch (g.kind) {
+      case GraphicKind::Line: out.push_back(Shape::capsule(g.a, g.b, 0)); break;
+      case GraphicKind::Arc: {
+        auto arc = ArcGeom::fromThreePoints(g.a, g.m, g.b);
+        auto pts = arc.valid ? arc.tessellate(5000) : Polyline{g.a, g.b};
+        for (size_t i = 1; i < pts.size(); ++i) out.push_back(Shape::capsule(pts[i - 1], pts[i], 0));
+        break;
+      }
+      case GraphicKind::Circle:
+        if (g.filled) out.push_back(Shape::circle(g.a, (g.b - g.a).len()));
+        else out.push_back(Shape::polygon(Shape::circle(g.a, (g.b - g.a).len()).outline(5000)));
+        break;
+      case GraphicKind::Rect: out.push_back(Shape::polygon({g.a, {g.b.x, g.a.y}, g.b, {g.a.x, g.b.y}})); break;
+      case GraphicKind::Poly:
+        if (g.pts.size() >= 3) out.push_back(Shape::polygon(g.pts));
+        break;
+    }
+  return out;
+}
+
+const TextStyle& Board::styleOf(const Text& t) const {
+  static const TextStyle def;
+  return t.style >= 0 && t.style < int(textStyles.size()) ? textStyles[size_t(t.style)] : def;
+}
+
+std::array<Vec2, 4> Board::textBox(const Text& t) const {
+  double h = double(styleOf(t).height), w = 0.7 * h * double(std::max<size_t>(1, t.text.size()));
+  int col = int(t.align) % 3, row = int(t.align) / 3;  // 0 left/top, 1 centre/middle, 2 right/bottom
+  double x0 = -w * col / 2.0, y0 = -h * row / 2.0;  // Y down: a bottom-aligned text rises above its point
+  std::array<Vec2, 4> c{Vec2{x0, y0}, Vec2{x0 + w, y0}, Vec2{x0 + w, y0 + h}, Vec2{x0, y0 + h}};
+  for (auto& p : c) {
+    if (t.mirror) p.x = -p.x;
+    p = t.pos + rotateBoard(p, t.angle);
+  }
+  return c;
+}
+
 BBox Board::bbox() const {
   BBox b;
   for (auto& c : outline)

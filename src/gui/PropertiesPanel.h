@@ -1,6 +1,6 @@
 #pragma once
 // «Свойства» (Alt+Enter), as in TopoR: a page for the kind of the selected objects — component, pin,
-// wire, via, copper area — with the editable values; several objects of one kind show what they have
+// wire, via, copper area, keepout, text, detail or board outline — with the editable values; several objects of one kind show what they have
 // in common and are edited together.
 #include <QWidget>
 #include <functional>
@@ -26,6 +26,9 @@ class PropertiesPanel : public QWidget {
   QWidget* wirePage(const std::vector<int>& tracks);
   QWidget* viaPage(const std::vector<int>& vias);
   QWidget* zonePage(int zone);
+  QWidget* keepoutPage(int keepout);
+  QWidget* textPage(int text);
+  QWidget* detailPage(const std::vector<int>& details);
   // A length in display units; the callback gets nm, on Enter or focus out.
   QWidget* length(std::optional<double> nm, std::function<void(double)> set, double min = 0);
 

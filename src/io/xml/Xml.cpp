@@ -296,6 +296,14 @@ void Writer::emptyList(std::string_view name, const std::vector<std::pair<std::s
   out_ += eol_;
 }
 
+void Writer::openList(std::string_view name, const std::vector<std::pair<std::string, std::string>>& attrs) {
+  startTag(name, {});
+  for (auto& [k, v] : attrs) attribute(k, v);
+  out_ += '>';
+  out_ += eol_;
+  stack_.emplace_back(name);
+}
+
 void Writer::open(std::string_view name, std::initializer_list<std::pair<std::string_view, std::string_view>> attrs) {
   startTag(name, attrs);
   out_ += '>';

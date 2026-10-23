@@ -6,6 +6,7 @@
 #include <QFormLayout>
 #include <QHeaderView>
 #include <QLabel>
+#include <QLineEdit>
 #include <QScrollArea>
 #include <QSpinBox>
 #include <QTabWidget>
@@ -99,7 +100,7 @@ void PropertiesPanel::rebuild() {
     const Board& b = *doc_->board();
     auto items = doc_->selectedItems();
     auto comps = doc_->selectedComponents();
-    std::vector<int> tracks, vias, pads, zones;
+    std::vector<int> tracks, vias, pads, zones, keepouts, texts, details;
     for (ItemRef r : items) {
       if (r.index < 0) continue;
       switch (r.type) {
@@ -107,15 +108,22 @@ void PropertiesPanel::rebuild() {
         case ItemType::Via: vias.push_back(r.index); break;
         case ItemType::Pad: pads.push_back(r.index); break;
         case ItemType::Zone: zones.push_back(r.index); break;
+        case ItemType::Keepout: keepouts.push_back(r.index); break;
+        case ItemType::Text: texts.push_back(r.index); break;
+        case ItemType::Detail: details.push_back(r.index); break;
       }
     }
-    int kinds = !tracks.empty() + !vias.empty() + !zones.empty() + !comps.empty() + (comps.empty() && !pads.empty());
+    int kinds = !tracks.empty() + !vias.empty() + !zones.empty() + !comps.empty() + (comps.empty() && !pads.empty()) +
+                !keepouts.empty() + !texts.empty() + !details.empty();
     if (kinds == 0) page = message(tr("Нет выделенных объектов"));
     else if (kinds > 1) page = message(tr("Выделены объекты разных типов (%1)").arg(items.size() + comps.size()));
     else if (!comps.empty()) page = componentPage(comps);
     else if (!tracks.empty()) page = wirePage(tracks);
     else if (!vias.empty()) page = viaPage(vias);
     else if (!zones.empty()) page = zones.size() == 1 ? zonePage(zones[0]) : message(tr("Области металлизации (%1)").arg(zones.size()));
+    else if (!keepouts.empty()) page = keepouts.size() == 1 ? keepoutPage(keepouts[0]) : message(tr("Запреты (%1)").arg(keepouts.size()));
+    else if (!texts.empty()) page = texts.size() == 1 ? textPage(texts[0]) : message(tr("Надписи (%1)").arg(texts.size()));
+    else if (!details.empty()) page = detailPage(details);
     else page = pads.size() == 1 ? padPage(pads[0]) : message(tr("Контакты (%1)").arg(pads.size()));
     (void)b;
   }
@@ -123,6 +131,141 @@ void PropertiesPanel::rebuild() {
 }
 
 // ---------------------------------------------------------------- pages
+
+QWidget* PropertiesPanel::keepoutPage(int ki) {
+  const Board& b = *doc_->board();
+  const Keepout& k = b.keepouts[ki];
+  auto* w = new QWidget;
+  auto* f = new QFormLayout(w);
+  f->addRow(title(tr("Запрет")));
+  auto* role = new QComboBox;
+  role->addItems({tr("Запрет трассировки"), tr("Запрет размещения")});
+  role->setCurrentIndex(k.role == Keepout::Role::Place);
+  connect(role, &QComboBox::activated, this, [this, ki](int i) {
+    edit(tr("Роль запрета"), [&](Board& bd) { bd.keepouts[ki].role = i ? Keepout::Role::Place : Keepout::Role::Route; });
+  });
+  f->addRow(tr("Роль:"), role);
+  if (k.role == Keepout::Role::Route) {
+    auto* what = new QComboBox;
+    what->addItems({tr("Проводники"), tr("Переходные отверстия"), tr("Проводники и переходные отверстия")});
+    what->setCurrentIndex(k.wires && k.vias ? 2 : k.vias ? 1 : 0);
+    connect(what, &QComboBox::activated, this, [this, ki](int i) {
+      edit(tr("Запрет трассировки"), [&](Board& bd) {
+        bd.keepouts[ki].wires = i != 1;
+        bd.keepouts[ki].vias = i != 0;
+      });
+    });
+    f->addRow(tr("Распространяется на:"), what);
+    // Layers: «Все слои» or a set of copper layers.
+    auto* all = new QCheckBox(tr("Все слои"));
+    all->setChecked(!k.layers);
+    connect(all, &QCheckBox::toggled, this, [this, ki](bool on) {
+      const Board& bd = *doc_->board();
+      edit(tr("Слои запрета"), [&](Board& x) { x.keepouts[ki].layers = on ? 0 : LayerMask(1) << bd.topCopper(); });
+    });
+    f->addRow(tr("Слои:"), all);
+    for (LayerId l : b.copperLayers()) {
+      auto* cb = new QCheckBox(QString::fromStdString(b.layers[l].name));
+      cb->setChecked(!k.layers || ((k.layers >> l) & 1));
+      cb->setEnabled(k.layers != 0);
+      connect(cb, &QCheckBox::toggled, this, [this, ki, l](bool on) {
+        edit(tr("Слои запрета"), [&](Board& x) {
+          LayerMask& m = x.keepouts[ki].layers;
+          m = on ? m | (LayerMask(1) << l) : m & ~(LayerMask(1) << l);
+          if (!m) m = LayerMask(1) << l;  // at least one layer
+        });
+      });
+      f->addRow(QString(), cb);
+    }
+  } else {
+    auto* side = new QComboBox;
+    side->addItems({tr("Верхняя сторона"), tr("Нижняя сторона"), tr("Обе стороны")});
+    side->setCurrentIndex(k.side == Side::Top ? 0 : k.side == Side::Bottom ? 1 : 2);
+    connect(side, &QComboBox::activated, this, [this, ki](int i) {
+      edit(tr("Сторона запрета"), [&](Board& bd) { bd.keepouts[ki].side = i == 0 ? Side::Top : i == 1 ? Side::Bottom : Side::None; });
+    });
+    f->addRow(tr("Сторона:"), side);
+  }
+  return w;
+}
+
+QWidget* PropertiesPanel::textPage(int ti) {
+  const Board& b = *doc_->board();
+  const Text& t = b.texts[ti];
+  auto* w = new QWidget;
+  auto* f = new QFormLayout(w);
+  f->addRow(title(tr("Надпись")));
+  auto* text = new QLineEdit(QString::fromStdString(t.text));
+  connect(text, &QLineEdit::returnPressed, this, [this, text, ti] {
+    if (text->text().isEmpty()) return;
+    edit(tr("Изменить надпись"), [&](Board& bd) { bd.texts[ti].text = text->text().toStdString(); });
+  });
+  f->addRow(tr("Текст:"), text);
+  auto* layer = new QComboBox;
+  for (LayerId l = 0; l < LayerId(b.layers.size()); ++l)
+    if (b.layers[l].kind != LayerKind::Edge) layer->addItem(QString::fromStdString(b.layers[l].name), int(l));
+  layer->setCurrentIndex(layer->findData(int(t.layer)));
+  connect(layer, &QComboBox::activated, this, [this, layer, ti](int i) {
+    edit(tr("Слой надписи"), [&](Board& bd) { bd.texts[ti].layer = LayerId(layer->itemData(i).toInt()); });
+  });
+  f->addRow(tr("Слой:"), layer);
+  auto* style = new QComboBox;
+  for (auto& st : b.textStyles) style->addItem(QString::fromStdString(st.name));
+  style->setCurrentIndex(t.style);
+  connect(style, &QComboBox::activated, this, [this, ti](int i) {
+    edit(tr("Стиль надписи"), [&](Board& bd) { bd.texts[ti].style = i; });
+  });
+  f->addRow(tr("Стиль:"), style);
+  auto* angle = new QDoubleSpinBox;
+  angle->setRange(-360, 360);
+  angle->setSuffix("°");
+  angle->setValue(t.angle);
+  angle->setKeyboardTracking(false);
+  connect(angle, &QDoubleSpinBox::editingFinished, this, [this, angle, ti] {
+    if (angle->value() == doc_->board()->texts[ti].angle) return;
+    edit(tr("Поворот надписи"), [&](Board& bd) { bd.texts[ti].angle = angle->value(); });
+  });
+  f->addRow(tr("Поворот:"), angle);
+  auto* mirror = new QCheckBox(tr("Зеркальность"));
+  mirror->setChecked(t.mirror);
+  connect(mirror, &QCheckBox::toggled, this, [this, ti](bool on) {
+    edit(tr("Зеркальность надписи"), [&](Board& bd) { bd.texts[ti].mirror = on; });
+  });
+  f->addRow(mirror);
+  return w;
+}
+
+QWidget* PropertiesPanel::detailPage(const std::vector<int>& details) {
+  const Board& b = *doc_->board();
+  bool outline = std::ranges::all_of(details, [&](int i) {
+    LayerId l = b.graphics[i].layer;
+    return l >= 0 && b.layers[l].kind == LayerKind::Edge;
+  });
+  auto* w = new QWidget;
+  auto* f = new QFormLayout(w);
+  f->addRow(title(outline ? tr("Контур платы") : tr("Деталь")));
+  if (!outline) {
+    auto* layer = new QComboBox;
+    for (LayerId l = 0; l < LayerId(b.layers.size()); ++l)
+      if (b.layers[l].kind != LayerKind::Copper && b.layers[l].kind != LayerKind::Edge)
+        layer->addItem(QString::fromStdString(b.layers[l].name), int(l));
+    auto cur = common<LayerId>(details, [&](int i) { return b.graphics[i].layer; });
+    layer->setCurrentIndex(cur ? layer->findData(int(*cur)) : -1);
+    connect(layer, &QComboBox::activated, this, [this, layer, details](int i) {
+      edit(tr("Слой детали"), [&](Board& bd) {
+        for (int d : details) bd.graphics[d].layer = LayerId(layer->itemData(i).toInt());
+      });
+    });
+    f->addRow(tr("Слой:"), layer);
+  }
+  auto wid = common<Coord>(details, [&](int i) { return b.graphics[i].width; });
+  f->addRow(tr("Толщина линии:"), length(wid ? std::optional<double>(double(*wid)) : std::nullopt, [this, details](double nm) {
+              edit(tr("Толщина линии"), [&](Board& bd) {
+                for (int d : details) bd.graphics[d].width = Coord(std::llround(nm));
+              });
+            }));
+  return w;
+}
 
 QWidget* PropertiesPanel::componentPage(const std::vector<int>& comps) {
   const Board& b = *doc_->board();

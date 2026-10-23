@@ -37,13 +37,23 @@ struct EditSnapshot {
   std::vector<Track> tracks;
   std::vector<Via> vias;
   std::vector<Zone> zones;
-  static EditSnapshot take(const Board& b) { return {b.components, b.pads, b.tracks, b.vias, b.zones}; }
+  std::vector<Keepout> keepouts;
+  std::vector<Text> texts;
+  std::vector<Graphic> graphics;
+  std::vector<std::vector<Vec2>> outline;
+  static EditSnapshot take(const Board& b) {
+    return {b.components, b.pads, b.tracks, b.vias, b.zones, b.keepouts, b.texts, b.graphics, b.outline};
+  }
   void apply(Board& b) const {
     b.components = components;
     b.pads = pads;
     b.tracks = tracks;
     b.vias = vias;
     b.zones = zones;
+    b.keepouts = keepouts;
+    b.texts = texts;
+    b.graphics = graphics;
+    b.outline = outline;
   }
 };
 

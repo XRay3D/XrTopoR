@@ -114,6 +114,9 @@ void Document::validateSelection() {
       case ItemType::Via: return r.index < int(board_->vias.size());
       case ItemType::Pad: return r.index < int(board_->pads.size());
       case ItemType::Zone: return r.index < int(board_->zones.size());
+      case ItemType::Keepout: return r.index < int(board_->keepouts.size());
+      case ItemType::Text: return r.index < int(board_->texts.size());
+      case ItemType::Detail: return r.index < int(board_->graphics.size());
     }
     return false;
   };

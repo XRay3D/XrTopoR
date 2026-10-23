@@ -1,6 +1,7 @@
 #pragma once
 // Board data model. Internal frame follows KiCad: Y axis points down, units are nanometres,
 // angles are degrees counter-clockwise as seen on screen.
+#include <array>
 #include <cstdint>
 #include <inplace_vector>
 #include <map>
@@ -135,6 +136,7 @@ struct Zone {
   LayerId layer = 0;
   std::string name;
   std::vector<Vec2> outline;
+  std::vector<std::vector<Vec2>> cutouts;  // «Вырезы в металлизации»: never poured
   std::vector<std::vector<Vec2>> filled;
   Coord clearance = 0;
   int priority = 0;              // higher priority zones are cut out of lower ones
@@ -143,6 +145,42 @@ struct Zone {
   Coord spokeWidth = 0;          // 0 = fill default
   double spokeAngle = 0;         // degrees relative to the pad (TopoR default 45)
   Coord minWidth = 0;            // 0 = fill default
+};
+
+// «Запрет». A routing keepout keeps wires and/or vias off its copper layers, a placement keepout keeps
+// components off a side. Its shape is a closed figure (an area) or open lines (a barrier wires may not cross).
+struct Keepout {
+  enum class Role { Route, Place } role = Role::Route;
+  bool wires = true, vias = true;  // routing: what is kept out
+  LayerMask layers = 0;            // routing: copper layers, 0 = all
+  Side side = Side::None;          // placement: Top, Bottom, None = both sides
+  std::vector<Graphic> shape;      // layer unused
+  bool onLayer(LayerId l) const { return role == Role::Route && (!layers || ((layers >> l) & 1)); }
+  // Areas as polygons and circles, lines as zero-width capsules (arcs in chords).
+  std::vector<Shape> shapes() const;
+};
+
+// Text style («Редактор стилей надписей»): TopoR's vector fonts by name, character height and stroke.
+struct TextStyle {
+  std::string name = "(Default)";
+  std::string font = "QUALITY";
+  Coord height = mmToNm(1.5);
+  Coord lineWidth = 0;  // 0: a tenth of the height
+  bool bold = false, italic = false;
+  Coord stroke() const { return lineWidth > 0 ? lineWidth : height / 10; }
+};
+
+// The point of a text that `pos` gives: Left/Centre/Right × Top/Middle/Bottom.
+enum class TextAlign { LT, CT, RT, LM, CM, RM, LB, CB, RB };
+
+struct Text {
+  std::string text;
+  Vec2 pos;
+  double angle = 0;  // degrees, counter-clockwise on screen
+  bool mirror = false;
+  LayerId layer = -1;
+  int style = 0;     // into Board::textStyles
+  TextAlign align = TextAlign::LB;
 };
 
 struct SourceDoc;
@@ -158,7 +196,10 @@ struct Board {
   std::vector<Track> tracks;
   std::vector<Via> vias;
   std::vector<Zone> zones;
-  std::vector<Graphic> graphics;           // board-level drawings
+  std::vector<Graphic> graphics;           // board-level drawings (board outline, details)
+  std::vector<Keepout> keepouts;
+  std::vector<TextStyle> textStyles{TextStyle{}};
+  std::vector<Text> texts;
   std::vector<std::vector<Vec2>> outline;  // closed board contours (first = outer)
   Coord edgeClearance = mmToNm(0.25);
   double designUnitNm = kNmPerMm;  // unit the design was drawn in (lengths are shown in it)
@@ -196,6 +237,10 @@ struct Board {
   void rotateComponent(int comp, double deltaDeg);
 
   BBox bbox() const;
+  const TextStyle& styleOf(const Text& t) const;
+  // Approximate extent of a text: characters 0.7 of the height wide (TopoR's vector fonts), as the
+  // corners of its box in board coordinates.
+  std::array<Vec2, 4> textBox(const Text& t) const;
   void rebuildNetIndex();  // fixes cached lookup after edits
   void clearRouting(bool keepLocked = true);
 

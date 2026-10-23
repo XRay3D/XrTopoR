@@ -13,7 +13,13 @@ namespace xr::edit {
 
 struct Fragment {
   std::vector<int> components, tracks, vias, zones;
-  bool empty() const { return components.empty() && tracks.empty() && vias.empty() && zones.empty(); }
+  std::vector<int> keepouts, texts, details;  // details: board drawings (Board::graphics), the outline among them
+  bool empty() const {
+    return components.empty() && tracks.empty() && vias.empty() && zones.empty() && keepouts.empty() && texts.empty() &&
+           details.empty();
+  }
+  // Whether the board outline must be built again from its drawings after an edit of the fragment.
+  bool touchesOutline(const Board& b) const;
 };
 
 // Rigid motion p → pivot + R(rotate)·M·(p − pivot) + shift, where M mirrors x when `mirror` is set:
@@ -82,15 +88,20 @@ struct Clip {
   std::vector<Track> tracks;
   std::vector<Via> vias;
   std::vector<Zone> zones;
+  std::vector<Keepout> keepouts;
+  std::vector<Text> texts;
+  std::vector<Graphic> details;
   std::vector<std::string> nets, layers;  // names in the source design, by index
   Vec2 origin;                            // centre of the copied objects
-  bool empty() const { return tracks.empty() && vias.empty() && zones.empty(); }
+  bool empty() const {
+    return tracks.empty() && vias.empty() && zones.empty() && keepouts.empty() && texts.empty() && details.empty();
+  }
 };
 Clip copy(const Board& b, const Fragment& f);
 // Appends the clip with its origin at `at` (nets and layers matched by name; objects on layers the
 // design lacks are dropped) and returns what was added. Pasted objects are never locked.
 Fragment paste(Board& b, const Clip& c, Vec2 at);
-// Removes the fragment's tracks, vias and copper areas (components stay: they belong to the netlist).
+// Removes the fragment's objects but its components (they belong to the netlist).
 void erase(Board& b, const Fragment& f);
 
 // Removes zero-length tracks (drags leave them); returns old → new track index (-1 = removed).

@@ -45,6 +45,7 @@ class Writer {
   void empty(std::string_view name, std::initializer_list<std::pair<std::string_view, std::string_view>> attrs = {});
   // Self-closing element with a run-time list of attributes.
   void emptyList(std::string_view name, const std::vector<std::pair<std::string, std::string>>& attrs);
+  void openList(std::string_view name, const std::vector<std::pair<std::string, std::string>>& attrs);
   // <name>text</name> on one line.
   void textElement(std::string_view name, std::string_view text);
   // A parsed element written back with its attributes, text and children (sections kept verbatim).

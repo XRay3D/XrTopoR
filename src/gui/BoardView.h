@@ -13,7 +13,10 @@
 
 namespace xr::gui {
 
-enum class Mode { Select, Freestyle, Route, Via, Measure };
+enum class Mode { Select, Freestyle, Route, Via, Measure, Draw, Text };
+// Creation tools of the «Вставка» menu: what is drawn and with which figure.
+enum class DrawTarget { Board, Keepout, Copper, Cutout, Detail };
+enum class DrawShape { Poly, Rect, Disk, Circle, Line, ArcC, ArcP };
 enum class MeasureKind { Points, Objects };
 enum class RouteAngle { Free, Deg45, Arc };
 
@@ -32,6 +35,11 @@ class BoardView : public QWidget {
  public slots:
   void setMode(Mode m);
   void startFreestyle(topo::Push push);  // F8 and its sub-modes
+  // A creation tool; one object unless Shift is held when it is chosen (TopoR's single-shot tools).
+  void startDraw(DrawTarget target, DrawShape shape);
+  void startText();
+  DrawTarget drawTarget() const { return drawTarget_; }
+  void finishShape();  // Enter / double click / right click: the polygon or line drawn so far
   void setRouteAngle(RouteAngle a);
   void setRatsnestVisible(bool on);
   void setOnlyActiveLayer(bool on);
@@ -147,6 +155,13 @@ class BoardView : public QWidget {
   void drawVia(QPainter& p, const Via& v, const QColor& c);
   void drawGraphic(QPainter& p, const Graphic& g, const QColor& c);
   void drawOverlay(QPainter& p);
+  void drawKeepouts(QPainter& p);
+  void drawText(QPainter& p, const Text& t, const QColor& c);
+  void drawDrawing(QPainter& p);  // the figure being drawn
+  void drawClick(Vec2 w);
+  void createShape(std::vector<Graphic> figure);  // what the drawing tool makes of a finished figure
+  bool keepoutVisible(const Keepout& k) const;
+  void syncOutline();  // board outline from its drawings, after they changed
 
   // Routing tool state
   void routeStart(const Pick& pk, Vec2 at);
@@ -198,6 +213,11 @@ class BoardView : public QWidget {
   std::optional<EditSnapshot> dragBefore_;
   std::optional<Pick> pendingClick_;  // press on a selected object: selects it alone if not dragged
   bool placing_ = false;                // a pasted fragment follows the cursor
+  // drawing tools
+  DrawTarget drawTarget_ = DrawTarget::Board;
+  DrawShape drawShape_ = DrawShape::Poly;
+  bool drawSticky_ = false;
+  std::vector<Vec2> drawPts_;
   // Freestyle: the board changes step by step (wires re-shaped), so a drag goes on from where it is.
   topo::Push push_ = topo::Push::None;
   topo::FreestyleTarget fsTarget_;

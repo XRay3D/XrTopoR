@@ -1,11 +1,8 @@
-<?xml version="1.0" encoding="UTF-8"?>
+<?xml version="1.0" encoding="UTF-8"?>
 <!--********************************************-->
-<!--   File    : Example_04.fsproj              -->
 <!--   Format  : TopoR Project file             -->
 <!--   Version : 2                              -->
-<!--   Program : TopoR 32 Layer 7.0.18313 Alpha -->
-<!--   Date    : Monday, April 09, 2018         -->
-<!--   Time    : 18:15                          -->
+<!--   Program : XrTopoR                        -->
 <!--********************************************-->
 
 <Project>
@@ -14,7 +11,7 @@
    <Documents>
       <Section name="PCB" isExpanded="true">
          <File path=".\Arcs.fsx" isopened="0" dateChange="2018-01-09 18:55:03"/>
-         <File path=".\Arcs_standard_routing.fsx" isopened="0" dateChange="2017-12-15 06:04:38"/>
+         <File path=".\Arcs_standard_routing.fsx" isopened="1" dateChange="2026-10-23 15:38:32"/>
          <File path=".\Arcs_master.pcb" dateChange="2011-09-12 17:13:04"/>
       </Section>
       <Section name="AutoRouting" isExpanded="true"/>

@@ -29,6 +29,46 @@ std::vector<Shape> itemShapes(const Board& b, ItemRef r, double expand) {
       for (auto& f : z.filled) out.push_back(Shape::polygon(f, expand));
       break;
     }
+    case ItemType::Keepout:
+      for (auto& s : b.keepouts[r.index].shapes()) out.push_back(s.inflated(expand));
+      break;
+    case ItemType::Text: {
+      auto c = b.textBox(b.texts[r.index]);
+      out.push_back(Shape::polygon({c.begin(), c.end()}, expand));
+      break;
+    }
+    case ItemType::Detail: {
+      const Graphic& g = b.graphics[r.index];
+      double w = g.width / 2.0 + expand;
+      switch (g.kind) {
+        case GraphicKind::Line: out.push_back(Shape::capsule(g.a, g.b, w)); break;
+        case GraphicKind::Arc: {
+          auto arc = ArcGeom::fromThreePoints(g.a, g.m, g.b);
+          auto pts = arc.valid ? arc.tessellate(2000) : Polyline{g.a, g.b};
+          for (size_t i = 1; i < pts.size(); ++i) out.push_back(Shape::capsule(pts[i - 1], pts[i], w));
+          break;
+        }
+        case GraphicKind::Circle: {
+          double rad = (g.b - g.a).len();
+          if (g.filled) out.push_back(Shape::circle(g.a, rad + w));
+          else {
+            auto pts = Shape::circle(g.a, rad).outline(2000);
+            for (size_t i = 0; i < pts.size(); ++i) out.push_back(Shape::capsule(pts[i], pts[(i + 1) % pts.size()], w));
+          }
+          break;
+        }
+        case GraphicKind::Rect:
+        case GraphicKind::Poly: {
+          Polyline pts = g.kind == GraphicKind::Rect ? Polyline{g.a, {g.b.x, g.a.y}, g.b, {g.a.x, g.b.y}} : g.pts;
+          if (g.filled && pts.size() >= 3) out.push_back(Shape::polygon(pts, w));
+          else
+            for (size_t i = 0; i + 1 < pts.size() + (pts.size() >= 3); ++i)
+              out.push_back(Shape::capsule(pts[i], pts[(i + 1) % pts.size()], w));
+          break;
+        }
+      }
+      break;
+    }
   }
   return out;
 }
@@ -39,6 +79,9 @@ int itemNet(const Board& b, ItemRef r) {
     case ItemType::Via: return b.vias[r.index].net;
     case ItemType::Track: return b.tracks[r.index].net;
     case ItemType::Zone: return b.zones[r.index].net;
+    case ItemType::Keepout:
+    case ItemType::Text:
+    case ItemType::Detail: return kNoNet;
   }
   return kNoNet;
 }
@@ -49,6 +92,12 @@ LayerMask itemLayers(const Board& b, ItemRef r) {
     case ItemType::Via: return b.vias[r.index].layers;
     case ItemType::Track: return LayerMask(1) << b.tracks[r.index].layer;
     case ItemType::Zone: return LayerMask(1) << b.zones[r.index].layer;
+    case ItemType::Keepout: {
+      const Keepout& k = b.keepouts[r.index];
+      return k.role == Keepout::Role::Route ? (k.layers ? k.layers : b.allCopperMask()) : 0;
+    }
+    case ItemType::Text: return b.texts[r.index].layer >= 0 ? LayerMask(1) << b.texts[r.index].layer : 0;
+    case ItemType::Detail: return b.graphics[r.index].layer >= 0 ? LayerMask(1) << b.graphics[r.index].layer : 0;
   }
   return 0;
 }

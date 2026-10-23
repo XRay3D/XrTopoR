@@ -552,6 +552,59 @@ struct Writer {
       for (auto& [layer, g] : details) writeDetail(layer, g);
       x.close();
     }
+    writeTexts();
+    writeKeepouts();
+    x.close();
+  }
+
+  Graphic fstGraphic(const Graphic& g) const {
+    Graphic l = g;
+    l.a = toFst(g.a);
+    l.b = toFst(g.b);
+    l.m = toFst(g.m);
+    if (g.kind == GraphicKind::Circle) l.b = l.a + Vec2{(g.b - g.a).len() / kNmPerMm, 0};
+    for (auto& v : l.pts) v = toFst(v);
+    return l;
+  }
+
+  void writeTexts() {
+    static const char* aligns[] = {"LT", "CT", "RT", "LM", "CM", "RM", "LB", "CB", "RB"};
+    bool any = false;
+    for (auto& t : b.texts) {
+      if (t.layer < 0 || t.layer >= LayerId(b.layers.size()) || layerName[t.layer].empty()) continue;
+      if (!any) x.open("Texts");
+      any = true;
+      std::vector<std::pair<std::string, std::string>> a{{"text", t.text}, {"align", aligns[int(t.align)]}};
+      if (std::abs(t.angle) > 1e-9) a.push_back({"angle", num(t.angle)});
+      if (t.mirror) a.push_back({"mirror", "on"});
+      x.openList("Text", a);
+      x.empty("LayerRef", {{"name", layerName[t.layer]}});
+      x.empty("TextStyleRef", {{"name", b.styleOf(t).name}});
+      xy("Org", toFst(t.pos));
+      x.close();
+    }
+    if (any) x.close();
+  }
+
+  void writeKeepouts() {
+    if (b.keepouts.empty()) return;
+    x.open("Keepouts");
+    for (auto& k : b.keepouts) {
+      x.open("Keepout");
+      x.open("Role");
+      if (k.role == Keepout::Role::Place) {
+        x.empty("Place", {{"side", k.side == Side::Top ? "Top" : k.side == Side::Bottom ? "Bottom" : "Both"}});
+      } else {
+        x.open("Trace", {{"role", k.wires && k.vias ? "Wires and Vias" : k.wires ? "Wires" : "Vias"}});
+        if (!k.layers) x.empty("AllLayers");
+        for (LayerId l = 0; l < LayerId(b.layers.size()); ++l)
+          if (k.layers && ((k.layers >> l) & 1) && !layerName[l].empty()) x.empty("LayerRef", {{"name", layerName[l]}});
+        x.close();
+      }
+      x.close();
+      for (auto& g : k.shape) writeFigure(fstGraphic(g));
+      x.close();
+    }
     x.close();
   }
 
@@ -916,6 +969,12 @@ struct Writer {
     x.open("Shape");
     writeFilledContour(z.outline);
     x.close();
+    if (!z.cutouts.empty()) {
+      x.open("Voids");
+      for (auto& c : z.cutouts)
+        if (c.size() >= 3) writeFilledContour(c);
+      x.close();
+    }
     if (!z.filled.empty()) {
       x.open("Islands");
       for (auto& f : z.filled) {
@@ -959,7 +1018,12 @@ struct Writer {
     writeLayers();
     x.blank();
     x.open("TextStyles", {{"version", "1.0"}});
-    x.empty("TextStyle", {{"name", "Default"}, {"fontName", "default"}, {"height", "1"}});
+    for (auto& st : b.textStyles) {
+      std::vector<std::pair<std::string, std::string>> a{{"name", st.name}, {"fontName", st.font}, {"height", mm(double(st.height))}};
+      if (st.bold) a.push_back({"bold", "on"});
+      if (st.italic) a.push_back({"italic", "on"});
+      x.emptyList("TextStyle", a);
+    }
     x.close();
     x.blank();
     x.open("LocalLibrary", {{"version", "1.4"}});

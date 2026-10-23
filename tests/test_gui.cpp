@@ -812,3 +812,82 @@ TEST(Gui, FreestyleDrag) {
   f.view.cancelTool();
   EXPECT_EQ(f.view.mode(), Mode::Select);
 }
+
+// «Вставка»: a keepout rectangle, a copper polygon with a cutout and another board contour.
+TEST(Gui, DrawingTools) {
+  Fixture f("tt.kicad_pcb");
+  const Board& b = f.b();
+  BBox bb = b.bbox();
+  Vec2 c = bb.center();
+  f.look(c, bb.width() / kNmPerMm * 1.2);
+  auto click = [&](Vec2 w) { QTest::mouseClick(&f.view, Qt::LeftButton, {}, f.at(w)); };
+  Vec2 d{2 * kNmPerMm, 2 * kNmPerMm};
+
+  f.view.startDraw(DrawTarget::Keepout, DrawShape::Rect);
+  EXPECT_EQ(f.view.mode(), Mode::Draw);
+  click(c - d);
+  click(c + d);
+  EXPECT_EQ(f.view.mode(), Mode::Select);  // single-shot
+  ASSERT_EQ(b.keepouts.size(), 1u);
+  EXPECT_EQ(b.keepouts[0].layers, LayerMask(1) << f.doc.activeLayer());
+  ASSERT_EQ(f.doc.selectedItems().size(), 1u);
+  EXPECT_EQ(f.doc.selectedItems()[0].type, ItemType::Keepout);
+
+  size_t zones = b.zones.size();
+  f.view.startDraw(DrawTarget::Copper, DrawShape::Poly);
+  click(c + Vec2{-6e6, -6e6});
+  click(c + Vec2{6e6, -6e6});
+  click(c + Vec2{6e6, 6e6});
+  click(c + Vec2{-6e6, 6e6});
+  f.view.finishShape();
+  ASSERT_EQ(b.zones.size(), zones + 1);
+  EXPECT_EQ(b.zones.back().outline.size(), 4u);
+  EXPECT_TRUE(b.zones.back().filled.empty());
+  // A cutout goes into the selected (unpoured) area.
+  f.view.startDraw(DrawTarget::Cutout, DrawShape::Circle);
+  ASSERT_EQ(f.view.mode(), Mode::Draw);
+  click(c + Vec2{3e6, 3e6});
+  click(c + Vec2{4e6, 3e6});
+  ASSERT_EQ(b.zones.back().cutouts.size(), 1u);
+  f.doc.undoStack()->undo();
+  EXPECT_TRUE(b.zones.back().cutouts.empty());
+  f.doc.undoStack()->undo();
+  EXPECT_EQ(b.zones.size(), zones);
+
+  // Another contour (a cutout of the board here).
+  size_t loops = b.outline.size();
+  f.view.startDraw(DrawTarget::Board, DrawShape::Rect);
+  click(c + Vec2{1e6, -1e6});
+  click(c + Vec2{2e6, 1e6});
+  EXPECT_EQ(b.outline.size(), loops + 1);
+  f.doc.undoStack()->undo();
+  EXPECT_EQ(b.outline.size(), loops);
+
+  // Esc drops a figure half drawn, then leaves the tool.
+  f.view.startDraw(DrawTarget::Detail, DrawShape::Line);
+  click(c);
+  f.view.cancelTool();
+  EXPECT_EQ(f.view.mode(), Mode::Draw);
+  f.view.cancelTool();
+  EXPECT_EQ(f.view.mode(), Mode::Select);
+}
+
+// Texts are picked by their box and move with the selection.
+TEST(Gui, TextsSelectAndMove) {
+  Fixture f("topor/Example_05/MinVia.fst");
+  const Board& b = f.b();
+  ASSERT_FALSE(b.texts.empty());
+  // MinVia's texts are on documenting layers the routing scheme hides: put one on the top copper.
+  int ti = 0;
+  f.doc.board()->texts[ti].layer = b.topCopper();
+  ASSERT_TRUE(f.doc.layerVisible(b.texts[ti].layer));
+  auto box = b.textBox(b.texts[ti]);
+  Vec2 mid = (box[0] + box[2]) * 0.5;
+  f.look(mid, 20);
+  QTest::mouseClick(&f.view, Qt::LeftButton, {}, f.at(mid));
+  ASSERT_EQ(f.doc.selectedItems().size(), 1u);
+  EXPECT_EQ(f.doc.selectedItems()[0].type, ItemType::Text);
+  Vec2 pos = b.texts[ti].pos;
+  f.drag(f.at(mid), f.at(mid + Vec2{2 * kNmPerMm, 0}));
+  EXPECT_NEAR(b.texts[ti].pos.x, pos.x + 2 * kNmPerMm, 0.05 * kNmPerMm);
+}

@@ -188,6 +188,14 @@ std::optional<Polyline> findPath(const Board& b, Vec2 from, Vec2 to, LayerId lay
     }
     for (auto& s : itemShapes(b, r)) g.mark(s, req);
   });
+  // Routing keepouts of the layer: their areas, and their lines as barriers.
+  for (const Keepout& k : b.keepouts) {
+    if (!k.onLayer(layer) || !k.wires) continue;
+    for (auto& sh : k.shapes()) {
+      if (sh.kind == Shape::Kind::Polygon) g.markPolygon(sh.poly, half);
+      else g.mark(sh, half);
+    }
+  }
   // Holes without copper still keep wires off.
   for (const Pad& p : b.pads)
     if (!p.onLayer(layer) && p.drill > 0) g.mark(Shape::circle(p.pos.v(), p.drill / 2.0), double(b.edgeClearance) + half);

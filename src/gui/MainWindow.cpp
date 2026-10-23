@@ -283,6 +283,25 @@ void MainWindow::bindCommands() {
 
   // Режимы редактора и автопроцедуры
   c.bind("Cmd_ModeSelect", [this] { view_->setMode(Mode::Select); });
+  // Вставка: shape tools of every target, texts.
+  struct Target {
+    const char* prefix;
+    DrawTarget target;
+  };
+  struct Figure {
+    const char* suffix;
+    DrawShape shape;
+  };
+  for (auto [prefix, target] : {Target{"Board", DrawTarget::Board}, Target{"Keepout", DrawTarget::Keepout},
+                                Target{"Copper", DrawTarget::Copper}, Target{"Cutout", DrawTarget::Cutout},
+                                Target{"Detail", DrawTarget::Detail}})
+    for (auto [suffix, shape] : {Figure{"Poly", DrawShape::Poly}, Figure{"Rect", DrawShape::Rect}, Figure{"Disk", DrawShape::Disk},
+                                 Figure{"Circle", DrawShape::Circle}, Figure{"Line", DrawShape::Line},
+                                 Figure{"ArcC", DrawShape::ArcC}, Figure{"ArcP", DrawShape::ArcP}}) {
+      QString id = QString("Cmd_%1%2").arg(prefix, suffix);
+      if (c.contains(id)) c.bind(id, [this, target, shape] { view_->startDraw(target, shape); });
+    }
+  c.bind("Accel_InsertText", [this] { view_->startText(); });
   c.bind("Cmd_FmNoPush", [this] { view_->startFreestyle(topo::Push::None); });
   c.bind("Cmd_FmPushVias", [this] { view_->startFreestyle(topo::Push::Vias); });
   c.bind("Cmd_FmPushComps", [this] { view_->startFreestyle(topo::Push::ViasAndComponents); });
@@ -618,6 +637,12 @@ void MainWindow::updateModeButtons() {
   switch (view_->mode()) {
     case Mode::Select: modeBar_->setActiveMode("Cmd_ModeSelect"); break;
     case Mode::Freestyle: modeBar_->setActiveMode("Accel_FM"); break;
+    case Mode::Draw: {
+      static const char* groups[] = {"Cmd_ModeBoard", "Cmd_ModeKeepout", "Cmd_ModeCopper", "Cmd_ModeCutout", "Cmd_ModeDetail"};
+      modeBar_->setActiveMode(groups[int(view_->drawTarget())]);
+      break;
+    }
+    case Mode::Text: modeBar_->setActiveMode("Accel_InsertText"); break;
     case Mode::Route: modeBar_->setActiveMode("Accel_RouteMode"); break;
     case Mode::Via: modeBar_->setActiveMode("Cmd_ModeVia"); break;
     case Mode::Measure: modeBar_->setActiveMode("Accel_Measure"); break;
@@ -1107,6 +1132,16 @@ void MainWindow::describeSelection() {
       case ItemType::Via: text = tr("Переход, цепь %1").arg(netName(b.vias[r.index].net)); break;
       case ItemType::Pad: text = tr("Контакт %1, цепь %2").arg(QString::fromStdString(b.pads[r.index].number), netName(b.pads[r.index].net)); break;
       case ItemType::Zone: text = tr("Область металлизации, цепь %1").arg(netName(b.zones[r.index].net)); break;
+      case ItemType::Keepout:
+        text = b.keepouts[r.index].role == Keepout::Role::Route ? tr("Запрет трассировки") : tr("Запрет размещения");
+        break;
+      case ItemType::Text: text = tr("Надпись «%1»").arg(QString::fromStdString(b.texts[r.index].text)); break;
+      case ItemType::Detail: {
+        LayerId l = b.graphics[r.index].layer;
+        text = l >= 0 && b.layers[l].kind == LayerKind::Edge ? tr("Контур платы")
+                                                              : tr("Деталь на слое %1").arg(QString::fromStdString(b.layers[l].name));
+        break;
+      }
     }
   } else if (comps.size() == 1 && items.size() <= 1) {
     const Component& c = b.components[comps[0]];

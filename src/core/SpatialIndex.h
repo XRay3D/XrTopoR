@@ -8,7 +8,9 @@
 
 namespace xr {
 
-enum class ItemType { Pad, Track, Via, Zone };
+// Copper items are indexed; keepouts, texts and board drawings (details, outline) are selectable
+// objects too but stay out of the index.
+enum class ItemType { Pad, Track, Via, Zone, Keepout, Text, Detail };
 
 struct ItemRef {
   ItemType type = ItemType::Pad;

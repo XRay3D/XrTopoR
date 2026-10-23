@@ -3,6 +3,7 @@
 // mirrored about the footprint's vertical axis before rotation, like Specctra.
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <format>
@@ -617,6 +618,70 @@ struct Reader {
         for (auto& f : figs)
           if (LayerId l = b.findLayer(f.layer); l >= 0) b.graphics.push_back(toGraphic(f, l));
       }
+    if (auto* ts = cs.find("Texts"))
+      for (auto* t : ts->findAll("Text")) readText(*t);
+    if (auto* ks = cs.find("Keepouts"))
+      for (auto* k : ks->findAll("Keepout")) readKeepout(*k);
+  }
+
+  // --- texts and keepouts ---
+  std::map<std::string, int, std::less<>> styleIndex;
+
+  void readTextStyles(const Element& ts) {
+    b.textStyles.clear();
+    for (auto* e : ts.findAll("TextStyle")) {
+      TextStyle st;
+      st.name = std::string(e->attr("name"));
+      st.font = std::string(e->attr("fontName", "QUALITY"));
+      st.height = len(e->num("height", 1.5));
+      st.bold = e->flag("bold");
+      st.italic = e->flag("italic");
+      // P-CAD styles come as «T:H<height>W<stroke>» in mils.
+      int h = 0, w = 0;
+      if (std::sscanf(st.name.c_str(), "T:H%dW%d", &h, &w) == 2 && w > 0) st.lineWidth = Coord(w) * kNmPerMil;
+      styleIndex[st.name] = int(b.textStyles.size());
+      b.textStyles.push_back(std::move(st));
+    }
+    if (b.textStyles.empty()) b.textStyles.push_back({});
+  }
+
+  void readText(const Element& e) {
+    Text t;
+    t.text = std::string(e.attr("text"));
+    static const char* aligns[] = {"LT", "CT", "RT", "LM", "CM", "RM", "LB", "CB", "RB"};
+    std::string_view al = e.attr("align", "LB");
+    for (int i = 0; i < 9; ++i)
+      if (al == aligns[i]) t.align = TextAlign(i);
+    t.angle = e.num("angle");
+    t.mirror = e.flag("mirror");
+    if (auto* lr = e.find("LayerRef")) t.layer = b.findLayer(std::string(lr->attr("name")));
+    if (t.layer < 0) return;
+    if (auto* sr = e.find("TextStyleRef"))
+      if (auto it = styleIndex.find(sr->attr("name")); it != styleIndex.end()) t.style = it->second;
+    t.pos = toBoard(pt(e.find("Org")));
+    b.texts.push_back(std::move(t));
+  }
+
+  void readKeepout(const Element& e) {
+    Keepout k;
+    if (auto* role = e.find("Role")) {
+      if (auto* tr = role->find("Trace")) {
+        std::string_view r = tr->attr("role", "Wires and Vias");
+        k.wires = r != "Vias";
+        k.vias = r != "Wires";
+        for (auto* lr : tr->findAll("LayerRef"))
+          if (LayerId l = copperByName(lr->attr("name")); l >= 0) k.layers |= LayerMask(1) << l;
+      } else if (auto* pl = role->find("Place")) {
+        k.role = Keepout::Role::Place;
+        std::string_view side = pl->attr("side", "Both");
+        k.side = side == "Top" ? Side::Top : side == "Bottom" ? Side::Bottom : Side::None;
+      }
+    }
+    std::vector<FpGraphic> figs;
+    for (auto& f : e.kids)
+      if (!f.is("Role")) figure(f, figs, "", 0);
+    for (auto& f : figs) k.shape.push_back(toGraphic(f, -1));
+    if (!k.shape.empty()) b.keepouts.push_back(std::move(k));
   }
 
   // --- nets ---
@@ -982,6 +1047,9 @@ struct Reader {
         if (!z.outline.empty()) break;
       }
     if (z.outline.empty()) return;
+    if (auto* vs = c.find("Voids"))
+      for (auto& f : vs->kids)
+        if (auto h = filledPolygon(f); h.size() >= 3) z.cutouts.push_back(std::move(h));
     if (auto* is = c.find("Islands"))
       for (auto* island : is->findAll("Island")) {
         // Island = outer contour + Voids (holes) + thermal spokes (separate copper pieces).
@@ -1033,6 +1101,7 @@ Result<BoardPtr> readFst(const std::string& text, const std::string& path) {
     b->addLayer("Top", LayerKind::Copper, Side::Top);
     b->addLayer("Bottom", LayerKind::Copper, Side::Bottom);
   }
+  if (auto* ts = root.find("TextStyles")) r.readTextStyles(*ts);
   if (auto* lib = root.find("LocalLibrary")) r.readLibrary(*lib);
   if (auto* cs = root.find("Constructive")) r.readConstructive(*cs);
   if (auto* cob = root.find("ComponentsOnBoard")) r.readComponents(*cob);

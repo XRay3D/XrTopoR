@@ -163,6 +163,17 @@ ZoneFillStats fillZones(Board& b, const ZoneFillOptions& opt) {
     for (auto& p : b.pads)
       if (p.drill > 0 && !p.copper && zb.inflated(maxClr).contains(p.pos.v()))
         holes.push_back(toMulti(Shape::circle(p.pos.v(), p.drill / 2.0 + zoneClr + opt.arcTolerance).outline(opt.arcTolerance)));
+    // The area's cutouts and the routing keepouts of its layer stay unpoured (a keepout line cuts the
+    // pour in two).
+    for (auto& c : z.cutouts)
+      if (c.size() >= 3) holes.push_back(toMulti(c));
+    for (auto& k : b.keepouts) {
+      if (!k.onLayer(z.layer) || !k.wires) continue;
+      for (auto& s : k.shapes()) {
+        if (s.kind == Shape::Kind::Polygon) holes.push_back(toMulti(s.poly));  // may be concave: taken as drawn
+        else holes.push_back(toMulti(s.inflated(s.kind == Shape::Kind::Segment ? zoneClr / 2 : 0).outline(opt.arcTolerance)));
+      }
+    }
     // Thermal reliefs: a ring of `thermalGap` around the pad, crossed by four spokes.
     double gap = double(z.thermalGap > 0 ? z.thermalGap : opt.thermalGap);
     double spoke = double(z.spokeWidth > 0 ? z.spokeWidth : opt.spokeWidth);

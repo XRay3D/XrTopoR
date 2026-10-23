@@ -196,6 +196,48 @@ void flipFootprint(Node& fp) {
   }
 }
 
+// Routing keepouts as KiCad rule areas; KiCad has areas only, so keepout lines are left out.
+void appendKeepouts(const Board& b, Node& root) {
+  for (const Keepout& k : b.keepouts) {
+    if (k.role != Keepout::Role::Route) continue;
+    for (auto& s : k.shapes()) {
+      if (s.kind == Shape::Kind::Segment) continue;
+      Node z = Node::list("zone");
+      Node net = Node::list("net");
+      net.addAtom("0");
+      z.add(std::move(net));
+      z.add(strNode("net_name", ""));
+      Node layers = Node::list("layers");
+      if (!k.layers) layers.addAtom("*.Cu", true);
+      for (LayerId l : b.copperLayers())
+        if (k.layers && ((k.layers >> l) & 1)) layers.addAtom(b.layers[l].name, true);
+      z.add(std::move(layers));
+      Node hatch = Node::list("hatch");
+      hatch.addAtom("edge");
+      hatch.addAtom("0.5");
+      z.add(std::move(hatch));
+      Node ko = Node::list("keepout");
+      auto rule = [&](const char* what, bool denied) {
+        Node r = Node::list(what);
+        r.addAtom(denied ? "not_allowed" : "allowed");
+        ko.add(std::move(r));
+      };
+      rule("tracks", k.wires);
+      rule("vias", k.vias);
+      rule("pads", false);
+      rule("copperpour", k.wires);
+      rule("footprints", false);
+      z.add(std::move(ko));
+      Node poly = Node::list("polygon");
+      Node pts = Node::list("pts");
+      for (Vec2 p : s.kind == Shape::Kind::Polygon ? s.poly : s.outline(5000)) pts.add(xyNode("xy", p));
+      poly.add(std::move(pts));
+      z.add(std::move(poly));
+      root.add(std::move(z));
+    }
+  }
+}
+
 std::string patchSource(const Board& b) {
   Node tree = *b.source->tree;
   Node& root = tree.kids[0];
@@ -245,6 +287,9 @@ std::string patchSource(const Board& b) {
       zn.add(std::move(fp));
     }
   }
+  // Keepout rule areas are written again from the model.
+  std::erase_if(root.kids, [](const Node& n) { return n.is("zone") && n.find("keepout"); });
+  appendKeepouts(b, root);
   // Replace routing.
   std::erase_if(root.kids, [](const Node& n) { return n.is("segment") || n.is("arc") || n.is("via"); });
   appendRouting(b, st, root);
@@ -492,6 +537,7 @@ std::string generate(const Board& b) {
     }
   }
   appendZones(kb, st, root);
+  appendKeepouts(kb, root);
   appendRouting(kb, st, root);
   return sexpr::write(root) + "\n";
 }

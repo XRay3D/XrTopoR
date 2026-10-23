@@ -1,5 +1,7 @@
 #include "gui/SmallDialogs.h"
 
+#include <QCheckBox>
+#include <QComboBox>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
@@ -92,6 +94,58 @@ std::optional<double> askRotationAngle(QWidget* parent) {
   double a = QInputDialog::getDouble(parent, QObject::tr("Повернуть на угол"), QObject::tr("Угол поворота, °:"), 45, -360,
                                      360, 3, &ok);
   return ok ? std::optional<double>(a) : std::nullopt;
+}
+
+bool askText(QWidget* parent, Document* doc, Text& t) {
+  const Board& b = *doc->board();
+  QDialog dlg(parent);
+  dlg.setWindowTitle(QObject::tr("Надпись"));
+  auto* f = new QFormLayout(&dlg);
+  auto* text = new QLineEdit(QString::fromStdString(t.text.empty() ? "Text" : t.text));
+  f->addRow(QObject::tr("Текст:"), text);
+  auto* layer = new QComboBox;
+  for (LayerId l = 0; l < LayerId(b.layers.size()); ++l)
+    if (b.layers[l].kind != LayerKind::Edge) layer->addItem(QString::fromStdString(b.layers[l].name), int(l));
+  layer->setCurrentIndex(std::max(0, layer->findData(int(t.layer))));
+  f->addRow(QObject::tr("Слой:"), layer);
+  auto* style = new QComboBox;
+  Unit u = doc->unit();
+  for (int i = 0; i < int(b.textStyles.size()); ++i)
+    style->addItem(QObject::tr("%1 (высота %2 %3)")
+                       .arg(QString::fromStdString(b.textStyles[size_t(i)].name),
+                            formatLength(double(b.textStyles[size_t(i)].height), u, 3), unitName(u)),
+                   i);
+  style->setCurrentIndex(std::max(0, style->findData(t.style)));
+  f->addRow(QObject::tr("Стиль:"), style);
+  auto* angle = new QDoubleSpinBox;
+  angle->setRange(-360, 360);
+  angle->setDecimals(2);
+  angle->setSuffix("°");
+  angle->setValue(t.angle);
+  f->addRow(QObject::tr("Поворот:"), angle);
+  auto* align = new QComboBox;
+  for (const char* a : {"Слева сверху", "По центру сверху", "Справа сверху", "Слева по центру", "По центру", "Справа по центру",
+                        "Слева снизу", "По центру снизу", "Справа снизу"})
+    align->addItem(QObject::tr(a));
+  align->setCurrentIndex(int(t.align));
+  f->addRow(QObject::tr("Точка привязки:"), align);
+  auto* mirror = new QCheckBox(QObject::tr("Зеркальность"));
+  mirror->setChecked(t.mirror);
+  f->addRow(mirror);
+  auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+  f->addRow(bb);
+  QObject::connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+  QObject::connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+  text->selectAll();
+  text->setFocus();
+  if (dlg.exec() != QDialog::Accepted || text->text().isEmpty()) return false;
+  t.text = text->text().toStdString();
+  t.layer = LayerId(layer->currentData().toInt());
+  t.style = style->currentData().toInt();
+  t.angle = angle->value();
+  t.align = TextAlign(align->currentIndex());
+  t.mirror = mirror->isChecked();
+  return true;
 }
 
 std::optional<int> askNet(QWidget* parent, Document* doc, int current) {

@@ -1,5 +1,6 @@
 #include "gui/BoardView.h"
 
+#include <QApplication>
 #include <QKeyEvent>
 #include <QMenu>
 #include <QMouseEvent>
@@ -7,6 +8,7 @@
 #include <QPainterPath>
 #include <QWheelEvent>
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <map>
 #include <numeric>
@@ -14,6 +16,7 @@
 
 #include "gui/Schemes.h"
 #include "gui/SmallDialogs.h"
+#include "io/BoardIO.h"
 #include "router/topo/Realizer.h"
 
 namespace xr::gui {
@@ -178,7 +181,7 @@ BoardView::Pick BoardView::pick(QPointF screen) const {
       case ItemType::Pad:
         if (pads) consider(r, 1);
         break;
-      case ItemType::Zone: break;
+      default: break;  // areas and drawings are picked below
     }
   });
   if (pk.item) {
@@ -194,6 +197,47 @@ BoardView::Pick BoardView::pick(QPointF screen) const {
       else if (!t.isArc()) pk.snap = closestPointOnSegment(w, t.a.v(), t.b.v());
     }
     return pk;
+  }
+  // Texts in their box; keepouts and board drawings (outline, details) near their lines.
+  if ((filter & SelTexts) && d.flag("showTexts"))
+    for (int i = int(b.texts.size()) - 1; i >= 0; --i) {
+      const Text& t = b.texts[i];
+      auto c = b.textBox(t);
+      if (layerVisible(t.layer) && pointInPolygon(w, {c.begin(), c.end()})) {
+        pk.item = ItemRef{ItemType::Text, i};
+        return pk;
+      }
+    }
+  {
+    double bd = tol;
+    auto edgeDist = [&](const Shape& sh) {
+      if (sh.kind != Shape::Kind::Polygon) return std::abs(sh.distance(w));
+      double m = std::numeric_limits<double>::max();
+      for (size_t k = 0; k < sh.poly.size(); ++k)
+        m = std::min(m, distPointSegment(w, sh.poly[k], sh.poly[(k + 1) % sh.poly.size()]));
+      return m;
+    };
+    if (filter & SelKeepouts)
+      for (int i = 0; i < int(b.keepouts.size()); ++i) {
+        if (!keepoutVisible(b.keepouts[i])) continue;
+        for (auto& sh : b.keepouts[i].shapes())
+          if (double dd = edgeDist(sh); dd <= bd) {
+            bd = dd;
+            pk.item = ItemRef{ItemType::Keepout, i};
+          }
+      }
+    for (int i = 0; i < int(b.graphics.size()); ++i) {
+      LayerId l = b.graphics[i].layer;
+      if (l < 0 || l >= LayerId(b.layers.size())) continue;
+      bool edge = b.layers[l].kind == LayerKind::Edge;
+      if (edge ? !(filter & SelBoard) || !d.flag("showBoardOutline") : !(filter & SelMechDetails) || !layerVisible(l)) continue;
+      for (auto& sh : itemShapes(b, {ItemType::Detail, i}))
+        if (double dd = std::max(0.0, sh.distance(w)); dd <= bd) {
+          bd = dd;
+          pk.item = ItemRef{ItemType::Detail, i};
+        }
+    }
+    if (pk.item) return pk;
   }
   // Component by its drawings or pad bounding box.
   if ((filter & SelComponents) && d.flag("showComponents"))
@@ -285,6 +329,7 @@ void BoardView::paintEvent(QPaintEvent*) {
 }
 
 void BoardView::drawTools(QPainter& p) {
+  if (mode_ == Mode::Draw) drawDrawing(p);
   if (drag_ == Drag::None || !dragMoved_) {
     p.setPen(QPen(QColor(0x20, 0x20, 0x20), 1));
     p.setBrush(QColor(0xf0, 0xf0, 0xf0));
@@ -440,11 +485,20 @@ void BoardView::drawLayer(QPainter& p, LayerId l) {
   const Layer& L = b.layers[l];
   if (L.kind == LayerKind::Copper) {
     if (d.flag("showCoppers")) {
-      p.setPen(Qt::NoPen);
       for (auto& z : b.zones)
         if (z.layer == l) {
-          p.setBrush(netColor(z.net, d.colorizeCopper).value_or(details));
+          QColor c = netColor(z.net, d.colorizeCopper).value_or(details);
+          p.setPen(Qt::NoPen);
+          p.setBrush(c);
           for (auto& f : z.filled) p.drawPolygon(toPoly(f, [&](Vec2 v) { return toScreen(v); }));
+          // An unpoured area shows its outline; cutouts are dashed.
+          p.setBrush(Qt::NoBrush);
+          if (z.filled.empty()) {
+            p.setPen(QPen(c, 1));
+            p.drawPolygon(toPoly(z.outline, [&](Vec2 v) { return toScreen(v); }));
+          }
+          p.setPen(QPen(c, 1, Qt::DashLine));
+          for (auto& cut : z.cutouts) p.drawPolygon(toPoly(cut, [&](Vec2 v) { return toScreen(v); }));
         }
     }
     if (d.flag("showWires") && showDetails)
@@ -460,6 +514,9 @@ void BoardView::drawLayer(QPainter& p, LayerId l) {
         drawPad(p, pad, l, netColor(pad.net, d.colorizePad).value_or(c));
       }
     }
+    if (d.flag("showTexts") && showDetails)
+      for (auto& t : b.texts)
+        if (t.layer == l) drawText(p, t, details);
     return;
   }
   // Technical layers: drawings of the board and of visible components.
@@ -481,6 +538,83 @@ void BoardView::drawLayer(QPainter& p, LayerId l) {
         if (g.layer == l) draw(g);
   for (auto& g : b.graphics)
     if (g.layer == l) draw(g);
+  if (d.flag("showTexts"))
+    for (auto& t : b.texts)
+      if (t.layer == l) drawText(p, t, details);
+}
+
+void BoardView::drawText(QPainter& p, const Text& t, const QColor& c) {
+  const TextStyle& st = doc_->board()->styleOf(t);
+  double h = px(double(st.height));
+  if (h < 2) {
+    // Too small to read: the box.
+    auto box = doc_->board()->textBox(t);
+    p.setPen(QPen(c, 1));
+    p.setBrush(Qt::NoBrush);
+    QPolygonF poly;
+    for (Vec2 v : box) poly << toScreen(v);
+    p.drawPolygon(poly);
+    return;
+  }
+  // TopoR's vector fonts are drawn with a sans font scaled to the style's character height.
+  QFont f("Sans");
+  f.setPixelSize(100);
+  f.setBold(st.bold);
+  f.setItalic(st.italic);
+  QPainterPath path;
+  path.addText(0, 0, f, QString::fromStdString(t.text));
+  QRectF r = path.boundingRect();
+  constexpr double cap = 72;  // cap height of a 100 px font
+  double k = h / cap;
+  int col = int(t.align) % 3, row = int(t.align) / 3;
+  QTransform tr;
+  QPointF at = toScreen(t.pos);
+  tr.translate(at.x(), at.y());
+  tr.rotate(-t.angle);
+  if (t.mirror) tr.scale(-1, 1);
+  tr.scale(k, k);
+  tr.translate(-(r.left() + r.width() * col / 2.0), cap * (2 - row) / 2.0);
+  p.save();
+  p.setTransform(tr, true);
+  p.setPen(Qt::NoPen);
+  p.setBrush(c);
+  p.drawPath(path);
+  p.restore();
+}
+
+bool BoardView::keepoutVisible(const Keepout& k) const {
+  const DisplayControl& d = doc_->display();
+  if (!d.flag("showKeepouts")) return false;
+  if (k.role == Keepout::Role::Place) return d.flag("showPlaceKeepouts", false);
+  if (!d.flag("showRouteKeepouts")) return false;
+  LayerMask lm = k.layers ? k.layers : doc_->board()->allCopperMask();
+  return (lm & visibleCopper()) != 0;
+}
+
+void BoardView::drawKeepouts(QPainter& p) {
+  const Board& b = *doc_->board();
+  for (const Keepout& k : b.keepouts) {
+    if (!keepoutVisible(k)) continue;
+    QColor c = k.role == Keepout::Role::Route ? doc_->color("keepoutWireAll", 0xff0000)
+               : k.side == Side::Top          ? doc_->color("keepoutPlaceTop", 0x259500)
+               : k.side == Side::Bottom       ? doc_->color("keepoutPlaceBot", 0x00aaaa)
+                                              : doc_->color("keepoutPlaceBoth", 0xf79646);
+    // A keepout on one layer takes that layer's colour, as TopoR shows them.
+    if (k.role == Keepout::Role::Route && std::popcount(k.layers) == 1) c = doc_->layerColor(std::countr_zero(k.layers));
+    for (auto& sh : k.shapes()) {
+      if (sh.kind == Shape::Kind::Segment) {
+        p.setPen(QPen(c, 2, Qt::DashLine));
+        p.drawLine(toScreen(sh.a), toScreen(sh.b));
+        continue;
+      }
+      QPolygonF poly = toPoly(sh.kind == Shape::Kind::Polygon ? sh.poly : sh.outline(std::max(2000.0, 0.5 / scale_)),
+                              [&](Vec2 v) { return toScreen(v); });
+      p.setPen(QPen(c, 1.5));
+      p.setBrush(QBrush(c, Qt::BDiagPattern));
+      p.drawPolygon(poly);
+    }
+  }
+  p.setBrush(Qt::NoBrush);
 }
 
 void BoardView::drawVias(QPainter& p) {
@@ -576,6 +710,7 @@ void BoardView::drawBoard(QPainter& p) {
     for (LayerId l = 0; l < LayerId(b.layers.size()); ++l)
       if (groupOf(l) == -1) drawLayer(p, l);
   }
+  drawKeepouts(p);
   drawLabels(p);
 
   // Ratsnest, with the «Показывать связи» filter.
@@ -635,6 +770,24 @@ void BoardView::drawBoard(QPainter& p) {
           for (auto& f : z.filled) p.drawPolygon(toPoly(f, [&](Vec2 v) { return toScreen(v); }));
           p.setBrush(Qt::NoBrush);
           p.drawPolygon(toPoly(z.outline, [&](Vec2 v) { return toScreen(v); }));
+          break;
+        }
+        case ItemType::Keepout:
+          for (auto& sh : b.keepouts[r.index].shapes()) {
+            p.setPen(QPen(QColor(0xff, 0xff, 0xff), 2));
+            p.setBrush(Qt::NoBrush);
+            if (sh.kind == Shape::Kind::Segment) p.drawLine(toScreen(sh.a), toScreen(sh.b));
+            else
+              p.drawPolygon(toPoly(sh.kind == Shape::Kind::Polygon ? sh.poly : sh.outline(std::max(2000.0, 0.5 / scale_)),
+                                   [&](Vec2 v) { return toScreen(v); }));
+          }
+          break;
+        case ItemType::Text: drawText(p, b.texts[r.index], lit(b.texts[r.index].layer)); break;
+        case ItemType::Detail: {
+          const Graphic& g = b.graphics[r.index];
+          drawGraphic(p, g, brighter(g.layer >= 0 && b.layers[g.layer].kind == LayerKind::Edge ? doc_->color("board", 0xd4d4d4)
+                                                                                                 : doc_->layerColor(g.layer),
+                                     rate));
           break;
         }
       }
@@ -785,6 +938,26 @@ void BoardView::mousePressEvent(QMouseEvent* e) {
       break;
     }
     case Mode::Measure: measureClick(pk, w); break;
+    case Mode::Draw: drawClick(drawPts_.empty() ? w : constrained(drawPts_.back(), w)); break;
+    case Mode::Text: {
+      Board& b = *doc_->board();
+      LayerId active = doc_->activeLayer();
+      // New texts go on the active layer when it is a documenting one, else on the top silk screen.
+      LayerId layer = active >= 0 && b.layers[active].kind != LayerKind::Copper ? active : -1;
+      for (LayerId l = 0; l < LayerId(b.layers.size()) && layer < 0; ++l)
+        if (b.layers[l].kind == LayerKind::Silk && b.layers[l].side == Side::Top) layer = l;
+      if (layer < 0) layer = active;
+      Text t;
+      t.pos = w;
+      t.layer = layer;
+      if (!askText(this, doc_, t)) break;
+      auto before = doc_->beginEdit();
+      b.texts.push_back(t);
+      doc_->commitEdit(before, tr("Создать надпись"));
+      doc_->setSelection({{ItemType::Text, int(b.texts.size()) - 1}}, {});
+      if (!drawSticky_) setMode(Mode::Select);
+      break;
+    }
   }
   update();
 }
@@ -847,6 +1020,22 @@ void BoardView::selectInFrame(QRectF screenRect, bool crossing, bool add) {
       for (int pi : b.components[ci].pads) bb.add(b.pads[pi].shapeGeom().bbox());
       if (hit(bb) && !std::ranges::contains(comps, ci)) comps.push_back(ci);
     }
+  if ((filter & SelTexts) && d.flag("showTexts"))
+    for (int i = 0; i < int(b.texts.size()); ++i)
+      if (layerVisible(b.texts[i].layer) && hit(itemBBox(b, {ItemType::Text, i}))) addItem({ItemType::Text, i});
+  if (filter & SelKeepouts)
+    for (int i = 0; i < int(b.keepouts.size()); ++i)
+      if (keepoutVisible(b.keepouts[i]) && hit(itemBBox(b, {ItemType::Keepout, i}))) addItem({ItemType::Keepout, i});
+  for (int i = 0; i < int(b.graphics.size()); ++i) {
+    LayerId l = b.graphics[i].layer;
+    if (l < 0 || l >= LayerId(b.layers.size())) continue;
+    bool edge = b.layers[l].kind == LayerKind::Edge;
+    // TopoR: drawings are taken by a frame only when wholly inside it.
+    if (edge ? (filter & SelBoard) && d.flag("showBoardOutline") : (filter & SelMechDetails) && layerVisible(l)) {
+      BBox bb = itemBBox(b, {ItemType::Detail, i});
+      if (box.contains({bb.minX, bb.minY}) && box.contains({bb.maxX, bb.maxY})) addItem({ItemType::Detail, i});
+    }
+  }
   doc_->setSelection(std::move(items), std::move(comps));
 }
 
@@ -1057,7 +1246,7 @@ void BoardView::mouseMoveEvent(QMouseEvent* e) {
   }
   if (mode_ == Mode::Select && !panning_ && !frameStart_)
     setCursor(markerAt(pos) ? Qt::SizeAllCursor : Qt::ArrowCursor);
-  if (routing_ || mode_ == Mode::Measure) update();
+  if (routing_ || mode_ == Mode::Measure || (mode_ == Mode::Draw && !drawPts_.empty())) update();
   lastMouse_ = pos;
 }
 
@@ -1070,7 +1259,11 @@ void BoardView::mouseReleaseEvent(QMouseEvent* e) {
     bool click = rightDown_ && !rightMoved_;
     rightDown_ = false;
     if (!click || !doc_->hasBoard()) return;
-    if (routing_ || mode_ == Mode::Measure) {
+    if (mode_ == Mode::Draw && !drawPts_.empty()) {
+      finishShape();  // a polygon or line ends with the right button
+      return;
+    }
+    if (routing_ || mode_ == Mode::Measure || mode_ == Mode::Draw || mode_ == Mode::Text) {
       // In a tool the right button ends it, as TopoR's «Вернуться в основной режим».
       emit contextMenuRequested(e->globalPosition().toPoint());
       return;
@@ -1097,6 +1290,7 @@ void BoardView::mouseReleaseEvent(QMouseEvent* e) {
 
 void BoardView::mouseDoubleClickEvent(QMouseEvent* e) {
   if (mode_ == Mode::Route && routing_ && e->button() == Qt::LeftButton) finishRoute();
+  if (mode_ == Mode::Draw && e->button() == Qt::LeftButton) finishShape();
 }
 
 void BoardView::wheelEvent(QWheelEvent* e) {
@@ -1112,7 +1306,8 @@ void BoardView::wheelEvent(QWheelEvent* e) {
 void BoardView::keyPressEvent(QKeyEvent* e) {
   // Everything else is a window command (see Commands), so user hotkeys apply while routing too.
   if (e->key() == Qt::Key_Return || e->key() == Qt::Key_Enter) {
-    finishRoute();
+    if (mode_ == Mode::Draw) finishShape();
+    else finishRoute();
     return;
   }
   QWidget::keyPressEvent(e);
@@ -1130,6 +1325,7 @@ void BoardView::setMode(Mode m) {
   if (drag_ != Drag::None) cancelDrag();
   mode_ = m;
   setCursor(m == Mode::Select || m == Mode::Freestyle ? Qt::ArrowCursor : Qt::CrossCursor);
+  drawPts_.clear();
   frameStart_.reset();
   emit modeChanged(m);
   switch (m) {
@@ -1145,6 +1341,22 @@ void BoardView::setMode(Mode m) {
       emit status(measureKind_ == MeasureKind::Points ? tr("Линейка: укажите первую точку")
                                                       : tr("Линейка: укажите первый объект"));
       break;
+    case Mode::Draw: {
+      static const char* what[] = {"контур платы", "запрет", "область металлизации", "вырез в металлизации", "деталь"};
+      QString how;
+      switch (drawShape_) {
+        case DrawShape::Poly: how = tr("щёлкайте вершины; двойной щелчок, Enter или правая кнопка — завершить"); break;
+        case DrawShape::Rect: how = tr("щёлкните две противоположные вершины"); break;
+        case DrawShape::Disk:
+        case DrawShape::Circle: how = tr("щёлкните центр, затем точку окружности"); break;
+        case DrawShape::Line: how = tr("щёлкайте точки линии; двойной щелчок, Enter или правая кнопка — завершить"); break;
+        case DrawShape::ArcC: how = tr("щёлкните центр, начало и конец дуги (против часовой стрелки)"); break;
+        case DrawShape::ArcP: how = tr("щёлкните начало, конец и точку дуги"); break;
+      }
+      emit status(tr("Создание: %1 — %2; Backspace — убрать точку, Esc — отмена").arg(tr(what[int(drawTarget_)]), how));
+      break;
+    }
+    case Mode::Text: emit status(tr("Создание надписи: щёлкните место надписи")); break;
   }
   update();
 }
@@ -1179,17 +1391,13 @@ void BoardView::deleteSelection() {
   auto comps = doc_->selectedComponents();
   if (items.empty() && comps.empty()) return;
   Board& b = *doc_->board();
+  edit::Fragment f = selectedFragment();
+  f.components.clear();  // components belong to the netlist
+  if (f.empty()) return;
+  bool outline = f.touchesOutline(b);
   auto before = doc_->beginEdit();
-  std::vector<int> tracks, vias, zones;
-  for (ItemRef r : items) {
-    if (r.type == ItemType::Track) tracks.push_back(r.index);
-    if (r.type == ItemType::Via) vias.push_back(r.index);
-    if (r.type == ItemType::Zone) zones.push_back(r.index);
-  }
-  for (auto* list : {&tracks, &vias, &zones}) std::ranges::sort(*list, std::greater{});
-  for (int i : tracks) b.tracks.erase(b.tracks.begin() + i);
-  for (int i : vias) b.vias.erase(b.vias.begin() + i);
-  for (int i : zones) b.zones.erase(b.zones.begin() + i);
+  edit::erase(b, f);
+  if (outline) syncOutline();
   doc_->clearSelection();
   doc_->commitEdit(before, tr("Удалить"));
 }
@@ -1247,8 +1455,20 @@ edit::Fragment BoardView::selectedFragment() const {
     if (r.type == ItemType::Track) f.tracks.push_back(r.index);
     if (r.type == ItemType::Via) f.vias.push_back(r.index);
     if (r.type == ItemType::Zone) f.zones.push_back(r.index);
+    if (r.type == ItemType::Keepout) f.keepouts.push_back(r.index);
+    if (r.type == ItemType::Text) f.texts.push_back(r.index);
+    if (r.type == ItemType::Detail) f.details.push_back(r.index);
   }
   return f;
+}
+
+void BoardView::syncOutline() {
+  Board& b = *doc_->board();
+  for (LayerId l = 0; l < LayerId(b.layers.size()); ++l)
+    if (b.layers[l].kind == LayerKind::Edge) {
+      io::buildOutline(b, l);
+      return;
+    }
 }
 
 void BoardView::transformSelection(double rotate, bool mirror, const QString& title) {
@@ -1265,6 +1485,7 @@ void BoardView::transformSelection(double rotate, bool mirror, const QString& ti
   m.rotate = rotate;
   m.mirror = mirror;
   edit::move(b, f, m);
+  if (f.touchesOutline(b)) syncOutline();
   auto map = edit::removeDegenerate(b);
   auto items = doc_->selectedItems();
   std::erase_if(items, [&](ItemRef& r) {
@@ -1343,6 +1564,7 @@ void BoardView::applyDrag() {
     case Drag::Fragment:
       m.shift = d;
       edit::move(b, dragFragment_, m);
+      if (dragFragment_.touchesOutline(b)) syncOutline();
       break;
     case Drag::Segment: {
       // A straight segment moves across itself, so its neighbours keep their directions roughly.
@@ -1376,6 +1598,269 @@ void BoardView::applyDrag() {
   update();
 }
 
+// ---------------------------------------------------------------- creation tools
+
+void BoardView::startDraw(DrawTarget target, DrawShape shape) {
+  if (!doc_->hasBoard()) return;
+  if (target == DrawTarget::Cutout) {
+    // TopoR: a cutout goes into the one selected copper area, which must not be poured.
+    auto items = doc_->selectedItems();
+    if (items.size() != 1 || items[0].type != ItemType::Zone || !doc_->board()->zones[items[0].index].filled.empty()) {
+      emit status(tr("Для создания выреза выделите одну незалитую область металлизации"));
+      return;
+    }
+  }
+  drawSticky_ = QApplication::keyboardModifiers() & Qt::ShiftModifier;
+  drawTarget_ = target;
+  drawShape_ = shape;
+  setMode(Mode::Draw);
+}
+
+void BoardView::startText() {
+  if (!doc_->hasBoard()) return;
+  drawSticky_ = QApplication::keyboardModifiers() & Qt::ShiftModifier;
+  setMode(Mode::Text);
+}
+
+void BoardView::drawClick(Vec2 w) {
+  if (!drawPts_.empty() && (w - drawPts_.back()).len() * scale_ < 1) return;  // the second click of a double click
+  drawPts_.push_back(w);
+  size_t need = 0;
+  switch (drawShape_) {
+    case DrawShape::Rect:
+    case DrawShape::Disk:
+    case DrawShape::Circle: need = 2; break;
+    case DrawShape::ArcC:
+    case DrawShape::ArcP: need = 3; break;
+    case DrawShape::Poly:
+    case DrawShape::Line: break;
+  }
+  if (need && drawPts_.size() >= need) finishShape();
+  update();
+}
+
+namespace {
+
+// The figure of a drawing tool from its points (empty if they do not make one yet).
+std::vector<Graphic> figureOf(DrawShape shape, const std::vector<Vec2>& pts) {
+  std::vector<Graphic> out;
+  Graphic g;
+  switch (shape) {
+    case DrawShape::Poly:
+      if (pts.size() < 3) break;
+      g.kind = GraphicKind::Poly;
+      g.pts = pts;
+      g.filled = true;
+      out.push_back(g);
+      break;
+    case DrawShape::Rect:
+      if (pts.size() < 2 || pts[0].x == pts[1].x || pts[0].y == pts[1].y) break;
+      g.kind = GraphicKind::Poly;
+      g.pts = {pts[0], {pts[1].x, pts[0].y}, pts[1], {pts[0].x, pts[1].y}};
+      g.filled = true;
+      out.push_back(g);
+      break;
+    case DrawShape::Disk:
+    case DrawShape::Circle:
+      if (pts.size() < 2 || pts[0] == pts[1]) break;
+      g.kind = GraphicKind::Circle;
+      g.a = pts[0];
+      g.b = pts[0] + Vec2{(pts[1] - pts[0]).len(), 0};
+      g.filled = shape == DrawShape::Disk;
+      out.push_back(g);
+      break;
+    case DrawShape::Line:
+      for (size_t i = 1; i < pts.size(); ++i) {
+        g.kind = GraphicKind::Line;
+        g.a = pts[i - 1];
+        g.b = pts[i];
+        out.push_back(g);
+      }
+      break;
+    case DrawShape::ArcC: {
+      if (pts.size() < 3) break;
+      // Counter-clockwise on screen from the start to the direction of the end (Y down: decreasing angles).
+      Vec2 c = pts[0], st = pts[1], en = pts[2];
+      double a0 = std::atan2(st.y - c.y, st.x - c.x), a1 = std::atan2(en.y - c.y, en.x - c.x);
+      double sweep = -normalizeAngle(a0 - a1);
+      if (sweep == 0) sweep = -2 * kPi;
+      auto arc = ArcGeom::fromCenter(c, st, sweep);
+      if (!arc.valid) break;
+      g.kind = GraphicKind::Arc;
+      g.a = arc.start();
+      g.m = arc.mid();
+      g.b = arc.end();
+      out.push_back(g);
+      break;
+    }
+    case DrawShape::ArcP: {
+      if (pts.size() < 3) break;
+      if (!ArcGeom::fromThreePoints(pts[0], pts[2], pts[1]).valid) break;
+      g.kind = GraphicKind::Arc;
+      g.a = pts[0];
+      g.m = pts[2];
+      g.b = pts[1];
+      out.push_back(g);
+      break;
+    }
+  }
+  return out;
+}
+
+// A closed outline of the figure (copper areas and cutouts are polygons).
+Polyline polygonOf(const std::vector<Graphic>& fig) {
+  Polyline out;
+  for (const Graphic& g : fig) switch (g.kind) {
+      case GraphicKind::Poly: out.insert(out.end(), g.pts.begin(), g.pts.end()); break;
+      case GraphicKind::Circle: {
+        auto pts = Shape::circle(g.a, (g.b - g.a).len()).outline(5000);
+        out.insert(out.end(), pts.begin(), pts.end());
+        break;
+      }
+      case GraphicKind::Line:
+        if (out.empty()) out.push_back(g.a);
+        out.push_back(g.b);
+        break;
+      case GraphicKind::Arc: {
+        auto arc = ArcGeom::fromThreePoints(g.a, g.m, g.b);
+        if (arc.valid) {
+          auto pts = arc.tessellate(5000);
+          out.insert(out.end(), pts.begin(), pts.end());
+        }
+        break;
+      }
+      case GraphicKind::Rect: out.insert(out.end(), {g.a, {g.b.x, g.a.y}, g.b, {g.a.x, g.b.y}}); break;
+    }
+  if (out.size() >= 2 && (out.front() - out.back()).len() < 1) out.pop_back();
+  return out;
+}
+
+}  // namespace
+
+void BoardView::finishShape() {
+  if (mode_ != Mode::Draw) return;
+  auto fig = figureOf(drawShape_, drawPts_);
+  drawPts_.clear();
+  if (fig.empty()) {
+    update();
+    return;
+  }
+  createShape(std::move(fig));
+  if (!drawSticky_) setMode(Mode::Select);
+  update();
+}
+
+void BoardView::createShape(std::vector<Graphic> fig) {
+  Board& b = *doc_->board();
+  auto before = doc_->beginEdit();
+  LayerId active = doc_->activeLayer();
+  LayerId copper = active >= 0 && b.layers[active].kind == LayerKind::Copper && !b.layers[active].plane ? active : b.topCopper();
+  ItemRef made;
+  QString title;
+  switch (drawTarget_) {
+    case DrawTarget::Board: {
+      LayerId edge = -1;
+      for (LayerId l = 0; l < LayerId(b.layers.size()) && edge < 0; ++l)
+        if (b.layers[l].kind == LayerKind::Edge) edge = l;
+      if (edge < 0) edge = b.addLayer("Board_outline", LayerKind::Edge, Side::None);
+      // An outline without drawings (Specctra) becomes drawings first, so that it is built again with the new one.
+      if (std::ranges::none_of(b.graphics, [&](const Graphic& g) { return g.layer == edge; }))
+        for (auto& loop : b.outline) {
+          Graphic g;
+          g.kind = GraphicKind::Poly;
+          g.layer = edge;
+          g.pts = loop;
+          g.width = mmToNm(0.2);
+          b.graphics.push_back(g);
+        }
+      for (auto& g : fig) {
+        g.layer = edge;
+        g.width = mmToNm(0.2);
+        g.filled = false;
+        b.graphics.push_back(g);
+      }
+      made = {ItemType::Detail, int(b.graphics.size()) - 1};
+      syncOutline();
+      title = tr("Создать контур платы");
+      break;
+    }
+    case DrawTarget::Keepout: {
+      Keepout k;
+      k.layers = LayerMask(1) << copper;
+      k.shape = std::move(fig);
+      b.keepouts.push_back(std::move(k));
+      made = {ItemType::Keepout, int(b.keepouts.size()) - 1};
+      title = tr("Создать запрет");
+      break;
+    }
+    case DrawTarget::Copper: {
+      Polyline poly = polygonOf(fig);
+      if (poly.size() < 3) return;
+      Zone z;
+      z.layer = copper;
+      z.outline = std::move(poly);
+      b.zones.push_back(std::move(z));
+      made = {ItemType::Zone, int(b.zones.size()) - 1};
+      title = tr("Создать область металлизации");
+      break;
+    }
+    case DrawTarget::Cutout: {
+      Polyline poly = polygonOf(fig);
+      auto items = doc_->selectedItems();
+      if (poly.size() < 3 || items.size() != 1 || items[0].type != ItemType::Zone) return;
+      b.zones[items[0].index].cutouts.push_back(std::move(poly));
+      made = items[0];
+      title = tr("Создать вырез в металлизации");
+      break;
+    }
+    case DrawTarget::Detail: {
+      // On the active layer when it is not copper, else on the first mechanical (or documenting) layer.
+      LayerId layer = active >= 0 && b.layers[active].kind != LayerKind::Copper && b.layers[active].kind != LayerKind::Edge ? active : -1;
+      for (LayerKind kind : {LayerKind::Other, LayerKind::Fab, LayerKind::Silk})
+        for (LayerId l = 0; l < LayerId(b.layers.size()) && layer < 0; ++l)
+          if (b.layers[l].kind == kind) layer = l;
+      if (layer < 0) layer = b.addLayer("Mechanical", LayerKind::Other, Side::None);
+      for (auto& g : fig) {
+        g.layer = layer;
+        g.width = mmToNm(0.1);
+        b.graphics.push_back(g);
+      }
+      made = {ItemType::Detail, int(b.graphics.size()) - 1};
+      title = tr("Создать деталь");
+      break;
+    }
+  }
+  doc_->commitEdit(before, title);
+  doc_->setSelection({made}, {});
+}
+
+void BoardView::drawDrawing(QPainter& p) {
+  if (drawPts_.empty()) return;
+  std::vector<Vec2> pts = drawPts_;
+  pts.push_back(constrained(drawPts_.back(), snapped(cursor_)));
+  QColor c(0xff, 0xff, 0x60);
+  p.setPen(QPen(c, 1, Qt::DashLine));
+  p.setBrush(Qt::NoBrush);
+  auto fig = figureOf(drawShape_, pts);
+  if (drawShape_ == DrawShape::Poly && pts.size() == 2) fig = figureOf(DrawShape::Line, pts);
+  if (drawShape_ == DrawShape::ArcC && pts.size() == 2) {
+    // The radius so far.
+    p.drawLine(toScreen(pts[0]), toScreen(pts[1]));
+    double r = px((pts[1] - pts[0]).len());
+    p.drawEllipse(toScreen(pts[0]), r, r);
+    return;
+  }
+  if (drawShape_ == DrawShape::ArcP && pts.size() == 2) fig = figureOf(DrawShape::Line, pts);
+  for (auto& g : fig) {
+    g.filled = false;
+    g.width = 0;
+    drawGraphic(p, g, c);
+  }
+  p.setPen(QPen(c, 1));
+  p.setBrush(c);
+  for (Vec2 v : drawPts_) p.drawEllipse(toScreen(v), 2.5, 2.5);
+}
+
 void BoardView::freestyleBy(Vec2 shift, double rotate) {
   if (shift.len2() == 0 && rotate == 0) return;
   Board& b = *doc_->board();
@@ -1392,6 +1877,7 @@ void BoardView::finishDrag() {
   drag_ = Drag::None;
   if (placing_) {
     placing_ = false;
+    if (dragFragment_.touchesOutline(*doc_->board())) syncOutline();
     doc_->invalidate();
     doc_->commitEdit(*pasteBefore_, tr("Вставить"));
     pasteBefore_.reset();
@@ -1502,6 +1988,11 @@ void BoardView::cancelTool() {
     routeTracks_.clear();
     routeVias_.clear();
     emit status(tr("Прокладка отменена"));
+    update();
+    return;
+  }
+  if (mode_ == Mode::Draw && !drawPts_.empty()) {
+    drawPts_.clear();
     update();
     return;
   }
@@ -1724,11 +2215,12 @@ void BoardView::copySelection() {
   edit::Fragment f = selectedFragment();
   f.components.clear();
   if (f.empty()) {
-    emit status(tr("Копируются проводники, переходы и области металлизации"));
+    emit status(tr("Копируются проводники, переходы, области металлизации, запреты, надписи и детали"));
     return;
   }
   clipboard() = edit::copy(*doc_->board(), f);
-  emit status(tr("Скопировано объектов: %1").arg(f.tracks.size() + f.vias.size() + f.zones.size()));
+  emit status(tr("Скопировано объектов: %1")
+                  .arg(f.tracks.size() + f.vias.size() + f.zones.size() + f.keepouts.size() + f.texts.size() + f.details.size()));
 }
 
 void BoardView::cutSelection() {
@@ -1738,7 +2230,9 @@ void BoardView::cutSelection() {
   if (f.empty()) return;
   clipboard() = edit::copy(*doc_->board(), f);
   auto before = doc_->beginEdit();
+  bool outline = f.touchesOutline(*doc_->board());
   edit::erase(*doc_->board(), f);
+  if (outline) syncOutline();
   doc_->clearSelection();
   doc_->commitEdit(before, tr("Вырезать"));
 }
@@ -1770,6 +2264,9 @@ void BoardView::paste() {
   for (int i : f.tracks) items.push_back({ItemType::Track, i});
   for (int i : f.vias) items.push_back({ItemType::Via, i});
   for (int i : f.zones) items.push_back({ItemType::Zone, i});
+  for (int i : f.keepouts) items.push_back({ItemType::Keepout, i});
+  for (int i : f.texts) items.push_back({ItemType::Text, i});
+  for (int i : f.details) items.push_back({ItemType::Detail, i});
   doc_->setSelection(std::move(items), {});
   startDrag(Drag::Fragment, at);
   dragMoved_ = true;
@@ -1811,6 +2308,11 @@ void BoardView::viaKey() {
 }
 
 void BoardView::routeUndoLast() {
+  if (mode_ == Mode::Draw && !drawPts_.empty()) {
+    drawPts_.pop_back();
+    update();
+    return;
+  }
   if (!routing_ || routeTracks_.empty()) return;
   Track t = routeTracks_.back();
   routeTracks_.pop_back();
