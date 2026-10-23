@@ -4,7 +4,9 @@
 #include <QTemporaryDir>
 #include <QTimer>
 
+#include "gui/AppSettings.h"
 #include "gui/MainWindow.h"
+#include "gui/ToporConfig.h"
 
 int main(int argc, char** argv) {
   QApplication app(argc, argv);
@@ -28,6 +30,9 @@ int main(int argc, char** argv) {
     else if (a == "--drc") drc = true;  // runs DRC after loading (for checks of the messages window)
     else opened = w.openFile(a) || opened;
   }
+  // TopoR's settings are taken over the first time an installed TopoR is found.
+  if (!xr::gui::AppSettings::toporImported())
+    if (QString cfg = xr::gui::findToporConfig(); !cfg.isEmpty()) w.importToporSettings(cfg, false);
   if (!opened) w.openLastFile();
   if (drc) (*w.commands())["Accel_DRC"]->trigger();
   if (!shot.isEmpty()) {  // headless check: render once and save the window

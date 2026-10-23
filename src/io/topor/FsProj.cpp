@@ -121,7 +121,7 @@ std::string matchCase(const fs::path& p) {
 
 }  // namespace
 
-std::string resolveProjectPath(const std::string& projectDir, const std::string& entry) {
+std::string resolveProjectPath(const std::string& projectDir, const std::string& entry, const std::string& winePrefix) {
   std::string e = entry;
   for (auto& c : e)
     if (c == '\\') c = '/';
@@ -130,8 +130,10 @@ std::string resolveProjectPath(const std::string& projectDir, const std::string&
     char drive = char(std::tolower(static_cast<unsigned char>(e[0])));
     std::string rest = e.substr(2);
     if (drive == 'z') return matchCase(fs::path(rest).lexically_normal());
-    const char* prefix = std::getenv("WINEPREFIX");
-    fs::path wine = prefix ? fs::path(prefix) : fs::path(std::getenv("HOME") ? std::getenv("HOME") : "") / ".wine";
+    const char* env = std::getenv("WINEPREFIX");
+    fs::path wine = !winePrefix.empty() ? fs::path(winePrefix)
+                    : env               ? fs::path(env)
+                                        : fs::path(std::getenv("HOME") ? std::getenv("HOME") : "") / ".wine";
     std::error_code ec;
     fs::path root = fs::weakly_canonical(wine / "dosdevices" / (std::string(1, drive) + ":"), ec);
     return matchCase((root / fs::path(rest).relative_path()).lexically_normal());

@@ -35,9 +35,10 @@ Result<FsProject> readFsProj(const std::string& text);
 std::string writeFsProj(const FsProject& p);
 
 // Absolute POSIX path of a project entry: relative to the project directory (.\x), or a Wine path
-// (Z:\home\… → /home/…, other drives through $WINEPREFIX/dosdevices). TopoR sometimes writes junk
+// (Z:\home\… → /home/…, other drives through <prefix>/dosdevices; by default $WINEPREFIX or ~/.wine).
+// TopoR sometimes writes junk
 // like ".\/\/\/\x": it is reduced to the file name.
-std::string resolveProjectPath(const std::string& projectDir, const std::string& entry);
+std::string resolveProjectPath(const std::string& projectDir, const std::string& entry, const std::string& winePrefix = {});
 // Entry for a file: ".\name" inside the project directory, a Wine "Z:\…" path otherwise.
 std::string projectEntry(const std::string& projectDir, const std::string& absPath);
 

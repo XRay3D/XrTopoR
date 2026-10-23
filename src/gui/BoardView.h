@@ -140,6 +140,7 @@ class BoardView : public QWidget {
   };
   std::vector<ViewState> views_;
   int viewPos_ = -1;
+  bool autoFit_ = false;  // the board is shown whole until the user changes the view
   QElapsedTimer viewTimer_;
   // ruler
   MeasureKind measureKind_ = MeasureKind::Objects;

@@ -29,8 +29,14 @@ void setWindowLayout(const QByteArray& geometry, const QByteArray& state);
 // Most recent first; at most 50 entries.
 std::vector<RecentFile> recentFiles();
 void addRecentFile(const QString& path);
+// Adds files opened elsewhere (TopoR's recent projects) with their dates; the list stays newest first.
+void mergeRecentFiles(const std::vector<RecentFile>& files);
 void removeRecentFile(const QString& path);
 void clearRecentFiles();
+
+// TopoR's settings are taken over once, on the first start that finds them.
+bool toporImported();
+void setToporImported();
 
 bool openLastProject();
 void setOpenLastProject(bool on);

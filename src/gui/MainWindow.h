@@ -30,6 +30,8 @@ class MainWindow : public QMainWindow {
   bool openLastFile();  // the project or design opened in the previous session, if any
   Project* project() { return project_ ? &*project_ : nullptr; }
   AutorouteWindow* autorouteWindow();  // F11, created on first use
+  // Takes over an installed TopoR's settings (hotkeys, panels, recent projects, start-up).
+  bool importToporSettings(const QString& cfg, bool interactive = true);
   Commands* commands() const { return cmds_; }
   BoardView* view() const { return view_; }
   Document* document() const { return doc_; }
@@ -45,6 +47,9 @@ class MainWindow : public QMainWindow {
   void buildDocks();
   void buildStatusBar();
   void restoreLayout();
+  void applyToporLayout(const struct ToporSettings& t);
+  void showProgramSettings();
+  void resetSettings();
   QDockWidget* addDock(const QString& objectName, const QString& title, QWidget* w, Qt::DockWidgetArea area,
                        const QString& toggleCommand);
 
@@ -99,6 +104,7 @@ class MainWindow : public QMainWindow {
   QString hint_;  // persistent hint shown when no temporary message is active
   Vec2 cursor_;
   std::optional<Vec2> origin_;  // last left click: dx/dy reference
+  QByteArray defaultState_;     // TopoR's default layout, for «Сбросить сейчас»
   std::shared_ptr<std::atomic<bool>> cancel_;
 };
 

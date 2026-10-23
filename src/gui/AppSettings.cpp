@@ -1,6 +1,7 @@
 #include "gui/AppSettings.h"
 
 #include <QFileInfo>
+#include <algorithm>
 #include <QSettings>
 
 namespace xr::gui::AppSettings {
@@ -83,6 +84,18 @@ void addRecentFile(const QString& path) {
   writeRecent(list);
 }
 
+void mergeRecentFiles(const std::vector<RecentFile>& files) {
+  auto list = recentFiles();
+  for (auto& f : files) {
+    auto it = std::ranges::find(list, f.path, &RecentFile::path);
+    if (it == list.end()) list.push_back(f);
+    else if (f.opened > it->opened) it->opened = f.opened;
+  }
+  std::ranges::stable_sort(list, std::greater{}, &RecentFile::opened);
+  if (list.size() > kMaxRecent) list.resize(kMaxRecent);
+  writeRecent(list);
+}
+
 void removeRecentFile(const QString& path) {
   auto list = recentFiles();
   std::erase_if(list, [&](const RecentFile& r) { return r.path == path; });
@@ -90,6 +103,9 @@ void removeRecentFile(const QString& path) {
 }
 
 void clearRecentFiles() { writeRecent({}); }
+
+bool toporImported() { return QSettings().value("topor/imported", false).toBool(); }
+void setToporImported() { QSettings().setValue("topor/imported", true); }
 
 bool openLastProject() { return QSettings().value("general/openLastProject", true).toBool(); }
 void setOpenLastProject(bool on) { QSettings().setValue("general/openLastProject", on); }

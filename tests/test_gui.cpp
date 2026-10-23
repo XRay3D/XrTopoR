@@ -29,6 +29,7 @@
 #include "gui/PropertiesPanel.h"
 #include "gui/SearchPanel.h"
 #include "gui/Schemes.h"
+#include "gui/ToporConfig.h"
 #include "io/BoardIO.h"
 
 using namespace xr;
@@ -622,4 +623,41 @@ TEST(Gui, DrcSettingsAndReport) {
   DrcDialog::run(&f.doc);
   EXPECT_TRUE(std::ranges::none_of(f.doc.drc(), [](auto& v) { return v.type == DrcViolation::Type::Width; }));
   s.remove("drc");
+}
+
+// Windows accelerators of TopoR's configuration as Qt key sequences.
+TEST(ToporSettings, WindowsKeys) {
+  EXPECT_EQ(keyFromWindows(68, 19), QKeySequence(Qt::ALT | Qt::Key_D));
+  EXPECT_EQ(keyFromWindows(107, 3), QKeySequence(Qt::KeypadModifier | Qt::Key_Plus));
+  EXPECT_EQ(keyFromWindows(192, 3), QKeySequence(Qt::Key_QuoteLeft));
+  EXPECT_EQ(keyFromWindows(32, 7), QKeySequence(Qt::SHIFT | Qt::Key_Space));
+  EXPECT_EQ(keyFromWindows(118, 3), QKeySequence(Qt::Key_F7));
+  EXPECT_TRUE(keyFromWindows(0, 3).isEmpty());
+}
+
+// TopoR's settings are read and taken over: hotkeys, panels, recent projects, start-up.
+TEST(ToporSettings, ImportIntoMainWindow) {
+  app();
+  QString cfg = QString::fromStdString(data("topor/TopoR_test.cfg"));
+  auto t = readToporConfig(cfg);
+  ASSERT_TRUE(t);
+  EXPECT_EQ(t->accelerators.value("Accel_DRC"), QList<QKeySequence>{QKeySequence(Qt::CTRL | Qt::Key_F9)});
+  EXPECT_TRUE(t->accelerators.value("Accel_SelInvert").isEmpty());
+  ASSERT_EQ(t->recentProjects.size(), 1u);
+  EXPECT_EQ(t->recentProjects[0].path, "/tmp/xrtopor_test/a.fsproj");
+  EXPECT_EQ(t->recentProjects[0].opened.date(), QDate(2025, 1, 2));
+  ASSERT_TRUE(t->openLastProject);
+  EXPECT_FALSE(*t->openLastProject);
+
+  MainWindow w;
+  ASSERT_TRUE(w.importToporSettings(cfg, false));
+  EXPECT_EQ((*w.commands())["Accel_DRC"]->shortcut(), QKeySequence(Qt::CTRL | Qt::Key_F9));
+  EXPECT_EQ(w.toolBarArea(w.findChild<QToolBar*>("ide_toolbar")), Qt::LeftToolBarArea);
+  EXPECT_EQ(w.dockWidgetArea(w.findChild<QDockWidget*>("display_control")), Qt::RightDockWidgetArea);
+  EXPECT_TRUE(w.findChild<QDockWidget*>("Search_View")->isHidden());
+  EXPECT_FALSE(AppSettings::openLastProject());
+  EXPECT_TRUE(AppSettings::toporImported());
+  auto recent = AppSettings::recentFiles();
+  EXPECT_TRUE(std::ranges::any_of(recent, [](auto& r) { return r.path == "/tmp/xrtopor_test/a.fsproj"; }));
+  QSettings().clear();
 }

@@ -17,6 +17,7 @@
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QProgressDialog>
+#include <QSettings>
 #include <QStatusBar>
 #include <QStatusTipEvent>
 #include <QTableWidget>
@@ -34,8 +35,11 @@
 #include "gui/MessagesPanel.h"
 #include "gui/PropertiesPanel.h"
 #include "gui/SearchPanel.h"
+#include "gui/SmallDialogs.h"
 #include "gui/ModeBar.h"
+#include "gui/ProgramSettingsDialog.h"
 #include "gui/ProjectPanel.h"
+#include "gui/ToporConfig.h"
 #include "io/BoardIO.h"
 #include "io/Report.h"
 #include "io/gerber/GerberWriter.h"
@@ -101,6 +105,7 @@ MainWindow::MainWindow()
 
   buildDocks();
   buildStatusBar();
+  defaultState_ = saveState();
   restoreLayout();
   cmds_->applyOverrides(AppSettings::shortcuts());
 
@@ -187,6 +192,9 @@ void MainWindow::bindCommands() {
   c.bind("Cmd_MeasureObj", [this] { view_->startMeasure(MeasureKind::Objects); });
   c.bind("Accel_RotateLeft", [this] { view_->rotateSelection(90); });
   c.bind("Accel_RotateRight", [this] { view_->rotateSelection(-90); });
+  c.bind("Cmd_RotateAngle", [this] {
+    if (auto a = askRotationAngle(this)) view_->rotateSelection(*a);
+  });
 
   // Вид
   c.bind("Accel_ZoomIn", [this] { view_->zoomBy(1.25); });
@@ -228,6 +236,7 @@ void MainWindow::bindCommands() {
     dlg.exec();
   });
   c.bind("Cmd_Summary", [this] { showSummary(); });
+  c.bind("Cmd_CopperArea", [this] { showCopperArea(this, doc_); });
 
   // Трассировка
   c.bind("Accel_TO", [this] { autoroute(); });
@@ -245,6 +254,7 @@ void MainWindow::bindCommands() {
 
   // Справка
   c.bind("Cmd_HotkeysHelp", [this] { showHotkeys(); }, false);
+  c.bind("Cmd_Settings", [this] { showProgramSettings(); }, false);
   c.bind("Cmd_About", [this] {
     QMessageBox::about(this, tr("О программе"),
                        tr("<b>XrTopoR</b><br>Топологический редактор и трассировщик печатных плат.<br>"
@@ -426,6 +436,99 @@ void MainWindow::restoreLayout() {
   else resize(1400, 900);
   QByteArray state = AppSettings::windowState();
   if (!state.isEmpty()) restoreState(state);
+}
+
+void MainWindow::showProgramSettings() {
+  ProgramSettingsDialog dlg(cmds_, this);
+  connect(&dlg, &ProgramSettingsDialog::importToporRequested, this, [this](const QString& cfg) { importToporSettings(cfg); });
+  connect(&dlg, &ProgramSettingsDialog::resetRequested, this, &MainWindow::resetSettings);
+  dlg.exec();
+}
+
+void MainWindow::resetSettings() {
+  QSettings().clear();
+  AppSettings::setToporImported();  // a reset must not bring TopoR's settings back by itself
+  cmds_->resetShortcuts();
+  restoreState(defaultState_);
+  projectPanel_->refreshHistory();
+  showHint(tr("Настройки программы сброшены"));
+}
+
+bool MainWindow::importToporSettings(const QString& cfg, bool interactive) {
+  QString error;
+  auto t = readToporConfig(cfg, &error);
+  if (!t) {
+    if (interactive) QMessageBox::warning(this, tr("Настройки TopoR"), error);
+    return false;
+  }
+  int keys = 0;
+  for (auto it = t->accelerators.cbegin(); it != t->accelerators.cend(); ++it)
+    if (cmds_->contains(it.key())) {
+      cmds_->setShortcuts(it.key(), it.value());
+      ++keys;
+    }
+  AppSettings::setShortcuts(cmds_->overrides());
+  applyToporLayout(*t);
+  AppSettings::mergeRecentFiles(t->recentProjects);
+  projectPanel_->refreshHistory();
+  if (t->openLastProject) AppSettings::setOpenLastProject(*t->openLastProject);
+  AppSettings::setToporImported();
+  doc_->addLog({LogMessage::Kind::Info, tr("Настройки"),
+                tr("Импортированы настройки TopoR (%1): горячих клавиш %2, панелей %3, недавних проектов %4")
+                    .arg(QDir::toNativeSeparators(cfg))
+                    .arg(keys)
+                    .arg(t->panels.size())
+                    .arg(t->recentProjects.size())});
+  showHint(tr("Импортированы настройки TopoR"));
+  return true;
+}
+
+void MainWindow::applyToporLayout(const ToporSettings& t) {
+  auto area = [](const QString& s) {
+    if (s == "left") return Qt::LeftDockWidgetArea;
+    if (s == "right") return Qt::RightDockWidgetArea;
+    if (s == "top") return Qt::TopDockWidgetArea;
+    return Qt::BottomDockWidgetArea;
+  };
+  // Docks: per side in TopoR's order, split along the side, with TopoR's sizes.
+  std::map<QString, std::vector<const ToporPanel*>> sides;
+  for (auto& p : t.panels)
+    if (auto* d = findChild<QDockWidget*>(p.name)) {
+      if (p.state == "float") {
+        d->setFloating(true);
+        continue;
+      }
+      d->setFloating(false);
+      sides[p.state].push_back(&p);
+    }
+  for (auto& [state, list] : sides) {
+    bool vertical = state == "left" || state == "right";
+    std::ranges::sort(list, {}, [&](const ToporPanel* p) { return vertical ? p->posVert : p->posHor; });
+    QList<QDockWidget*> docks;
+    QList<int> share;
+    for (auto* p : list) {
+      auto* d = findChild<QDockWidget*>(p->name);
+      if (docks.isEmpty()) addDockWidget(area(state), d);
+      else splitDockWidget(docks.back(), d, vertical ? Qt::Vertical : Qt::Horizontal);
+      d->setVisible(p->visible);
+      docks << d;
+      share << std::max(1, int(p->spaceScale * 1000));
+    }
+    const ToporPanel* first = list.front();
+    resizeDocks({docks.front()}, {vertical ? first->widthDocked : first->heightDocked}, vertical ? Qt::Horizontal : Qt::Vertical);
+    if (docks.size() > 1) resizeDocks(docks, share, vertical ? Qt::Vertical : Qt::Horizontal);
+  }
+  // Toolbars of the window (the editor's mode bars stay beside the canvas).
+  std::vector<const ToporPanel*> bars;
+  for (auto& p : t.panels)
+    if (auto* tb = findChild<QToolBar*>(p.name); tb && tb->parentWidget() == this) bars.push_back(&p);
+  std::ranges::sort(bars, {}, [](const ToporPanel* p) { return std::pair{p->posVert, p->posHor}; });
+  for (auto* p : bars) {
+    auto* tb = findChild<QToolBar*>(p->name);
+    Qt::ToolBarArea a = p->state == "left" ? Qt::LeftToolBarArea : p->state == "right" ? Qt::RightToolBarArea
+                        : p->state == "bottom" ? Qt::BottomToolBarArea : Qt::TopToolBarArea;
+    addToolBar(a, tb);
+  }
 }
 
 bool MainWindow::event(QEvent* e) {

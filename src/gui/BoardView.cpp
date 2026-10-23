@@ -1,6 +1,5 @@
 #include "gui/BoardView.h"
 
-#include <QInputDialog>
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
@@ -13,6 +12,7 @@
 #include <ranges>
 
 #include "gui/Schemes.h"
+#include "gui/SmallDialogs.h"
 #include "router/topo/Realizer.h"
 
 namespace xr::gui {
@@ -27,6 +27,7 @@ BoardView::BoardView(Document* doc, QWidget* parent) : QWidget(parent), doc_(doc
     viewTimer_.invalidate();
     cycleSeed_ = -1;
     fitBoard();
+    autoFit_ = true;
   });
   connect(doc_, &Document::boardChanged, this, qOverload<>(&QWidget::update));
   connect(doc_, &Document::selectionChanged, this, qOverload<>(&QWidget::update));
@@ -102,7 +103,17 @@ void BoardView::zoomBy(double factor) {
   update();
 }
 
-void BoardView::resizeEvent(QResizeEvent*) { update(); }
+void BoardView::resizeEvent(QResizeEvent*) {
+  if (autoFit_ && doc_->hasBoard()) {
+    BBox bb = doc_->board()->bbox();
+    if (bb.valid()) {
+      bb = bb.inflated(2 * kNmPerMm);
+      center_ = bb.center();
+      scale_ = std::min(width() / bb.width(), height() / bb.height());
+    }
+  }
+  update();
+}
 
 // ---------------------------------------------------------------- layers / picking
 
@@ -898,6 +909,7 @@ void BoardView::measureClick(const Pick& pk, Vec2 w) {
 }
 
 void BoardView::pushView() {
+  autoFit_ = false;
   // Steps of one gesture (wheel turns) merge into one history entry.
   bool merge = viewTimer_.isValid() && viewTimer_.elapsed() < 700 && viewPos_ >= 0;
   viewTimer_.restart();
@@ -1106,16 +1118,28 @@ void BoardView::rotateSelection(double deg) {
 void BoardView::changeTrackWidth() {
   if (!doc_->hasBoard()) return;
   Board& b = *doc_->board();
-  double cur = routing_ ? routeWidth_ / 1e6 : 0;
+  Coord cur = routing_ ? routeWidth_ : 0;
+  std::vector<int> nets;
+  LayerId layer = routing_ ? routeLayer_ : doc_->activeLayer();
+  if (routing_) nets.push_back(routeNet_);
   for (ItemRef r : doc_->selectedItems())
-    if (r.type == ItemType::Track) cur = b.tracks[r.index].width / 1e6;
-  bool ok = false;
-  double w = QInputDialog::getDouble(this, tr("Ширина проводника"), tr("Ширина, мм:"), cur > 0 ? cur : 0.25, 0.01, 10.0, 3, &ok);
-  if (!ok) return;
-  if (routing_) { routeWidth_ = mmToNm(w); update(); return; }
+    if (r.type == ItemType::Track) {
+      cur = b.tracks[r.index].width;
+      layer = b.tracks[r.index].layer;
+      if (!std::ranges::contains(nets, b.tracks[r.index].net)) nets.push_back(b.tracks[r.index].net);
+    }
+  if (!routing_ && nets.empty()) return;
+  std::erase(nets, kNoNet);
+  auto w = askTrackWidth(this, doc_, nets, layer, cur > 0 ? cur : b.netClasses[0].trackWidth);
+  if (!w) return;
+  if (routing_) {
+    routeWidth_ = *w;
+    update();
+    return;
+  }
   auto before = doc_->beginEdit();
   for (ItemRef r : doc_->selectedItems())
-    if (r.type == ItemType::Track) b.tracks[r.index].width = mmToNm(w);
+    if (r.type == ItemType::Track) b.tracks[r.index].width = *w;
   doc_->commitEdit(before, tr("Изменить ширину"));
 }
 

@@ -64,11 +64,14 @@ if(XR_BUILD_GUI)
     gui/MainWindow.cpp
     gui/MessagesPanel.cpp
     gui/ModeBar.cpp
+    gui/ProgramSettingsDialog.cpp
     gui/Project.cpp
     gui/ProjectPanel.cpp
     gui/PropertiesPanel.cpp
     gui/Schemes.cpp
     gui/SearchPanel.cpp
+    gui/SmallDialogs.cpp
+    gui/ToporConfig.cpp
     gui/Units.cpp
     gui/icons.qrc
   )
