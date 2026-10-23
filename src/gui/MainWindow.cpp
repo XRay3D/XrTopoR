@@ -46,6 +46,7 @@
 #include "io/gerber/GerberWriter.h"
 #include "io/svg/SvgWriter.h"
 #include "router/topo/Optimizer.h"
+#include "router/topo/Refine.h"
 #include "router/topo/TopoRouter.h"
 
 // Resources of a static library are registered explicitly (outside any namespace).
@@ -282,9 +283,15 @@ void MainWindow::bindCommands() {
 
   // Режимы редактора и автопроцедуры
   c.bind("Cmd_ModeSelect", [this] { view_->setMode(Mode::Select); });
+  c.bind("Cmd_FmNoPush", [this] { view_->startFreestyle(topo::Push::None); });
+  c.bind("Cmd_FmPushVias", [this] { view_->startFreestyle(topo::Push::Vias); });
+  c.bind("Cmd_FmPushComps", [this] { view_->startFreestyle(topo::Push::ViasAndComponents); });
   c.bind("Cmd_RecalcArcs", [this] { view_->recomputeShapes(); });
   c.bind("Cmd_MoveVias", [this] { optimize(false); });
-  c.bind("Cmd_MoveCompsVias", [this] { optimize(true); });
+  c.bind("Cmd_MoveViasRefine", [this] { optimize(false, true); });
+  c.bind("Cmd_RefineLayers", [this] { refine(true); });
+  c.bind("Cmd_RefineSame", [this] { refine(false); });
+  c.bind("Cmd_MoveCompsVias", [this] { optimize(true, true); });
 
   // Ручная прокладка, выделение, слои
   c.bind("Accel_Cancel", [this] { view_->cancelTool(); });
@@ -610,6 +617,7 @@ void MainWindow::updateCursor(Vec2 w) {
 void MainWindow::updateModeButtons() {
   switch (view_->mode()) {
     case Mode::Select: modeBar_->setActiveMode("Cmd_ModeSelect"); break;
+    case Mode::Freestyle: modeBar_->setActiveMode("Accel_FM"); break;
     case Mode::Route: modeBar_->setActiveMode("Accel_RouteMode"); break;
     case Mode::Via: modeBar_->setActiveMode("Cmd_ModeVia"); break;
     case Mode::Measure: modeBar_->setActiveMode("Accel_Measure"); break;
@@ -1003,7 +1011,7 @@ void MainWindow::showContextMenu(QPoint globalPos) {
   QMenu m(this);
   Commands& c = *cmds_;
   // In a tool the menu offers the way back first.
-  if (view_->mode() != Mode::Select) {
+  if (view_->mode() != Mode::Select && view_->mode() != Mode::Freestyle) {
     m.addAction(tr("Вернуться в основной режим редактора"), this, [this] {
       view_->cancelTool();
       view_->setMode(Mode::Select);
@@ -1134,7 +1142,58 @@ void MainWindow::autoroute() {
   w->activateWindow();
 }
 
-void MainWindow::optimize(bool components) {
+void MainWindow::refine(bool changeLayers) {
+  if (!doc_->hasBoard()) return;
+  // The selected wires, or all of them.
+  topo::RefineOptions o;
+  o.changeLayers = changeLayers;
+  for (ItemRef r : doc_->selectedItems())
+    if (r.type == ItemType::Track) o.tracks.push_back(r.index);
+  auto work = std::make_shared<Board>(*doc_->board());
+  cancel_ = std::make_shared<std::atomic<bool>>(false);
+  auto* dlg = new QProgressDialog(tr("Перекладка проводников..."), tr("Остановить"), 0, 100, this);
+  dlg->setWindowModality(Qt::WindowModal);
+  dlg->setMinimumDuration(300);
+  auto cancel = cancel_;
+  connect(dlg, &QProgressDialog::canceled, this, [cancel] { cancel->store(true); });
+  auto* watcher = new QFutureWatcher<topo::RefineResult>(this);
+  connect(watcher, &QFutureWatcher<topo::RefineResult>::finished, this, [this, watcher, dlg, work] {
+    topo::RefineResult res = watcher->result();
+    dlg->close();
+    dlg->deleteLater();
+    watcher->deleteLater();
+    if (res.improved) {
+      auto before = doc_->beginEdit();
+      Board& b = *doc_->board();
+      b.tracks = work->tracks;
+      b.vias = work->vias;
+      doc_->clearSelection();
+      doc_->commitEdit(before, tr("Перекладка проводников"));
+    }
+    QString text = tr("Перекладка проводников: улучшено %1 из %2 (на другой слой %3), удалено переходов %4; длина %5 → %6 мм")
+                       .arg(res.improved)
+                       .arg(res.wires)
+                       .arg(res.layerChanges)
+                       .arg(res.viasRemoved)
+                       .arg(res.lengthBefore / 1e6, 0, 'f', 1)
+                       .arg(res.lengthAfter / 1e6, 0, 'f', 1);
+    doc_->clearLog(tr("Перекладка проводников"));
+    doc_->addLog({LogMessage::Kind::Info, tr("Перекладка проводников"), text});
+    showHint(text, 10000);
+  });
+  QPointer<QProgressDialog> dp(dlg);
+  watcher->setFuture(QtConcurrent::run([work, o, cancel, dp]() mutable {
+    o.cancel = cancel.get();
+    o.progress = [dp](int done, int total, const std::string&) {
+      QMetaObject::invokeMethod(qApp, [dp, done, total] {
+        if (dp) dp->setValue(total ? done * 100 / total : 0);
+      }, Qt::QueuedConnection);
+    };
+    return topo::refine(*work, o);
+  }));
+}
+
+void MainWindow::optimize(bool components, bool thenRefine) {
   if (!doc_->hasBoard()) return;
   auto work = std::make_shared<Board>(*doc_->board());
   cancel_ = std::make_shared<std::atomic<bool>>(false);
@@ -1144,7 +1203,7 @@ void MainWindow::optimize(bool components) {
   auto cancel = cancel_;
   connect(dlg, &QProgressDialog::canceled, this, [cancel] { cancel->store(true); });
   auto* watcher = new QFutureWatcher<topo::OptimizeResult>(this);
-  connect(watcher, &QFutureWatcher<topo::OptimizeResult>::finished, this, [this, watcher, dlg, work] {
+  connect(watcher, &QFutureWatcher<topo::OptimizeResult>::finished, this, [this, watcher, dlg, work, thenRefine] {
     topo::OptimizeResult res = watcher->result();
     dlg->close();
     dlg->deleteLater();
@@ -1166,6 +1225,7 @@ void MainWindow::optimize(bool components) {
                  .arg(res.lengthBefore / 1e6, 0, 'f', 1)
                  .arg(res.lengthAfter / 1e6, 0, 'f', 1),
              10000);
+    if (thenRefine) refine(true);
   });
   QPointer<QProgressDialog> dp(dlg);
   watcher->setFuture(QtConcurrent::run([work, components, cancel, dp] {

@@ -9,10 +9,11 @@
 
 #include "core/Edit.h"
 #include "gui/Document.h"
+#include "router/topo/Freestyle.h"
 
 namespace xr::gui {
 
-enum class Mode { Select, Route, Via, Measure };
+enum class Mode { Select, Freestyle, Route, Via, Measure };
 enum class MeasureKind { Points, Objects };
 enum class RouteAngle { Free, Deg45, Arc };
 
@@ -26,9 +27,11 @@ class BoardView : public QWidget {
   bool ratsnestVisible() const;
   bool onlyActiveLayer() const;
   bool isRouting() const { return routing_; }
+  topo::Push freestylePush() const { return push_; }
 
  public slots:
   void setMode(Mode m);
+  void startFreestyle(topo::Push push);  // F8 and its sub-modes
   void setRouteAngle(RouteAngle a);
   void setRatsnestVisible(bool on);
   void setOnlyActiveLayer(bool on);
@@ -105,7 +108,8 @@ class BoardView : public QWidget {
   edit::Fragment selectedFragment() const;
   // Moves the selection by an edit::Motion built around its pivot (rotations and flips).
   void transformSelection(double rotate, bool mirror, const QString& title);
-  enum class Drag { None, Fragment, Segment, Vertex, Bend };
+  enum class Drag { None, Fragment, Segment, Vertex, Bend, Freestyle };
+  void freestyleBy(Vec2 shift, double rotate);  // one Freestyle move of fsTarget_
   void startDrag(Drag kind, Vec2 at, std::optional<Marker> marker = {});
   void applyDrag();
   void finishDrag();
@@ -194,6 +198,10 @@ class BoardView : public QWidget {
   std::optional<EditSnapshot> dragBefore_;
   std::optional<Pick> pendingClick_;  // press on a selected object: selects it alone if not dragged
   bool placing_ = false;                // a pasted fragment follows the cursor
+  // Freestyle: the board changes step by step (wires re-shaped), so a drag goes on from where it is.
+  topo::Push push_ = topo::Push::None;
+  topo::FreestyleTarget fsTarget_;
+  Vec2 fsLast_;
   std::optional<EditSnapshot> pasteBefore_;
   // routing
   bool routing_ = false;

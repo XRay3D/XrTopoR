@@ -74,7 +74,8 @@ class MainWindow : public QMainWindow {
   void showHotkeys();
   void runDrc();
   void autoroute();
-  void optimize(bool components);  // F7 sub-modes
+  void optimize(bool components, bool thenRefine = false);  // F7 sub-modes
+  void refine(bool changeLayers);  // F6 sub-modes
   void pour(bool fill, bool clear, const QString& title);
   void pourSelected(int how);  // 0 toggle (Z), 1 remove fill, 2 re-pour
   void showContextMenu(QPoint globalPos);

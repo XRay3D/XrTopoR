@@ -128,6 +128,9 @@ void buildOutline(Board& b, LayerId edgeLayer) {
   auto near = [&](Vec2 a, Vec2 c) { return (a - c).len() <= tol; };
   std::vector<Polyline> loops;
   std::vector<bool> used(chains.size(), false);
+  // Closed figures (polygons, rectangles, circles) are loops of their own; only open pieces chain up,
+  // and a chain stops growing as soon as it closes.
+  auto closed = [&](const Polyline& c) { return c.size() >= 4 && near(c.front(), c.back()); };
   for (size_t i = 0; i < chains.size(); ++i) {
     if (used[i] || chains[i].size() < 2) continue;
     used[i] = true;
@@ -135,8 +138,8 @@ void buildOutline(Board& b, LayerId edgeLayer) {
     bool grew = true;
     while (grew && !near(loop.front(), loop.back())) {
       grew = false;
-      for (size_t j = 0; j < chains.size(); ++j) {
-        if (used[j] || chains[j].size() < 2) continue;
+      for (size_t j = 0; j < chains.size() && !near(loop.front(), loop.back()); ++j) {
+        if (used[j] || chains[j].size() < 2 || closed(chains[j])) continue;
         auto& c = chains[j];
         if (near(loop.back(), c.front())) loop.insert(loop.end(), c.begin() + 1, c.end());
         else if (near(loop.back(), c.back())) loop.insert(loop.end(), c.rbegin() + 1, c.rend());

@@ -730,6 +730,41 @@ void BoardView::mousePressEvent(QMouseEvent* e) {
       }
       break;
     }
+    case Mode::Freestyle: {
+      bool add = e->modifiers() & (Qt::ShiftModifier | Qt::ControlModifier);
+      if (!pk.item && pk.component < 0) {
+        // A branch point of a wire, or a frame selection.
+        double tol = 6 / scale_;
+        if (auto bp = !add ? topo::branchPointAt(*doc_->board(), toWorld(e->position()), tol) : std::nullopt) {
+          fsTarget_ = *bp;
+          startDrag(Drag::Freestyle, w);
+          doc_->clearSelection();
+          break;
+        }
+        frameStart_ = frameEnd_ = e->position();
+        if (!add) doc_->clearSelection();
+        break;
+      }
+      if (pk.item && pk.item->type == ItemType::Track) {
+        if (auto bp = topo::branchPointAt(*doc_->board(), pk.snap, 6 / scale_); bp && !add) {
+          fsTarget_ = *bp;
+          startDrag(Drag::Freestyle, w);
+          break;
+        }
+        clickSelect(pk, e->modifiers());  // wires are not moved in Freestyle: their shape is computed
+        break;
+      }
+      bool selected = (pk.component >= 0 && std::ranges::contains(doc_->selectedComponents(), pk.component)) ||
+                      (pk.component < 0 && pk.item && std::ranges::contains(doc_->selectedItems(), *pk.item));
+      if (add || !selected) clickSelect(pk, e->modifiers());
+      if (add) break;
+      fsTarget_ = {};
+      fsTarget_.fragment = selectedFragment();
+      fsTarget_.fragment.tracks.clear();
+      fsTarget_.fragment.zones.clear();
+      if (!fsTarget_.fragment.empty()) startDrag(Drag::Freestyle, w);
+      break;
+    }
     case Mode::Route: {
       if (!routing_) routeStart(pk, pk.item ? pk.snap : w);
       else routeAddPoint(constrained(routeLast_, pk.item && itemNet(*doc_->board(), *pk.item) == routeNet_ ? pk.snap : w), pk);
@@ -997,8 +1032,9 @@ void BoardView::mouseMoveEvent(QMouseEvent* e) {
       if ((pos - dragScreen_).manhattanLength() < 4) return;
       // TopoR: nothing moves while fixed objects are among the moved ones.
       const Board& b = *doc_->board();
-      bool locked = drag_ == Drag::Fragment || drag_ == Drag::Segment ? edit::hasLocked(b, dragFragment_)
-                                                                       : b.tracks[dragMarker_.track].locked;
+      bool locked = drag_ == Drag::Freestyle ? edit::hasLocked(b, fsTarget_.fragment)
+                    : drag_ == Drag::Fragment || drag_ == Drag::Segment ? edit::hasLocked(b, dragFragment_)
+                                                                        : b.tracks[dragMarker_.track].locked;
       if (locked) {
         emit status(tr("Среди выделенных объектов есть зафиксированные: перемещение запрещено"));
         cancelDrag();
@@ -1007,8 +1043,16 @@ void BoardView::mouseMoveEvent(QMouseEvent* e) {
       dragMoved_ = true;
       pendingClick_.reset();
       dragBefore_ = doc_->beginEdit();
+      if (drag_ == Drag::Freestyle) {
+        // Re-shaping renumbers the wires: only components and vias stay selected.
+        auto items = doc_->selectedItems();
+        std::erase_if(items, [](ItemRef r) { return r.type == ItemType::Track || r.type == ItemType::Zone; });
+        doc_->setSelection(std::move(items), doc_->selectedComponents());
+        fsLast_ = dragStart_;
+      }
     }
-    applyDrag();
+    if (drag_ == Drag::Freestyle) freestyleBy(snapped(cursor_) - fsLast_, 0);
+    else applyDrag();
     return;
   }
   if (mode_ == Mode::Select && !panning_ && !frameStart_)
@@ -1076,14 +1120,25 @@ void BoardView::keyPressEvent(QKeyEvent* e) {
 
 // ---------------------------------------------------------------- editing actions
 
+void BoardView::startFreestyle(topo::Push push) {
+  push_ = push;
+  setMode(Mode::Freestyle);
+}
+
 void BoardView::setMode(Mode m) {
   if (routing_) cancelTool();
+  if (drag_ != Drag::None) cancelDrag();
   mode_ = m;
-  setCursor(m == Mode::Select ? Qt::ArrowCursor : Qt::CrossCursor);
+  setCursor(m == Mode::Select || m == Mode::Freestyle ? Qt::ArrowCursor : Qt::CrossCursor);
   frameStart_.reset();
   emit modeChanged(m);
   switch (m) {
     case Mode::Select: emit status(tr("Выделять и перемещать объекты")); break;
+    case Mode::Freestyle:
+      emit status(push_ == topo::Push::None    ? tr("Freestyle: перемещение без подталкивания и соблюдения зазоров")
+                  : push_ == topo::Push::Vias ? tr("Freestyle: перемещение с подталкиванием переходов")
+                                              : tr("Freestyle: перемещение с подталкиванием компонентов и переходов"));
+      break;
     case Mode::Route: emit status(tr("Прокладка проводника: щёлкните контакт, с которого начать")); break;
     case Mode::Via: emit status(tr("Создание переходов: щёлкните место перехода")); break;
     case Mode::Measure:
@@ -1141,6 +1196,28 @@ void BoardView::deleteSelection() {
 
 void BoardView::rotateSelection(double deg) {
   if (!doc_->hasBoard()) return;
+  if (drag_ == Drag::Freestyle && dragMoved_ && !fsTarget_.vertex) {
+    freestyleBy({}, deg);
+    return;
+  }
+  if (mode_ == Mode::Freestyle && drag_ == Drag::None) {
+    // Turned in Freestyle, the wires are re-shaped as well.
+    fsTarget_ = {};
+    fsTarget_.fragment = selectedFragment();
+    fsTarget_.fragment.tracks.clear();
+    fsTarget_.fragment.zones.clear();
+    if (fsTarget_.fragment.empty()) return;
+    if (edit::hasLocked(*doc_->board(), fsTarget_.fragment)) {
+      emit status(tr("Среди выделенных объектов есть зафиксированные: перемещение запрещено"));
+      return;
+    }
+    auto before = doc_->beginEdit();
+    auto r = topo::freestyle(*doc_->board(), fsTarget_, {}, deg, edit::pivotOf(*doc_->board(), fsTarget_.fragment), push_);
+    doc_->setSelection({}, doc_->selectedComponents());
+    doc_->commitEdit(before, tr("Повернуть"));
+    if (r.blocked) emit status(tr("Поворот ограничен зазорами"));
+    return;
+  }
   if (drag_ == Drag::Fragment && dragMoved_) {
     // Space while dragging turns what is being dragged.
     dragRotate_ += deg;
@@ -1261,7 +1338,8 @@ void BoardView::applyDrag() {
   m.rotate = dragRotate_;
   m.mirror = dragMirror_;
   switch (drag_) {
-    case Drag::None: break;
+    case Drag::None:
+    case Drag::Freestyle: break;
     case Drag::Fragment:
       m.shift = d;
       edit::move(b, dragFragment_, m);
@@ -1298,6 +1376,17 @@ void BoardView::applyDrag() {
   update();
 }
 
+void BoardView::freestyleBy(Vec2 shift, double rotate) {
+  if (shift.len2() == 0 && rotate == 0) return;
+  Board& b = *doc_->board();
+  Vec2 pivot = fsTarget_.vertex ? *fsTarget_.vertex : edit::pivotOf(b, fsTarget_.fragment);
+  auto r = topo::freestyle(b, fsTarget_, shift, rotate, pivot, push_);
+  fsLast_ += r.moved;
+  if (r.blocked) emit status(tr("Перемещение ограничено зазорами: объекты, которые нельзя подтолкнуть"));
+  doc_->invalidate();
+  update();
+}
+
 void BoardView::finishDrag() {
   Drag kind = drag_;
   drag_ = Drag::None;
@@ -1324,7 +1413,8 @@ void BoardView::finishDrag() {
     r.index = r.index < int(map.size()) ? map[r.index] : -1;
     return r.index < 0;
   });
-  QString title = kind == Drag::Fragment ? (dragFragment_.components.empty() ? tr("Переместить") : tr("Переместить компонент"))
+  QString title = kind == Drag::Freestyle ? tr("Перемещение Freestyle")
+                  : kind == Drag::Fragment ? (dragFragment_.components.empty() ? tr("Переместить") : tr("Переместить компонент"))
                   : kind == Drag::Segment ? tr("Переместить сегмент")
                                           : tr("Изменить форму проводника");
   doc_->commitEdit(*dragBefore_, title);

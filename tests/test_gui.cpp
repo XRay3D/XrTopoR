@@ -783,3 +783,32 @@ TEST(Gui, CopyPaste) {
   f.view.cutSelection();
   EXPECT_EQ(b.vias.size(), vias - 1);
 }
+
+// F8: a component dragged in Freestyle keeps its routing whole; one undo step takes it back.
+TEST(Gui, FreestyleDrag) {
+  Fixture f("topor/Example_05/MinVia_standard_routing.fst");
+  const Board& b = f.b();
+  size_t unrouted = Connectivity::compute(b).ratsnest.size();
+  size_t tracks = b.tracks.size();
+  int ci = -1;
+  for (int c = 0; c < int(b.components.size()) && ci < 0; ++c)
+    if (!b.components[c].locked && !b.components[c].pads.empty()) ci = c;
+  ASSERT_GE(ci, 0);
+  Vec2 pad = b.pads[b.components[ci].pads[0]].pos.v();
+  Vec2 pos = b.components[ci].pos.v();
+  f.look(pad, 30);
+  f.view.startFreestyle(topo::Push::None);
+  EXPECT_EQ(f.view.mode(), Mode::Freestyle);
+  QPoint from = f.at(pad), to = f.at(pad + Vec2{1.5 * kNmPerMm, 0});
+  QTest::mousePress(&f.view, Qt::LeftButton, {}, from);
+  moveTo(f.view, from + QPoint(8, 0), Qt::LeftButton);
+  moveTo(f.view, to, Qt::LeftButton);
+  QTest::mouseRelease(&f.view, Qt::LeftButton, {}, to);
+  EXPECT_NEAR(f.b().components[ci].pos.x, pos.x + 1.5 * kNmPerMm, 0.05 * kNmPerMm);
+  EXPECT_EQ(Connectivity::compute(f.b()).ratsnest.size(), unrouted);
+  f.doc.undoStack()->undo();
+  EXPECT_EQ(f.b().components[ci].pos.v(), pos);
+  EXPECT_EQ(f.b().tracks.size(), tracks);
+  f.view.cancelTool();
+  EXPECT_EQ(f.view.mode(), Mode::Select);
+}
