@@ -28,6 +28,7 @@ add_library(xrio STATIC
   io/gerber/GerberWriter.cpp
   io/svg/SvgWriter.cpp
   io/xml/Xml.cpp
+  io/topor/FsProj.cpp
   io/topor/FstReader.cpp
   io/topor/FstWriter.cpp
 )
@@ -59,7 +60,8 @@ if(XR_BUILD_GUI)
     gui/MainWindow.cpp
     gui/MessagesPanel.cpp
     gui/ModeBar.cpp
-    gui/Panels.cpp
+    gui/Project.cpp
+    gui/ProjectPanel.cpp
     gui/PropertiesPanel.cpp
     gui/Schemes.cpp
     gui/SearchPanel.cpp

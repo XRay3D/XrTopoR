@@ -32,7 +32,7 @@
 #include "gui/PropertiesPanel.h"
 #include "gui/SearchPanel.h"
 #include "gui/ModeBar.h"
-#include "gui/Panels.h"
+#include "gui/ProjectPanel.h"
 #include "io/BoardIO.h"
 #include "io/Report.h"
 #include "io/gerber/GerberWriter.h"
@@ -147,10 +147,11 @@ MainWindow::MainWindow()
 void MainWindow::bindCommands() {
   Commands& c = *cmds_;
   // Файл
+  c.bind("Cmd_NewProject", [this] { newProject(); }, false);
   c.bind("Accel_FileOpen", [this] { open(); }, false);
-  c.bind("Cmd_ImportDesign", [this] { open(); }, false);
+  c.bind("Cmd_ImportDesign", [this] { importDesign(); }, false);
   c.bind("Cmd_OpenExamples", [this] { openExamples(); }, false);
-  c.bind("Cmd_CloseProject", [this] { closeBoard(); });
+  c.bind("Cmd_CloseProject", [this] { closeBoard(); }, false);
   c.bind("Accel_FileSave", [this] { save(); });
   c.bind("Cmd_SaveAs", [this] { saveAs(); });
   c.bind("Cmd_ImportSes", [this] { importSes(); });
@@ -359,11 +360,13 @@ QDockWidget* MainWindow::addDock(const QString& objectName, const QString& title
 }
 
 void MainWindow::buildDocks() {
-  project_ = new ProjectPanel(doc_, this);
-  connect(project_, &ProjectPanel::openRequested, this, [this](const QString& p) {
+  projectPanel_ = new ProjectPanel(doc_, this);
+  connect(projectPanel_, &ProjectPanel::openRequested, this, [this](const QString& p) {
     if (maybeSave()) openFile(p);
   });
-  auto* projectDock = addDock("Project_View", tr("Проект"), project_, Qt::LeftDockWidgetArea, "Accel_ViewProject");
+  connect(projectPanel_, &ProjectPanel::projectEdited, this, &MainWindow::saveProject);
+  connect(projectPanel_, &ProjectPanel::copyProjectRequested, this, &MainWindow::copyProject);
+  auto* projectDock = addDock("Project_View", tr("Проект"), projectPanel_, Qt::LeftDockWidgetArea, "Accel_ViewProject");
   auto* search = new SearchPanel(doc_, view_, this);
   auto* searchDock = addDock("Search_View", tr("Поиск"), search, Qt::LeftDockWidgetArea, "Accel_ViewSearch");
   // Ctrl+F also puts the cursor into the search field when the panel is shown.
@@ -485,9 +488,13 @@ void MainWindow::updateModeButtons() {
 }
 
 void MainWindow::updateTitle() {
+  // As TopoR: «TopoR - [Редактор ПП - file]».
   QString t = "XrTopoR";
   if (doc_->hasBoard())
-    t = QString("%1 - [%2%3]").arg(t, QFileInfo(doc_->path()).fileName(), doc_->undoStack()->isClean() ? "" : " *");
+    t = tr("%1 - [Редактор ПП - %2%3]")
+            .arg(t, QFileInfo(doc_->path()).fileName(), doc_->undoStack()->isClean() ? "" : " *");
+  else if (project_)
+    t = QString("%1 - [%2]").arg(t, project_->name());
   setWindowTitle(t);
 }
 
@@ -503,24 +510,135 @@ bool MainWindow::maybeSave() {
 }
 
 bool MainWindow::openFile(const QString& path) {
-  auto r = io::loadBoard(path.toStdString());
+  QFileInfo fi(path);
+  if (fi.suffix().compare("fsproj", Qt::CaseInsensitive) == 0) return openProject(fi.absoluteFilePath());
+  QString file = openableFile(fi.absoluteFilePath());
+  if (file.isEmpty()) {
+    QMessageBox::warning(this, tr("Открыть"),
+                         fi.suffix().compare("fsx", Qt::CaseInsensitive) == 0
+                             ? tr("Формат TopoR .fsx не поддерживается: сохраните дизайн в TopoR как .fst "
+                                  "(Файл › Экспорт › Экспорт дизайна) рядом с «%1».")
+                                   .arg(fi.fileName())
+                             : tr("Не удалось открыть «%1»: формат не поддерживается.").arg(fi.fileName()));
+    return false;
+  }
+  // A design of the open project stays in it; otherwise a project next to it that lists it is opened.
+  if (!project_ || !project_->contains(file)) {
+    project_.reset();
+    for (const QFileInfo& pf : QDir(fi.absolutePath()).entryInfoList({"*.fsproj"}, QDir::Files)) {
+      auto p = Project::load(pf.absoluteFilePath(), nullptr);
+      if (p && (p->contains(file) || p->contains(fi.absoluteFilePath()))) {
+        project_ = std::move(*p);
+        break;
+      }
+    }
+    projectPanel_->setProject(project());
+  }
+  if (!openDesign(file)) return false;
+  AppSettings::addRecentFile(project_ ? project_->path() : file);
+  projectPanel_->refreshHistory();
+  return true;
+}
+
+bool MainWindow::openDesign(const QString& file) {
+  auto r = io::loadBoard(file.toStdString());
   if (!r) {
     QMessageBox::warning(this, tr("Открыть"), QString::fromStdString(r.error()));
     return false;
   }
-  doc_->setBoard(std::move(*r), QFileInfo(path).absoluteFilePath());
-  showHint(tr("Открыт %1").arg(path));
+  doc_->setBoard(std::move(*r), QFileInfo(file).absoluteFilePath());
+  showHint(tr("Открыт %1").arg(file));
   const Board& b = *doc_->board();
   doc_->addLog({LogMessage::Kind::Info, tr("Документ"),
                 tr("Открыт %1: компонентов %2, цепей %3, проводников %4, переходов %5")
-                    .arg(QFileInfo(path).fileName())
+                    .arg(QFileInfo(file).fileName())
                     .arg(b.components.size())
                     .arg(b.nets.size())
                     .arg(b.tracks.size())
                     .arg(b.vias.size())});
-  AppSettings::addRecentFile(path);
-  project_->refreshHistory();
+  if (project_) {
+    project_->setOpened(doc_->path());
+    saveProject();
+  }
+  projectPanel_->refresh();
+  updateTitle();
   return true;
+}
+
+bool MainWindow::openProject(const QString& path) {
+  QString error;
+  auto p = Project::load(path, &error);
+  if (!p) {
+    QMessageBox::warning(this, tr("Открыть проект"), error);
+    return false;
+  }
+  doc_->setBoard(nullptr, {});
+  project_ = std::move(*p);
+  projectPanel_->setProject(project());
+  AppSettings::addRecentFile(project_->path());
+  projectPanel_->refreshHistory();
+  // The document open last time, else the first one the editor can open.
+  QString doc = project_->openedDocument();
+  if (doc.isEmpty() && !project_->documents().isEmpty()) doc = project_->documents().front();
+  if (!doc.isEmpty()) openDesign(doc);
+  else showHint(tr("В проекте нет документов, которые можно открыть (формат .fsx не поддерживается)"), 10000);
+  updateTitle();
+  return true;
+}
+
+void MainWindow::saveProject() {
+  if (!project_) return;
+  QString error;
+  if (!project_->save(&error)) showHint(tr("Не удалось сохранить проект: %1").arg(error), 10000);
+}
+
+void MainWindow::newProject() {
+  if (!maybeSave()) return;
+  QString start = doc_->hasBoard() ? QFileInfo(doc_->path()).absolutePath() + "/" + QFileInfo(doc_->path()).completeBaseName()
+                                   : QDir::homePath();
+  QString f = QFileDialog::getSaveFileName(this, tr("Создать проект"), start + ".fsproj", tr("Проект TopoR (*.fsproj)"));
+  if (f.isEmpty()) return;
+  if (!f.endsWith(".fsproj", Qt::CaseInsensitive)) f += ".fsproj";
+  project_ = Project::create(f);
+  if (doc_->hasBoard() && !doc_->path().isEmpty()) {
+    project_->add(doc_->path());
+    project_->setOpened(doc_->path());
+  }
+  saveProject();
+  projectPanel_->setProject(project());
+  AppSettings::addRecentFile(project_->path());
+  projectPanel_->refreshHistory();
+  updateTitle();
+}
+
+void MainWindow::copyProject() {
+  if (!project_) return;
+  QString dir = QFileDialog::getExistingDirectory(this, tr("Скопировать проект в папку"));
+  if (dir.isEmpty()) return;
+  // The project file and every file it lists that lies in its folder.
+  QDir src(project_->dir()), dst(dir);
+  int copied = 0;
+  for (const QString& f : QDir(project_->dir()).entryList(QDir::Files)) {
+    QString from = src.filePath(f);
+    if (from != project_->path() && !project_->contains(from)) continue;
+    if (QFile::copy(from, dst.filePath(f))) ++copied;
+  }
+  showHint(tr("Скопировано файлов: %1").arg(copied));
+}
+
+void MainWindow::importDesign() {
+  if (!maybeSave()) return;
+  QString f = QFileDialog::getOpenFileName(this, tr("Импорт дизайна"), project_ ? project_->dir() : QString(),
+                                           tr("Дизайны (*.kicad_pcb *.dsn *.pcb *.PCB *.fst);;Все файлы (*)"));
+  if (f.isEmpty()) return;
+  f = QFileInfo(f).absoluteFilePath();
+  if (project_) {
+    project_->add(f);
+    saveProject();
+    if (openDesign(f)) AppSettings::addRecentFile(project_->path());
+    return;
+  }
+  openFile(f);
 }
 
 bool MainWindow::openLastFile() {
@@ -532,7 +650,10 @@ bool MainWindow::openLastFile() {
 
 void MainWindow::open() {
   if (!maybeSave()) return;
-  QString f = QFileDialog::getOpenFileName(this, tr("Открыть"), QFileInfo(doc_->path()).absolutePath(), kBoardFilter);
+  QString start = project_ ? project_->dir() : QFileInfo(doc_->path()).absolutePath();
+  QString f = QFileDialog::getOpenFileName(
+      this, tr("Открыть"), start,
+      tr("Проекты и дизайны (*.fsproj *.fst *.fsx *.kicad_pcb *.dsn *.pcb *.PCB);;Проект TopoR (*.fsproj);;") + kBoardFilter);
   if (!f.isEmpty()) openFile(f);
 }
 
@@ -540,13 +661,17 @@ void MainWindow::openExamples() {
   if (!maybeSave()) return;
   QString dir = QDir::home().filePath("Документы/TopoR/Examples");
   if (!QFileInfo::exists(dir)) dir = QDir::homePath();
-  QString f = QFileDialog::getOpenFileName(this, tr("Открыть примеры"), dir, kBoardFilter);
+  QString f = QFileDialog::getOpenFileName(this, tr("Открыть примеры"), dir,
+                                           tr("Проекты и дизайны (*.fsproj *.fst *.kicad_pcb *.dsn *.pcb *.PCB)"));
   if (!f.isEmpty()) openFile(f);
 }
 
 void MainWindow::closeBoard() {
   if (!maybeSave()) return;
   doc_->setBoard(nullptr, {});
+  project_.reset();
+  projectPanel_->setProject(nullptr);
+  updateTitle();
 }
 
 bool MainWindow::save() {
@@ -574,8 +699,14 @@ bool MainWindow::saveAs() {
   }
   doc_->setPath(QFileInfo(f).absoluteFilePath());
   doc_->undoStack()->setClean();
-  AppSettings::addRecentFile(f);
-  project_->refreshHistory();
+  if (project_) {
+    project_->add(doc_->path());
+    project_->setOpened(doc_->path());
+    saveProject();
+    projectPanel_->refresh();
+  }
+  AppSettings::addRecentFile(project_ ? project_->path() : f);
+  projectPanel_->refreshHistory();
   updateTitle();
   showHint(tr("Сохранён %1").arg(f));
   return true;

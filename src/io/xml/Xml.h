@@ -47,6 +47,8 @@ class Writer {
   void emptyList(std::string_view name, const std::vector<std::pair<std::string, std::string>>& attrs);
   // <name>text</name> on one line.
   void textElement(std::string_view name, std::string_view text);
+  // A parsed element written back with its attributes, text and children (sections kept verbatim).
+  void element(const Element& e);
   std::string str() && { return std::move(out_); }
   const std::string& str() const& { return out_; }
 

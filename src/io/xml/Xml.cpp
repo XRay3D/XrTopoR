@@ -320,6 +320,30 @@ void Writer::empty(std::string_view name, std::initializer_list<std::pair<std::s
   out_ += eol_;
 }
 
+void Writer::element(const Element& e) {
+  startTag(e.name, {});
+  for (auto& [k, v] : e.attrs) attribute(k, v);
+  if (e.kids.empty() && e.text.empty()) {
+    out_ += "/>";
+    out_ += eol_;
+    return;
+  }
+  out_ += '>';
+  if (e.kids.empty()) {
+    out_ += escape(e.text);
+  } else {
+    out_ += eol_;
+    stack_.emplace_back(e.name);
+    for (auto& k : e.kids) element(k);
+    stack_.pop_back();
+    pad();
+  }
+  out_ += "</";
+  out_ += e.name;
+  out_ += '>';
+  out_ += eol_;
+}
+
 void Writer::textElement(std::string_view name, std::string_view text) {
   pad();
   out_ += '<';

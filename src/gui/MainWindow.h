@@ -9,6 +9,7 @@
 #include "gui/BoardView.h"
 #include "gui/Commands.h"
 #include "gui/Document.h"
+#include "gui/Project.h"
 
 class QDockWidget;
 class QLabel;
@@ -23,8 +24,10 @@ class MainWindow : public QMainWindow {
   Q_OBJECT
  public:
   MainWindow();
+  // A project (.fsproj) or a design file; a design inside a project opens with its project.
   bool openFile(const QString& path);
-  bool openLastFile();  // the board opened in the previous session, if any
+  bool openLastFile();  // the project or design opened in the previous session, if any
+  Project* project() { return project_ ? &*project_ : nullptr; }
   Commands* commands() const { return cmds_; }
   BoardView* view() const { return view_; }
   Document* document() const { return doc_; }
@@ -44,6 +47,12 @@ class MainWindow : public QMainWindow {
                        const QString& toggleCommand);
 
   bool maybeSave();
+  bool openProject(const QString& path);
+  bool openDesign(const QString& path);  // into the editor, keeping the current project
+  void newProject();
+  void copyProject();
+  void saveProject();
+  void importDesign();
   void open();
   void openExamples();
   void closeBoard();
@@ -76,7 +85,8 @@ class MainWindow : public QMainWindow {
   Commands* cmds_;
   ModeBar* modeBar_ = nullptr;
   ModeBar* autoBar_ = nullptr;
-  ProjectPanel* project_ = nullptr;
+  ProjectPanel* projectPanel_ = nullptr;
+  std::optional<Project> project_;
   DisplayPanel* display_ = nullptr;
   QLabel* stMain_ = nullptr;
   QLabel* stHint_ = nullptr;

@@ -10,6 +10,7 @@
 #include "core/Connectivity.h"
 #include "io/BoardIO.h"
 #include "io/topor/Fst.h"
+#include "io/topor/FsProj.h"
 #include "io/xml/Xml.h"
 
 using namespace xr;
@@ -361,4 +362,45 @@ TEST(FstIO, DisplayControlRoundTrip) {
   EXPECT_EQ(e.netColors[0].color, 0x00ff00u);
   EXPECT_TRUE(e.filterNetlines);
   EXPECT_EQ(e.netlineNets, std::vector<std::string>{"GND"});
+}
+
+// TopoR projects: documents and autorouting variants, paths relative to the project or Wine paths.
+TEST(FsProj, ReadResolveWrite) {
+  std::string dir = data("topor/Example_02");
+  auto text = io::readFile(dir + "/Example_02.fsproj");
+  ASSERT_TRUE(text);
+  auto p = io::readFsProj(*text);
+  ASSERT_TRUE(p) << p.error();
+  EXPECT_EQ(p->guid, "{01AA04F3-218E-498E-BA3F-985CB272D5E3}");
+  ASSERT_EQ(p->documents.files.size(), 3u);
+  EXPECT_EQ(p->documents.files[0].path, ".\\Placement.fsx");
+  EXPECT_EQ(p->documents.files[0].opened, std::optional<bool>(false));
+  EXPECT_FALSE(p->documents.files[2].opened.has_value());
+  EXPECT_EQ(io::resolveProjectPath(dir, p->documents.files[2].path), dir + "/Placement_master.pcb");
+  // Junk written by TopoR, Wine drive Z:.
+  EXPECT_EQ(io::resolveProjectPath("/a/b", ".\\/\\/\\/\\x.fsx"), "/a/b/x.fsx");
+  EXPECT_EQ(io::resolveProjectPath("/a/b", "Z:\\home\\u\\y.fst"), "/home/u/y.fst");
+  EXPECT_EQ(io::projectEntry("/a/b", "/a/b/sub/z.fst"), ".\\sub\\z.fst");
+  EXPECT_EQ(io::projectEntry("/a/b", "/c/z.fst"), "Z:\\c\\z.fst");
+
+  // Written back: same entries, folders and unknown sections kept.
+  p->autorouting.files.push_back({".\\Placement_var1.fst", std::nullopt, "2026-10-23 12:00:00"});
+  io::FsProjFolder folder{"Мои варианты"};
+  folder.files.push_back({".\\v2.fst", false, ""});
+  p->documents.folders.push_back(folder);
+  xml::Element imp;
+  imp.name = "Import";
+  imp.kids.push_back({"PCAD", {}, {}, {}});
+  p->extra.push_back(imp);
+  auto again = io::readFsProj(io::writeFsProj(*p));
+  ASSERT_TRUE(again) << again.error();
+  EXPECT_EQ(again->guid, p->guid);
+  ASSERT_EQ(again->documents.files.size(), 3u);
+  EXPECT_EQ(again->documents.files[1].path, p->documents.files[1].path);
+  EXPECT_EQ(again->documents.files[1].dateChange, p->documents.files[1].dateChange);
+  ASSERT_EQ(again->documents.folders.size(), 1u);
+  EXPECT_EQ(again->documents.folders[0].name, "Мои варианты");
+  ASSERT_EQ(again->autorouting.files.size(), 1u);
+  ASSERT_EQ(again->extra.size(), 1u);
+  EXPECT_EQ(again->extra[0].name, "Import");
 }

@@ -1,6 +1,8 @@
 // GUI smoke test: drives the board view with synthetic mouse/key events on the offscreen platform.
 #include <QApplication>
+#include <QDir>
 #include <QDockWidget>
+#include <QFile>
 #include <QDoubleSpinBox>
 #include <QLineEdit>
 #include <QTreeWidget>
@@ -505,4 +507,31 @@ TEST(Gui, SearchPanel) {
   EXPECT_LT(comps->childCount(), int(f.b().components.size()));
   emit tree->itemClicked(comps->child(0), 0);
   ASSERT_EQ(f.doc.selectedComponents().size(), 1u);
+}
+
+// A TopoR project opens with its document (the .fst saved next to TopoR's .fsx), which is marked open
+// in the project; other documents of the project open within it.
+TEST(Gui, TopoRProject) {
+  app();
+  QTemporaryDir dir;
+  QString src = QString::fromStdString(data("topor/Example_05"));
+  for (const char* f : {"Example_05.fsproj", "MinVia.fst", "MinVia_standard_routing.fst", "MinVia_master.PCB"})
+    ASSERT_TRUE(QFile::copy(src + "/" + f, dir.filePath(f))) << f;
+  MainWindow w;
+  ASSERT_TRUE(w.openFile(dir.filePath("Example_05.fsproj")));
+  ASSERT_TRUE(w.project());
+  ASSERT_TRUE(w.document()->hasBoard());
+  QString opened = w.document()->path();
+  EXPECT_TRUE(opened.endsWith(".fst")) << opened.toStdString();
+  // The project file now marks that document open.
+  auto p = Project::load(dir.filePath("Example_05.fsproj"), nullptr);
+  ASSERT_TRUE(p);
+  EXPECT_EQ(p->openedDocument(), opened);
+  // Another document of the project keeps the project.
+  ASSERT_TRUE(w.openFile(dir.filePath("MinVia_master.PCB")));
+  ASSERT_TRUE(w.project());
+  EXPECT_EQ(w.project()->path(), QFileInfo(dir.filePath("Example_05.fsproj")).absoluteFilePath());
+  p = Project::load(dir.filePath("Example_05.fsproj"), nullptr);
+  // Reopening the project returns to the design viewed last.
+  EXPECT_EQ(p->openedDocument(), w.document()->path());
 }
