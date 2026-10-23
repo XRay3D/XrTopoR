@@ -57,9 +57,12 @@ if(XR_BUILD_GUI)
     gui/DisplayPanel.cpp
     gui/Document.cpp
     gui/MainWindow.cpp
+    gui/MessagesPanel.cpp
     gui/ModeBar.cpp
     gui/Panels.cpp
+    gui/PropertiesPanel.cpp
     gui/Schemes.cpp
+    gui/SearchPanel.cpp
     gui/Units.cpp
     gui/icons.qrc
   )

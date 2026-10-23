@@ -28,6 +28,9 @@
 #include "core/ZoneFill.h"
 #include "gui/AppSettings.h"
 #include "gui/DisplayPanel.h"
+#include "gui/MessagesPanel.h"
+#include "gui/PropertiesPanel.h"
+#include "gui/SearchPanel.h"
 #include "gui/ModeBar.h"
 #include "gui/Panels.h"
 #include "io/BoardIO.h"
@@ -361,13 +364,18 @@ void MainWindow::buildDocks() {
     if (maybeSave()) openFile(p);
   });
   auto* projectDock = addDock("Project_View", tr("Проект"), project_, Qt::LeftDockWidgetArea, "Accel_ViewProject");
-  auto* searchDock = addDock("Search_View", tr("Поиск"), new NetsPanel(doc_, this), Qt::LeftDockWidgetArea,
-                             "Accel_ViewSearch");
+  auto* search = new SearchPanel(doc_, view_, this);
+  auto* searchDock = addDock("Search_View", tr("Поиск"), search, Qt::LeftDockWidgetArea, "Accel_ViewSearch");
+  // Ctrl+F also puts the cursor into the search field when the panel is shown.
+  connect((*cmds_)["Accel_ViewSearch"], &QAction::triggered, search, [search, searchDock] {
+    if (searchDock->isVisible()) search->focusSearch();
+  });
   splitDockWidget(projectDock, searchDock, Qt::Vertical);
   auto* props = addDock("properties", tr("Свойства"), new PropertiesPanel(doc_, this), Qt::BottomDockWidgetArea,
                         "Accel_ViewPropertyBar");
-  auto* output = addDock("Output_View", tr("Окно сообщений"), new DrcPanel(doc_, view_, this), Qt::BottomDockWidgetArea,
-                         "Accel_ViewOutput");
+  auto* messages = new MessagesPanel(doc_, view_, this);
+  connect(messages, &MessagesPanel::drcSettingsRequested, this, &MainWindow::runDrc);
+  auto* output = addDock("Output_View", tr("Окно сообщений"), messages, Qt::BottomDockWidgetArea, "Accel_ViewOutput");
   splitDockWidget(props, output, Qt::Horizontal);
   display_ = new DisplayPanel(doc_, this);
   auto* display = addDock("display_control", tr("Управление отображением"), display_, Qt::RightDockWidgetArea,
@@ -502,6 +510,14 @@ bool MainWindow::openFile(const QString& path) {
   }
   doc_->setBoard(std::move(*r), QFileInfo(path).absoluteFilePath());
   showHint(tr("Открыт %1").arg(path));
+  const Board& b = *doc_->board();
+  doc_->addLog({LogMessage::Kind::Info, tr("Документ"),
+                tr("Открыт %1: компонентов %2, цепей %3, проводников %4, переходов %5")
+                    .arg(QFileInfo(path).fileName())
+                    .arg(b.components.size())
+                    .arg(b.nets.size())
+                    .arg(b.tracks.size())
+                    .arg(b.vias.size())});
   AppSettings::addRecentFile(path);
   project_->refreshHistory();
   return true;
@@ -862,7 +878,11 @@ void MainWindow::autoroute() {
     b.zones = work->zones;
     doc_->commitEdit(before, tr("Автотрассировка"));
     QString log;
-    for (auto& l : res.log) log += QString::fromStdString(l) + "\n";
+    doc_->clearLog(tr("Автотрассировка"));
+    for (auto& l : res.log) {
+      log += QString::fromStdString(l) + "\n";
+      doc_->addLog({LogMessage::Kind::Info, tr("Автотрассировка"), QString::fromStdString(l)});
+    }
     QMessageBox::information(this, tr("Автотрассировка"),
                              tr("Разведено %1 из %2 связей, переходов: %3, длина %4 мм, %5 с\n\n%6")
                                  .arg(res.routed)
@@ -911,6 +931,8 @@ void MainWindow::optimize(bool components) {
     b.tracks = work->tracks;
     b.vias = work->vias;
     doc_->commitEdit(before, tr("Подвижка"));
+    doc_->clearLog(tr("Подвижка"));
+    for (auto& l : res.log) doc_->addLog({LogMessage::Kind::Info, tr("Подвижка"), QString::fromStdString(l)});
     showHint(tr("Подвижка: переходов %1, компонентов %2; конфликтов %3 → %4; длина %5 → %6 мм")
                  .arg(res.viaMoves)
                  .arg(res.componentMoves)

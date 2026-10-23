@@ -47,6 +47,13 @@ struct EditSnapshot {
   }
 };
 
+// A line of the «Окно сообщений» besides the DRC and unrouted nets (program and procedure output).
+struct LogMessage {
+  enum class Kind { Info, Warning, Error } kind = Kind::Info;
+  QString group;  // messages of one group are listed under one entry
+  QString text;
+};
+
 class Document : public QObject {
   Q_OBJECT
  public:
@@ -94,6 +101,13 @@ class Document : public QObject {
   // DRC results
   const std::vector<DrcViolation>& drc() const { return drc_; }
   void setDrc(std::vector<DrcViolation> v);
+  bool drcRun() const { return drcRun_; }  // DRC was run on this board (an empty result means «no violations»)
+  void clearDrc();
+
+  // Messages of procedures (load, autoroute, optimiser, …).
+  const std::vector<LogMessage>& log() const { return log_; }
+  void addLog(LogMessage m);
+  void clearLog(const QString& group = {});  // empty: all
 
   // Edits: snapshot-based undo. Call begin, edit the board, then commit with a title.
   EditSnapshot beginEdit() { return EditSnapshot::take(*board_); }
@@ -107,6 +121,7 @@ class Document : public QObject {
   void drcChanged();
   void unitChanged();
   void selectionFilterChanged();
+  void logChanged();
 
  private:
   std::unique_ptr<Board> board_;
@@ -121,6 +136,8 @@ class Document : public QObject {
   std::vector<int> selComponents_;
   int highlightNet_ = kNoNet;
   std::vector<DrcViolation> drc_;
+  bool drcRun_ = false;
+  std::vector<LogMessage> log_;
 };
 
 }  // namespace xr::gui

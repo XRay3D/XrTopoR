@@ -1,6 +1,9 @@
 // GUI smoke test: drives the board view with synthetic mouse/key events on the offscreen platform.
 #include <QApplication>
 #include <QDockWidget>
+#include <QDoubleSpinBox>
+#include <QLineEdit>
+#include <QTreeWidget>
 #include <QMenuBar>
 #include <QMouseEvent>
 #include <QSettings>
@@ -15,6 +18,9 @@
 #include "gui/Commands.h"
 #include "gui/Document.h"
 #include "gui/MainWindow.h"
+#include "gui/MessagesPanel.h"
+#include "gui/PropertiesPanel.h"
+#include "gui/SearchPanel.h"
 #include "gui/Schemes.h"
 #include "io/BoardIO.h"
 
@@ -446,4 +452,57 @@ TEST(Gui, RulerMeasuresPoints) {
   EXPECT_TRUE(text.contains("Расстояние: 5")) << text.toStdString();
   f.view.cancelTool();
   EXPECT_EQ(f.view.mode(), Mode::Select);
+}
+
+// «Свойства»: the width of the selected wires is edited in place, as one undoable step.
+TEST(Gui, PropertiesEditWireWidth) {
+  Fixture f("tt.kicad_pcb");
+  PropertiesPanel props(&f.doc);
+  f.doc.setUnit(Unit::Mm);
+  f.doc.setSelection({{ItemType::Track, 0}, {ItemType::Track, 1}}, {});
+  auto spins = props.findChildren<QDoubleSpinBox*>();
+  ASSERT_EQ(spins.size(), 1);  // the width
+  Coord w0 = f.b().tracks[0].width;
+  spins[0]->setValue(0.5);
+  emit spins[0]->editingFinished();
+  EXPECT_EQ(f.b().tracks[0].width, mmToNm(0.5));
+  EXPECT_EQ(f.b().tracks[1].width, mmToNm(0.5));
+  f.doc.undoStack()->undo();
+  EXPECT_EQ(f.b().tracks[0].width, w0);
+}
+
+// «Окно сообщений»: unrouted nets and DRC results are listed by kind.
+TEST(Gui, MessagesWindow) {
+  Fixture f("tt.kicad_pcb");
+  MessagesPanel messages(&f.doc, &f.view);
+  auto* tree = messages.findChild<QTreeWidget*>();
+  ASSERT_TRUE(tree);
+  auto texts = [&] {
+    QStringList t;
+    for (int i = 0; i < tree->topLevelItemCount(); ++i) t << tree->topLevelItem(i)->text(0);
+    return t.join("\n");
+  };
+  EXPECT_FALSE(texts().contains("Не разведена"));
+  auto before = f.doc.beginEdit();
+  f.doc.board()->clearRouting(false);
+  f.doc.commitEdit(before, "clear");
+  EXPECT_TRUE(texts().contains("Не разведена цепь")) << texts().toStdString();
+  f.doc.setDrc({});
+  EXPECT_TRUE(texts().contains("DRC: нарушений нет"));
+}
+
+// «Поиск»: the filter narrows each kind of object.
+TEST(Gui, SearchPanel) {
+  Fixture f("tt.kicad_pcb");
+  SearchPanel search(&f.doc, &f.view);
+  auto* tree = search.findChild<QTreeWidget*>();
+  auto* edit = search.findChild<QLineEdit*>();
+  ASSERT_TRUE(tree && edit);
+  const Component& c = f.b().components[0];
+  edit->setText(QString::fromStdString(c.ref));
+  QTreeWidgetItem* comps = tree->topLevelItem(0);
+  ASSERT_GE(comps->childCount(), 1);
+  EXPECT_LT(comps->childCount(), int(f.b().components.size()));
+  emit tree->itemClicked(comps->child(0), 0);
+  ASSERT_EQ(f.doc.selectedComponents().size(), 1u);
 }

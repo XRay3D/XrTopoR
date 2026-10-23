@@ -21,13 +21,15 @@ int main(int argc, char** argv) {
   xr::gui::MainWindow w;
   w.show();
   QString shot;
-  bool opened = false;
+  bool opened = false, drc = false;
   for (int i = 1; i < argc; ++i) {
     QString a = QString::fromLocal8Bit(argv[i]);
     if (a == "--screenshot" && i + 1 < argc) shot = QString::fromLocal8Bit(argv[++i]);
+    else if (a == "--drc") drc = true;  // runs DRC after loading (for checks of the messages window)
     else opened = w.openFile(a) || opened;
   }
   if (!opened) w.openLastFile();
+  if (drc) (*w.commands())["Accel_DRC"]->trigger();
   if (!shot.isEmpty()) {  // headless check: render once and save the window
     QTimer::singleShot(300, &app, [&] {
       w.grab().save(shot);

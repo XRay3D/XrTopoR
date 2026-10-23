@@ -44,6 +44,8 @@ void Document::setBoard(std::unique_ptr<Board> b, const QString& path) {
   selComponents_.clear();
   highlightNet_ = kNoNet;
   drc_.clear();
+  drcRun_ = false;
+  log_.clear();
   if (board_) {
     // Designs without saved display settings get the default schemes; saved ones are completed.
     bool saved = board_->display.has_value();
@@ -70,6 +72,7 @@ void Document::setBoard(std::unique_ptr<Board> b, const QString& path) {
   emit layersChanged();
   emit selectionChanged();
   emit drcChanged();
+  emit logChanged();
 }
 
 void Document::setActiveLayer(LayerId l) {
@@ -166,7 +169,25 @@ void Document::setHighlightedNet(int net) {
 
 void Document::setDrc(std::vector<DrcViolation> v) {
   drc_ = std::move(v);
+  drcRun_ = true;
   emit drcChanged();
+}
+
+void Document::clearDrc() {
+  drc_.clear();
+  drcRun_ = false;
+  emit drcChanged();
+}
+
+void Document::addLog(LogMessage m) {
+  log_.push_back(std::move(m));
+  emit logChanged();
+}
+
+void Document::clearLog(const QString& group) {
+  if (group.isEmpty()) log_.clear();
+  else std::erase_if(log_, [&](const LogMessage& m) { return m.group == group; });
+  emit logChanged();
 }
 
 void Document::commitEdit(const EditSnapshot& before, const QString& title) {
