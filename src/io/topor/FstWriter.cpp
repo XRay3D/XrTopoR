@@ -228,7 +228,8 @@ struct Writer {
         break;
       case PadShapeKind::RoundRect: {
         double radius = k.rr / 1000.0 * std::min(k.w, k.h);
-        x.open("PadRect", {{"width", mm(k.w)}, {"height", mm(k.h)}, {"handling", "Rounding"}, {"handlingValue", mm(radius)}});
+        x.open("PadRect", {{"width", mm(k.w)}, {"height", mm(k.h)}, {"handling", "Rounding"},
+                           {"handlingValue", mm(radius)}});
         layerRefs();
         x.close();
         break;
@@ -626,7 +627,8 @@ struct Writer {
     x.open("RulesWidthOfWires");
     for (size_t c = 0; c < b.netClasses.size(); ++c) {
       if (c > 0 && netsOfClass[c].empty()) continue;
-      x.open("WidthOfWires", {{"enabled", "on"}, {"widthMin", mm(b.netClasses[c].trackWidth)}, {"widthNom", mm(b.netClasses[c].trackWidth)}});
+      std::string w = mm(b.netClasses[c].trackWidth);
+      x.open("WidthOfWires", {{"enabled", "on"}, {"widthMin", w}, {"widthNom", w}});
       x.empty("AllLayers");
       objects(int(c), 1);
       x.close();
@@ -635,7 +637,8 @@ struct Writer {
     x.open("RulesClearancesNetToNet");
     for (size_t c = 0; c < b.netClasses.size(); ++c) {
       if (c > 0 && netsOfClass[c].empty()) continue;
-      x.open("ClearanceNetToNet", {{"enabled", "on"}, {"clrnMin", mm(b.netClasses[c].clearance)}, {"clrnNom", mm(b.netClasses[c].clearance)}});
+      std::string clr = mm(b.netClasses[c].clearance);
+      x.open("ClearanceNetToNet", {{"enabled", "on"}, {"clrnMin", clr}, {"clrnNom", clr}});
       x.empty("AllLayers");
       // Two object lists: class nets against all nets.
       x.open("ObjectsAffected");

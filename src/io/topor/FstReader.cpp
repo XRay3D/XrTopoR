@@ -21,7 +21,6 @@ struct PadstackDef {
   Vec2 shift;  // shape centre offset (fst frame, file units)
   Coord drill = 0;
   bool plated = true;
-  bool smd = false;
   bool allSignal = false, allPlane = false;
   LayerMask layers = 0;  // explicitly named copper layers (unmirrored)
   bool haveShape = false, shapeFromSignal = false;
@@ -178,7 +177,6 @@ struct Reader {
   void readPadstack(const Element& ps) {
     PadstackDef d;
     auto type = ps.attr("type", "Through");
-    d.smd = type == "SMD";
     d.drill = len(ps.num("holeDiameter"));
     d.plated = ps.flag("metallized", type != "MountHole");
     if (auto* pads = ps.find("Pads")) {
