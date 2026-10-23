@@ -742,3 +742,44 @@ TEST(Gui, FlipComponent) {
     EXPECT_EQ(f.b().pads[pi].copper, pads[pi].copper);
   }
 }
+
+// Ctrl+C / Ctrl+V: the pasted copy follows the cursor and a click puts it down; Esc drops it.
+TEST(Gui, CopyPaste) {
+  Fixture f("tt.kicad_pcb");
+  const Board& b = f.b();
+  ASSERT_FALSE(b.vias.empty());
+  Vec2 v = b.vias[0].pos.v();
+  f.look(v, 20);
+  size_t tracks = b.tracks.size(), vias = b.vias.size();
+  f.doc.setSelection({{ItemType::Via, 0}, {ItemType::Track, 0}}, {});
+  f.view.copySelection();
+  ASSERT_FALSE(BoardView::clipboardEmpty());
+  Vec2 target = v + Vec2{3 * kNmPerMm, 2 * kNmPerMm};
+  moveTo(f.view, f.at(target));
+  f.view.paste();
+  EXPECT_TRUE(f.view.isPlacing());
+  Vec2 to = target + Vec2{1 * kNmPerMm, 0};
+  moveTo(f.view, f.at(to));
+  QTest::mouseClick(&f.view, Qt::LeftButton, {}, f.at(to));
+  EXPECT_FALSE(f.view.isPlacing());
+  ASSERT_EQ(b.vias.size(), vias + 1);
+  EXPECT_EQ(b.tracks.size(), tracks + 1);
+  EXPECT_EQ(b.vias.back().net, b.vias[0].net);
+  // The copy keeps its place relative to the clip's centre.
+  Vec2 shift = b.vias.back().pos.v() - v;
+  Vec2 tshift = b.tracks.back().a.v() - b.tracks[0].a.v();
+  EXPECT_NEAR(shift.x, tshift.x, 2);
+  EXPECT_NEAR(shift.y, tshift.y, 2);
+  f.doc.undoStack()->undo();
+  EXPECT_EQ(b.vias.size(), vias);
+  // A paste dropped with Esc leaves nothing behind.
+  f.view.paste();
+  f.view.cancelTool();
+  EXPECT_FALSE(f.view.isPlacing());
+  EXPECT_EQ(b.vias.size(), vias);
+  EXPECT_EQ(b.tracks.size(), tracks);
+  // Cut removes, paste brings back.
+  f.doc.setSelection({{ItemType::Via, 0}}, {});
+  f.view.cutSelection();
+  EXPECT_EQ(b.vias.size(), vias - 1);
+}

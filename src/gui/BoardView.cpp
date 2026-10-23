@@ -682,6 +682,12 @@ void BoardView::mousePressEvent(QMouseEvent* e) {
     panning_ = true;
     return;
   }
+  if (placing_ && (e->button() == Qt::LeftButton || e->button() == Qt::RightButton)) {
+    // A click places the pasted fragment, the right button drops it.
+    if (e->button() == Qt::LeftButton) finishDrag();
+    else cancelDrag();
+    return;
+  }
   if (e->button() == Qt::RightButton) {
     rightDown_ = true;
     rightMoved_ = false;
@@ -1113,7 +1119,7 @@ void BoardView::setOnlyActiveLayer(bool on) {
 }
 
 void BoardView::deleteSelection() {
-  if (!doc_->hasBoard()) return;
+  if (!doc_->hasBoard() || drag_ != Drag::None) return;
   auto items = doc_->selectedItems();
   auto comps = doc_->selectedComponents();
   if (items.empty() && comps.empty()) return;
@@ -1295,6 +1301,16 @@ void BoardView::applyDrag() {
 void BoardView::finishDrag() {
   Drag kind = drag_;
   drag_ = Drag::None;
+  if (placing_) {
+    placing_ = false;
+    doc_->invalidate();
+    doc_->commitEdit(*pasteBefore_, tr("Вставить"));
+    pasteBefore_.reset();
+    dragBefore_.reset();
+    emit status(tr("Вставлено"));
+    update();
+    return;
+  }
   if (!dragMoved_) {
     if (pendingClick_) clickSelect(*pendingClick_, {});
     pendingClick_.reset();
@@ -1318,6 +1334,19 @@ void BoardView::finishDrag() {
 }
 
 void BoardView::cancelDrag() {
+  if (placing_) {
+    placing_ = false;
+    pasteBefore_->apply(*doc_->board());
+    pasteBefore_.reset();
+    dragMoved_ = false;
+    dragBefore_.reset();
+    drag_ = Drag::None;
+    doc_->invalidate();
+    doc_->clearSelection();
+    emit status(tr("Вставка отменена"));
+    update();
+    return;
+  }
   if (dragMoved_ && dragBefore_) {
     dragBefore_->apply(*doc_->board());
     doc_->invalidate();
@@ -1591,6 +1620,73 @@ void BoardView::changeNet() {
   auto before = doc_->beginEdit();
   edit::changeNet(b, f, pads, *net);
   doc_->commitEdit(before, tr("Изменить цепь"));
+}
+
+static edit::Clip& clipboard() {
+  static edit::Clip c;
+  return c;
+}
+
+bool BoardView::clipboardEmpty() { return clipboard().empty(); }
+
+void BoardView::copySelection() {
+  if (!doc_->hasBoard()) return;
+  edit::Fragment f = selectedFragment();
+  f.components.clear();
+  if (f.empty()) {
+    emit status(tr("Копируются проводники, переходы и области металлизации"));
+    return;
+  }
+  clipboard() = edit::copy(*doc_->board(), f);
+  emit status(tr("Скопировано объектов: %1").arg(f.tracks.size() + f.vias.size() + f.zones.size()));
+}
+
+void BoardView::cutSelection() {
+  if (!doc_->hasBoard()) return;
+  edit::Fragment f = selectedFragment();
+  f.components.clear();
+  if (f.empty()) return;
+  clipboard() = edit::copy(*doc_->board(), f);
+  auto before = doc_->beginEdit();
+  edit::erase(*doc_->board(), f);
+  doc_->clearSelection();
+  doc_->commitEdit(before, tr("Вырезать"));
+}
+
+void BoardView::duplicateSelection() {
+  copySelection();
+  if (!clipboard().empty()) paste();
+}
+
+void BoardView::paste() {
+  if (!doc_->hasBoard()) return;
+  if (clipboard().empty()) {
+    emit status(tr("Буфер обмена пуст"));
+    return;
+  }
+  if (drag_ != Drag::None) cancelDrag();
+  if (mode_ != Mode::Select) setMode(Mode::Select);
+  Board& b = *doc_->board();
+  pasteBefore_ = doc_->beginEdit();
+  Vec2 at = snapped(cursor_);
+  edit::Fragment f = edit::paste(b, clipboard(), at);
+  if (f.empty()) {
+    pasteBefore_.reset();
+    emit status(tr("В дизайне нет слоёв скопированных объектов"));
+    return;
+  }
+  doc_->invalidate();
+  std::vector<ItemRef> items;
+  for (int i : f.tracks) items.push_back({ItemType::Track, i});
+  for (int i : f.vias) items.push_back({ItemType::Via, i});
+  for (int i : f.zones) items.push_back({ItemType::Zone, i});
+  doc_->setSelection(std::move(items), {});
+  startDrag(Drag::Fragment, at);
+  dragMoved_ = true;
+  dragBefore_ = doc_->beginEdit();
+  placing_ = true;
+  emit status(tr("Вставка: щёлкните, где разместить; Space — повернуть, Esc — отмена"));
+  update();
 }
 
 void BoardView::invertSelection() {

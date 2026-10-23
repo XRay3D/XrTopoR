@@ -172,13 +172,18 @@ void MainWindow::bindCommands() {
   c.bind("Cmd_Exit", [this] { close(); }, false);
 
   // Правка
-  auto* undo = c.bind("Accel_Undo", [this] { doc_->undoStack()->undo(); }, false);
-  auto* redo = c.bind("Accel_Redo", [this] { doc_->undoStack()->redo(); }, false);
+  // Undo during a drag or a paste only drops what is being dragged.
+  auto* undo = c.bind("Accel_Undo", [this] { view_->isDragging() ? view_->cancelTool() : doc_->undoStack()->undo(); }, false);
+  auto* redo = c.bind("Accel_Redo", [this] { if (!view_->isDragging()) doc_->undoStack()->redo(); }, false);
   undo->setEnabled(false);
   redo->setEnabled(false);
   connect(doc_->undoStack(), &QUndoStack::canUndoChanged, undo, &QAction::setEnabled);
   connect(doc_->undoStack(), &QUndoStack::canRedoChanged, redo, &QAction::setEnabled);
   c.bind("Accel_Delete", [this] { view_->deleteSelection(); });
+  c.bind("Accel_Cut", [this] { view_->cutSelection(); });
+  c.bind("Accel_Copy", [this] { view_->copySelection(); });
+  c.bind("Accel_Paste", [this] { view_->paste(); });
+  c.bind("Accel_Duplicate", [this] { view_->duplicateSelection(); });
   c.bind("Accel_SelAll", [this] { view_->selectAll(); });
   c.bind("Accel_Fix", [this] { view_->toggleFix(); });
   c.bind("Accel_Layer", [this] { view_->changeLayer(); });

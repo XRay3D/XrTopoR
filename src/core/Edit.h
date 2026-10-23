@@ -4,6 +4,7 @@
 // connected, and the operations on wires (vertex and segment drags, «Спрямить», «Изменить слой»,
 // «Отсоединить», «Изменить цепь»). Objects are addressed by index; new tracks are appended, so the
 // indices taken before an edit stay valid until removeDegenerate() compacts the track list.
+#include <string>
 #include <vector>
 
 #include "core/Board.h"
@@ -74,6 +75,23 @@ int unlink(Board& b, const Fragment& f);
 void changeNet(Board& b, const Fragment& f, const std::vector<int>& pads, int net);
 // «Удалить избыточные переходы»: unlocked vias connecting nothing or one layer only. Returns the count.
 int removeExcessVias(Board& b);
+
+// Clipboard contents: wires, vias and copper areas with their nets and layers by name, so that they
+// can be pasted into another design. Components come from the netlist and are not copied.
+struct Clip {
+  std::vector<Track> tracks;
+  std::vector<Via> vias;
+  std::vector<Zone> zones;
+  std::vector<std::string> nets, layers;  // names in the source design, by index
+  Vec2 origin;                            // centre of the copied objects
+  bool empty() const { return tracks.empty() && vias.empty() && zones.empty(); }
+};
+Clip copy(const Board& b, const Fragment& f);
+// Appends the clip with its origin at `at` (nets and layers matched by name; objects on layers the
+// design lacks are dropped) and returns what was added. Pasted objects are never locked.
+Fragment paste(Board& b, const Clip& c, Vec2 at);
+// Removes the fragment's tracks, vias and copper areas (components stay: they belong to the netlist).
+void erase(Board& b, const Fragment& f);
 
 // Removes zero-length tracks (drags leave them); returns old → new track index (-1 = removed).
 std::vector<int> removeDegenerate(Board& b);

@@ -45,6 +45,14 @@ class BoardView : public QWidget {
   void unlinkSelection();             // U
   void changeNet();                   // Shift+N
   void invertSelection();
+  // Clipboard (wires, vias, copper areas): a paste follows the cursor until a click places it.
+  void copySelection();
+  void cutSelection();
+  void paste();
+  void duplicateSelection();
+  static bool clipboardEmpty();
+  bool isPlacing() const { return placing_; }
+  bool isDragging() const { return drag_ != Drag::None; }
   void cancelTool();
   void finishRoute();
   void routeAddVia();      // via + layer change while routing
@@ -185,6 +193,8 @@ class BoardView : public QWidget {
   Marker dragMarker_;
   std::optional<EditSnapshot> dragBefore_;
   std::optional<Pick> pendingClick_;  // press on a selected object: selects it alone if not dragged
+  bool placing_ = false;                // a pasted fragment follows the cursor
+  std::optional<EditSnapshot> pasteBefore_;
   // routing
   bool routing_ = false;
   int routeNet_ = kNoNet;

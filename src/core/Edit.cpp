@@ -506,6 +506,75 @@ int removeExcessVias(Board& b) {
   return n;
 }
 
+Clip copy(const Board& b, const Fragment& f) {
+  Clip c;
+  for (int ti : f.tracks) c.tracks.push_back(b.tracks[ti]);
+  for (int vi : f.vias) c.vias.push_back(b.vias[vi]);
+  for (int zi : f.zones) c.zones.push_back(b.zones[zi]);
+  for (auto& n : b.nets) c.nets.push_back(n.name);
+  for (auto& l : b.layers) c.layers.push_back(l.name);
+  Fragment g = f;
+  g.components.clear();
+  BBox bb = bboxOf(b, g);
+  c.origin = bb.valid() ? bb.center() : Vec2{};
+  return c;
+}
+
+Fragment paste(Board& b, const Clip& c, Vec2 at) {
+  auto net = [&](int n) { return n >= 0 && n < int(c.nets.size()) ? b.findNet(c.nets[size_t(n)]) : kNoNet; };
+  auto layer = [&](LayerId l) { return l >= 0 && l < LayerId(c.layers.size()) ? b.findLayer(c.layers[size_t(l)]) : -1; };
+  Motion m;
+  m.shift = at - c.origin;
+  Fragment f;
+  for (Track t : c.tracks) {
+    t.layer = layer(t.layer);
+    if (t.layer < 0) continue;
+    t.net = net(t.net);
+    t.locked = false;
+    t.a = m.apply(t.a);
+    t.b = m.apply(t.b);
+    if (t.mid) t.mid = m.apply(*t.mid);
+    f.tracks.push_back(int(b.tracks.size()));
+    b.tracks.push_back(t);
+  }
+  for (Via v : c.vias) {
+    LayerMask lm = 0;
+    for (LayerId l = 0; l < 64; ++l)
+      if ((v.layers >> l) & 1)
+        if (LayerId k = layer(l); k >= 0) lm |= LayerMask(1) << k;
+    if (!lm) continue;
+    v.layers = lm;
+    v.net = net(v.net);
+    v.locked = false;
+    v.pos = m.apply(v.pos);
+    f.vias.push_back(int(b.vias.size()));
+    b.vias.push_back(v);
+  }
+  for (Zone z : c.zones) {
+    z.layer = layer(z.layer);
+    if (z.layer < 0) continue;
+    z.net = net(z.net);
+    for (auto& p : z.outline) p = m.apply(p);
+    for (auto& poly : z.filled)
+      for (auto& p : poly) p = m.apply(p);
+    f.zones.push_back(int(b.zones.size()));
+    b.zones.push_back(std::move(z));
+  }
+  return f;
+}
+
+void erase(Board& b, const Fragment& f) {
+  auto drop = [](auto& list, std::vector<int> idx) {
+    std::ranges::sort(idx, std::greater{});
+    auto [first, last] = std::ranges::unique(idx);
+    idx.erase(first, last);
+    for (int i : idx) list.erase(list.begin() + i);
+  };
+  drop(b.tracks, f.tracks);
+  drop(b.vias, f.vias);
+  drop(b.zones, f.zones);
+}
+
 std::vector<int> removeDegenerate(Board& b) {
   std::vector<int> map(b.tracks.size(), -1);
   std::vector<Track> kept;
