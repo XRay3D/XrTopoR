@@ -341,13 +341,12 @@ struct Reader {
 
 }  // namespace
 
-std::unique_ptr<Board> readDsn(const std::string& text, const std::string& path, std::string* err) {
+Result<BoardPtr> readDsn(const std::string& text, const std::string& path) {
   sexpr::ParseOptions opt;
   opt.dsnQuoting = true;
   auto tree = std::make_shared<Node>(sexpr::parse(text, opt));
   if (tree->kids.empty() || !(tree->kids[0].is("pcb") || tree->kids[0].is("PCB"))) {
-    if (err) *err = "not a Specctra DSN file";
-    return nullptr;
+    return std::unexpected(std::string("not a Specctra DSN file"));
   }
   const Node& root = tree->kids[0];
   auto b = std::make_unique<Board>();

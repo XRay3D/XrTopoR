@@ -168,22 +168,20 @@ void TopoMesh::build(const Board& b, const MeshOptions& opt) {
   std::vector<int> alias(verts.size(), -1);
   CDT::Face_handle hint;
   for (size_t i = 0; i < verts.size(); ++i) {
+    size_t before = cdt.number_of_vertices();
     auto vh = cdt.insert(CPoint(verts[i].p.x, verts[i].p.y), hint);
     hint = vh->face();
-    if (vh->info() >= 0 && vh->info() != int(i) && vh->info() < int(i)) {
-      alias[i] = vh->info();  // duplicate point
-    } else {
-      vh->info() = int(i);
-    }
+    if (cdt.number_of_vertices() > before) vh->info() = int(i);
+    else alias[i] = vh->info();  // duplicate point
     handles[i] = vh;
   }
   for (auto [a, c] : constraints)
     if (handles[a] != handles[c]) cdt.insert_constraint(handles[a], handles[c]);
   // Constraint intersections may create new vertices.
   for (auto v = cdt.finite_vertices_begin(); v != cdt.finite_vertices_end(); ++v) {
-    if (v->info() >= 0 && v->info() < int(verts.size()) && handles[v->info()] == CDT::Vertex_handle(v)) continue;
-    bool known = v->info() >= 0 && v->info() < int(verts.size());
-    if (!known) v->info() = addVert({v->point().x(), v->point().y()}, VKind::Outline, -1);
+    int id = v->info();
+    if (id >= 0 && id < int(handles.size()) && handles[id] == CDT::Vertex_handle(v)) continue;
+    v->info() = addVert({v->point().x(), v->point().y()}, VKind::Outline, -1);
   }
   markDomains(cdt);
 

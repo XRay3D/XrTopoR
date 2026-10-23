@@ -23,6 +23,7 @@ add_library(xrio STATIC
   io/dsn/SesIO.cpp
   io/pcad/PcadReader.cpp
   io/gerber/GerberWriter.cpp
+  io/svg/SvgWriter.cpp
 )
 target_link_libraries(xrio PUBLIC xrcore Boost::json)
 

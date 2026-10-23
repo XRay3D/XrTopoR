@@ -5,13 +5,13 @@
       "name": "debug",
       "binaryDir": "${sourceDir}/build/debug",
       "generator": "Unix Makefiles",
-      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug", "CMAKE_CXX_COMPILER": "/opt/gcc-16/bin/g++" }
     },
     {
       "name": "release",
       "binaryDir": "${sourceDir}/build/release",
       "generator": "Unix Makefiles",
-      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "CMAKE_CXX_COMPILER": "/opt/gcc-16/bin/g++" }
     }
   ],
   "buildPresets": [

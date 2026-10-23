@@ -2,6 +2,7 @@
 // Board data model. Internal frame follows KiCad: Y axis points down, units are nanometres,
 // angles are degrees counter-clockwise as seen on screen.
 #include <cstdint>
+#include <inplace_vector>
 #include <map>
 #include <memory>
 #include <string>
@@ -15,6 +16,8 @@ namespace sexpr { struct Node; }
 
 using LayerId = int;
 using LayerMask = std::uint64_t;
+// Copper layer lists are bounded by the 64-bit layer mask: no heap allocation needed.
+using LayerList = std::inplace_vector<LayerId, 64>;
 constexpr int kNoNet = -1;
 
 enum class LayerKind { Copper, Silk, Mask, Paste, Fab, Courtyard, Edge, Other };
@@ -139,7 +142,7 @@ struct Board {
   std::shared_ptr<SourceDoc> source;       // original file tree for lossless round-trip
 
   // Layers
-  std::vector<LayerId> copperLayers() const;  // top to bottom
+  LayerList copperLayers() const;  // top to bottom
   int copperCount() const;
   LayerId findLayer(const std::string& name) const;
   LayerId addLayer(const std::string& name, LayerKind kind, Side side);

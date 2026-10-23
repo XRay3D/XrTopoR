@@ -287,12 +287,12 @@ std::vector<GerberFile> makeGerbers(const Board& b, const GerberOptions& opt) {
   return files;
 }
 
-bool writeGerbers(const Board& b, const std::string& dir, const GerberOptions& opt, std::string* err) {
+Result<void> writeGerbers(const Board& b, const std::string& dir, const GerberOptions& opt) {
   std::error_code ec;
   std::filesystem::create_directories(dir, ec);
   for (auto& f : makeGerbers(b, opt))
-    if (!writeFile((std::filesystem::path(dir) / f.name).string(), f.content, err)) return false;
-  return true;
+    if (auto r = writeFile((std::filesystem::path(dir) / f.name).string(), f.content); !r) return r;
+  return {};
 }
 
 }  // namespace xr::io

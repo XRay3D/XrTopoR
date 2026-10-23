@@ -423,10 +423,9 @@ struct Reader {
 
 }  // namespace
 
-std::unique_ptr<Board> readPcad(const std::string& text, const std::string& path, std::string* err) {
+Result<BoardPtr> readPcad(const std::string& text, const std::string& path) {
   if (text.rfind("ACCEL_ASCII", 0) != 0) {
-    if (err) *err = "not a P-CAD ASCII file";
-    return nullptr;
+    return std::unexpected(std::string("not a P-CAD ASCII file"));
   }
   sexpr::ParseOptions opt;
   opt.dsnQuoting = true;  // P-CAD strings contain raw backslashes (paths); no escapes

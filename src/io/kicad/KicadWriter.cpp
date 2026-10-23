@@ -132,6 +132,11 @@ std::string patchSource(const Board& b) {
       // Net reassignment is not edited in stage 1; keep the original (net ...) node.
     }
   }
+  // Zone fills cleared in the model (e.g. by the router) must be dropped so KiCad refills them.
+  bool fillsCleared = std::ranges::all_of(b.zones, [](const Zone& z) { return z.filled.empty(); });
+  if (fillsCleared)
+    for (auto& k : root.kids)
+      if (k.is("zone")) std::erase_if(k.kids, [](const Node& n) { return n.is("filled_polygon"); });
   // Replace routing.
   std::erase_if(root.kids, [](const Node& n) { return n.is("segment") || n.is("arc") || n.is("via"); });
   appendRouting(b, st, root);

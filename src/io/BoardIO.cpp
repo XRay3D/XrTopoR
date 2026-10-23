@@ -28,52 +28,43 @@ Format detectFormat(const std::string& path) {
   return Format::Unknown;
 }
 
-std::string readFile(const std::string& path, std::string* err) {
+Result<std::string> readFile(const std::string& path) {
   std::ifstream f(path, std::ios::binary);
-  if (!f) {
-    if (err) *err = "cannot open " + path;
-    return {};
-  }
+  if (!f) return std::unexpected("cannot open " + path);
   std::ostringstream ss;
   ss << f.rdbuf();
   return ss.str();
 }
 
-bool writeFile(const std::string& path, const std::string& data, std::string* err) {
+Result<void> writeFile(const std::string& path, const std::string& data) {
   std::ofstream f(path, std::ios::binary);
-  if (!f) {
-    if (err) *err = "cannot write " + path;
-    return false;
-  }
+  if (!f) return std::unexpected("cannot write " + path);
   f << data;
-  return bool(f);
+  if (!f) return std::unexpected("write failed: " + path);
+  return {};
 }
 
-std::unique_ptr<Board> loadBoard(const std::string& path, std::string* err) {
+Result<BoardPtr> loadBoard(const std::string& path) {
   Format fmt = detectFormat(path);
-  std::string text = readFile(path, err);
-  if (text.empty()) return nullptr;
-  std::unique_ptr<Board> b;
+  auto text = readFile(path);
+  if (!text) return std::unexpected(text.error());
+  Result<BoardPtr> b;
   switch (fmt) {
-    case Format::Kicad: b = readKicad(text, path, err); break;
-    case Format::Dsn: b = readDsn(text, path, err); break;
-    case Format::Pcad: b = readPcad(text, path, err); break;
-    default:
-      if (err) *err = "unsupported file format: " + path;
-      return nullptr;
+    case Format::Kicad: b = readKicad(*text, path); break;
+    case Format::Dsn: b = readDsn(*text, path); break;
+    case Format::Pcad: b = readPcad(*text, path); break;
+    default: return std::unexpected("unsupported file format: " + path);
   }
-  if (b && b->name.empty()) b->name = std::filesystem::path(path).stem().string();
+  if (b && (*b)->name.empty()) (*b)->name = std::filesystem::path(path).stem().string();
   return b;
 }
 
-bool saveBoard(const Board& b, const std::string& path, std::string* err) {
+Result<void> saveBoard(const Board& b, const std::string& path) {
   switch (detectFormat(path)) {
-    case Format::Kicad: return writeFile(path, writeKicad(b), err);
-    case Format::Dsn: return writeFile(path, writeDsn(b), err);
-    case Format::Ses: return writeFile(path, writeSes(b), err);
-    default:
-      if (err) *err = "unsupported output format: " + path;
-      return false;
+    case Format::Kicad: return writeFile(path, writeKicad(b));
+    case Format::Dsn: return writeFile(path, writeDsn(b));
+    case Format::Ses: return writeFile(path, writeSes(b));
+    default: return std::unexpected("unsupported output format: " + path);
   }
 }
 

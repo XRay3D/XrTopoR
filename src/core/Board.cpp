@@ -37,8 +37,8 @@ Polyline Track::path(double tol) const {
   return g.tessellate(tol);
 }
 
-std::vector<LayerId> Board::copperLayers() const {
-  std::vector<LayerId> out;
+LayerList Board::copperLayers() const {
+  LayerList out;
   for (LayerId i = 0; i < LayerId(layers.size()); ++i)
     if (layers[i].kind == LayerKind::Copper) out.push_back(i);
   std::sort(out.begin(), out.end(), [&](LayerId a, LayerId b) {

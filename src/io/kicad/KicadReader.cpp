@@ -301,10 +301,10 @@ struct Reader {
 
   void readProject(const std::string& pcbPath) {
     auto pro = std::filesystem::path(pcbPath).replace_extension(".kicad_pro");
-    std::string text = readFile(pro.string());
-    if (text.empty()) return;
+    auto text = readFile(pro.string());
+    if (!text) return;
     boost::system::error_code ec;
-    auto jv = boost::json::parse(text, ec);
+    auto jv = boost::json::parse(*text, ec);
     if (ec || !jv.is_object()) return;
     auto num = [](const boost::json::value* v, double def) {
       if (!v) return def;
@@ -367,11 +367,10 @@ struct Reader {
 
 }  // namespace
 
-std::unique_ptr<Board> readKicad(const std::string& text, const std::string& path, std::string* err) {
+Result<BoardPtr> readKicad(const std::string& text, const std::string& path) {
   auto tree = std::make_shared<Node>(sexpr::parse(text));
   if (tree->kids.empty() || !tree->kids[0].is("kicad_pcb")) {
-    if (err) *err = "not a KiCad board file";
-    return nullptr;
+    return std::unexpected(std::string("not a KiCad board file"));
   }
   Node& root = tree->kids[0];
   auto b = std::make_unique<Board>();

@@ -30,19 +30,17 @@ ViaDef parseViaPadstack(const Node* ps, double s) {
 
 }  // namespace
 
-bool applySes(Board& b, const std::string& text, std::string* err) {
+Result<void> applySes(Board& b, const std::string& text) {
   sexpr::ParseOptions opt;
   opt.dsnQuoting = true;
   Node tree = sexpr::parse(text, opt);
   if (tree.kids.empty() || !tree.kids[0].is("session")) {
-    if (err) *err = "not a Specctra session file";
-    return false;
+    return std::unexpected(std::string("not a Specctra session file"));
   }
   const Node& root = tree.kids[0];
   const Node* routes = root.find("routes");
   if (!routes) {
-    if (err) *err = "session has no routes";
-    return false;
+    return std::unexpected(std::string("session has no routes"));
   }
   double s = dsn::coordScale(*routes, 100);
   std::map<std::string, ViaDef> vias;
@@ -83,7 +81,7 @@ bool applySes(Board& b, const std::string& text, std::string* err) {
       }
     }
   }
-  return true;
+  return {};
 }
 
 std::string writeSes(const Board& b) {
