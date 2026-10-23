@@ -33,7 +33,7 @@ namespace xr::topo {
 namespace {
 
 constexpr double kUnit = 1e6;  // congestion cost unit: 1 mm of track
-constexpr size_t kMaxExpansions = 400'000;
+constexpr size_t kMaxExpansions = 3'000'000;
 
 // rows x cols table with row-major storage, indexed as grid[r, c] through std::mdspan.
 template <class T>
@@ -509,16 +509,18 @@ std::optional<std::vector<SNode>> Router::search(int pad) {
       push(n, keyVertex(li, v));
     }
 
+  size_t nNoNb = 0, nBlocked = 0, nNoGap = 0, nPushed = 0;
   auto tryEdge = [&](int from, int t, double s, int le2) {
     const SNode& n = nodes[from];
     int e = m_.tris[t].e[le2];
     int t2 = m_.tris[t].nb[le2];
-    if (t2 < 0) return;
+    if (t2 < 0) { ++nNoNb; return; }
     bool blocked = false;
     double cc = crossCost(e, n.li, blocked);
-    if (blocked) return;
+    if (blocked) { ++nBlocked; return; }
     auto g = relaxed_ ? std::optional<int>(0) : exitGap(n.li, t, le2, s);
-    if (!g) return;
+    if (!g) { ++nNoGap; return; }
+    ++nPushed;
     int m = int(s_.cross[n.li, e].size());
     SNode c;
     c.li = n.li;
@@ -595,6 +597,7 @@ std::optional<std::vector<SNode>> Router::search(int pad) {
       return path;
     }
     if (++expansions > kMaxExpansions || (expansions % 4096 == 0 && cancelled())) break;
+    if (std::getenv("XR_DEBUG5") && expansions == 1) nodes.reserve(1024);
     if (n.atVertex) {
       for (int t : m_.verts[n.vtx].tris) {
         int lv = m_.localVertex(t, n.vtx);
@@ -609,6 +612,9 @@ std::optional<std::vector<SNode>> Router::search(int pad) {
       for (int lv = 0; lv < 3; ++lv) tryVertex(idx, n.tri, s, lv);
     }
   }
+  if (std::getenv("XR_DEBUG5"))
+    std::println(stderr, "search failed: {} expansions, {} nodes; edges: {} no-neighbour, {} capacity-blocked, {} no-gap, {} pushed",
+                 expansions, nodes.size(), nNoNb, nBlocked, nNoGap, nPushed);
   return std::nullopt;
 }
 
@@ -771,7 +777,8 @@ void Router::routeJob(int ji) {
     if (!path && std::getenv("XR_DEBUG5")) {
       const Pad& p = b_.pads[pad];
       std::println(stderr, "no path from {}-{} net {}", b_.components[p.component].ref, p.number, b_.nets[net_].name);
-      for (int v : m_.padVerts[pad]) {
+      for (int padX : {pad, job.pads[0]})
+      for (int v : m_.padVerts[padX]) {
         std::println(stderr, " vertex {} kind {} at ({:.3f},{:.3f}) tris {}", v, int(m_.verts[v].kind), P(v).x / 1e6,
                      P(v).y / 1e6, m_.verts[v].tris.size());
         for (int t : m_.verts[v].tris)
@@ -782,8 +789,9 @@ void Router::routeJob(int ji) {
             double cu, cv;
             bool ou, ov;
             double free = freeLength(e, 0, net_, cu, ou, cv, ov);
-            std::println(stderr, "   tri {} edge {} ({}-{}) free {:.3f} ends {}/{} blocked {} cost {:.2f} nb {}", t, e,
-                         m_.edges[e].v[0], m_.edges[e].v[1], free / 1e6, ou, ov, blocked, cost / 1e6, m_.tris[t].nb[i]);
+            std::println(stderr, "   tri {} edge {} ({}-{}) free {:.3f} ends {}/{} blocked {} cost {:.2f} nb {} chords {} crossings {}",
+                         t, e, m_.edges[e].v[0], m_.edges[e].v[1], free / 1e6, ou, ov, blocked, cost / 1e6, m_.tris[t].nb[i],
+                         s_.chords[0, t].size(), s_.cross[0, e].size());
           }
       }
     }
