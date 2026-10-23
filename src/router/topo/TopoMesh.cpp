@@ -150,8 +150,10 @@ void TopoMesh::build(const Board& b, const MeshOptions& opt) {
         q.add(p);
         idx.query(q.inflated(need + 5 * kNmPerMm), cuMask, [&](ItemRef r) {
           if (!ok || r.type == ItemType::Track || r.type == ItemType::Zone) return;
+          // A track of the pad's class must be able to leave the pad past the via.
+          double exitRoom = r.type == ItemType::Pad ? double(b.classOf(b.pads[r.index].net).trackWidth) : 0.0;
           for (auto& s : itemShapes(b, r))
-            if (s.distance(p) < need) ok = false;
+            if (s.distance(p) < need + exitRoom) ok = false;
         });
         // Non-plated holes have no copper but still block vias.
         if (ok)

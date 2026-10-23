@@ -13,14 +13,17 @@
 #include <chrono>
 #include <cstdlib>
 #include <flat_map>
+#include <flat_set>
 #include <inplace_vector>
 #include <mdspan>
 #include <numeric>
 #include <optional>
 #include <queue>
+#include <set>
 #include <ranges>
 #include <unordered_map>
 
+#include "drc/Drc.h"
 #include "router/topo/Realizer.h"
 #include "router/topo/TopoMesh.h"
 
@@ -189,7 +192,16 @@ class Router {
   bool edgeOverflow(int li, int e) const;
   std::vector<int> blockersOf(int job) const;
   int countOverflow() const;
-  void realizeAll();
+  // Realises the topology into tracks/vias appended to the board; returns wire index per new track.
+  std::vector<int> realizeAll();
+  // Geometric check of the realised tracks; returns the wires involved and the spots.
+  struct Conflict {
+    Vec2 pos;
+    int wireA, wireB;  // wire indices into the last realisation (-1 = static obstacle)
+  };
+  std::vector<Conflict> checkRealized(size_t firstTrack, const std::vector<int>& trackWire) const;
+  int penalizeAround(int wire, Vec2 pos, double radius);
+  std::vector<int> realizedWires_;  // s_.wires index of each RealWire passed to realize()
 };
 
 void Router::setup() {
@@ -806,10 +818,12 @@ std::vector<int> Router::blockersOf(int ji) const {
   return v | std::views::keys | std::ranges::to<std::vector>();
 }
 
-void Router::realizeAll() {
+std::vector<int> Router::realizeAll() {
   std::vector<RealWire> wires;
-  for (const Wire& w : s_.wires) {
+  realizedWires_.clear();
+  for (auto [wiIdx, w] : std::views::enumerate(s_.wires)) {
     if (!w.alive || w.v0 < 0 || w.v1 < 0) continue;
+    realizedWires_.push_back(int(wiIdx));
     RealWire rw;
     rw.net = w.net;
     rw.layer = layers_[w.li];
@@ -844,16 +858,69 @@ void Router::realizeAll() {
         b_.tracks.push_back(t);
       }
     for (auto& v : vias) b_.vias.push_back(Via{Point(v.pos), v.diameter, v.drill, b_.allCopperMask(), v.net, false});
-    return;
+    return {};
   }
   auto st = realize(b_, wires, vias);
   res_.vias = int(vias.size());
+  res_.length = 0;
   for (size_t i = before; i < b_.tracks.size(); ++i) {
     const Track& t = b_.tracks[i];
     if (t.isArc()) res_.length += ArcGeom::fromThreePoints(t.a.v(), t.mid->v(), t.b.v()).length();
     else res_.length += (t.b.v() - t.a.v()).len();
   }
   res_.log.push_back(std::format("realised {} wires, {} arcs, {} apexes dropped", st.wires, st.arcs, st.droppedApexes));
+  return st.trackWire;
+}
+
+std::vector<Router::Conflict> Router::checkRealized(size_t firstTrack, const std::vector<int>& trackWire) const {
+  std::vector<Conflict> out;
+  SpatialIndex idx;
+  idx.build(b_);
+  double maxClr = 0;
+  for (auto& nc : b_.netClasses) maxClr = std::max(maxClr, double(nc.clearance));
+  std::set<std::pair<int, int>> seen;
+  for (size_t ti = firstTrack; ti < b_.tracks.size(); ++ti) {
+    const Track& t = b_.tracks[ti];
+    int wa = trackWire[ti - firstTrack];
+    ItemRef me{ItemType::Track, int(ti)};
+    auto shapes = itemShapes(b_, me);
+    BBox bb;
+    for (auto& s : shapes) bb.add(s.bbox());
+    idx.query(bb.inflated(maxClr), LayerMask(1) << t.layer, [&](ItemRef o) {
+      if (o == me) return;
+      int on = itemNet(b_, o);
+      if (on == t.net || o.type == ItemType::Zone) return;
+      int wb = -1;
+      if (o.type == ItemType::Track) {
+        if (o.index < int(firstTrack)) return;  // pre-existing (locked) copper is not ours to fix
+        wb = trackWire[o.index - firstTrack];
+        if (wb < wa) return;  // each wire pair once
+      }
+      double req = requiredClearance(b_, t.net, on);
+      for (auto& s1 : shapes)
+        for (auto& s2 : itemShapes(b_, o))
+          if (s1.distance(s2) < req - 1) {
+            if (seen.insert({wa, wb >= 0 ? wb : -1 - o.index}).second)
+              out.push_back({(s1.center() + s2.center()) * 0.5, wa, wb});
+            return;
+          }
+    });
+  }
+  return out;
+}
+
+int Router::penalizeAround(int wire, Vec2 pos, double radius) {
+  const Wire& w = s_.wires[realizedWires_[wire]];
+  int n = 0;
+  for (int t : w.tris)
+    for (int e : m_.tris[t].e) {
+      Vec2 mid = (P(m_.edges[e].v[0]) + P(m_.edges[e].v[1])) * 0.5;
+      if ((mid - pos).len() < radius) {
+        hist_[w.li, e] += 2.0;
+        ++n;
+      }
+    }
+  return n;
 }
 
 RouterResult Router::run() {
@@ -921,11 +988,57 @@ RouterResult Router::run() {
       vshape_[v] = Shape::circle(P(int(v)), vn >= 0 ? b_.classOf(vn).viaDiameter / 2.0 : 0.0);
   res_.cancelled = cancelled();
 
+  // Geometric feedback: conflicts the edge-capacity model missed are penalised around the spot and
+  // the nets involved are rerouted; the best realisation is kept.
+  size_t tracks0 = b_.tracks.size(), vias0 = b_.vias.size();
+  std::vector<int> trackWire = realizeAll();
+  std::flat_map<int, int> jobOfNet;
+  for (auto [j, job] : std::views::enumerate(jobs_)) jobOfNet[job.net] = int(j);
+  struct Snapshot {
+    State s;
+    std::vector<Track> tracks;
+    std::vector<Via> vias;
+    size_t conflicts;
+  };
+  std::optional<Snapshot> bestGeom;
+  presFac_ = 8;
+  hardCap_ = false;
+  for (int round = 0; round <= o_.maxPasses && !std::getenv("XR_SKETCH"); ++round) {
+    auto conflicts = checkRealized(tracks0, trackWire);
+    res_.log.push_back(std::format("geometry round {}: {} conflict(s)", round, conflicts.size()));
+    if (!bestGeom || conflicts.size() < bestGeom->conflicts)
+      bestGeom = Snapshot{s_, {b_.tracks.begin() + tracks0, b_.tracks.end()}, {b_.vias.begin() + vias0, b_.vias.end()},
+                          conflicts.size()};
+    if (conflicts.empty() || round == o_.maxPasses || cancelled()) break;
+    std::flat_set<int> reroute;
+    for (auto& c : conflicts) {
+      for (int w : {c.wireA, c.wireB}) {
+        if (w < 0) continue;
+        penalizeAround(w, c.pos, 2.5 * kNmPerMm);
+        reroute.insert(jobOfNet[s_.wires[realizedWires_[w]].net]);
+      }
+    }
+    // Reroute the net with fewer pads first so it is the one that moves.
+    std::vector<int> queue(reroute.begin(), reroute.end());
+    std::ranges::sort(queue, {}, [&](int j) { return jobs_[j].pads.size(); });
+    for (int j : queue) ripup(j);
+    for (int j : queue) routeJob(j);
+    b_.tracks.resize(tracks0);
+    b_.vias.resize(vias0);
+    trackWire = realizeAll();
+  }
+  if (bestGeom) {
+    s_ = std::move(bestGeom->s);
+    b_.tracks.resize(tracks0);
+    b_.vias.resize(vias0);
+    b_.tracks.insert(b_.tracks.end(), bestGeom->tracks.begin(), bestGeom->tracks.end());
+    b_.vias.insert(b_.vias.end(), bestGeom->vias.begin(), bestGeom->vias.end());
+    res_.vias = int(bestGeom->vias.size());
+  }
   int fails = 0;
   for (auto& f : s_.failed) fails += int(f.size());
   res_.failed = fails;
   res_.routed = res_.connections - fails;
-  realizeAll();
   res_.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
   return res_;
 }

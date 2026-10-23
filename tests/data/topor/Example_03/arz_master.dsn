@@ -1,0 +1,1361 @@
+(PCB
+ (parser
+  (host_cad Altium)
+  (host_version 18.00)
+  (string_quote ')
+  (routes_include testpoint)
+  (constant Top 1)
+  (constant Bottom 2)
+  (constant TestPointLayerNumFront 10)
+  (constant TestPointLayerNumBack 11)
+ )
+ (resolution MM 100000)
+ (structure 
+  (rule (clearance 0.2)) 
+  (boundary
+   (rect pcb   -0.10000   -0.10000  102.10000  112.10000)
+  )
+  (boundary
+    (path signal    0.00000
+          5.00000  107.00000   97.00000  107.00000   97.00000  107.00000
+         97.00000    5.00000   97.00000    5.00000    5.00000    5.00000
+          5.00000    5.00000    5.00000  107.00000)
+  )
+  (layer Top
+   (type signal)
+   (rule (clearance    0.20000 (type pin_pin pin_smd smd_smd)))
+   (rule (clearance    0.20000 (type pin_wire smd_wire)))
+   (rule (clearance    0.20000 (type wire_wire)))
+   (rule (clearance    0.20000 (type smd_via pin_via)))
+   (rule (clearance    0.20000 (type via_wire)))
+   (rule (clearance    0.20000 (type via_via)))
+  )
+  (layer Bottom
+   (type signal)
+   (rule (clearance    0.20000 (type pin_pin pin_smd smd_smd)))
+   (rule (clearance    0.20000 (type pin_wire smd_wire)))
+   (rule (clearance    0.20000 (type wire_wire)))
+   (rule (clearance    0.20000 (type smd_via pin_via)))
+   (rule (clearance    0.20000 (type via_wire)))
+   (rule (clearance    0.20000 (type via_via)))
+  )
+  (grid via .01)
+  (grid wire .01)
+  (rule (width .2))
+  (via  via15 X1.3Y1.3R0.6 'CCTVIA_(Default)'
+    (spare EX1.8Y1.8R1.1 EX1.5Y1.8R1.1
+    )
+  )
+ )
+ (placement 
+  (component 16-4.7_auto
+   (place C12   91.75000   27.00000 back -90 
+   )
+  )
+  (component Õ1806’Ã1-241_Primary
+   (place D20   37.75000   81.75000 back -90 
+   )
+  )
+  (component 1533“Ã2_Primary
+   (place D8   81.00000   94.00000 front 0 
+   )
+   (place D7   92.20000   94.00000 back 0 
+   )
+  )
+  (component 556PT5_Primary
+   (place D3   26.00000   29.00000 front 90 
+   )
+   (place D2   44.75000   29.00000 front 90 
+   )
+   (place D1   77.75000   29.00000 front 90 
+   )
+  )
+  (component ¡19 -2_Primary
+   (place DR1   76.00000   36.50000 back -270 
+   )
+   (place DR3   30.00000   36.50000 back -270 
+   )
+   (place DR2   49.00000   36.50000 back -270 
+   )
+  )
+  (component H1806XM1-242_Primary
+   (place D12   81.25000   74.00000 back -270 
+   )
+   (place D13   81.25000   56.50000 front 90 
+   )
+   (place D11   22.25000   56.50000 front 90 
+   )
+   (place D16   71.00000   90.00000 back 0 
+   )
+   (place D17   22.25000   74.00000 back -270 
+   )
+   (place D14   51.25000   74.00000 back -270 
+   )
+   (place D15   51.25000   56.50000 front 90 
+   )
+  )
+  (component 533ÀÀ1_Primary
+   (place D9   18.75000   45.75000 front 270 
+   )
+  )
+  (component 1533ÀÕ2_Primary
+   (place D10   11.25000   83.25000 front 90 
+   )
+  )
+  (component 1533¿œ6_Primary
+   (place D18   26.25000   28.25000 back -90 
+   )
+   (place D19   62.75000   29.00000 front 90 
+   )
+  )
+  (component 1533À¿2_Primary
+   (place D6   29.75000   41.00000 back -180 
+   )
+   (place D5   49.00000   41.00000 back -180 
+   )
+   (place D4   86.00000   48.50000 back 0 
+   )
+  )
+  (component PLD-10_2_2
+   (place P29   45.25000   93.75000 front 90 (lock_type position)
+   )
+   (place P28   46.50000   93.75000 front 90 (lock_type position)
+   )
+   (place P25   44.00000   93.75000 front 90 (lock_type position)
+   )
+   (place P24   35.25000   93.75000 front 90 (lock_type position)
+   )
+   (place P27   49.00000   93.75000 front 90 (lock_type position)
+   )
+   (place P26   50.25000   93.75000 front 90 (lock_type position)
+   )
+   (place P21   27.75000   93.75000 front 90 (lock_type position)
+   )
+   (place P20   37.75000   93.75000 front 90 (lock_type position)
+   )
+   (place P23   32.75000   93.75000 front 90 (lock_type position)
+   )
+   (place P22   29.00000   93.75000 front 90 (lock_type position)
+   )
+   (place P53   55.25000   93.75000 front 90 (lock_type position)
+   )
+   (place P56   52.75000   93.75000 front 90 (lock_type position)
+   )
+   (place P57   54.00000   93.75000 front 90 (lock_type position)
+   )
+   (place P54   61.50000   93.75000 front 90 (lock_type position)
+   )
+   (place P55   31.50000   93.75000 front 90 (lock_type position)
+   )
+   (place P19   41.50000   93.75000 front 90 (lock_type position)
+   )
+   (place P14   40.25000   93.75000 front 90 (lock_type position)
+   )
+   (place P13   39.00000   93.75000 front 90 (lock_type position)
+   )
+   (place P85   64.00000   93.75000 front 90 (lock_type position)
+   )
+   (place P82   62.75000   93.75000 front 90 (lock_type position)
+   )
+   (place P81   57.75000   93.75000 front 90 (lock_type position)
+   )
+   (place P43   59.00000   93.75000 front 90 (lock_type position)
+   )
+   (place P42   69.00000   93.75000 front 90 (lock_type position)
+   )
+   (place P41   36.50000   93.75000 front 90 (lock_type position)
+   )
+   (place P40   66.50000   93.75000 front 90 (lock_type position)
+   )
+   (place P47   34.00000   93.75000 front 90 (lock_type position)
+   )
+   (place P46   67.75000   93.75000 front 90 (lock_type position)
+   )
+   (place P45   65.25000   93.75000 front 90 (lock_type position)
+   )
+   (place P44   30.25000   93.75000 front 90 (lock_type position)
+   )
+   (place P70   56.50000   93.75000 front 90 (lock_type position)
+   )
+   (place P39   70.25000   93.75000 front 90 (lock_type position)
+   )
+   (place P34   71.50000   93.75000 front 90 (lock_type position)
+   )
+   (place P35   60.25000   93.75000 front 90 (lock_type position)
+   )
+   (place P36   74.00000   93.75000 front 90 (lock_type position)
+   )
+   (place P37   72.75000   93.75000 front 90 (lock_type position)
+   )
+   (place P30   42.75000   93.75000 front 90 (lock_type position)
+   )
+   (place P31   47.75000   93.75000 front 90 (lock_type position)
+   )
+   (place P32   51.50000   93.75000 front 90 (lock_type position)
+   )
+  )
+  (component 0,1Ã_auto
+   (place C10   92.50000   75.75000 back -270 
+   )
+   (place C8   94.37500   37.87500 back 0 
+   )
+   (place C9   71.87500   89.50000 front 0 
+   )
+   (place C4   68.25000   36.25000 back -90 
+   )
+   (place C5    7.75000   53.00000 back -180 
+   )
+   (place C6   45.00000   44.37500 back -270 
+   )
+   (place C7   36.25000   67.25000 back -270 
+   )
+   (place C1   23.50000   94.75000 back 0 
+   )
+   (place C2   10.25000   31.00000 front 0 
+   )
+   (place C3   66.25000   67.25000 back -270 
+   )
+  )
+  (component –1-12-0,25_auto
+   (place R5   63.25000   37.50000 back -90 
+   )
+   (place R4   35.50000   86.50000 front 90 
+   )
+   (place R6   38.00000   86.50000 front 90 
+   )
+  )
+  (component PL25_Primary
+   (place 12   58.50000   51.00000 front 180 
+   )
+   (place 13   79.00000   51.25000 front 180 
+   )
+   (place 10   80.87500   51.25000 front 180 
+   )
+   (place 11   21.62500   38.75000 front 270 
+   )
+   (place 9   82.75000   51.25000 front 180 
+   )
+   (place 8   85.25000   50.12500 front 0 
+   )
+   (place 7   54.87500   53.50000 front 180 
+   )
+   (place 6   48.75000   50.37500 front 270 
+   )
+   (place 5   46.25000   50.37500 front 270 
+   )
+   (place 4   43.75000   50.37500 front 270 
+   )
+   (place 3   35.50000   50.25000 front 90 
+   )
+   (place 2   36.25000   52.12500 front 90 
+   )
+   (place 1   35.00000   53.37500 front 270 
+   )
+  )
+  (component KREST1_Primary
+   (place K4   28.50000  102.00000 front 0 (lock_type position)
+   )
+   (place K5   73.50000  102.00000 front 0 (lock_type position)
+   )
+   (place K6   10.50000   15.25000 front 0 (lock_type position)
+   )
+   (place K1   90.50000   15.25000 front 0 (lock_type position)
+   )
+   (place K2   14.30000  101.00000 front 0 (lock_type position)
+   )
+   (place K3   88.00000  101.00000 front 0 (lock_type position)
+   )
+  )
+  (component PLD-10_1_2
+   (place P69   67.68000   17.84000 front 90 (lock_type position)
+   )
+   (place P68   65.14000   17.84000 front 90 (lock_type position)
+   )
+   (place P60   24.50000   20.48000 front 90 (lock_type position)
+   )
+   (place P65   72.76000   17.84000 front 90 (lock_type position)
+   )
+   (place P64   77.84000   17.84000 front 90 (lock_type position)
+   )
+   (place P67   60.06000   17.84000 front 90 (lock_type position)
+   )
+   (place P66   75.30000   17.84000 front 90 (lock_type position)
+   )
+   (place P59   27.04000   20.48000 front 90 (lock_type position)
+   )
+   (place P52   72.76000   15.30000 front 90 (lock_type position)
+   )
+   (place P50   70.22000   17.84000 front 90 (lock_type position)
+   )
+   (place P51   62.60000   17.84000 front 90 (lock_type position)
+   )
+   (place P18   44.82000   23.02000 front 90 (lock_type position)
+   )
+   (place P15   90.54000   20.48000 front 90 (lock_type position)
+   )
+   (place P10   37.20000   20.48000 front 90 (lock_type position)
+   )
+   (place P11   42.28000   23.02000 front 90 (lock_type position)
+   )
+   (place P48   29.58000   20.48000 front 90 (lock_type position)
+   )
+   (place P78   34.66000   23.02000 front 90 (lock_type position)
+   )
+   (place P71   77.84000   15.30000 front 90 (lock_type position)
+   )
+   (place P72   80.38000   15.30000 front 90 (lock_type position)
+   )
+   (place P73   32.12000   17.84000 front 90 (lock_type position)
+   )
+   (place P74   80.38000   17.84000 front 90 (lock_type position)
+   )
+   (place P38   32.12000   15.30000 front 90 (lock_type position)
+   )
+   (place P33   37.20000   15.30000 front 90 (lock_type position)
+   )
+  )
+  (component PLD-10_2
+   (place P61   19.42000   20.48000 front 90 (lock_type position)
+   )
+   (place P63   14.34000   20.48000 front 90 (lock_type position)
+   )
+   (place P62   16.88000   20.48000 front 90 (lock_type position)
+   )
+   (place P58   32.12000   20.48000 front 90 (lock_type position)
+   )
+   (place P16   60.06000   23.02000 front 90 (lock_type position)
+   )
+   (place P17   65.14000   20.48000 front 90 (lock_type position)
+   )
+   (place P12   14.34000   23.02000 front 90 (lock_type position)
+   )
+   (place P87   32.12000   23.02000 front 90 (lock_type position)
+   )
+   (place P86   27.04000   23.02000 front 90 (lock_type position)
+   )
+   (place P80   16.88000   23.02000 front 90 (lock_type position)
+   )
+   (place P9   67.68000   20.48000 front 90 (lock_type position)
+   )
+   (place P49   21.96000   20.48000 front 90 (lock_type position)
+   )
+   (place P8   70.22000   20.48000 front 90 (lock_type position)
+   )
+   (place P7   72.76000   20.48000 front 90 (lock_type position)
+   )
+   (place P6   75.30000   20.48000 front 90 (lock_type position)
+   )
+   (place P5   77.84000   20.48000 front 90 (lock_type position)
+   )
+   (place P4   80.38000   20.48000 front 90 (lock_type position)
+   )
+   (place P3   82.92000   20.48000 front 90 (lock_type position)
+   )
+   (place P2   85.46000   20.48000 front 90 (lock_type position)
+   )
+   (place P1   88.00000   20.48000 front 90 (lock_type position)
+   )
+   (place P79   82.92000   23.02000 front 90 (lock_type position)
+   )
+   (place P75   88.00000   23.02000 front 90 (lock_type position)
+   )
+   (place P76   90.54000   23.02000 front 90 (lock_type position)
+   )
+   (place P77   11.80000   23.02000 front 90 (lock_type position)
+   )
+  )
+ )
+ (library 
+  (image 16-4.7_auto
+   (outline (rect Top   -0.72500   -3.42500    8.56000    3.42500))
+   (pin RX3.5Y7.4T 1    5.40000    0.00000 )
+   (pin RX4.3Y7.4T 2    0.00000    0.00000 )
+  )
+  (image Õ1806’Ã1-241_Primary
+   (outline (rect Top   -1.10000   -9.35000   18.60000   10.35000))
+   (pin OX2.5Y0.6T 1    0.00000    0.00000 )
+   (pin OX2.5Y0.6T 10    7.75000   -8.25000 (rotate   90.00000))
+   (pin OX2.5Y0.6T 33    7.75000    9.25000 (rotate   90.00000))
+   (pin OX2.5Y0.6T 37    0.00000    6.00000 )
+   (pin OX2.5Y0.6T 38    0.00000    5.00000 )
+   (pin OX2.5Y0.6T 39    0.00000    4.00000 )
+   (pin OX2.5Y0.6T 40    0.00000    3.00000 )
+   (pin OX2.5Y0.6T 41    0.00000    2.00000 )
+   (pin OX2.5Y0.6T 42    0.00000    1.00000 )
+   (pin OX2.5Y0.6T 2    0.00000   -1.00000 )
+   (pin OX2.5Y0.6T 3    0.00000   -2.00000 )
+   (pin OX2.5Y0.6T 4    0.00000   -3.00000 )
+   (pin OX2.5Y0.6T 5    0.00000   -4.00000 )
+   (pin OX2.5Y0.6T 6    0.00000   -5.00000 )
+   (pin OX2.5Y0.6T 21   17.50000    0.00000 )
+   (pin OX2.5Y0.6T 11    8.75000   -8.25000 (rotate   90.00000))
+   (pin OX2.5Y0.6T 12    9.75000   -8.25000 (rotate   90.00000))
+   (pin OX2.5Y0.6T 14   11.75000   -8.25000 (rotate   90.00000))
+   (pin OX2.5Y0.6T 13   10.75000   -8.25000 (rotate   90.00000))
+   (pin OX2.5Y0.6T 15   12.75000   -8.25000 (rotate   90.00000))
+   (pin OX2.5Y0.6T 9    6.75000   -8.25000 (rotate   90.00000))
+   (pin OX2.5Y0.6T 8    5.75000   -8.25000 (rotate   90.00000))
+   (pin OX2.5Y0.6T 7    4.75000   -8.25000 (rotate   90.00000))
+   (pin OX2.5Y0.6T 27   17.50000    6.00000 )
+   (pin OX2.5Y0.6T 26   17.50000    5.00000 )
+   (pin OX2.5Y0.6T 25   17.50000    4.00000 )
+   (pin OX2.5Y0.6T 24   17.50000    3.00000 )
+   (pin OX2.5Y0.6T 22   17.50000    1.00000 )
+   (pin OX2.5Y0.6T 23   17.50000    2.00000 )
+   (pin OX2.5Y0.6T 20   17.50000   -1.00000 )
+   (pin OX2.5Y0.6T 19   17.50000   -2.00000 )
+   (pin OX2.5Y0.6T 18   17.50000   -3.00000 )
+   (pin OX2.5Y0.6T 17   17.50000   -4.00000 )
+   (pin OX2.5Y0.6T 16   17.50000   -5.00000 )
+   (pin OX2.5Y0.6T 29   11.75000    9.25000 (rotate   90.00000))
+   (pin OX2.5Y0.6T 32    8.75000    9.25000 (rotate   90.00000))
+   (pin OX2.5Y0.6T 31    9.75000    9.25000 (rotate   90.00000))
+   (pin OX2.5Y0.6T 30   10.75000    9.25000 (rotate   90.00000))
+   (pin OX2.5Y0.6T 28   12.75000    9.25000 (rotate   90.00000))
+   (pin OX2.5Y0.6T 34    6.75000    9.25000 (rotate   90.00000))
+   (pin OX2.5Y0.6T 35    5.75000    9.25000 (rotate   90.00000))
+   (pin OX2.5Y0.6T 36    4.75000    9.25000 (rotate   90.00000))
+  )
+  (image 1533“Ã2_Primary
+   (outline (rect Top   -0.90000   -8.75000   12.10000    1.25000))
+   (pin OX2.1Y0.8T 12   11.20000   -2.50000 )
+   (pin OX2.1Y0.8T 14   11.20000    0.00000 )
+   (pin OX2.1Y0.8T 13   11.20000   -1.25000 )
+   (pin OX2.1Y0.8T 11   11.20000   -3.75000 )
+   (pin OX2.1Y0.8T 10   11.20000   -5.00000 )
+   (pin OX2.1Y0.8T 9   11.20000   -6.25000 )
+   (pin OX2.1Y0.8T 8   11.20000   -7.50000 )
+   (pin OX2.1Y0.8T 3    0.00000   -2.50000 )
+   (pin OX2.1Y0.8T 1    0.00000    0.00000 )
+   (pin OX2.1Y0.8T 2    0.00000   -1.25000 )
+   (pin OX2.1Y0.8T 4    0.00000   -3.75000 )
+   (pin OX2.1Y0.8T 5    0.00000   -5.00000 )
+   (pin OX2.1Y0.8T 6    0.00000   -6.25000 )
+   (pin OX2.1Y0.8T 7    0.00000   -7.50000 )
+  )
+  (image 556PT5_Primary
+   (outline (rect Top   -0.90000  -14.67500   19.65000    0.92500))
+   (pin OX2.1Y0.8T 24   18.70000    0.00000 )
+   (pin OX2.1Y0.8T 23   18.70000   -1.25000 )
+   (pin OX2.1Y0.8T 22   18.70000   -2.50000 )
+   (pin OX2.1Y0.8T 21   18.70000   -3.75000 )
+   (pin OX2.1Y0.8T 20   18.70000   -5.00000 )
+   (pin OX2.1Y0.8T 19   18.70000   -6.25000 )
+   (pin OX2.1Y0.8T 18   18.70000   -7.50000 )
+   (pin OX2.1Y0.8T 17   18.70000   -8.75000 )
+   (pin OX2.1Y0.8T 16   18.70000  -10.00000 )
+   (pin OX2.1Y0.8T 15   18.70000  -11.25000 )
+   (pin OX2.1Y0.8T 14   18.70000  -12.50000 )
+   (pin OX2.1Y0.8T 13   18.70000  -13.75000 )
+   (pin OX2.1Y0.8T 1    0.00000    0.00000 )
+   (pin OX2.1Y0.8T 6    0.00000   -6.25000 )
+   (pin OX2.1Y0.8T 5    0.00000   -5.00000 )
+   (pin OX2.1Y0.8T 4    0.00000   -3.75000 )
+   (pin OX2.1Y0.8T 3    0.00000   -2.50000 )
+   (pin OX2.1Y0.8T 2    0.00000   -1.25000 )
+   (pin OX2.1Y0.8T 7    0.00000   -7.50000 )
+   (pin OX2.1Y0.8T 12    0.00000  -13.75000 )
+   (pin OX2.1Y0.8T 11    0.00000  -12.50000 )
+   (pin OX2.1Y0.8T 10    0.00000  -11.25000 )
+   (pin OX2.1Y0.8T 9    0.00000  -10.00000 )
+   (pin OX2.1Y0.8T 8    0.00000   -8.75000 )
+  )
+  (image ¡19 -2_Primary
+   (outline (rect Top   -0.62500  -11.00000   11.85000    1.00000))
+   (pin OX2.1Y0.8T 5    0.00000   -5.00000 )
+   (pin OX2.1Y0.8T 1    0.00000    0.00000 )
+   (pin OX2.1Y0.8T 2    0.00000   -1.25000 )
+   (pin OX2.1Y0.8T 3    0.00000   -2.50000 )
+   (pin OX2.1Y0.8T 4    0.00000   -3.75000 )
+   (pin OX2.1Y0.8T 6    0.00000   -6.25000 )
+   (pin OX2.1Y0.8T 7    0.00000   -7.50000 )
+   (pin OX2.1Y0.8T 8    0.00000   -8.75000 )
+   (pin OX2.1Y0.8T 9    0.00000  -10.00000 )
+  )
+  (image H1806XM1-242_Primary
+   (outline (rect Top   -1.10000   -9.35000   18.60000   10.35000))
+   (pin OX2.5Y0.6T 1    0.00000    0.00000 )
+   (pin OX2.5Y0.6T 10    7.75000   -8.25000 (rotate   90.00000))
+   (pin OX2.5Y0.6T 33    7.75000    9.25000 (rotate   90.00000))
+   (pin OX2.5Y0.6T 37    0.00000    6.00000 )
+   (pin OX2.5Y0.6T 38    0.00000    5.00000 )
+   (pin OX2.5Y0.6T 39    0.00000    4.00000 )
+   (pin OX2.5Y0.6T 40    0.00000    3.00000 )
+   (pin OX2.5Y0.6T 41    0.00000    2.00000 )
+   (pin OX2.5Y0.6T 42    0.00000    1.00000 )
+   (pin OX2.5Y0.6T 2    0.00000   -1.00000 )
+   (pin OX2.5Y0.6T 3    0.00000   -2.00000 )
+   (pin OX2.5Y0.6T 4    0.00000   -3.00000 )
+   (pin OX2.5Y0.6T 5    0.00000   -4.00000 )
+   (pin OX2.5Y0.6T 6    0.00000   -5.00000 )
+   (pin OX2.5Y0.6T 21   17.50000    0.00000 )
+   (pin OX2.5Y0.6T 11    8.75000   -8.25000 (rotate   90.00000))
+   (pin OX2.5Y0.6T 12    9.75000   -8.25000 (rotate   90.00000))
+   (pin OX2.5Y0.6T 14   11.75000   -8.25000 (rotate   90.00000))
+   (pin OX2.5Y0.6T 13   10.75000   -8.25000 (rotate   90.00000))
+   (pin OX2.5Y0.6T 15   12.75000   -8.25000 (rotate   90.00000))
+   (pin OX2.5Y0.6T 9    6.75000   -8.25000 (rotate   90.00000))
+   (pin OX2.5Y0.6T 8    5.75000   -8.25000 (rotate   90.00000))
+   (pin OX2.5Y0.6T 7    4.75000   -8.25000 (rotate   90.00000))
+   (pin OX2.5Y0.6T 27   17.50000    6.00000 )
+   (pin OX2.5Y0.6T 26   17.50000    5.00000 )
+   (pin OX2.5Y0.6T 25   17.50000    4.00000 )
+   (pin OX2.5Y0.6T 24   17.50000    3.00000 )
+   (pin OX2.5Y0.6T 22   17.50000    1.00000 )
+   (pin OX2.5Y0.6T 23   17.50000    2.00000 )
+   (pin OX2.5Y0.6T 20   17.50000   -1.00000 )
+   (pin OX2.5Y0.6T 19   17.50000   -2.00000 )
+   (pin OX2.5Y0.6T 18   17.50000   -3.00000 )
+   (pin OX2.5Y0.6T 17   17.50000   -4.00000 )
+   (pin OX2.5Y0.6T 16   17.50000   -5.00000 )
+   (pin OX2.5Y0.6T 29   11.75000    9.25000 (rotate   90.00000))
+   (pin OX2.5Y0.6T 32    8.75000    9.25000 (rotate   90.00000))
+   (pin OX2.5Y0.6T 31    9.75000    9.25000 (rotate   90.00000))
+   (pin OX2.5Y0.6T 30   10.75000    9.25000 (rotate   90.00000))
+   (pin OX2.5Y0.6T 28   12.75000    9.25000 (rotate   90.00000))
+   (pin OX2.5Y0.6T 34    6.75000    9.25000 (rotate   90.00000))
+   (pin OX2.5Y0.6T 35    5.75000    9.25000 (rotate   90.00000))
+   (pin OX2.5Y0.6T 36    4.75000    9.25000 (rotate   90.00000))
+  )
+  (image 533ÀÀ1_Primary
+   (outline (rect Top   -0.90000   -8.75000   12.10000    1.25000))
+   (pin OX2.1Y0.8T 12   11.20000   -2.50000 )
+   (pin OX2.1Y0.8T 14   11.20000    0.00000 )
+   (pin OX2.1Y0.8T 13   11.20000   -1.25000 )
+   (pin OX2.1Y0.8T 11   11.20000   -3.75000 )
+   (pin OX2.1Y0.8T 10   11.20000   -5.00000 )
+   (pin OX2.1Y0.8T 9   11.20000   -6.25000 )
+   (pin OX2.1Y0.8T 8   11.20000   -7.50000 )
+   (pin OX2.1Y0.8T 3    0.00000   -2.50000 )
+   (pin OX2.1Y0.8T 1    0.00000    0.00000 )
+   (pin OX2.1Y0.8T 2    0.00000   -1.25000 )
+   (pin OX2.1Y0.8T 4    0.00000   -3.75000 )
+   (pin OX2.1Y0.8T 5    0.00000   -5.00000 )
+   (pin OX2.1Y0.8T 6    0.00000   -6.25000 )
+   (pin OX2.1Y0.8T 7    0.00000   -7.50000 )
+  )
+  (image 1533ÀÕ2_Primary
+   (outline (rect Top   -0.90000   -8.75000   12.10000    1.25000))
+   (pin OX2.1Y0.8T 12   11.20000   -2.50000 )
+   (pin OX2.1Y0.8T 14   11.20000    0.00000 )
+   (pin OX2.1Y0.8T 13   11.20000   -1.25000 )
+   (pin OX2.1Y0.8T 11   11.20000   -3.75000 )
+   (pin OX2.1Y0.8T 10   11.20000   -5.00000 )
+   (pin OX2.1Y0.8T 9   11.20000   -6.25000 )
+   (pin OX2.1Y0.8T 8   11.20000   -7.50000 )
+   (pin OX2.1Y0.8T 3    0.00000   -2.50000 )
+   (pin OX2.1Y0.8T 1    0.00000    0.00000 )
+   (pin OX2.1Y0.8T 2    0.00000   -1.25000 )
+   (pin OX2.1Y0.8T 4    0.00000   -3.75000 )
+   (pin OX2.1Y0.8T 5    0.00000   -5.00000 )
+   (pin OX2.1Y0.8T 6    0.00000   -6.25000 )
+   (pin OX2.1Y0.8T 7    0.00000   -7.50000 )
+  )
+  (image 1533¿œ6_Primary
+   (outline (rect Top   -0.90000  -12.12500   19.65000    0.87500))
+   (pin OX2.1Y0.8T 16   18.75000   -5.00000 )
+   (pin OX2.1Y0.8T 17   18.75000   -3.75000 )
+   (pin OX2.1Y0.8T 18   18.75000   -2.50000 )
+   (pin OX2.1Y0.8T 19   18.75000   -1.25000 )
+   (pin OX2.1Y0.8T 20   18.75000    0.00000 )
+   (pin OX2.1Y0.8T 11   18.75000  -11.25000 )
+   (pin OX2.1Y0.8T 12   18.75000  -10.00000 )
+   (pin OX2.1Y0.8T 15   18.75000   -6.25000 )
+   (pin OX2.1Y0.8T 14   18.75000   -7.50000 )
+   (pin OX2.1Y0.8T 13   18.75000   -8.75000 )
+   (pin OX2.1Y0.8T 5    0.00000   -5.00000 )
+   (pin OX2.1Y0.8T 2    0.00000   -1.25000 )
+   (pin OX2.1Y0.8T 1    0.00000    0.00000 )
+   (pin OX2.1Y0.8T 3    0.00000   -2.50000 )
+   (pin OX2.1Y0.8T 4    0.00000   -3.75000 )
+   (pin OX2.1Y0.8T 8    0.00000   -8.75000 )
+   (pin OX2.1Y0.8T 6    0.00000   -6.25000 )
+   (pin OX2.1Y0.8T 7    0.00000   -7.50000 )
+   (pin OX2.1Y0.8T 9    0.00000  -10.00000 )
+   (pin OX2.1Y0.8T 10    0.00000  -11.25000 )
+  )
+  (image 1533À¿2_Primary
+   (outline (rect Top   -0.90000   -8.75000   12.10000    1.25000))
+   (pin OX2.1Y0.8T 12   11.20000   -2.50000 )
+   (pin OX2.1Y0.8T 14   11.20000    0.00000 )
+   (pin OX2.1Y0.8T 13   11.20000   -1.25000 )
+   (pin OX2.1Y0.8T 11   11.20000   -3.75000 )
+   (pin OX2.1Y0.8T 10   11.20000   -5.00000 )
+   (pin OX2.1Y0.8T 9   11.20000   -6.25000 )
+   (pin OX2.1Y0.8T 8   11.20000   -7.50000 )
+   (pin OX2.1Y0.8T 3    0.00000   -2.50000 )
+   (pin OX2.1Y0.8T 1    0.00000    0.00000 )
+   (pin OX2.1Y0.8T 2    0.00000   -1.25000 )
+   (pin OX2.1Y0.8T 4    0.00000   -3.75000 )
+   (pin OX2.1Y0.8T 5    0.00000   -5.00000 )
+   (pin OX2.1Y0.8T 6    0.00000   -6.25000 )
+   (pin OX2.1Y0.8T 7    0.00000   -7.50000 )
+  )
+  (image PLD-10_2_2
+   (pin OX0.8Y2.5T 1    0.00000    0.00000 (rotate   90.00000))
+  )
+  (image 0,1Ã_auto
+   (outline (rect Top    0.25000   -1.47500    4.00000    1.47500))
+   (pin RX1.95Y3.5T 2    4.25000    0.00000 )
+   (pin RX1.95Y3.5T 1    0.00000    0.00000 )
+  )
+  (image –1-12-0,25_auto
+   (outline (rect Top    0.06250   -0.75000    3.01250    0.75000))
+   (pin RX1.275Y1.85T 2    3.07500    0.00000 )
+   (pin RX1.275Y1.85T 1    0.00000    0.00000 )
+  )
+  (image PL25_Primary
+   (pin OX2.1Y0.8T 1    0.00000    0.62500 (rotate   90.00000))
+  )
+  (image KREST1_Primary
+   (outline (rect Top   -1.25000   -1.25000    1.25000    1.25000))
+   (pin krest 1    0.00000    0.00000 )
+  )
+  (image PLD-10_1_2
+   (pin EX1.8Y1.8R1.1 1    0.00000    0.00000 (rotate   90.00000))
+  )
+  (image PLD-10_2
+   (pin EX1.5Y1.8R1.1 1    0.00000    0.00000 (rotate   90.00000))
+  )
+  (padstack via15
+   (shape
+    (circle Top    1.30000))
+   (shape
+    (circle Bottom    1.30000))
+  )
+  (padstack X1.3Y1.3R0.6
+   (shape
+    (circle Top    1.30000))
+   (shape
+    (circle Bottom    1.30000))
+  )
+  (padstack 'CCTVIA_(Default)'
+   (shape
+    (circle Top    1.01600))
+   (shape
+    (circle Bottom    1.01600))
+  )
+  (padstack RX4.3Y7.4T
+   (shape
+    (rect Top   -2.15000   -3.70000    2.15000    3.70000))
+  )
+  (padstack RX3.5Y7.4T
+   (shape
+    (rect Top   -1.75000   -3.70000    1.75000    3.70000))
+  )
+  (padstack EX1.8Y1.8R1.1
+   (shape
+    (circle Top    1.80000))
+   (shape
+    (circle Bottom    1.80000))
+  )
+  (padstack EX1.5Y1.8R1.1
+   (shape
+    (path Top    1.50000    0.00000   -0.15000    0.00000    0.15000))
+   (shape
+    (path Bottom    1.50000    0.00000   -0.15000    0.00000    0.15000))
+  )
+  (padstack krest
+   (shape
+    (circle Top    0.80000))
+   (shape
+    (circle Bottom    0.80000))
+  )
+  (padstack OX2.1Y0.8T
+   (shape
+    (path Top    0.80000   -0.65000    0.00000    0.65000    0.00000))
+  )
+  (padstack RX1.275Y1.85T
+   (shape
+    (rect Top   -0.63750   -0.92500    0.63750    0.92500))
+  )
+  (padstack OX2.5Y0.6T
+   (shape
+    (path Top    0.60000   -0.95000    0.00000    0.95000    0.00000))
+  )
+  (padstack OX0.8Y2.5T
+   (shape
+    (path Top    0.80000    0.00000   -0.85000    0.00000    0.85000))
+  )
+  (padstack EX1.7Y1.7R1.0
+   (shape
+    (circle Top    1.70000))
+   (shape
+    (circle Bottom    1.70000))
+  )
+  (padstack RX1.95Y3.5T
+   (shape
+    (rect Top   -0.97500   -1.75000    0.97500    1.75000))
+  )
+ )
+ (network 
+  (net 1
+   (pins  P1-1 D2-8 D1-8 D3-8)
+   (rule (tjunction on))
+  )
+  (net 56
+   (pins  D6-12 D3-17 DR3-8)
+   (rule (tjunction on))
+  )
+  (net 55
+   (pins  D6-11 D3-16 DR3-7)
+   (rule (tjunction on))
+  )
+  (net 54
+   (pins  D6-6 D3-15 DR3-6)
+   (rule (tjunction on))
+  )
+  (net 58
+   (pins  R5-1 D18-1 D10-2 D19-1)
+   (rule (tjunction on))
+  )
+  (net 53
+   (pins  D6-5 D3-14 DR3-5)
+   (rule (tjunction on))
+  )
+  (net 32
+   (pins  P64-1 D19-9)
+   (rule (tjunction on))
+  )
+  (net 31
+   (pins  P66-1 D19-8)
+   (rule (tjunction on))
+  )
+  (net 30
+   (pins  P65-1 D19-7)
+   (rule (tjunction on))
+  )
+  (net 29
+   (pins  P50-1 D19-6)
+   (rule (tjunction on))
+  )
+  (net 28
+   (pins  P69-1 D19-5)
+   (rule (tjunction on))
+  )
+  (net 26
+   (pins  P51-1 D19-3)
+   (rule (tjunction on))
+  )
+  (net 27
+   (pins  P68-1 D19-4)
+   (rule (tjunction on))
+  )
+  (net 25
+   (pins  P67-1 D19-2)
+   (rule (tjunction on))
+  )
+  (net 24
+   (pins  P63-1 D18-9)
+   (rule (tjunction on))
+  )
+  (net 23
+   (pins  P62-1 D18-8)
+   (rule (tjunction on))
+  )
+  (net 22
+   (pins  P61-1 D18-7)
+   (rule (tjunction on))
+  )
+  (net 21
+   (pins  P49-1 D18-6)
+   (rule (tjunction on))
+  )
+  (net 20
+   (pins  P60-1 D18-5)
+   (rule (tjunction on))
+  )
+  (net 18
+   (pins  P48-1 D18-3)
+   (rule (tjunction on))
+  )
+  (net 19
+   (pins  P59-1 D18-4)
+   (rule (tjunction on))
+  )
+  (net 52
+   (pins  D6-4 D3-13 DR3-4)
+   (rule (tjunction on))
+  )
+  (net 51
+   (pins  D6-3 D3-11 DR3-3)
+   (rule (tjunction on))
+  )
+  (net 50
+   (pins  D10-5 D6-2 D3-10 DR3-2)
+   (rule (tjunction on))
+  )
+  (net 48
+   (pins  D5-12 DR2-8 D2-17)
+   (rule (tjunction on))
+  )
+  (net 16
+   (pins  P33-1 D10-4)
+   (rule (tjunction on))
+  )
+  (net 15
+   (pins  P30-1 D20-24)
+   (rule (tjunction on))
+  )
+  (net 14
+   (pins  P11-1 D3-20)
+   (rule (tjunction on))
+  )
+  (net 13
+   (pins  6-1 9-1 P18-1 D2-20 D1-20)
+   (rule (tjunction on))
+  )
+  (net 17
+   (pins  P58-1 D18-2)
+   (rule (tjunction on))
+  )
+  (net 12
+   (pins  P85-1 P16-1 D7-3)
+   (rule (tjunction on))
+  )
+  (net 11
+   (pins  10-1 2-1 P10-1 5-1 D2-21 D1-21 D3-21)
+   (rule (tjunction on))
+  )
+  (net 10
+   (pins  3-1 P17-1 8-1 7-1 D2-18 D1-18 D3-18)
+   (rule (tjunction on))
+  )
+  (net 9
+   (pins  4-1 13-1 1-1 P9-1 D2-23 D1-23 D3-23)
+   (rule (tjunction on))
+  )
+  (net 8
+   (pins  P8-1 D2-1 D1-1 D3-1)
+   (rule (tjunction on))
+  )
+  (net 7
+   (pins  P7-1 D2-2 D1-2 D3-2)
+   (rule (tjunction on))
+  )
+  (net 6
+   (pins  P6-1 D2-3 D1-3 D3-3)
+   (rule (tjunction on))
+  )
+  (net 5
+   (pins  P5-1 D2-4 D1-4 D3-4)
+   (rule (tjunction on))
+  )
+  (net 2
+   (pins  P2-1 D2-7 D1-7 D3-7)
+   (rule (tjunction on))
+  )
+  (net 3
+   (pins  P3-1 D2-6 D1-6 D3-6)
+   (rule (tjunction on))
+  )
+  (net 4
+   (pins  P4-1 D2-5 D1-5 D3-5)
+   (rule (tjunction on))
+  )
+  (net GND
+   (pins  P73-1 C3-1 P74-1 P77-1 P38-1 P78-1 P37-1 P71-1 P72-1 P75-1 C1-1
+          C6-1 C7-1 P15-1 C9-1 C2-1 C5-1 D5-7 P76-1 D4-7 C4-1 C10-1 D18-10
+          D18-19 D10-7 D9-7 D17-21 D11-21 D2-12 D14-21 D15-21 D1-12 D7-7
+          D8-7 D12-21 D13-21 D6-7 C8-1 D3-12 D19-10 D19-19 D16-21 D20-19
+          D20-20 D20-21 C12-2)
+   (rule (tjunction on))
+  )
+  (net 60
+   (pins  P47-1 D17-7 D17-6)
+   (rule (tjunction on))
+  )
+  (net 33
+   (pins  P13-1 D20-11)
+   (rule (tjunction on))
+  )
+  (net 59
+   (pins  P55-1 D17-36 D17-35)
+   (rule (tjunction on))
+  )
+  (net 47
+   (pins  P29-1 D20-25)
+   (rule (tjunction on))
+  )
+  (net 46
+   (pins  P25-1 D20-26)
+   (rule (tjunction on))
+  )
+  (net 45
+   (pins  P28-1 D20-27)
+   (rule (tjunction on))
+  )
+  (net 44
+   (pins  P27-1 D20-28)
+   (rule (tjunction on))
+  )
+  (net 43
+   (pins  P26-1 D20-29)
+   (rule (tjunction on))
+  )
+  (net 42
+   (pins  P32-1 D20-30)
+   (rule (tjunction on))
+  )
+  (net 34
+   (pins  P14-1 D20-12)
+   (rule (tjunction on))
+  )
+  (net 41
+   (pins  P31-1 D20-31)
+   (rule (tjunction on))
+  )
+  (net 40
+   (pins  P24-1 D20-18)
+   (rule (tjunction on))
+  )
+  (net 39
+   (pins  P23-1 D20-17)
+   (rule (tjunction on))
+  )
+  (net 38
+   (pins  P22-1 D20-16)
+   (rule (tjunction on))
+  )
+  (net 35
+   (pins  P19-1 D20-13)
+   (rule (tjunction on))
+  )
+  (net 117
+   (pins  R6-1 D10-8 D20-41)
+   (rule (tjunction on))
+  )
+  (net 36
+   (pins  P20-1 D20-14)
+   (rule (tjunction on))
+  )
+  (net 116
+   (pins  P86-1 P56-1)
+   (rule (tjunction on))
+  )
+  (net 115
+   (pins  P87-1 P57-1)
+   (rule (tjunction on))
+  )
+  (net 114
+   (pins  D5-11 D10-9 DR2-7 D2-16 D20-23)
+   (rule (tjunction on))
+  )
+  (net 113
+   (pins  D5-6 DR2-6 D2-15 D16-28 D16-27)
+   (rule (tjunction on))
+  )
+  (net 112
+   (pins  P54-1 D16-7 D16-6)
+   (rule (tjunction on))
+  )
+  (net 110
+   (pins  D5-5 DR2-5 D2-14 D16-15 D16-14)
+   (rule (tjunction on))
+  )
+  (net 111
+   (pins  P82-1 D16-36 D16-35)
+   (rule (tjunction on))
+  )
+  (net 94
+   (pins  D17-24 D11-24 D14-24 D15-24 D12-24 D13-24 D19-11 D16-24 D20-32)
+   (rule (tjunction on))
+  )
+  (net 93
+   (pins  D17-23 D11-23 D14-23 D15-23 D12-23 D13-23 D19-12 D16-23 D20-33)
+   (rule (tjunction on))
+  )
+  (net 92
+   (pins  D17-22 D11-22 D14-22 D15-22 D12-22 D13-22 D19-13 D16-22 D20-34)
+   (rule (tjunction on))
+  )
+  (net 91
+   (pins  D17-20 D11-20 D14-20 D15-20 D12-20 D13-20 D19-14 D16-20 D20-35)
+   (rule (tjunction on))
+  )
+  (net 90
+   (pins  D17-19 D11-19 D14-19 D15-19 D12-19 D13-19 D19-15 D16-19 D20-36)
+   (rule (tjunction on))
+  )
+  (net 89
+   (pins  D17-18 D11-18 D14-18 D15-18 D12-18 D13-18 D19-16 D16-18 D20-37)
+   (rule (tjunction on))
+  )
+  (net 88
+   (pins  D17-17 D11-17 D14-17 D15-17 D12-17 D13-17 D19-17 D16-17 D20-38)
+   (rule (tjunction on))
+  )
+  (net 87
+   (pins  D17-16 D11-16 D14-16 D15-16 D12-16 D13-16 D19-18 D16-16 D20-39)
+   (rule (tjunction on))
+  )
+  (net 86
+   (pins  D18-11 D17-37 D11-37 D14-37 D15-37 D12-37 D13-37 D16-37 D20-10)
+   (rule (tjunction on))
+  )
+  (net 85
+   (pins  D18-12 D17-38 D11-38 D14-38 D15-38 D12-38 D13-38 D16-38 D20-9)
+   (rule (tjunction on))
+  )
+  (net 84
+   (pins  D18-13 D17-39 D11-39 D14-39 D15-39 D12-39 D13-39 D16-39 D20-8)
+   (rule (tjunction on))
+  )
+  (net 83
+   (pins  D18-14 D17-40 D11-40 D14-40 D15-40 D12-40 D13-40 D16-40 D20-7)
+   (rule (tjunction on))
+  )
+  (net 82
+   (pins  D18-15 D17-41 D11-41 D14-41 D15-41 D12-41 D13-41 D16-41 D20-6)
+   (rule (tjunction on))
+  )
+  (net 81
+   (pins  D18-16 D17-3 D11-3 D14-3 D15-3 D12-3 D13-3 D16-3 D20-5)
+   (rule (tjunction on))
+  )
+  (net 80
+   (pins  D18-17 D17-2 D11-2 D14-2 D15-2 D12-2 D13-2 D16-2 D20-4)
+   (rule (tjunction on))
+  )
+  (net 79
+   (pins  D18-18 D17-1 D11-1 D14-1 D15-1 D12-1 D13-1 D16-1 D20-3)
+   (rule (tjunction on))
+  )
+  (net 78
+   (pins  P43-1 D15-7 D15-6)
+   (rule (tjunction on))
+  )
+  (net 77
+   (pins  P53-1 D15-36 D15-35)
+   (rule (tjunction on))
+  )
+  (net 76
+   (pins  P81-1 D14-7 D14-6)
+   (rule (tjunction on))
+  )
+  (net 75
+   (pins  P70-1 D14-36 D14-35)
+   (rule (tjunction on))
+  )
+  (net 74
+   (pins  P42-1 D13-7 D13-6)
+   (rule (tjunction on))
+  )
+  (net 73
+   (pins  P40-1 D13-36 D13-35)
+   (rule (tjunction on))
+  )
+  (net 72
+   (pins  P46-1 D12-7 D12-6)
+   (rule (tjunction on))
+  )
+  (net 71
+   (pins  P45-1 D12-36 D12-35)
+   (rule (tjunction on))
+  )
+  (net 70
+   (pins  P41-1 D11-7 D11-6)
+   (rule (tjunction on))
+  )
+  (net 69
+   (pins  P44-1 D11-36 D11-35)
+   (rule (tjunction on))
+  )
+  (net NET00032
+   (pins  D8-8 D8-12)
+   (rule (tjunction on))
+  )
+  (net NET00030
+   (pins  D7-8 D7-12)
+   (rule (tjunction on))
+  )
+  (net 108
+   (pins  P34-1 D8-5 D8-11)
+   (rule (tjunction on))
+  )
+  (net +5B
+   (pins  R4-2 C3-2 P80-1 R5-2 P52-1 P36-1 C1-2 C6-2 C7-2 R6-2 C9-2 C2-2
+          C5-2 D5-14 P79-1 D4-14 C4-2 C10-2 D18-20 D10-14 D9-14 D17-34
+          D17-26 D17-8 D17-42 D11-34 D11-26 D11-8 D11-42 DR2-9 D2-19 D2-24
+          D14-34 D14-26 D14-8 D14-42 D15-34 D15-26 D15-8 D15-42 D1-19 D1-24
+          D7-4 D7-1 D7-10 D7-13 D7-14 D8-4 D8-1 D8-10 D8-13 D8-14 D12-34
+          D12-26 D12-8 D12-42 D13-34 D13-26 D13-8 D13-42 DR1-9 D6-14 C8-2
+          D3-19 D3-24 D19-20 DR3-9 D16-34 D16-26 D16-8 D16-42 D20-22 D20-2
+          D20-42 D20-40 C12-1)
+   (rule (tjunction on))
+  )
+  (net NET00031
+   (pins  D8-6 D8-2)
+   (rule (tjunction on))
+  )
+  (net 37
+   (pins  P21-1 D20-15)
+   (rule (tjunction on))
+  )
+  (net NET00026
+   (pins  D7-6 D7-2)
+   (rule (tjunction on))
+  )
+  (net 57
+   (pins  R4-1 D10-6 D20-1)
+   (rule (tjunction on))
+  )
+  (net 109
+   (pins  P39-1 D7-9 D8-3)
+   (rule (tjunction on))
+  )
+  (net 68
+   (pins  P35-1 D17-4 D11-4 D14-4 D15-4 D7-5 D7-11 D12-4 D13-4 D16-4)
+   (rule (tjunction on))
+  )
+  (net 107
+   (pins  12-1 D5-4 D17-28 D17-27 DR2-4 D2-13)
+   (rule (tjunction on))
+  )
+  (net 67
+   (pins  D17-5 D11-5 D14-5 D15-5 D12-5 D13-5 D6-1 D3-9 DR3-1 D16-5)
+   (rule (tjunction on))
+  )
+  (net 106
+   (pins  11-1 D5-3 D17-15 D17-14 DR2-3 D2-11)
+   (rule (tjunction on))
+  )
+  (net 66
+   (pins  P12-1 D17-25 D11-25 D14-25 D15-25 D12-25 D13-25 D16-25)
+   (rule (tjunction on))
+  )
+  (net 104
+   (pins  D5-2 DR2-2 D2-10 D15-28 D15-27)
+   (rule (tjunction on))
+  )
+  (net 103
+   (pins  D5-1 DR2-1 D2-9 D15-15 D15-14)
+   (rule (tjunction on))
+  )
+  (net 102
+   (pins  D4-12 D14-28 D14-27 D1-17 DR1-8)
+   (rule (tjunction on))
+  )
+  (net 101
+   (pins  D4-11 D14-15 D14-14 D1-16 DR1-7)
+   (rule (tjunction on))
+  )
+  (net 100
+   (pins  D4-6 D1-15 D13-28 D13-27 DR1-6)
+   (rule (tjunction on))
+  )
+  (net 99
+   (pins  D4-5 D1-14 D13-15 D13-14 DR1-5)
+   (rule (tjunction on))
+  )
+  (net 98
+   (pins  D4-4 D1-13 D12-28 D12-27 DR1-4)
+   (rule (tjunction on))
+  )
+  (net 97
+   (pins  D4-3 D1-11 D12-15 D12-14 DR1-3)
+   (rule (tjunction on))
+  )
+  (net 96
+   (pins  D4-2 D11-28 D11-27 D1-10 DR1-2)
+   (rule (tjunction on))
+  )
+  (net NET00005
+   (pins  D10-3 D9-6)
+   (rule (tjunction on))
+  )
+  (net 95
+   (pins  D4-1 D11-15 D11-14 D1-9 DR1-1)
+   (rule (tjunction on))
+  )
+  (net NET00003
+   (pins  D10-1 D9-4 D9-3)
+   (rule (tjunction on))
+  )
+  (net NET00002
+   (pins  D9-5 D6-8)
+   (rule (tjunction on))
+  )
+  (net NET00001
+   (pins  D5-8 D9-2)
+   (rule (tjunction on))
+  )
+  (net NET00000
+   (pins  D4-8 D9-1)
+   (rule (tjunction on))
+  )
+ ) 
+(wiring  
+  (via EX1.8Y1.8R1.1   75.30000   15.30000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )
+  (via EX1.5Y1.8R1.1   75.30000   23.02000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )
+  (via EX1.5Y1.8R1.1   67.68000   23.02000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )
+  (via EX1.8Y1.8R1.1   67.68000   15.30000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  ) 
+  (via EX1.8Y1.8R1.1   60.06000   15.30000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )
+  (via EX1.8Y1.8R1.1   44.82000   15.30000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )
+  (via EX1.8Y1.8R1.1   52.44000   23.02000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )
+  (via EX1.8Y1.8R1.1   52.44000   15.30000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )
+  (via EX1.5Y1.8R1.1   37.20000   23.02000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )  
+  (via EX1.5Y1.8R1.1   29.58000   23.02000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )
+  (via EX1.5Y1.8R1.1   21.96000   23.02000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )  
+  (via EX1.8Y1.8R1.1   44.82000   20.48000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )
+  (via EX1.8Y1.8R1.1   37.20000   17.84000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )
+  (via EX1.8Y1.8R1.1   44.82000   17.84000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )
+  (via EX1.5Y1.8R1.1   60.06000   20.48000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )
+  (via EX1.8Y1.8R1.1   52.44000   20.48000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )
+  (via EX1.8Y1.8R1.1   52.44000   17.84000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  ) 
+  (via EX1.5Y1.8R1.1   85.46000   23.02000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )  
+  (via EX1.5Y1.8R1.1   80.38000   23.02000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )
+  (via EX1.5Y1.8R1.1   77.84000   23.02000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )  
+  (via EX1.5Y1.8R1.1   72.76000   23.02000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )
+  (via EX1.8Y1.8R1.1   70.22000   15.30000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )
+  (via EX1.5Y1.8R1.1   70.22000   23.02000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )  
+  (via EX1.8Y1.8R1.1   65.14000   15.30000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )
+  (via EX1.5Y1.8R1.1   65.14000   23.02000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )
+  (via EX1.5Y1.8R1.1   62.60000   23.02000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )
+  (via EX1.8Y1.8R1.1   62.60000   15.30000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )  
+  (via EX1.8Y1.8R1.1   57.52000   15.30000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )
+  (via EX1.5Y1.8R1.1   57.52000   23.02000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )
+  (via EX1.8Y1.8R1.1   54.98000   15.30000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )
+  (via EX1.8Y1.8R1.1   54.98000   23.02000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )  
+  (via EX1.8Y1.8R1.1   49.90000   15.30000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )
+  (via EX1.8Y1.8R1.1   49.90000   23.02000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )
+  (via EX1.8Y1.8R1.1   47.36000   23.02000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )
+  (via EX1.8Y1.8R1.1   47.36000   15.30000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )  
+  (via EX1.8Y1.8R1.1   39.74000   15.30000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )
+  (via EX1.8Y1.8R1.1   42.28000   15.30000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )
+  (via EX1.5Y1.8R1.1   39.74000   23.02000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )  
+  (via EX1.8Y1.8R1.1   34.66000   15.30000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )  
+  (via EX1.5Y1.8R1.1   24.50000   23.02000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )  
+  (via EX1.5Y1.8R1.1   19.42000   23.02000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )  
+  (via EX1.5Y1.8R1.1   62.60000   20.48000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )  
+  (via EX1.8Y1.8R1.1   57.52000   17.84000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )
+  (via EX1.5Y1.8R1.1   57.52000   20.48000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )
+  (via EX1.8Y1.8R1.1   54.98000   17.84000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )
+  (via EX1.8Y1.8R1.1   54.98000   20.48000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )  
+  (via EX1.8Y1.8R1.1   49.90000   17.84000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )
+  (via EX1.8Y1.8R1.1   49.90000   20.48000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )
+  (via EX1.8Y1.8R1.1   47.36000   20.48000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )
+  (via EX1.8Y1.8R1.1   47.36000   17.82000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )  
+  (via EX1.8Y1.8R1.1   42.28000   20.48000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )
+  (via EX1.8Y1.8R1.1   39.74000   20.48000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )
+  (via EX1.8Y1.8R1.1   39.74000   17.84000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )
+  (via EX1.8Y1.8R1.1   42.28000   17.84000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )  
+  (via EX1.8Y1.8R1.1   34.66000   17.84000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )
+  (via EX1.5Y1.8R1.1   34.66000   20.48000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  ) 
+  (via EX1.5Y1.8R1.1   11.80000   20.48000
+    (via_number 1) (net ProtectedFreePad) (type protect) 
+  )
+ )
+)

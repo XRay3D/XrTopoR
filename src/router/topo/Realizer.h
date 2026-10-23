@@ -28,6 +28,7 @@ struct RealizeStats {
   int wires = 0;
   int arcs = 0;
   int droppedApexes = 0;
+  std::vector<int> trackWire;  // wire index of every track appended, in order
 };
 
 // Appends tracks for the wires and vias to the board.
