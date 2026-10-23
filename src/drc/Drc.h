@@ -34,4 +34,12 @@ const char* drcTypeName(DrcViolation::Type t);
 double shapeMargin(const Board& b, const SpatialIndex& idx, const Shape& s, LayerMask layers, int net,
                    ItemRef* hit = nullptr);
 
+struct ConflictSum {
+  int count = 0;
+  double depth = 0;  // sum of (required - actual) clearance, nm
+};
+// Clearance and edge conflicts, counted as runDrc counts them, of the copper item pairs with at least
+// one item touching `region`.
+ConflictSum regionConflicts(const Board& b, const SpatialIndex& idx, const BBox& region);
+
 }  // namespace xr

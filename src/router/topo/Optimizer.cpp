@@ -15,9 +15,9 @@ namespace xr::topo {
 
 namespace {
 
-constexpr double kConflictCost = 20 * kNmPerMm;  // one clearance conflict weighs like 20 mm of track
-constexpr double kDepthCost = 100;               // plus 100 mm per mm of overlap depth
-constexpr double kTolerance = 2000;              // as the DRC: below this is rounding
+// Clearance comes first: no length gain pays for a conflict; among equal counts shallower is better.
+constexpr double kConflictCost = 1e6 * kNmPerMm;
+constexpr double kDepthCost = 100;  // 100 mm of track per mm of overlap depth
 
 double trackLength(const Track& t) {
   if (t.isArc()) return ArcGeom::fromThreePoints(t.a.v(), t.mid->v(), t.b.v()).length();
@@ -38,32 +38,25 @@ int conflictCount(const Board& b) {
 
 struct Local {
   double length = 0;
-  int conflicts = 0;
-  double depth = 0;
-  double score() const { return length + conflicts * kConflictCost + depth * kDepthCost; }
+  ConflictSum conflicts;
+  double score() const { return length + conflicts.count * kConflictCost + conflicts.depth / kNmPerMm * kDepthCost; }
 };
 
-// Length of the given tracks and their clearance conflicts (plus those of the given vias/pads).
-Local evaluate(const Board& b, const std::vector<int>& tracks, const std::vector<int>& vias,
-               const std::vector<int>& pads) {
-  SpatialIndex idx;
-  idx.build(b);
+// Track length and clearance conflicts around a move; the same region is scored on the board before
+// and after it, so whatever the re-shaping touched is compared like for like.
+Local evaluate(const Board& b, const SpatialIndex& idx, const BBox& region) {
   Local l;
-  auto account = [&](const Shape& s, LayerMask layers, int net) {
-    double m = shapeMargin(b, idx, s, layers, net);
-    if (m < -kTolerance) {
-      ++l.conflicts;
-      l.depth -= m;
-    }
-  };
-  for (int ti : tracks) {
-    const Track& t = b.tracks[ti];
-    l.length += trackLength(t);
-    for (auto& s : itemShapes(b, {ItemType::Track, ti})) account(s, LayerMask(1) << t.layer, t.net);
-  }
-  for (int vi : vias) account(Shape::circle(b.vias[vi].pos.v(), b.vias[vi].diameter / 2.0), b.vias[vi].layers, b.vias[vi].net);
-  for (int pi : pads) account(b.pads[pi].shapeGeom(), b.pads[pi].copper, b.pads[pi].net);
+  l.conflicts = regionConflicts(b, idx, region);
+  for (ItemRef r : idx.query(region, ~LayerMask(0)))
+    if (r.type == ItemType::Track) l.length += trackLength(b.tracks[r.index]);
   return l;
+}
+
+BBox tracksBox(const Board& b, std::span<const int> tracks) {
+  BBox bb;
+  for (int ti : tracks)
+    for (auto& s : itemShapes(b, {ItemType::Track, ti})) bb.add(s.bbox());
+  return bb;
 }
 
 // Tracks of `net` on the given layers with an end point inside `shape`.
@@ -79,19 +72,27 @@ std::vector<char> attachedTo(const Board& b, const Shape& shape, LayerMask layer
 
 struct Candidate {
   Board board;
-  Local local;
+  double gain = 0;  // score decrease over the move's region
 };
 
-// Re-shapes the chosen tracks on a copy of `b` after `move` was applied to it and scores the result.
-template <class Move>
-std::optional<Candidate> tryMove(const Board& b, const std::vector<char>& chosen, Move&& move,
-                                 const std::vector<int>& vias, const std::vector<int>& pads) {
-  Candidate c{b, {}};
+// Re-shapes the chosen tracks (`current` once grown to whole chains) on a copy of `b` after `move`
+// was applied to it and scores the result against `b`. `items` gives the moved via/pad boxes.
+template <class Move, class Items>
+std::optional<Candidate> tryMove(const Board& b, const SpatialIndex& idx, const std::vector<char>& chosen,
+                                 const std::vector<int>& current, Move&& move, Items&& items) {
+  Candidate c{b, 0};
   if (!move(c.board)) return std::nullopt;
   auto st = reshapeTracks(c.board, chosen, nullptr, nullptr, true);
   std::vector<int> fresh;
   for (size_t i = c.board.tracks.size() - st.trackWire.size(); i < c.board.tracks.size(); ++i) fresh.push_back(int(i));
-  c.local = evaluate(c.board, fresh, vias, pads);
+  BBox region = tracksBox(b, current);
+  region.add(tracksBox(c.board, fresh));
+  region.add(items(b));
+  region.add(items(c.board));
+  region = region.inflated(double(b.maxClearance()));
+  SpatialIndex cidx;
+  cidx.build(c.board);
+  c.gain = evaluate(b, idx, region).score() - evaluate(c.board, cidx, region).score();
   return c;
 }
 
@@ -119,8 +120,12 @@ OptimizeResult optimize(Board& b, const OptimizeOptions& o) {
   size_t unrouted = Connectivity::compute(b).ratsnest.size();
   auto keepsConnectivity = [&](const Board& c) { return Connectivity::compute(c).ratsnest.size() <= unrouted; };
 
+  // Moves are judged locally; an iteration that still ends with more conflicts overall is undone.
+  int conflicts = r.conflictsBefore;
   double step = o.step;
   for (int it = 0; it < o.iterations && !cancelled(); ++it, step /= 2) {
+    Board before = b;
+    int viaMoves0 = r.viaMoves, componentMoves0 = r.componentMoves;
     int moves = 0;
     int total = (o.vias ? int(b.vias.size()) : 0) + (o.components ? int(b.components.size()) : 0);
     int done = 0;
@@ -142,24 +147,25 @@ OptimizeResult optimize(Board& b, const OptimizeOptions& o) {
         std::vector<int> current;
         for (size_t i = 0; i < grown.size(); ++i)
           if (grown[i]) current.push_back(int(i));
-        Local base = evaluate(b, current, {vi}, {});
+        SpatialIndex idx;
+        idx.build(b);
+        auto viaBox = [vi](const Board& x) { return Shape::circle(x.vias[vi].pos.v(), x.vias[vi].diameter / 2.0).bbox(); };
         std::optional<Candidate> best;
         auto consider = [&](std::optional<Candidate> c) {
-          if (c && c->local.score() < (best ? best->local.score() : base.score()) - 1000 && keepsConnectivity(c->board))
-            best = std::move(c);
+          if (c && c->gain > std::max(best ? best->gain : 0.0, 1000.0) && keepsConnectivity(c->board)) best = std::move(c);
         };
-        consider(tryMove(b, chosen, [](Board&) { return true; }, {vi}, {}));  // re-shape in place
+        consider(tryMove(b, idx, chosen, current, [](Board&) { return true; }, viaBox));  // re-shape in place
         for (Vec2 d : kDirs) {
           Vec2 delta = d * step;
           consider(tryMove(
-              b, chosen,
+              b, idx, chosen, current,
               [&](Board& c) {
                 Via& cv = c.vias[vi];
                 dragEnds(c, vs, cv.layers, cv.net, delta);
                 cv.pos = Point(cv.pos.v() + delta);
                 return true;
               },
-              {vi}, {}));
+              viaBox));
         }
         if (best) {
           bool moved = best->board.vias[vi].pos != b.vias[vi].pos;
@@ -189,16 +195,21 @@ OptimizeResult optimize(Board& b, const OptimizeOptions& o) {
         std::vector<int> current;
         for (size_t i = 0; i < grown.size(); ++i)
           if (grown[i]) current.push_back(int(i));
-        Local base = evaluate(b, current, {}, comp.pads);
+        SpatialIndex idx;
+        idx.build(b);
+        auto padsBox = [ci](const Board& x) {
+          BBox bb;
+          for (int pi : x.components[ci].pads) bb.add(x.pads[pi].shapeGeom().bbox());
+          return bb;
+        };
         std::optional<Candidate> best;
         auto consider = [&](std::optional<Candidate> c) {
-          if (c && c->local.score() < (best ? best->local.score() : base.score()) - 1000 && keepsConnectivity(c->board))
-            best = std::move(c);
+          if (c && c->gain > std::max(best ? best->gain : 0.0, 1000.0) && keepsConnectivity(c->board)) best = std::move(c);
         };
         for (Vec2 d : std::span(kDirs, 4)) {
           Vec2 delta = d * step;
           consider(tryMove(
-              b, chosen,
+              b, idx, chosen, current,
               [&](Board& c) {
                 for (int pi : c.components[ci].pads) {
                   const Pad& p = c.pads[pi];
@@ -207,7 +218,7 @@ OptimizeResult optimize(Board& b, const OptimizeOptions& o) {
                 c.moveComponent(ci, c.components[ci].pos + Point(delta));
                 return true;
               },
-              {}, comp.pads));
+              padsBox));
         }
         if (best) {
           b = std::move(best->board);
@@ -215,11 +226,22 @@ OptimizeResult optimize(Board& b, const OptimizeOptions& o) {
           ++r.componentMoves;
         }
       }
-    r.log.push_back(std::format("iteration {}: step {:.3f} mm, {} move(s)", it + 1, step / kNmPerMm, moves));
+    int now = moves ? conflictCount(b) : conflicts;
+    if (now > conflicts) {
+      b = std::move(before);
+      r.viaMoves = viaMoves0;
+      r.componentMoves = componentMoves0;
+      r.log.push_back(std::format("iteration {}: step {:.3f} mm, {} move(s) undone ({} -> {} conflicts)", it + 1,
+                                  step / kNmPerMm, moves, conflicts, now));
+      break;
+    }
+    conflicts = now;
+    r.log.push_back(std::format("iteration {}: step {:.3f} mm, {} move(s), {} conflict(s)", it + 1, step / kNmPerMm, moves,
+                                conflicts));
     if (moves == 0 && it > 0) break;
   }
   r.lengthAfter = totalLength(b);
-  r.conflictsAfter = conflictCount(b);
+  r.conflictsAfter = conflicts;
   r.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
   return r;
 }

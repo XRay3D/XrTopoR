@@ -94,6 +94,50 @@ double shapeMargin(const Board& b, const SpatialIndex& idx, const Shape& s, Laye
   return worst;
 }
 
+ConflictSum regionConflicts(const Board& b, const SpatialIndex& idx, const BBox& region) {
+  ConflictSum sum;
+  double maxClr = double(b.maxClearance());
+  std::set<std::pair<int, int>> seen;
+  auto gid = [](ItemRef r) { return int(r.type) * 10'000'000 + r.index; };
+  for (ItemRef a : idx.query(region, ~LayerMask(0))) {
+    if (a.type == ItemType::Zone) continue;
+    auto shapes = itemShapes(b, a);
+    BBox bb;
+    for (auto& s : shapes) bb.add(s.bbox());
+    LayerMask lm = itemLayers(b, a);
+    idx.query(bb.inflated(maxClr), lm, [&](ItemRef c) {
+      if (c == a || skipPair(b, a, c)) return;
+      int ka = gid(a), kc = gid(c);
+      if (!seen.insert({std::min(ka, kc), std::max(ka, kc)}).second) return;
+      double req = requiredClearance(b, itemNet(b, a), itemNet(b, c), lm & itemLayers(b, c));
+      double best = std::numeric_limits<double>::max();
+      for (auto& s1 : shapes)
+        for (auto& s2 : itemShapes(b, c)) best = std::min(best, s1.distance(s2));
+      if (best < req - kDrcTolerance) {
+        ++sum.count;
+        sum.depth += req - best;
+      }
+    });
+    if (a.type == ItemType::Pad) continue;
+    double ec = double(b.edgeClearance), edge = std::numeric_limits<double>::max();
+    BBox near = bb.inflated(ec);
+    for (auto& loop : b.outline)
+      for (size_t i = 0; i < loop.size(); ++i) {
+        Vec2 p0 = loop[i], p1 = loop[(i + 1) % loop.size()];
+        BBox sb;
+        sb.add(p0);
+        sb.add(p1);
+        if (!sb.intersects(near)) continue;  // farther than the edge clearance
+        for (auto& s : shapes) edge = std::min(edge, s.distanceToSegment(p0, p1));
+      }
+    if (edge < ec - kDrcTolerance) {
+      ++sum.count;
+      sum.depth += ec - edge;
+    }
+  }
+  return sum;
+}
+
 std::vector<DrcViolation> runDrc(const Board& b, const DrcOptions& opt) {
   std::vector<DrcViolation> out;
   SpatialIndex idx;
@@ -166,10 +210,15 @@ std::vector<DrcViolation> runDrc(const Board& b, const DrcOptions& opt) {
   if (opt.edge && !b.outline.empty()) {
     double ec = double(b.edgeClearance);
     auto checkEdge = [&](ItemRef r) {
-      for (auto& s : itemShapes(b, r))
+      for (auto& s : itemShapes(b, r)) {
+        BBox near = s.bbox().inflated(ec);
         for (auto& loop : b.outline)
           for (size_t i = 0; i < loop.size(); ++i) {
             Vec2 p0 = loop[i], p1 = loop[(i + 1) % loop.size()];
+            BBox sb;
+            sb.add(p0);
+            sb.add(p1);
+            if (!sb.intersects(near)) continue;
             double d = s.distanceToSegment(p0, p1);
             if (d < ec - kDrcTolerance) {
               DrcViolation v;
@@ -183,6 +232,7 @@ std::vector<DrcViolation> runDrc(const Board& b, const DrcOptions& opt) {
               return;
             }
           }
+      }
     };
     for (int i = 0; i < int(b.tracks.size()); ++i) checkEdge({ItemType::Track, i});
     for (int i = 0; i < int(b.vias.size()); ++i) checkEdge({ItemType::Via, i});
