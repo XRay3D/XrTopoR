@@ -30,6 +30,7 @@ class MainWindow : public QMainWindow {
   void runDrc();
   void autoroute();
   void optimize(bool components);  // F7 / Shift+F7
+  void commitZones(const EditSnapshot& before, const QString& title);
   void clearRouting();
   void updateTitle();
 

@@ -18,6 +18,7 @@
 #include "io/BoardIO.h"
 #include "io/gerber/GerberWriter.h"
 #include "io/svg/SvgWriter.h"
+#include "core/ZoneFill.h"
 #include "router/topo/Optimizer.h"
 #include "router/topo/TopoRouter.h"
 
@@ -110,6 +111,21 @@ void MainWindow::buildMenus() {
   routeMenu->addAction(tr("Move &vias (optimise)"), QKeySequence(Qt::Key_F7), this, [this] { optimize(false); });
   routeMenu->addAction(tr("Move vias and &components"), QKeySequence(Qt::SHIFT | Qt::Key_F7), this, [this] { optimize(true); });
   routeMenu->addAction(tr("&Clear routing"), this, &MainWindow::clearRouting);
+  routeMenu->addSeparator();
+  routeMenu->addAction(tr("&Pour zones"), QKeySequence(Qt::Key_Z), this, [this] {
+    if (!doc_->hasBoard()) return;
+    auto before = doc_->beginEdit();
+    auto st = fillZones(*doc_->board());
+    commitZones(before, tr("Pour zones"));
+    statusBar()->showMessage(tr("Poured %1 zone(s): %2 polygon(s), %3 island(s) removed")
+                                 .arg(st.zones).arg(st.polygons).arg(st.islandsRemoved), 5000);
+  });
+  routeMenu->addAction(tr("Remove zone fills"), QKeySequence(Qt::SHIFT | Qt::Key_Z), this, [this] {
+    if (!doc_->hasBoard()) return;
+    auto before = doc_->beginEdit();
+    clearZoneFills(*doc_->board());
+    commitZones(before, tr("Remove zone fills"));
+  });
 
   auto* tb = addToolBar(tr("Tools"));
   tb->addAction(sel);
@@ -267,7 +283,7 @@ void MainWindow::autoroute() {
     Board& b = *doc_->board();
     b.tracks = work->tracks;
     b.vias = work->vias;
-    for (auto& z : b.zones) z.filled.clear();
+    b.zones = work->zones;
     doc_->commitEdit(before, tr("Autoroute"));
     QString log;
     for (auto& l : res.log) log += QString::fromStdString(l) + "\n";
@@ -334,6 +350,10 @@ void MainWindow::optimize(bool components) {
     };
     return topo::optimize(*work, o);
   }));
+}
+
+void MainWindow::commitZones(const EditSnapshot& before, const QString& title) {
+  doc_->commitEdit(before, title);
 }
 
 }  // namespace xr::gui

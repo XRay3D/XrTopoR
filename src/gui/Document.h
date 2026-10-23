@@ -23,12 +23,14 @@ struct EditSnapshot {
   std::vector<Pad> pads;
   std::vector<Track> tracks;
   std::vector<Via> vias;
-  static EditSnapshot take(const Board& b) { return {b.components, b.pads, b.tracks, b.vias}; }
+  std::vector<Zone> zones;
+  static EditSnapshot take(const Board& b) { return {b.components, b.pads, b.tracks, b.vias, b.zones}; }
   void apply(Board& b) const {
     b.components = components;
     b.pads = pads;
     b.tracks = tracks;
     b.vias = vias;
+    b.zones = zones;
   }
 };
 
