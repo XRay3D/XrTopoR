@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <numeric>
 #include <ranges>
 
 #include "gui/Theme.h"
@@ -44,6 +45,32 @@ void BoardView::fitBoard() {
   bb = bb.inflated(2 * kNmPerMm);
   center_ = bb.center();
   scale_ = std::min(width() / bb.width(), height() / bb.height());
+  update();
+}
+
+void BoardView::fitAll() {
+  if (!doc_->hasBoard()) return;
+  const Board& b = *doc_->board();
+  BBox bb = b.bbox();
+  for (auto& t : b.tracks) {
+    bb.add(t.a.v());
+    bb.add(t.b.v());
+  }
+  for (auto& v : b.vias) bb.add(v.pos.v());
+  for (auto& g : b.graphics) {
+    bb.add(g.a);
+    bb.add(g.b);
+    for (auto& q : g.pts) bb.add(q);
+  }
+  if (!bb.valid()) return;
+  bb = bb.inflated(2 * kNmPerMm);
+  center_ = bb.center();
+  scale_ = std::min(width() / bb.width(), height() / bb.height());
+  update();
+}
+
+void BoardView::centerAtCursor() {
+  center_ = cursor_;
   update();
 }
 
@@ -355,7 +382,6 @@ void BoardView::drawBoard(QPainter& p) {
 
 void BoardView::drawOverlay(QPainter& p) {
   if (!routing_) return;
-  const Board& b = *doc_->board();
   QColor c = doc_->layerViews()[routeLayer_].color;
   for (auto& t : routeTracks_) drawTrack(p, t, doc_->layerViews()[t.layer].color);
   for (auto& v : routeVias_) drawVia(p, v, Theme::viaRing());
@@ -365,7 +391,6 @@ void BoardView::drawOverlay(QPainter& p) {
     rc.setAlpha(180);
     drawTrack(p, *seg, rc);
   }
-  Q_UNUSED(b);
 }
 
 // ---------------------------------------------------------------- mouse / keys
@@ -380,6 +405,7 @@ void BoardView::mousePressEvent(QMouseEvent* e) {
   if (e->button() != Qt::LeftButton || !doc_->hasBoard()) return;
   Pick pk = pick(e->position());
   Vec2 w = toWorld(e->position());
+  emit clicked(w);
   switch (mode_) {
     case Mode::Select: {
       if (pk.item && pk.item->type != ItemType::Pad) {
@@ -412,7 +438,7 @@ void BoardView::mousePressEvent(QMouseEvent* e) {
       v.drill = nc.viaDrill;
       v.layers = b.allCopperMask();
       b.vias.push_back(v);
-      doc_->commitEdit(before, tr("Add via"));
+      doc_->commitEdit(before, tr("Добавить переход"));
       break;
     }
   }
@@ -451,7 +477,7 @@ void BoardView::mouseReleaseEvent(QMouseEvent* e) {
   if (dragging_) {
     dragging_ = false;
     Vec2 d = cursor_ - dragStart_;
-    if (dragBefore_ && (std::abs(d.x) > 1 || std::abs(d.y) > 1)) doc_->commitEdit(*dragBefore_, tr("Move component"));
+    if (dragBefore_ && (std::abs(d.x) > 1 || std::abs(d.y) > 1)) doc_->commitEdit(*dragBefore_, tr("Переместить компонент"));
     else if (dragBefore_) {
       dragBefore_->apply(*doc_->board());
       doc_->invalidate();
@@ -475,60 +501,12 @@ void BoardView::wheelEvent(QWheelEvent* e) {
 }
 
 void BoardView::keyPressEvent(QKeyEvent* e) {
-  const Board* b = doc_->hasBoard() ? doc_->board() : nullptr;
-  int k = e->key();
-  if (k == Qt::Key_Escape) { cancelTool(); return; }
-  if (!b) return;
-  if (k >= Qt::Key_0 && k <= Qt::Key_9) {
-    int n = b->copperCount();
-    int idx = k == Qt::Key_0 ? n - 1 : k - Qt::Key_1;
-    if (idx >= 0 && idx < n) {
-      LayerId l = b->copperByIndex(idx);
-      if (routing_ && l != routeLayer_) { routeAddVia(); routeLayer_ = l; }
-      doc_->setActiveLayer(l);
-    }
+  // Everything else is a window command (see Commands), so user hotkeys apply while routing too.
+  if (e->key() == Qt::Key_Return || e->key() == Qt::Key_Enter) {
+    finishRoute();
     return;
   }
-  switch (k) {
-    case Qt::Key_Delete: deleteSelection(); break;
-    case Qt::Key_Backspace:
-      if (routing_ && !routeTracks_.empty()) {
-        Track t = routeTracks_.back();
-        routeTracks_.pop_back();
-        if (!routeVias_.empty() && Point(routeLast_) == routeVias_.back().pos && t.layer != routeLayer_) {
-          routeVias_.pop_back();
-          routeLayer_ = t.layer;
-          doc_->setActiveLayer(routeLayer_);
-        }
-        routeLast_ = t.a.v();
-        routeDir_.reset();
-        if (!routeTracks_.empty()) {
-          const Track& pr = routeTracks_.back();
-          routeDir_ = (pr.b.v() - pr.a.v()).normalized();
-        }
-        update();
-      }
-      break;
-    case Qt::Key_Return:
-    case Qt::Key_Enter: finishRoute(); break;
-    case Qt::Key_L: toggleLayer(); break;
-    case Qt::Key_V:
-      if (routing_) routeAddVia();
-      else setMode(Mode::Via);
-      break;
-    case Qt::Key_R: setMode(Mode::Route); break;
-    case Qt::Key_W: changeTrackWidth(); break;
-    case Qt::Key_F5: recomputeShapes(); break;
-    case Qt::Key_Space: rotateSelection(e->modifiers() & Qt::ShiftModifier ? 90 : -90); break;
-    case Qt::Key_N: setRatsnestVisible(!showRatsnest_); break;
-    case Qt::Key_O:
-      setRouteAngle(angle_ == RouteAngle::Deg45 ? RouteAngle::Free : RouteAngle::Deg45);
-      break;
-    case Qt::Key_A:
-      setRouteAngle(angle_ == RouteAngle::Arc ? RouteAngle::Free : RouteAngle::Arc);
-      break;
-    default: QWidget::keyPressEvent(e);
-  }
+  QWidget::keyPressEvent(e);
 }
 
 // ---------------------------------------------------------------- editing actions
@@ -538,18 +516,30 @@ void BoardView::setMode(Mode m) {
   mode_ = m;
   setCursor(m == Mode::Select ? Qt::ArrowCursor : Qt::CrossCursor);
   emit modeChanged(m);
-  emit status(m == Mode::Select ? tr("Select / move") : m == Mode::Route ? tr("Route: click a pad to start") : tr("Via: click to place"));
+  emit status(m == Mode::Select   ? tr("Выделять и перемещать объекты")
+              : m == Mode::Route  ? tr("Прокладка проводника: щёлкните контакт, с которого начать")
+                                  : tr("Создание переходов: щёлкните место перехода"));
   update();
 }
 
 void BoardView::setRouteAngle(RouteAngle a) {
+  if (angle_ == a) return;
   angle_ = a;
-  emit status(a == RouteAngle::Free ? tr("Any angle") : a == RouteAngle::Deg45 ? tr("45 degrees") : tr("Arcs"));
+  emit routeAngleChanged(a);
   update();
 }
 
-void BoardView::setRatsnestVisible(bool on) { showRatsnest_ = on; update(); }
-void BoardView::setOnlyActiveLayer(bool on) { onlyActive_ = on; update(); }
+void BoardView::setRatsnestVisible(bool on) {
+  showRatsnest_ = on;
+  emit viewChanged();
+  update();
+}
+
+void BoardView::setOnlyActiveLayer(bool on) {
+  onlyActive_ = on;
+  emit viewChanged();
+  update();
+}
 
 void BoardView::deleteSelection() {
   if (!doc_->hasBoard()) return;
@@ -568,7 +558,7 @@ void BoardView::deleteSelection() {
   for (int i : tracks) b.tracks.erase(b.tracks.begin() + i);
   for (int i : vias) b.vias.erase(b.vias.begin() + i);
   doc_->clearSelection();
-  doc_->commitEdit(before, tr("Delete"));
+  doc_->commitEdit(before, tr("Удалить"));
 }
 
 void BoardView::rotateSelection(double deg) {
@@ -577,7 +567,7 @@ void BoardView::rotateSelection(double deg) {
   if (comps.empty()) return;
   auto before = doc_->beginEdit();
   for (int ci : comps) doc_->board()->rotateComponent(ci, deg);
-  doc_->commitEdit(before, tr("Rotate"));
+  doc_->commitEdit(before, tr("Повернуть"));
 }
 
 void BoardView::changeTrackWidth() {
@@ -587,13 +577,13 @@ void BoardView::changeTrackWidth() {
   for (ItemRef r : doc_->selectedItems())
     if (r.type == ItemType::Track) cur = b.tracks[r.index].width / 1e6;
   bool ok = false;
-  double w = QInputDialog::getDouble(this, tr("Track width"), tr("Width, mm:"), cur > 0 ? cur : 0.25, 0.01, 10.0, 3, &ok);
+  double w = QInputDialog::getDouble(this, tr("Ширина проводника"), tr("Ширина, мм:"), cur > 0 ? cur : 0.25, 0.01, 10.0, 3, &ok);
   if (!ok) return;
   if (routing_) { routeWidth_ = mmToNm(w); update(); return; }
   auto before = doc_->beginEdit();
   for (ItemRef r : doc_->selectedItems())
     if (r.type == ItemType::Track) b.tracks[r.index].width = mmToNm(w);
-  doc_->commitEdit(before, tr("Track width"));
+  doc_->commitEdit(before, tr("Изменить ширину"));
 }
 
 void BoardView::recomputeShapes() {
@@ -608,8 +598,8 @@ void BoardView::recomputeShapes() {
   auto before = doc_->beginEdit();
   auto st = topo::reshapeTracks(b, std::move(chosen));
   doc_->clearSelection();
-  doc_->commitEdit(before, tr("Recompute shapes"));
-  emit status(tr("Recomputed %1 wire(s): %2 arcs").arg(st.wires).arg(st.arcs));
+  doc_->commitEdit(before, tr("Расчёт формы проводников"));
+  emit status(tr("Расчёт формы проводников: %1 проводник(ов), %2 дуг").arg(st.wires).arg(st.arcs));
 }
 
 void BoardView::cancelTool() {
@@ -617,7 +607,7 @@ void BoardView::cancelTool() {
     routing_ = false;
     routeTracks_.clear();
     routeVias_.clear();
-    emit status(tr("Route cancelled"));
+    emit status(tr("Прокладка отменена"));
     update();
     return;
   }
@@ -643,8 +633,8 @@ void BoardView::routeStart(const Pick& pk, Vec2 at) {
   routeVias_.clear();
   routeLast_ = at;
   routeDir_.reset();
-  emit status(tr("Routing %1 on %2: click points, V = via, L = layer, Enter = finish, Esc = cancel")
-                  .arg(routeNet_ >= 0 ? QString::fromStdString(b.nets[routeNet_].name) : tr("(no net)"))
+  emit status(tr("Прокладка цепи %1 на слое %2: V — переход, Backspace — отменить сегмент, Enter — завершить, Esc — отмена")
+                  .arg(routeNet_ >= 0 ? QString::fromStdString(b.nets[routeNet_].name) : tr("(без цепи)"))
                   .arg(QString::fromStdString(b.layers[routeLayer_].name)));
 }
 
@@ -688,8 +678,7 @@ std::optional<Track> BoardView::makeSegment(Vec2 from, Vec2 to) const {
 double BoardView::rubberMargin(const Track& t) const {
   const Board& b = *doc_->board();
   double worst = std::numeric_limits<double>::max();
-  for (auto& s : itemShapes(b, ItemRef{ItemType::Track, -1}).empty() ? std::vector<Shape>{} : std::vector<Shape>{}) (void)s;
-  // Build the capsule(s) of the rubber segment directly.
+  // Capsule(s) of the rubber segment.
   auto pts = t.path();
   for (size_t i = 1; i < pts.size(); ++i) {
     Shape s = Shape::capsule(pts[i - 1], pts[i], t.width / 2.0);
@@ -741,12 +730,86 @@ void BoardView::routeAddVia() {
 }
 
 void BoardView::toggleLayer() {
+  if (routing_) routeAddVia();
+}
+
+void BoardView::viaKey() {
+  if (routing_) routeAddVia();
+  else setMode(Mode::Via);
+}
+
+void BoardView::routeUndoLast() {
+  if (!routing_ || routeTracks_.empty()) return;
+  Track t = routeTracks_.back();
+  routeTracks_.pop_back();
+  if (!routeVias_.empty() && Point(routeLast_) == routeVias_.back().pos && t.layer != routeLayer_) {
+    routeVias_.pop_back();
+    routeLayer_ = t.layer;
+    doc_->setActiveLayer(routeLayer_);
+  }
+  routeLast_ = t.a.v();
+  routeDir_.reset();
+  if (!routeTracks_.empty()) {
+    const Track& pr = routeTracks_.back();
+    routeDir_ = (pr.b.v() - pr.a.v()).normalized();
+  }
+  update();
+}
+
+void BoardView::selectCopper(int toporIndex) {
   if (!doc_->hasBoard()) return;
-  if (routing_) { routeAddVia(); return; }
+  const Board& b = *doc_->board();
+  int n = b.copperCount();
+  int idx = toporIndex == 0 ? n - 1 : toporIndex - 1;  // copper index: 0 = top
+  if (idx < 0 || idx >= n) return;
+  LayerId l = b.copperByIndex(idx);
+  if (routing_ && l != routeLayer_) {
+    routeAddVia();
+    routeLayer_ = l;
+    routeWidth_ = b.trackWidth(routeNet_, routeLayer_);
+  }
+  doc_->setActiveLayer(l);
+}
+
+void BoardView::toggleMetalLayers() {
+  if (!doc_->hasBoard()) return;
   auto cu = doc_->board()->copperLayers();
-  auto it = std::ranges::find(cu, doc_->activeLayer());
-  size_t idx = it == cu.end() ? 0 : size_t(it - cu.begin());
-  doc_->setActiveLayer(cu[(idx + 1) % cu.size()]);
+  bool anyVisible = std::ranges::any_of(cu, [&](LayerId l) { return doc_->layerViews()[l].visible; });
+  for (LayerId l : cu) doc_->layerViews()[l].visible = !anyVisible;
+  emit doc_->layersChanged();
+}
+
+void BoardView::toggleFix() {
+  if (!doc_->hasBoard()) return;
+  auto items = doc_->selectedItems();
+  auto comps = doc_->selectedComponents();
+  if (items.empty() && comps.empty()) return;
+  Board& b = *doc_->board();
+  // Like TopoR: all become fixed unless all already are.
+  bool allFixed = true;
+  for (ItemRef r : items) {
+    if (r.type == ItemType::Track) allFixed = allFixed && b.tracks[r.index].locked;
+    if (r.type == ItemType::Via) allFixed = allFixed && b.vias[r.index].locked;
+  }
+  for (int ci : comps) allFixed = allFixed && b.components[ci].locked;
+  auto before = doc_->beginEdit();
+  for (ItemRef r : items) {
+    if (r.type == ItemType::Track) b.tracks[r.index].locked = !allFixed;
+    if (r.type == ItemType::Via) b.vias[r.index].locked = !allFixed;
+  }
+  for (int ci : comps) b.components[ci].locked = !allFixed;
+  doc_->commitEdit(before, allFixed ? tr("Расфиксировать") : tr("Фиксировать"));
+}
+
+void BoardView::selectAll() {
+  if (!doc_->hasBoard()) return;
+  const Board& b = *doc_->board();
+  std::vector<ItemRef> items;
+  for (int i = 0; i < int(b.tracks.size()); ++i) items.push_back({ItemType::Track, i});
+  for (int i = 0; i < int(b.vias.size()); ++i) items.push_back({ItemType::Via, i});
+  std::vector<int> comps(b.components.size());
+  std::ranges::iota(comps, 0);
+  doc_->setSelection(std::move(items), std::move(comps));
 }
 
 void BoardView::finishRoute() {
@@ -757,11 +820,11 @@ void BoardView::finishRoute() {
     auto before = doc_->beginEdit();
     for (auto& t : routeTracks_) b.tracks.push_back(t);
     for (auto& v : routeVias_) b.vias.push_back(v);
-    doc_->commitEdit(before, tr("Route"));
+    doc_->commitEdit(before, tr("Прокладка проводника"));
   }
   routeTracks_.clear();
   routeVias_.clear();
-  emit status(tr("Route finished"));
+  emit status(tr("Проводник проложен"));
   update();
 }
 

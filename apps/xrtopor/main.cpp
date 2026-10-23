@@ -1,12 +1,23 @@
 #include <QApplication>
+#include <QSettings>
+#include <QStyleFactory>
+#include <QTemporaryDir>
 #include <QTimer>
 
 #include "gui/MainWindow.h"
 
 int main(int argc, char** argv) {
   QApplication app(argc, argv);
+  QApplication::setStyle(QStyleFactory::create("Fusion"));
   QApplication::setApplicationName("XrTopoR");
   QApplication::setOrganizationName("XrTopoR");
+  // A screenshot run must not touch the user's settings: they go to a throw-away directory.
+  QTemporaryDir scratchSettings;
+  for (int i = 1; i < argc; ++i)
+    if (QString::fromLocal8Bit(argv[i]) == "--screenshot") {
+      QSettings::setDefaultFormat(QSettings::IniFormat);
+      QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, scratchSettings.path());
+    }
   xr::gui::MainWindow w;
   w.show();
   QString shot;

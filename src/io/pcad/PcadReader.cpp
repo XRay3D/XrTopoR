@@ -489,6 +489,7 @@ Result<BoardPtr> readPcad(const std::string& text, const std::string& path) {
   for (auto [num, id] : r.layerMap)
     if (id >= 0 && id < LayerId(b->layers.size())) src->layerNums[id] = num;
   src->unitNm = r.unit;
+  b->designUnitNm = r.unit;
   b->source = src;
   b->rebuildNetIndex();
   return b;

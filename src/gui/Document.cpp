@@ -24,6 +24,7 @@ class SnapshotCommand : public QUndoCommand {
     if (!doc_->hasBoard()) return;
     s.apply(*doc_->board());
     doc_->invalidate();
+    doc_->validateSelection();
     emit doc_->boardChanged();
   }
   Document* doc_;
@@ -53,6 +54,7 @@ void Document::setBoard(std::unique_ptr<Board> b, const QString& path) {
       layerViews_.push_back(v);
     }
     activeLayer_ = board_->topCopper();
+    unit_ = designUnit(*board_);
   }
   invalidate();
   emit boardReplaced();
@@ -89,6 +91,29 @@ void Document::setSelection(std::vector<ItemRef> items, std::vector<int> comps) 
   selection_ = std::move(items);
   selComponents_ = std::move(comps);
   emit selectionChanged();
+}
+
+void Document::validateSelection() {
+  if (!board_) return;
+  auto valid = [&](ItemRef r) {
+    switch (r.type) {
+      case ItemType::Track: return r.index < int(board_->tracks.size());
+      case ItemType::Via: return r.index < int(board_->vias.size());
+      case ItemType::Pad: return r.index < int(board_->pads.size());
+      case ItemType::Zone: return r.index < int(board_->zones.size());
+    }
+    return false;
+  };
+  size_t n = selection_.size() + selComponents_.size();
+  std::erase_if(selection_, [&](ItemRef r) { return r.index < 0 || !valid(r); });
+  std::erase_if(selComponents_, [&](int c) { return c < 0 || c >= int(board_->components.size()); });
+  if (selection_.size() + selComponents_.size() != n) emit selectionChanged();
+}
+
+void Document::setUnit(Unit u) {
+  if (u == unit_) return;
+  unit_ = u;
+  emit unitChanged();
 }
 
 void Document::setHighlightedNet(int net) {

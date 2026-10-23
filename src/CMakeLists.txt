@@ -50,11 +50,17 @@ if(XR_BUILD_GUI)
   find_package(Qt6 REQUIRED COMPONENTS Widgets Concurrent)
   set(CMAKE_AUTOMOC ON)
   add_library(xrgui STATIC
+    gui/AppSettings.cpp
+    gui/BoardView.cpp
+    gui/Commands.cpp
     gui/Document.cpp
     gui/MainWindow.cpp
-    gui/BoardView.cpp
+    gui/ModeBar.cpp
     gui/Panels.cpp
     gui/Theme.cpp
+    gui/Units.cpp
+    gui/icons.qrc
   )
+  set_target_properties(xrgui PROPERTIES AUTORCC ON)
   target_link_libraries(xrgui PUBLIC xrio xrdrc xrrouter Qt6::Widgets Qt6::Concurrent)
 endif()

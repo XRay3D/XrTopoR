@@ -9,6 +9,7 @@
 
 #include "core/Connectivity.h"
 #include "drc/Drc.h"
+#include "gui/Units.h"
 
 namespace xr::gui {
 
@@ -42,8 +43,12 @@ class Document : public QObject {
   Board* board() const { return board_.get(); }
   bool hasBoard() const { return board_ != nullptr; }
   const QString& path() const { return path_; }
+  void setPath(const QString& p) { path_ = p; }
   void setBoard(std::unique_ptr<Board> b, const QString& path);
   QUndoStack* undoStack() { return &undo_; }
+
+  Unit unit() const { return unit_; }
+  void setUnit(Unit u);
 
   std::vector<LayerView>& layerViews() { return layerViews_; }
   LayerId activeLayer() const { return activeLayer_; }
@@ -59,6 +64,7 @@ class Document : public QObject {
   std::vector<int> selectedComponents() const { return selComponents_; }
   void setSelection(std::vector<ItemRef> items, std::vector<int> comps);
   void clearSelection() { setSelection({}, {}); }
+  void validateSelection();  // drops references to items that no longer exist (after undo/redo)
   int highlightedNet() const { return highlightNet_; }
   void setHighlightedNet(int net);
 
@@ -76,6 +82,7 @@ class Document : public QObject {
   void selectionChanged();
   void layersChanged();
   void drcChanged();
+  void unitChanged();
 
  private:
   std::unique_ptr<Board> board_;
@@ -83,6 +90,7 @@ class Document : public QObject {
   QUndoStack undo_;
   std::vector<LayerView> layerViews_;
   LayerId activeLayer_ = 0;
+  Unit unit_ = Unit::Mm;
   std::optional<SpatialIndex> index_;
   std::optional<Connectivity> conn_;
   std::vector<ItemRef> selection_;

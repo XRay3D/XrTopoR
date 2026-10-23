@@ -993,6 +993,7 @@ Result<BoardPtr> readFst(const std::string& text, const std::string& path) {
     else if (d == "m") r.s = 1000.0 * kNmPerMm;
     else if (d == "inch") r.s = 1000.0 * kNmPerMil;
   }
+  b->designUnitNm = r.s;
   if (auto* layers = root.find("Layers")) r.readLayers(*layers);
   if (b->copperCount() == 0) {
     b->addLayer("Top", LayerKind::Copper, Side::Top);

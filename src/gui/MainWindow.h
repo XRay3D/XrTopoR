@@ -1,15 +1,22 @@
 #pragma once
+// Main window laid out like TopoR 7.0: menus and toolbars from the command registry, the editor's
+// vertical mode toolbars beside the canvas, docks «Проект», «Поиск», «Свойства», «Окно сообщений»,
+// «Управление отображением», and TopoR's five-field status bar.
 #include <QMainWindow>
 #include <atomic>
 #include <memory>
 
 #include "gui/BoardView.h"
+#include "gui/Commands.h"
 #include "gui/Document.h"
 
+class QDockWidget;
 class QLabel;
-class QProgressDialog;
 
 namespace xr::gui {
+
+class ModeBar;
+class ProjectPanel;
 
 class MainWindow : public QMainWindow {
   Q_OBJECT
@@ -17,27 +24,63 @@ class MainWindow : public QMainWindow {
   MainWindow();
   bool openFile(const QString& path);
   bool openLastFile();  // the board opened in the previous session, if any
+  Commands* commands() const { return cmds_; }
+  BoardView* view() const { return view_; }
+  Document* document() const { return doc_; }
+
+ protected:
+  bool event(QEvent* e) override;
+  void closeEvent(QCloseEvent* e) override;
 
  private:
+  void bindCommands();
   void buildMenus();
+  void buildToolbars();
   void buildDocks();
+  void buildStatusBar();
+  void restoreLayout();
+  QDockWidget* addDock(const QString& objectName, const QString& title, QWidget* w, Qt::DockWidgetArea area,
+                       const QString& toggleCommand);
+
+  bool maybeSave();
   void open();
-  void save();
-  void saveAs();
+  void openExamples();
+  void closeBoard();
+  bool save();
+  bool saveAs();
+  void exportDesign();
   void importSes();
   void exportGerber();
   void exportSvg();
+  void exportBom();
+  void showSummary();
+  void showHotkeys();
   void runDrc();
   void autoroute();
-  void optimize(bool components);  // F7 / Shift+F7
-  void commitZones(const EditSnapshot& before, const QString& title);
+  void optimize(bool components);  // F7 sub-modes
+  void pour(bool fill, bool clear, const QString& title);
   void clearRouting();
+
   void updateTitle();
+  void updateStatus();      // field 0: mode, length, vias, violations
+  void showHint(const QString& text, int ms = 5000);
+  void updateCursor(Vec2 world);
+  void updateModeButtons();
 
   Document* doc_;
   BoardView* view_;
-  QLabel* coords_;
-  QLabel* layerLabel_;
+  Commands* cmds_;
+  ModeBar* modeBar_ = nullptr;
+  ModeBar* autoBar_ = nullptr;
+  ProjectPanel* project_ = nullptr;
+  QLabel* stMain_ = nullptr;
+  QLabel* stHint_ = nullptr;
+  QLabel* stXY_ = nullptr;
+  QLabel* stGrid_ = nullptr;
+  QLabel* stAngle_ = nullptr;
+  QString hint_;  // persistent hint shown when no temporary message is active
+  Vec2 cursor_;
+  std::optional<Vec2> origin_;  // last left click: dx/dy reference
   std::shared_ptr<std::atomic<bool>> cancel_;
 };
 

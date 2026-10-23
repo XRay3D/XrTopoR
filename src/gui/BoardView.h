@@ -20,6 +20,7 @@ class BoardView : public QWidget {
   RouteAngle routeAngle() const { return angle_; }
   bool ratsnestVisible() const { return showRatsnest_; }
   bool onlyActiveLayer() const { return onlyActive_; }
+  bool isRouting() const { return routing_; }
 
  public slots:
   void setMode(Mode m);
@@ -27,21 +28,32 @@ class BoardView : public QWidget {
   void setRatsnestVisible(bool on);
   void setOnlyActiveLayer(bool on);
   void fitBoard();
+  void fitAll();          // board, components and everything drawn
+  void centerAtCursor();  // «Перейти в центр»: the point under the cursor becomes the view centre
   void centerOn(Vec2 p, double widthMm = 0);
   void zoomBy(double factor);
   void deleteSelection();
   void rotateSelection(double deg);
   void cancelTool();
   void finishRoute();
-  void routeAddVia();  // via + layer change while routing
-  void toggleLayer();  // L: next copper layer (while routing: with a via)
+  void routeAddVia();      // via + layer change while routing
+  void toggleLayer();      // L: while routing, a via to the next copper layer
+  void viaKey();           // V: a via while routing, otherwise the via tool
+  void routeUndoLast();    // Backspace: drops the last routed segment (and its via)
+  void selectCopper(int toporIndex);  // 0 = bottom, 1 = top, 2..9 = inner layers (with a via while routing)
+  void toggleMetalLayers();           // all copper layers on/off
+  void toggleFix();                   // F: lock/unlock the selection
+  void selectAll();
   void changeTrackWidth();
   void recomputeShapes();  // F5: selected (or all) tracks become sketches and are re-realised
 
  signals:
   void cursorMoved(Vec2 world);
+  void clicked(Vec2 world);  // left button pressed on the board (origin of dx/dy in the status bar)
   void status(const QString& text);
   void modeChanged(Mode m);
+  void routeAngleChanged(RouteAngle a);
+  void viewChanged();  // ratsnest / only-active-layer toggles
 
  protected:
   void paintEvent(QPaintEvent*) override;

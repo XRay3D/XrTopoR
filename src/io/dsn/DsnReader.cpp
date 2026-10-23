@@ -353,6 +353,7 @@ Result<BoardPtr> readDsn(const std::string& text, const std::string& path) {
   b->name = root.arg(0);
   Reader r(*b);
   r.s = dsn::coordScale(root, 1000);
+  b->designUnitNm = r.s;
   if (const Node* st = root.find("structure")) r.readStructure(*st);
   if (b->copperCount() == 0) {
     b->addLayer("Top", LayerKind::Copper, Side::Top);

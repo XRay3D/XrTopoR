@@ -1,11 +1,19 @@
 // GUI smoke test: drives the board view with synthetic mouse/key events on the offscreen platform.
 #include <QApplication>
+#include <QDockWidget>
+#include <QMenuBar>
 #include <QMouseEvent>
+#include <QSettings>
+#include <QTemporaryDir>
 #include <QTest>
+#include <QToolBar>
 #include <gtest/gtest.h>
+#include <set>
 
 #include "gui/BoardView.h"
+#include "gui/Commands.h"
 #include "gui/Document.h"
+#include "gui/MainWindow.h"
 #include "io/BoardIO.h"
 
 using namespace xr;
@@ -20,11 +28,17 @@ struct App {
   char arg0[8] = "xrtests";
   char* argv[2] = {arg0, nullptr};
   QApplication app{argc, argv};
+  QTemporaryDir settings;  // tests never touch the user's settings
+  App() {
+    QSettings::setDefaultFormat(QSettings::IniFormat);
+    QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settings.path());
+  }
 };
 
+// Never destroyed: a QApplication torn down by static destructors outlives Qt's own globals (fonts).
 App& app() {
-  static App a;
-  return a;
+  static App* a = new App;
+  return *a;
 }
 
 // QTest::mouseMove is not delivered as a move event on every platform plugin: send one directly.
@@ -157,4 +171,91 @@ TEST(Gui, RecomputeShapesKeepsConnectivityAndClearance) {
     if (v.type != DrcViolation::Type::Unconnected) ADD_FAILURE() << v.message;
   doc.undoStack()->undo();
   EXPECT_EQ(doc.board()->tracks.size(), tracksBefore) << "after undo";
+}
+
+// The window is laid out like TopoR: its menus in order, its docks and toolbars under TopoR's names.
+TEST(Gui, MainWindowLayoutLikeTopoR) {
+  app();
+  MainWindow w;
+  QStringList menus;
+  for (QAction* a : w.menuBar()->actions()) menus << a->text();
+  EXPECT_EQ(menus, (QStringList{"&Файл", "&Правка", "&Вид", "&Дизайн", "Т&рассировка", "Вс&тавка", "&Инструменты",
+                                "&Справка"}));
+  std::map<QString, Qt::DockWidgetArea> docks{{"Project_View", Qt::LeftDockWidgetArea},
+                                              {"Search_View", Qt::LeftDockWidgetArea},
+                                              {"properties", Qt::BottomDockWidgetArea},
+                                              {"Output_View", Qt::BottomDockWidgetArea},
+                                              {"display_control", Qt::RightDockWidgetArea}};
+  for (auto& [name, area] : docks) {
+    auto* d = w.findChild<QDockWidget*>(name);
+    ASSERT_TRUE(d) << name.toStdString();
+    EXPECT_EQ(w.dockWidgetArea(d), area) << name.toStdString();
+  }
+  for (const char* tb : {"ide_toolbar", "pcbdoctb_edit2", "pcbdoctb_mode", "pcbdoctb_view", "pcbdoctb_edit",
+                         "editor_mode_toolbar", "editor_autoproc_toolbar"})
+    EXPECT_TRUE(w.findChild<QToolBar*>(tb)) << tb;
+  // Commands work only with a board open.
+  EXPECT_FALSE((*w.commands())["Accel_DRC"]->isEnabled());
+  EXPECT_TRUE((*w.commands())["Accel_FileOpen"]->isEnabled());
+  ASSERT_TRUE(w.openFile(QString::fromStdString(data("astable.kicad_pcb"))));
+  EXPECT_TRUE((*w.commands())["Accel_DRC"]->isEnabled());
+}
+
+// TopoR's default hotkeys: every key belongs to one command.
+TEST(Gui, DefaultHotkeysAreUnique) {
+  app();
+  QWidget host;
+  Commands cmds(&host);
+  std::map<QString, QString> owner;
+  for (auto& i : cmds.all())
+    for (auto& k : i.defaults) {
+      QString key = k.toString(QKeySequence::PortableText);
+      EXPECT_FALSE(owner.contains(key)) << key.toStdString() << ": " << owner[key].toStdString() << " / "
+                                        << i.id.toStdString();
+      owner[key] = i.id;
+    }
+  EXPECT_EQ(owner["F7"], "Accel_AutoStart");
+  EXPECT_EQ(owner["F11"], "Accel_TO");
+  EXPECT_EQ(owner["Alt+D"], "Accel_ViewDispCtrl");
+}
+
+// While routing, V adds a via (the route continues on the next layer) instead of switching tools.
+TEST(Gui, ViaKeyWhileRouting) {
+  app();
+  MainWindow w;
+  w.resize(1200, 800);
+  w.show();
+  ASSERT_TRUE(QTest::qWaitForWindowExposed(&w));
+  ASSERT_TRUE(w.openFile(QString::fromStdString(data("astable.kicad_pcb"))));
+  Document& doc = *w.document();
+  BoardView& view = *w.view();
+  doc.board()->clearRouting(false);
+  doc.invalidate();
+  const Board& b = *doc.board();
+  int pa = -1, pb = -1;
+  for (int i = 0; i < int(b.pads.size()) && pb < 0; ++i)
+    for (int j = i + 1; j < int(b.pads.size()); ++j)
+      if (b.pads[i].net >= 0 && b.pads[i].net == b.pads[j].net && b.pads[i].drill > 0 && b.pads[j].drill > 0 &&
+          (b.pads[i].pos.v() - b.pads[j].pos.v()).len() > 5 * kNmPerMm) {
+        pa = i;
+        pb = j;
+        break;
+      }
+  ASSERT_GE(pb, 0);
+  Vec2 a = b.pads[pa].pos.v(), c = b.pads[pb].pos.v();
+  Vec2 mid = (a + c) * 0.5;
+  double widthMm = 2 * (a - c).len() / kNmPerMm;
+  view.centerOn(mid, widthMm);
+  double scale = view.width() / (widthMm * kNmPerMm);
+  view.setMode(Mode::Route);
+  QTest::mouseClick(&view, Qt::LeftButton, {}, screenOf(view, a, mid, scale));
+  ASSERT_TRUE(view.isRouting());
+  QTest::mouseClick(&view, Qt::LeftButton, {}, screenOf(view, mid + Vec2{0, 3 * kNmPerMm}, mid, scale));
+  size_t vias = b.vias.size();
+  QTest::keyClick(&view, Qt::Key_V);
+  EXPECT_TRUE(view.isRouting());
+  EXPECT_EQ(view.mode(), Mode::Route);
+  QTest::mouseClick(&view, Qt::LeftButton, {}, screenOf(view, c, mid, scale));
+  EXPECT_FALSE(view.isRouting());
+  EXPECT_EQ(b.vias.size(), vias + 1);
 }

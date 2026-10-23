@@ -158,6 +158,7 @@ struct Board {
   std::vector<Graphic> graphics;           // board-level drawings
   std::vector<std::vector<Vec2>> outline;  // closed board contours (first = outer)
   Coord edgeClearance = mmToNm(0.25);
+  double designUnitNm = kNmPerMm;  // unit the design was drawn in (lengths are shown in it)
   std::shared_ptr<SourceDoc> source;       // original file tree for lossless round-trip
 
   // Layers
