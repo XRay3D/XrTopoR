@@ -185,14 +185,14 @@ bool MainWindow::openLastFile() {
 
 void MainWindow::open() {
   QString f = QFileDialog::getOpenFileName(this, tr("Open board"), {},
-                                           tr("Boards (*.kicad_pcb *.dsn *.pcb *.PCB);;All files (*)"));
+                                           tr("Boards (*.kicad_pcb *.dsn *.pcb *.PCB *.fst);;All files (*)"));
   if (!f.isEmpty()) openFile(f);
 }
 
 void MainWindow::save() {
   if (!doc_->hasBoard()) return;
   QString p = doc_->path();
-  if (p.isEmpty() || io::detectFormat(p.toStdString()) == io::Format::Pcad) { saveAs(); return; }
+  if (p.isEmpty() || io::detectFormat(p.toStdString()) == io::Format::Unknown) { saveAs(); return; }
   auto r = io::saveBoard(*doc_->board(), p.toStdString());
   if (!r) QMessageBox::warning(this, tr("Save"), QString::fromStdString(r.error()));
   else {
@@ -204,7 +204,7 @@ void MainWindow::save() {
 void MainWindow::saveAs() {
   if (!doc_->hasBoard()) return;
   QString f = QFileDialog::getSaveFileName(this, tr("Save board as"), doc_->path(),
-                                           tr("KiCad board (*.kicad_pcb);;Specctra design (*.dsn);;Specctra session (*.ses)"));
+                                           tr("KiCad board (*.kicad_pcb);;TopoR PCB (*.fst);;P-CAD ASCII (*.pcb);;Specctra design (*.dsn);;Specctra session (*.ses)"));
   if (f.isEmpty()) return;
   auto r = io::saveBoard(*doc_->board(), f.toStdString());
   if (!r) QMessageBox::warning(this, tr("Save"), QString::fromStdString(r.error()));
