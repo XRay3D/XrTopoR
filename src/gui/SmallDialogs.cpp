@@ -7,8 +7,11 @@
 #include <QHeaderView>
 #include <QInputDialog>
 #include <QLabel>
+#include <QLineEdit>
+#include <QListWidget>
 #include <QTableWidget>
 #include <QVBoxLayout>
+#include <algorithm>
 #include <cmath>
 
 namespace xr::gui {
@@ -89,6 +92,41 @@ std::optional<double> askRotationAngle(QWidget* parent) {
   double a = QInputDialog::getDouble(parent, QObject::tr("Повернуть на угол"), QObject::tr("Угол поворота, °:"), 45, -360,
                                      360, 3, &ok);
   return ok ? std::optional<double>(a) : std::nullopt;
+}
+
+std::optional<int> askNet(QWidget* parent, Document* doc, int current) {
+  const Board& b = *doc->board();
+  QDialog dlg(parent);
+  dlg.setWindowTitle(QObject::tr("Изменение цепи"));
+  auto* v = new QVBoxLayout(&dlg);
+  v->addWidget(new QLabel(QObject::tr("Новая цепь выделенных объектов:")));
+  auto* filter = new QLineEdit;
+  filter->setPlaceholderText(QObject::tr("Фильтр"));
+  filter->setClearButtonEnabled(true);
+  v->addWidget(filter);
+  auto* list = new QListWidget;
+  auto* none = new QListWidgetItem(QObject::tr("(без цепи)"), list);
+  none->setData(Qt::UserRole, kNoNet);
+  std::vector<int> order(b.nets.size());
+  for (int i = 0; i < int(order.size()); ++i) order[size_t(i)] = i;
+  std::ranges::sort(order, {}, [&](int n) { return b.nets[size_t(n)].name; });
+  for (int n : order) {
+    auto* it = new QListWidgetItem(QString::fromStdString(b.nets[size_t(n)].name), list);
+    it->setData(Qt::UserRole, n);
+    if (n == current) list->setCurrentItem(it);
+  }
+  v->addWidget(list);
+  QObject::connect(filter, &QLineEdit::textChanged, list, [list](const QString& t) {
+    for (int i = 0; i < list->count(); ++i) list->item(i)->setHidden(!t.isEmpty() && !list->item(i)->text().contains(t, Qt::CaseInsensitive));
+  });
+  auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+  v->addWidget(bb);
+  QObject::connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+  QObject::connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+  QObject::connect(list, &QListWidget::itemDoubleClicked, &dlg, &QDialog::accept);
+  filter->setFocus();
+  if (dlg.exec() != QDialog::Accepted || !list->currentItem()) return std::nullopt;
+  return list->currentItem()->data(Qt::UserRole).toInt();
 }
 
 void showCopperArea(QWidget* parent, Document* doc) {

@@ -275,8 +275,9 @@ struct Reader {
     bool flipped = inst.find("isFlipped") && inst.find("isFlipped")->arg(0) == "True";
     c.side = flipped ? Side::Bottom : Side::Top;
     c.pos = Point(toBoard(o));
-    c.angle = std::fmod(rot + 360.0, 360.0);
-    // P-CAD rotates the pattern first and then mirrors it about the vertical axis when flipped.
+    // P-CAD rotates the pattern first and then mirrors it about the vertical axis when flipped; the
+    // model mirrors first, as TopoR, KiCad and Specctra do: a flipped part is turned the other way.
+    c.angle = std::fmod((flipped ? 720.0 - rot : rot + 360.0), 360.0);
     auto tr = [&](Vec2 p) {
       Vec2 r = p.rotated(degToRad(rot));
       if (flipped) r.x = -r.x;

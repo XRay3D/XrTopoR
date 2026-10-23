@@ -18,6 +18,7 @@
 #include <gtest/gtest.h>
 #include <set>
 
+#include "core/Connectivity.h"
 #include "gui/BoardView.h"
 #include "gui/Commands.h"
 #include "gui/Document.h"
@@ -660,4 +661,84 @@ TEST(ToporSettings, ImportIntoMainWindow) {
   auto recent = AppSettings::recentFiles();
   EXPECT_TRUE(std::ranges::any_of(recent, [](auto& r) { return r.path == "/tmp/xrtopor_test/a.fsproj"; }));
   QSettings().clear();
+}
+
+// Dragging a routed component: the wires ending on its pads go along, also when it is turned with
+// Space during the drag; a wire's bend moves by its marker.
+TEST(Gui, DragKeepsWiresConnected) {
+  Fixture f("topor/Example_05/MinVia_standard_routing.fst");
+  const Board& b = f.b();
+  size_t unrouted = Connectivity::compute(b).ratsnest.size();
+  // A component with a wire ending on its first pad.
+  int ci = -1, track = -1;
+  for (int c = 0; c < int(b.components.size()) && ci < 0; ++c) {
+    if (b.components[c].locked || b.components[c].pads.empty()) continue;
+    const Pad& p = b.pads[b.components[c].pads[0]];
+    for (int t = 0; t < int(b.tracks.size()); ++t)
+      if (b.tracks[t].net == p.net && p.onLayer(b.tracks[t].layer) && p.shapeGeom().contains(b.tracks[t].a.v())) {
+        ci = c;
+        track = t;
+        break;
+      }
+  }
+  ASSERT_GE(ci, 0);
+  Vec2 pad = b.pads[b.components[ci].pads[0]].pos.v();
+  Vec2 far = b.tracks[track].b.v();
+  f.look(pad, 30);
+  QPoint from = f.at(pad), to = from + QPoint(int(2 * kNmPerMm * f.scale), int(1 * kNmPerMm * f.scale));
+  QTest::mousePress(&f.view, Qt::LeftButton, {}, from);
+  moveTo(f.view, from + QPoint(10, 0), Qt::LeftButton);
+  f.view.rotateSelection(90);
+  moveTo(f.view, to, Qt::LeftButton);
+  QTest::mouseRelease(&f.view, Qt::LeftButton, {}, to);
+  ASSERT_EQ(f.doc.selectedComponents(), std::vector<int>{ci});
+  EXPECT_NE(f.b().pads[f.b().components[ci].pads[0]].pos.v(), pad);
+  EXPECT_EQ(f.b().tracks[track].b.v(), far);  // the far end stays
+  EXPECT_TRUE(f.b().pads[f.b().components[ci].pads[0]].shapeGeom().contains(f.b().tracks[track].a.v()));
+  EXPECT_EQ(Connectivity::compute(f.b()).ratsnest.size(), unrouted);
+  f.doc.undoStack()->undo();
+  EXPECT_EQ(f.b().pads[f.b().components[ci].pads[0]].pos.v(), pad);
+
+  // A free bend of a wire: both segments meeting there follow its marker.
+  int t0 = -1, t1 = -1;
+  for (int i = 0; i < int(b.tracks.size()) && t0 < 0; ++i) {
+    if (b.tracks[i].locked || edit::anchoredAt(b, b.tracks[i].b.v(), b.tracks[i].layer, b.tracks[i].net)) continue;
+    auto ends = edit::endsAt(b, b.tracks[i].b.v(), b.tracks[i].layer, b.tracks[i].net);
+    if (ends.size() == 2) {
+      t0 = i;
+      t1 = ends[0].first == i ? ends[1].first : ends[0].first;
+    }
+  }
+  ASSERT_GE(t0, 0);
+  Vec2 bend = b.tracks[t0].b.v();
+  f.look(bend, 10);
+  f.doc.setSelection({{ItemType::Track, t0}}, {});
+  Vec2 target = bend + Vec2{0.5 * kNmPerMm, 0.5 * kNmPerMm};
+  f.drag(f.at(bend), f.at(target));
+  Vec2 moved = f.b().tracks[t0].b.v();
+  EXPECT_NEAR((moved - target).len(), 0, 0.05 * kNmPerMm);
+  const Track& n = f.b().tracks[t1];
+  EXPECT_TRUE(n.a.v() == moved || n.b.v() == moved);
+  EXPECT_EQ(Connectivity::compute(f.b()).ratsnest.size(), unrouted);
+}
+
+// S flips a component to the other side; its SMD wires stay behind, a second S brings it back.
+TEST(Gui, FlipComponent) {
+  Fixture f("topor/Example_05/MinVia_standard_routing.fst");
+  int ci = -1;
+  for (int c = 0; c < int(f.b().components.size()) && ci < 0; ++c)
+    if (!f.b().components[c].locked && !f.b().components[c].pads.empty()) ci = c;
+  ASSERT_GE(ci, 0);
+  Side side = f.b().components[ci].side;
+  auto pads = f.b().pads;
+  f.doc.setSelection({}, {ci});
+  f.view.flipSelection(false);
+  EXPECT_NE(f.b().components[ci].side, side);
+  f.view.flipSelection(false);
+  EXPECT_EQ(f.b().components[ci].side, side);
+  for (int pi : f.b().components[ci].pads) {
+    EXPECT_NEAR(f.b().pads[pi].pos.x, pads[pi].pos.x, 2);
+    EXPECT_NEAR(f.b().pads[pi].pos.y, pads[pi].pos.y, 2);
+    EXPECT_EQ(f.b().pads[pi].copper, pads[pi].copper);
+  }
 }

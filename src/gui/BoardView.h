@@ -1,11 +1,13 @@
 #pragma once
-// Interactive board canvas: rendering, zoom/pan, picking, selection (click, frame, cyclic), component
-// moves, manual routing, vias and the ruler — with TopoR's mouse conventions.
+// Interactive board canvas: rendering, zoom/pan, picking, selection (click, frame, cyclic), moving
+// fragments with the wires attached to them, editing wires by their markers, manual routing, vias and
+// the ruler — with TopoR's mouse conventions.
 #include <QElapsedTimer>
 #include <QWidget>
 #include <optional>
 #include <vector>
 
+#include "core/Edit.h"
 #include "gui/Document.h"
 
 namespace xr::gui {
@@ -36,7 +38,13 @@ class BoardView : public QWidget {
   void centerOn(Vec2 p, double widthMm = 0);
   void zoomBy(double factor);
   void deleteSelection();
-  void rotateSelection(double deg);
+  void rotateSelection(double deg);  // with the attached wires; while dragging, turns the dragged fragment
+  void flipSelection(bool vertical);  // S / Y: to the other side, about the vertical / horizontal axis
+  void changeLayer();                 // L: a via while routing, otherwise the layer menu for the selected wires
+  void straighten();                  // C
+  void unlinkSelection();             // U
+  void changeNet();                   // Shift+N
+  void invertSelection();
   void cancelTool();
   void finishRoute();
   void routeAddVia();      // via + layer change while routing
@@ -77,6 +85,24 @@ class BoardView : public QWidget {
   void resizeEvent(QResizeEvent*) override;
 
  private:
+  struct Marker {
+    int track = -1;
+    enum Kind { End, Middle } kind = End;
+    int end = 0;  // End: 0 = a, 1 = b
+  };
+  std::optional<Marker> markerAt(QPointF screen) const;  // markers of the selected tracks
+  std::vector<Marker> markers() const;
+  Vec2 markerPos(const Marker& m) const;
+
+  edit::Fragment selectedFragment() const;
+  // Moves the selection by an edit::Motion built around its pivot (rotations and flips).
+  void transformSelection(double rotate, bool mirror, const QString& title);
+  enum class Drag { None, Fragment, Segment, Vertex, Bend };
+  void startDrag(Drag kind, Vec2 at, std::optional<Marker> marker = {});
+  void applyDrag();
+  void finishDrag();
+  void cancelDrag();
+
   struct Pick {
     std::optional<ItemRef> item;
     int component = -1;
@@ -147,11 +173,18 @@ class BoardView : public QWidget {
   Mode measureReturn_ = Mode::Select;
   std::optional<Vec2> measureA_, measureB_;
   std::optional<ItemRef> measureObjA_;
-  // component drag
-  bool dragging_ = false;
+  // drags: a fragment (selection), one segment (parallel transfer), a vertex or the bend of a segment
+  Drag drag_ = Drag::None;
+  bool dragMoved_ = false;  // past the threshold: a drag, not a click
+  QPointF dragScreen_;
   Vec2 dragStart_;
+  edit::Fragment dragFragment_;
+  Vec2 dragPivot_;
+  double dragRotate_ = 0;
+  bool dragMirror_ = false;
+  Marker dragMarker_;
   std::optional<EditSnapshot> dragBefore_;
-  std::vector<Point> dragOrigins_;
+  std::optional<Pick> pendingClick_;  // press on a selected object: selects it alone if not dragged
   // routing
   bool routing_ = false;
   int routeNet_ = kNoNet;

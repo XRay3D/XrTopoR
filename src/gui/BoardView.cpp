@@ -1,6 +1,7 @@
 #include "gui/BoardView.h"
 
 #include <QKeyEvent>
+#include <QMenu>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
@@ -147,13 +148,15 @@ BoardView::Pick BoardView::pick(QPointF screen) const {
   BBox q;
   q.add(w);
   LayerMask vis = visibleCopper();
-  // Prefer the active layer, then anything visible; vias > tracks > pads.
+  // Prefer the active layer, then anything visible; vias > the pad under the cursor > tracks > pads
+  // nearby (a click inside a pad takes its component, not the wire ending there).
   double best = std::numeric_limits<double>::max();
   int bestRank = 99;
   auto consider = [&](ItemRef r, int rank) {
     for (auto& s : itemShapes(b, r)) {
       double dist = s.distance(w);
       if (dist > tol) continue;
+      if (r.type == ItemType::Pad && dist > 0) rank = 3;
       bool active = itemLayers(b, r) & (LayerMask(1) << doc_->activeLayer());
       int rk = rank + (active ? 0 : 10);
       if (rk < bestRank || (rk == bestRank && dist < best)) {
@@ -170,10 +173,10 @@ BoardView::Pick BoardView::pick(QPointF screen) const {
         if ((filter & SelVias) && d.flag("showVias")) consider(r, 0);
         break;
       case ItemType::Track:
-        if ((filter & SelWires) && d.flag("showWires")) consider(r, 1);
+        if ((filter & SelWires) && d.flag("showWires")) consider(r, 2);
         break;
       case ItemType::Pad:
-        if (pads) consider(r, 2);
+        if (pads) consider(r, 1);
         break;
       case ItemType::Zone: break;
     }
@@ -282,6 +285,15 @@ void BoardView::paintEvent(QPaintEvent*) {
 }
 
 void BoardView::drawTools(QPainter& p) {
+  if (drag_ == Drag::None || !dragMoved_) {
+    p.setPen(QPen(QColor(0x20, 0x20, 0x20), 1));
+    p.setBrush(QColor(0xf0, 0xf0, 0xf0));
+    for (const Marker& m : markers()) {
+      QPointF c = toScreen(markerPos(m));
+      if (m.kind == Marker::End) p.drawRect(QRectF(c - QPointF(3, 3), QSizeF(6, 6)));
+      else p.drawEllipse(c, 3.5, 3.5);
+    }
+  }
   if (frameStart_) {
     // Window (→) solid, crossing (←) dashed, as in TopoR.
     bool crossing = frameEnd_.x() < frameStart_->x();
@@ -683,19 +695,32 @@ void BoardView::mousePressEvent(QMouseEvent* e) {
   switch (mode_) {
     case Mode::Select: {
       bool add = e->modifiers() & (Qt::ShiftModifier | Qt::ControlModifier);
+      // A marker of a selected segment edits it; the segment itself moves in parallel.
+      if (!add)
+        if (auto mk = markerAt(e->position())) {
+          startDrag(mk->kind == Marker::End ? Drag::Vertex : Drag::Bend, w, mk);
+          if (pk.item || pk.component >= 0) pendingClick_ = pk;  // a click there still selects
+          break;
+        }
       if (!pk.item && pk.component < 0) {
         // Empty spot: a frame selection starts (a click alone clears the selection).
         frameStart_ = frameEnd_ = e->position();
         if (!add) doc_->clearSelection();
         break;
       }
-      clickSelect(pk, e->modifiers());
-      if (!add && pk.component >= 0 && (!pk.item || pk.item->type == ItemType::Pad)) {
-        dragging_ = true;
-        dragStart_ = w;
-        dragBefore_ = doc_->beginEdit();
-        dragOrigins_.clear();
-        for (int ci : doc_->selectedComponents()) dragOrigins_.push_back(doc_->board()->components[ci].pos);
+      if (add) {
+        clickSelect(pk, e->modifiers());
+        break;
+      }
+      // Pressing a selected object drags the whole selection; a click without a drag selects it alone.
+      bool selected = (pk.component >= 0 && std::ranges::contains(doc_->selectedComponents(), pk.component)) ||
+                      (pk.component < 0 && pk.item && std::ranges::contains(doc_->selectedItems(), *pk.item));
+      if (selected) pendingClick_ = pk;
+      else clickSelect(pk, {});
+      edit::Fragment f = selectedFragment();
+      if (!f.empty()) {
+        bool segment = f.tracks.size() == 1 && f.components.empty() && f.vias.empty() && f.zones.empty();
+        startDrag(segment ? Drag::Segment : Drag::Fragment, w);
       }
       break;
     }
@@ -961,15 +986,27 @@ void BoardView::mouseMoveEvent(QMouseEvent* e) {
     update();
     return;
   }
-  if (dragging_ && doc_->hasBoard()) {
-    Vec2 d = snapped(cursor_) - snapped(dragStart_);
-    auto comps = doc_->selectedComponents();
-    for (size_t i = 0; i < comps.size(); ++i)
-      doc_->board()->moveComponent(comps[i], dragOrigins_[i] + Point(d));
-    doc_->invalidate();
-    update();
+  if (drag_ != Drag::None && doc_->hasBoard()) {
+    if (!dragMoved_) {
+      if ((pos - dragScreen_).manhattanLength() < 4) return;
+      // TopoR: nothing moves while fixed objects are among the moved ones.
+      const Board& b = *doc_->board();
+      bool locked = drag_ == Drag::Fragment || drag_ == Drag::Segment ? edit::hasLocked(b, dragFragment_)
+                                                                       : b.tracks[dragMarker_.track].locked;
+      if (locked) {
+        emit status(tr("Среди выделенных объектов есть зафиксированные: перемещение запрещено"));
+        cancelDrag();
+        return;
+      }
+      dragMoved_ = true;
+      pendingClick_.reset();
+      dragBefore_ = doc_->beginEdit();
+    }
+    applyDrag();
     return;
   }
+  if (mode_ == Mode::Select && !panning_ && !frameStart_)
+    setCursor(markerAt(pos) ? Qt::SizeAllCursor : Qt::ArrowCursor);
   if (routing_ || mode_ == Mode::Measure) update();
   lastMouse_ = pos;
 }
@@ -1005,17 +1042,7 @@ void BoardView::mouseReleaseEvent(QMouseEvent* e) {
     update();
     return;
   }
-  if (dragging_) {
-    dragging_ = false;
-    Vec2 d = cursor_ - dragStart_;
-    if (dragBefore_ && (std::abs(d.x) > 1 || std::abs(d.y) > 1)) doc_->commitEdit(*dragBefore_, tr("Переместить компонент"));
-    else if (dragBefore_) {
-      dragBefore_->apply(*doc_->board());
-      doc_->invalidate();
-    }
-    dragBefore_.reset();
-    update();
-  }
+  if (drag_ != Drag::None && e->button() == Qt::LeftButton) finishDrag();
 }
 
 void BoardView::mouseDoubleClickEvent(QMouseEvent* e) {
@@ -1108,11 +1135,198 @@ void BoardView::deleteSelection() {
 
 void BoardView::rotateSelection(double deg) {
   if (!doc_->hasBoard()) return;
-  auto comps = doc_->selectedComponents();
-  if (comps.empty()) return;
+  if (drag_ == Drag::Fragment && dragMoved_) {
+    // Space while dragging turns what is being dragged.
+    dragRotate_ += deg;
+    applyDrag();
+    return;
+  }
+  transformSelection(deg, false, tr("Повернуть"));
+}
+
+void BoardView::flipSelection(bool vertical) {
+  if (!doc_->hasBoard()) return;
+  if (drag_ == Drag::Fragment && dragMoved_) {
+    // A flip after the motion so far: about the screen axis through the pivot.
+    dragRotate_ = (vertical ? 180 : 0) - dragRotate_;
+    dragMirror_ = !dragMirror_;
+    applyDrag();
+    return;
+  }
+  transformSelection(vertical ? 180 : 0, true, vertical ? tr("Перевернуть вертикально") : tr("Перевернуть горизонтально"));
+}
+
+edit::Fragment BoardView::selectedFragment() const {
+  edit::Fragment f;
+  if (!doc_->hasBoard()) return f;
+  f.components = doc_->selectedComponents();
+  for (ItemRef r : doc_->selectedItems()) {
+    if (r.type == ItemType::Track) f.tracks.push_back(r.index);
+    if (r.type == ItemType::Via) f.vias.push_back(r.index);
+    if (r.type == ItemType::Zone) f.zones.push_back(r.index);
+  }
+  return f;
+}
+
+void BoardView::transformSelection(double rotate, bool mirror, const QString& title) {
+  edit::Fragment f = selectedFragment();
+  if (f.empty()) return;
+  Board& b = *doc_->board();
+  if (edit::hasLocked(b, f)) {
+    emit status(tr("Среди выделенных объектов есть зафиксированные: перемещение запрещено"));
+    return;
+  }
   auto before = doc_->beginEdit();
-  for (int ci : comps) doc_->board()->rotateComponent(ci, deg);
-  doc_->commitEdit(before, tr("Повернуть"));
+  edit::Motion m;
+  m.pivot = edit::pivotOf(b, f);
+  m.rotate = rotate;
+  m.mirror = mirror;
+  edit::move(b, f, m);
+  auto map = edit::removeDegenerate(b);
+  auto items = doc_->selectedItems();
+  std::erase_if(items, [&](ItemRef& r) {
+    if (r.type != ItemType::Track) return false;
+    r.index = map[r.index];
+    return r.index < 0;
+  });
+  doc_->commitEdit(before, title);
+  doc_->setSelection(std::move(items), doc_->selectedComponents());
+}
+
+// ---------------------------------------------------------------- drags
+
+std::vector<BoardView::Marker> BoardView::markers() const {
+  std::vector<Marker> out;
+  if (!doc_->hasBoard() || mode_ != Mode::Select) return out;
+  const Board& b = *doc_->board();
+  auto items = doc_->selectedItems();
+  if (items.size() > 200) return out;  // markers of a whole board would hide it
+  for (ItemRef r : items) {
+    if (r.type != ItemType::Track || r.index >= int(b.tracks.size())) continue;
+    out.push_back({r.index, Marker::End, 0});
+    out.push_back({r.index, Marker::End, 1});
+    // The middle marker only when the segment is long enough on screen to hold three.
+    const Track& t = b.tracks[r.index];
+    if (px((t.b.v() - t.a.v()).len()) > 30) out.push_back({r.index, Marker::Middle, 0});
+  }
+  return out;
+}
+
+Vec2 BoardView::markerPos(const Marker& m) const {
+  const Track& t = doc_->board()->tracks[m.track];
+  if (m.kind == Marker::End) return m.end ? t.b.v() : t.a.v();
+  return t.mid ? t.mid->v() : (t.a.v() + t.b.v()) * 0.5;
+}
+
+std::optional<BoardView::Marker> BoardView::markerAt(QPointF screen) const {
+  std::optional<Marker> best;
+  double bd = 6;  // px
+  for (const Marker& m : markers()) {
+    QPointF d = toScreen(markerPos(m)) - screen;
+    double dist = std::hypot(d.x(), d.y());
+    if (dist <= bd) {
+      bd = dist;
+      best = m;
+    }
+  }
+  return best;
+}
+
+void BoardView::startDrag(Drag kind, Vec2 at, std::optional<Marker> marker) {
+  drag_ = kind;
+  dragMoved_ = false;
+  dragScreen_ = lastMouse_;
+  dragStart_ = at;
+  dragFragment_ = selectedFragment();
+  dragPivot_ = edit::pivotOf(*doc_->board(), dragFragment_);
+  dragRotate_ = 0;
+  dragMirror_ = false;
+  if (marker) dragMarker_ = *marker;
+  dragBefore_.reset();
+}
+
+void BoardView::applyDrag() {
+  Board& b = *doc_->board();
+  dragBefore_->apply(b);
+  Vec2 to = snapped(cursor_);
+  Vec2 d = to - dragStart_;
+  edit::Motion m;
+  m.pivot = dragPivot_;
+  m.rotate = dragRotate_;
+  m.mirror = dragMirror_;
+  switch (drag_) {
+    case Drag::None: break;
+    case Drag::Fragment:
+      m.shift = d;
+      edit::move(b, dragFragment_, m);
+      break;
+    case Drag::Segment: {
+      // A straight segment moves across itself, so its neighbours keep their directions roughly.
+      const Track& t = b.tracks[dragFragment_.tracks[0]];
+      Vec2 n = (t.b.v() - t.a.v()).perp().normalized();
+      m.shift = t.isArc() || n.len2() == 0 ? d : n * d.dot(n);
+      edit::move(b, dragFragment_, m);
+      break;
+    }
+    case Drag::Vertex: {
+      const Track& t = b.tracks[dragMarker_.track];
+      Vec2 other = dragMarker_.end ? t.a.v() : t.b.v();
+      edit::moveVertex(b, dragMarker_.track, dragMarker_.end, constrained(other, to));
+      break;
+    }
+    case Drag::Bend: {
+      const Track& t = b.tracks[dragMarker_.track];
+      if (t.isArc()) {
+        edit::bendTrack(b, dragMarker_.track, to);
+      } else {
+        // The middle of a straight segment becomes a new bend of the wire.
+        Vec2 mid = (t.a.v() + t.b.v()) * 0.5;
+        Vec2 a = t.a.v();
+        edit::splitTrack(b, dragMarker_.track, mid);
+        edit::moveVertex(b, dragMarker_.track, 1, constrained(a, to));
+      }
+      break;
+    }
+  }
+  doc_->invalidate();
+  update();
+}
+
+void BoardView::finishDrag() {
+  Drag kind = drag_;
+  drag_ = Drag::None;
+  if (!dragMoved_) {
+    if (pendingClick_) clickSelect(*pendingClick_, {});
+    pendingClick_.reset();
+    return;
+  }
+  Board& b = *doc_->board();
+  auto map = edit::removeDegenerate(b);
+  auto items = doc_->selectedItems();
+  std::erase_if(items, [&](ItemRef& r) {
+    if (r.type != ItemType::Track) return false;
+    r.index = r.index < int(map.size()) ? map[r.index] : -1;
+    return r.index < 0;
+  });
+  QString title = kind == Drag::Fragment ? (dragFragment_.components.empty() ? tr("Переместить") : tr("Переместить компонент"))
+                  : kind == Drag::Segment ? tr("Переместить сегмент")
+                                          : tr("Изменить форму проводника");
+  doc_->commitEdit(*dragBefore_, title);
+  dragBefore_.reset();
+  doc_->setSelection(std::move(items), doc_->selectedComponents());
+  update();
+}
+
+void BoardView::cancelDrag() {
+  if (dragMoved_ && dragBefore_) {
+    dragBefore_->apply(*doc_->board());
+    doc_->invalidate();
+  }
+  drag_ = Drag::None;
+  dragMoved_ = false;
+  dragBefore_.reset();
+  pendingClick_.reset();
+  update();
 }
 
 void BoardView::changeTrackWidth() {
@@ -1160,6 +1374,10 @@ void BoardView::recomputeShapes() {
 }
 
 void BoardView::cancelTool() {
+  if (drag_ != Drag::None) {
+    cancelDrag();
+    return;
+  }
   if (routing_) {
     routing_ = false;
     routeTracks_.clear();
@@ -1289,6 +1507,116 @@ void BoardView::routeAddVia() {
 
 void BoardView::toggleLayer() {
   if (routing_) routeAddVia();
+}
+
+void BoardView::changeLayer() {
+  if (routing_) {
+    routeAddVia();
+    return;
+  }
+  if (!doc_->hasBoard()) return;
+  Board& b = *doc_->board();
+  std::vector<int> tracks = selectedFragment().tracks;
+  if (tracks.empty()) {
+    emit status(tr("Выделите участки проводников"));
+    return;
+  }
+  // TopoR: the layers are offered in a menu at the cursor.
+  QMenu menu(this);
+  for (LayerId l : b.copperLayers()) {
+    if (b.layers[l].plane) continue;
+    QAction* a = menu.addAction(QString::fromStdString(b.layers[l].name));
+    a->setData(l);
+    a->setCheckable(true);
+    a->setChecked(std::ranges::all_of(tracks, [&](int ti) { return b.tracks[ti].layer == l; }));
+  }
+  QAction* chosen = menu.exec(QCursor::pos());
+  if (!chosen) return;
+  LayerId layer = chosen->data().toInt();
+  if (std::ranges::any_of(tracks, [&](int ti) { return b.tracks[ti].locked; }))
+    emit status(tr("Зафиксированные участки проводников остались на своём слое"));
+  auto before = doc_->beginEdit();
+  int vias = edit::changeLayer(b, tracks, layer);
+  doc_->commitEdit(before, tr("Изменить слой"));
+  if (vias) emit status(tr("Добавлено переходов: %1").arg(vias));
+  update();
+}
+
+void BoardView::straighten() {
+  if (!doc_->hasBoard()) return;
+  std::vector<int> tracks = selectedFragment().tracks;
+  if (tracks.empty()) return;
+  Board& b = *doc_->board();
+  auto before = doc_->beginEdit();
+  int made = edit::straighten(b, tracks);
+  if (!made) {
+    emit status(tr("Спрямить можно цепочку нефиксированных сегментов одного проводника без ветвлений"));
+    return;
+  }
+  doc_->commitEdit(before, tr("Спрямить"));
+  // The new segments stay selected (they are appended).
+  std::vector<ItemRef> items;
+  for (size_t i = b.tracks.size() - size_t(made); i < b.tracks.size(); ++i) items.push_back({ItemType::Track, int(i)});
+  doc_->setSelection(std::move(items), {});
+}
+
+void BoardView::unlinkSelection() {
+  if (!doc_->hasBoard()) return;
+  edit::Fragment f = selectedFragment();
+  if (f.components.empty() && f.vias.empty()) return;
+  auto before = doc_->beginEdit();
+  int n = edit::unlink(*doc_->board(), f);
+  if (!n) return;
+  doc_->setSelection({}, f.components);
+  doc_->commitEdit(before, tr("Отсоединить"));
+  emit status(tr("Отсоединено участков проводников: %1").arg(n));
+}
+
+void BoardView::changeNet() {
+  if (!doc_->hasBoard()) return;
+  Board& b = *doc_->board();
+  edit::Fragment f = selectedFragment();
+  std::vector<int> pads;
+  int current = kNoNet;
+  for (ItemRef r : doc_->selectedItems()) {
+    if (r.type == ItemType::Pad) pads.push_back(r.index);
+    if (current == kNoNet) current = itemNet(b, r);
+  }
+  if (f.tracks.empty() && f.vias.empty() && f.zones.empty() && pads.empty()) {
+    emit status(tr("Выделите проводники, переходы, контакты или области металлизации"));
+    return;
+  }
+  auto net = askNet(this, doc_, current);
+  if (!net) return;
+  auto before = doc_->beginEdit();
+  edit::changeNet(b, f, pads, *net);
+  doc_->commitEdit(before, tr("Изменить цепь"));
+}
+
+void BoardView::invertSelection() {
+  if (!doc_->hasBoard()) return;
+  const Board& b = *doc_->board();
+  const DisplayControl& d = doc_->display();
+  uint32_t filter = doc_->selectionFilter();
+  auto items = doc_->selectedItems();
+  auto comps = doc_->selectedComponents();
+  std::vector<ItemRef> ni;
+  std::vector<int> nc;
+  if ((filter & SelWires) && d.flag("showWires"))
+    for (int i = 0; i < int(b.tracks.size()); ++i)
+      if (layerVisible(b.tracks[i].layer) && !std::ranges::contains(items, ItemRef{ItemType::Track, i}))
+        ni.push_back({ItemType::Track, i});
+  if ((filter & SelVias) && d.flag("showVias"))
+    for (int i = 0; i < int(b.vias.size()); ++i)
+      if (!std::ranges::contains(items, ItemRef{ItemType::Via, i})) ni.push_back({ItemType::Via, i});
+  if ((filter & SelCoppers) && d.flag("showCoppers"))
+    for (int i = 0; i < int(b.zones.size()); ++i)
+      if (layerVisible(b.zones[i].layer) && !std::ranges::contains(items, ItemRef{ItemType::Zone, i}))
+        ni.push_back({ItemType::Zone, i});
+  if (filter & SelComponents)
+    for (int i = 0; i < int(b.components.size()); ++i)
+      if (componentVisible(i) && !std::ranges::contains(comps, i)) nc.push_back(i);
+  doc_->setSelection(std::move(ni), std::move(nc));
 }
 
 void BoardView::viaKey() {

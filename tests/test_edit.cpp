@@ -1,0 +1,289 @@
+#include <gtest/gtest.h>
+
+#include "core/Connectivity.h"
+#include "core/Edit.h"
+#include "io/BoardIO.h"
+
+using namespace xr;
+
+namespace {
+
+std::string data(const char* name) { return std::string(XR_TEST_DATA) + "/" + name; }
+
+Point mm(double x, double y) { return Point(Vec2{x * kNmPerMm, y * kNmPerMm}); }
+
+// Two copper layers; U1 with SMD pads 1 (net A) at (10,10) and 2 (net B) at (12,10), a through pad 3
+// (net C) at (11,12); wires from the pads to (20,10), (20,14) and (20,12).
+struct Fixture {
+  Board b;
+  LayerId top, bot, silkTop, silkBot;
+  int netA, netB, netC;
+
+  Fixture() {
+    top = b.addLayer("Top", LayerKind::Copper, Side::Top);
+    bot = b.addLayer("Bottom", LayerKind::Copper, Side::Bottom);
+    silkTop = b.addLayer("SilkTop", LayerKind::Silk, Side::Top);
+    silkBot = b.addLayer("SilkBottom", LayerKind::Silk, Side::Bottom);
+    b.layers[top].copperIndex = 0;
+    b.layers[bot].copperIndex = 1;
+    netA = b.addNet("A");
+    netB = b.addNet("B");
+    netC = b.addNet("C");
+    Component c;
+    c.ref = "U1";
+    c.pos = mm(11, 10);
+    Graphic g;
+    g.kind = GraphicKind::Line;
+    g.layer = silkTop;
+    g.a = mm(10, 9).v();
+    g.b = mm(12, 9).v();
+    c.graphics.push_back(g);
+    b.components.push_back(c);
+    addPad("1", mm(-1, 0), netA, LayerMask(1) << top, 0);
+    addPad("2", mm(1, 0), netB, LayerMask(1) << top, 0);
+    addPad("3", mm(0, 2), netC, b.allCopperMask(), mmToNm(0.5));
+    b.updatePadPositions(0);
+    addTrack(mm(10, 10), mm(20, 10), top, netA);
+    addTrack(mm(12, 10), mm(16, 14), top, netB);
+    addTrack(mm(16, 14), mm(20, 14), top, netB);
+    addTrack(mm(11, 12), mm(20, 12), bot, netC);
+  }
+  void addPad(const char* num, Point local, int net, LayerMask copper, Coord drill) {
+    Pad p;
+    p.number = num;
+    p.component = 0;
+    p.net = net;
+    p.localPos = local;
+    p.shape.kind = PadShapeKind::Rect;
+    p.shape.w = p.shape.h = mmToNm(0.8);
+    p.copper = copper;
+    p.drill = drill;
+    b.components[0].pads.push_back(int(b.pads.size()));
+    b.pads.push_back(p);
+  }
+  int addTrack(Point a, Point c, LayerId l, int net) {
+    Track t;
+    t.a = a;
+    t.b = c;
+    t.width = mmToNm(0.25);
+    t.layer = l;
+    t.net = net;
+    b.tracks.push_back(t);
+    return int(b.tracks.size()) - 1;
+  }
+  size_t unrouted() const { return Connectivity::compute(b).ratsnest.size(); }
+};
+
+edit::Fragment components(std::vector<int> c) {
+  edit::Fragment f;
+  f.components = std::move(c);
+  return f;
+}
+
+}  // namespace
+
+TEST(Edit, MovedComponentDragsAttachedEnds) {
+  Fixture fx;
+  ASSERT_EQ(fx.unrouted(), 0u);
+  edit::Motion m;
+  m.shift = mm(-3, 2).v();
+  ASSERT_TRUE(edit::move(fx.b, components({0}), m));
+  EXPECT_EQ(fx.b.components[0].pos, mm(8, 12));
+  EXPECT_EQ(fx.b.tracks[0].a, mm(7, 12));   // on pad 1
+  EXPECT_EQ(fx.b.tracks[0].b, mm(20, 10));  // far end stays
+  EXPECT_EQ(fx.b.tracks[1].a, mm(9, 12));
+  EXPECT_EQ(fx.b.tracks[1].b, mm(16, 14));  // the bend stays
+  EXPECT_EQ(fx.b.tracks[3].a, mm(8, 14));
+  EXPECT_EQ(fx.b.components[0].graphics[0].a, mm(7, 11).v());
+  EXPECT_EQ(fx.unrouted(), 0u);
+}
+
+TEST(Edit, RotatedComponentKeepsWires) {
+  Fixture fx;
+  edit::Fragment f = components({0});
+  edit::Motion m;
+  m.pivot = edit::pivotOf(fx.b, f);
+  m.rotate = 90;
+  ASSERT_TRUE(edit::move(fx.b, f, m));
+  // Counter-clockwise on screen (Y down): pad 1 at (-1, 0) goes to (0, +1).
+  EXPECT_EQ(fx.b.pads[0].pos, mm(11, 11));
+  EXPECT_EQ(fx.b.tracks[0].a, mm(11, 11));
+  EXPECT_EQ(fx.b.tracks[1].a, mm(11, 9));
+  EXPECT_EQ(fx.b.tracks[3].a, mm(13, 10));
+  EXPECT_EQ(fx.unrouted(), 0u);
+}
+
+TEST(Edit, FlipLeavesSmdWiresBehind) {
+  Fixture fx;
+  edit::Fragment f = components({0});
+  edit::Motion m;
+  m.pivot = edit::pivotOf(fx.b, f);
+  m.mirror = true;
+  ASSERT_TRUE(edit::move(fx.b, f, m));
+  const Component& c = fx.b.components[0];
+  EXPECT_EQ(c.side, Side::Bottom);
+  EXPECT_EQ(fx.b.pads[0].pos, mm(12, 10));
+  EXPECT_EQ(fx.b.pads[0].copper, LayerMask(1) << fx.bot);
+  EXPECT_EQ(c.graphics[0].layer, fx.silkBot);
+  // SMD wires stay on the top where they were; the through pad's wire follows.
+  EXPECT_EQ(fx.b.tracks[0].a, mm(10, 10));
+  EXPECT_EQ(fx.b.tracks[1].a, mm(12, 10));
+  EXPECT_EQ(fx.b.tracks[3].a, mm(11, 12));
+  EXPECT_EQ(fx.unrouted(), 2u);
+  // Flipping back restores the pads exactly.
+  ASSERT_TRUE(edit::move(fx.b, f, m));
+  EXPECT_EQ(fx.b.pads[0].pos, mm(10, 10));
+  EXPECT_EQ(fx.b.pads[0].copper, LayerMask(1) << fx.top);
+  EXPECT_EQ(fx.unrouted(), 0u);
+}
+
+TEST(Edit, LockedWireGetsConnector) {
+  Fixture fx;
+  fx.b.tracks[0].locked = true;
+  edit::Motion m;
+  m.shift = mm(0, 1).v();
+  ASSERT_TRUE(edit::move(fx.b, components({0}), m));
+  EXPECT_EQ(fx.b.tracks[0].a, mm(10, 10));
+  ASSERT_EQ(fx.b.tracks.size(), 5u);
+  EXPECT_EQ(fx.b.tracks[4].a, mm(10, 11));
+  EXPECT_EQ(fx.b.tracks[4].b, mm(10, 10));
+  EXPECT_FALSE(fx.b.tracks[4].locked);
+  EXPECT_EQ(fx.unrouted(), 0u);
+  // A locked component is not moved.
+  fx.b.components[0].locked = true;
+  EXPECT_FALSE(edit::move(fx.b, components({0}), m));
+}
+
+TEST(Edit, VertexAndSegmentDrags) {
+  Fixture fx;
+  // The bend of net B: both segments follow.
+  ASSERT_TRUE(edit::moveVertex(fx.b, 1, 1, mm(17, 15).v()));
+  EXPECT_EQ(fx.b.tracks[1].b, mm(17, 15));
+  EXPECT_EQ(fx.b.tracks[2].a, mm(17, 15));
+  // On a pad the vertex stays and the track breaks off it.
+  ASSERT_TRUE(edit::moveVertex(fx.b, 0, 0, mm(12, 8).v()));
+  EXPECT_EQ(fx.b.tracks[0].a, mm(12, 8));
+  ASSERT_EQ(fx.b.tracks.size(), 5u);
+  EXPECT_EQ(fx.b.tracks[4].a, mm(10, 10));
+  EXPECT_EQ(fx.b.tracks[4].b, mm(12, 8));
+  EXPECT_EQ(fx.unrouted(), 0u);
+  // Parallel transfer of the middle segment of B: the neighbour stretches, the pad end gets a link.
+  size_t n = fx.b.tracks.size();
+  ASSERT_TRUE(edit::moveSegment(fx.b, 1, mm(0, -1).v()));
+  EXPECT_EQ(fx.b.tracks[1].b, mm(17, 14));
+  EXPECT_EQ(fx.b.tracks[2].a, mm(17, 14));
+  ASSERT_EQ(fx.b.tracks.size(), n + 1);
+  EXPECT_EQ(fx.b.tracks[n].b, mm(12, 10));
+  EXPECT_EQ(fx.unrouted(), 0u);
+}
+
+TEST(Edit, StretchedArcKeepsShape) {
+  Fixture fx;
+  Track& t = fx.b.tracks[0];
+  t.mid = mm(15, 8);
+  edit::Motion m;
+  m.shift = mm(-5, 0).v();
+  ASSERT_TRUE(edit::move(fx.b, components({0}), m));
+  // Chord (10,10)-(20,10) became (5,10)-(20,10): the mid point scales with it.
+  EXPECT_EQ(fx.b.tracks[0].mid, mm(12.5, 7));
+}
+
+TEST(Edit, SplitStraightenChangeLayer) {
+  Fixture fx;
+  int second = edit::splitTrack(fx.b, 0, mm(15, 11).v());
+  EXPECT_EQ(fx.b.tracks[0].b, mm(15, 10));
+  EXPECT_EQ(fx.b.tracks[second].a, mm(15, 10));
+  ASSERT_TRUE(edit::moveVertex(fx.b, 0, 1, mm(15, 7).v()));
+  EXPECT_EQ(edit::straighten(fx.b, {0, second}), 1);
+  ASSERT_EQ(fx.b.tracks.size(), 4u);
+  EXPECT_EQ(fx.b.tracks.back().a, mm(10, 10));
+  EXPECT_EQ(fx.b.tracks.back().b, mm(20, 10));
+
+  // Net B's far segment goes to the bottom: a via at the bend joins it to the top segment.
+  Fixture f2;
+  EXPECT_EQ(edit::changeLayer(f2.b, {2}, f2.bot), 1);
+  ASSERT_EQ(f2.b.vias.size(), 1u);
+  EXPECT_EQ(f2.b.vias[0].pos, mm(16, 14));
+  EXPECT_EQ(f2.unrouted(), 0u);
+  // Both segments on the bottom: the via is excess, and the SMD pad end needs one instead.
+  EXPECT_EQ(edit::changeLayer(f2.b, {1}, f2.bot), 1);
+  EXPECT_EQ(edit::removeExcessVias(f2.b), 1);
+  ASSERT_EQ(f2.b.vias.size(), 1u);
+  EXPECT_EQ(f2.b.vias[0].pos, mm(12, 10));
+  EXPECT_EQ(f2.unrouted(), 0u);
+}
+
+TEST(Edit, UnlinkAndDegenerate) {
+  Fixture fx;
+  EXPECT_EQ(edit::unlink(fx.b, components({0})), 3);
+  ASSERT_EQ(fx.b.tracks.size(), 1u);
+  fx.b.tracks[0].b = fx.b.tracks[0].a;
+  auto map = edit::removeDegenerate(fx.b);
+  EXPECT_TRUE(fx.b.tracks.empty());
+  EXPECT_EQ(map[0], -1);
+}
+
+TEST(Edit, RoutedBoardStaysConnected) {
+  auto lb = io::loadBoard(data("topor/Example_05/MinVia_standard_routing.fst"));
+  ASSERT_TRUE(lb);
+  Board& b = **lb;
+  size_t before = Connectivity::compute(b).ratsnest.size();
+  for (int ci = 0; ci < int(b.components.size()); ++ci) {
+    if (b.components[ci].locked) continue;
+    edit::Fragment f = components({ci});
+    edit::Motion m;
+    m.pivot = edit::pivotOf(b, f);
+    m.rotate = 90;
+    m.shift = mm(0.7, -0.3).v();
+    ASSERT_TRUE(edit::move(b, f, m));
+  }
+  EXPECT_EQ(Connectivity::compute(b).ratsnest.size(), before);
+}
+
+// A part flipped and turned in the editor is written so that every CAD places its pads where the
+// editor shows them.
+TEST(Edit, FlippedPartRoundTrips) {
+  struct Case {
+    const char* file;
+    const char* ext;
+  };
+  for (auto [file, ext] : {Case{"el4134_pcad_ascii.pcb", ".pcb"}, Case{"astable.kicad_pcb", ".kicad_pcb"},
+                           Case{"astable.kicad_pcb", ".fst"}}) {
+    SCOPED_TRACE(file + std::string(" -> ") + ext);
+    auto lb = io::loadBoard(data(file));
+    ASSERT_TRUE(lb);
+    Board& b = **lb;
+    std::vector<Side> sides0;
+    for (int ci = 0; ci < int(b.components.size()) && ci < 3; ++ci) {
+      sides0.push_back(b.components[ci].side);
+      edit::Fragment f = components({ci});
+      edit::Motion m;
+      m.pivot = edit::pivotOf(b, f);
+      m.mirror = true;
+      m.rotate = 30 + 60 * ci;
+      ASSERT_TRUE(edit::move(b, f, m));
+    }
+    std::string out = ::testing::TempDir() + "xr_flipped" + ext;
+    ASSERT_TRUE(io::saveBoard(b, out));
+    auto rb = io::loadBoard(out);
+    ASSERT_TRUE(rb) << rb.error();
+    const Board& r = **rb;
+    for (int ci = 0; ci < 3; ++ci) {
+      int rc = r.findComponent(b.components[ci].ref);
+      ASSERT_GE(rc, 0);
+      EXPECT_NE(r.components[rc].side, sides0[size_t(ci)]);
+      ASSERT_EQ(r.components[rc].pads.size(), b.components[ci].pads.size());
+      for (size_t k = 0; k < b.components[ci].pads.size(); ++k) {
+        const Pad &p = b.pads[b.components[ci].pads[k]], &q = r.pads[r.components[rc].pads[k]];
+        EXPECT_NEAR((p.pos.v() - q.pos.v()).len(), 0, 2000) << b.components[ci].ref << " pad " << p.number;
+        auto sides = [](const Board& x, LayerMask lm) {
+          unsigned m = 0;
+          for (LayerId l : x.copperLayers())
+            if ((lm >> l) & 1) m |= 1u << x.layers[l].copperIndex;
+          return m;
+        };
+        EXPECT_EQ(sides(b, p.copper), sides(r, q.copper)) << b.components[ci].ref << " pad " << p.number;
+      }
+    }
+  }
+}

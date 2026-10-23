@@ -140,13 +140,26 @@ Result<std::string> writePcad(const Board& b) {
     if (idx < 0 || idx >= int(ml->kids.size())) continue;
     Node& inst = ml->kids[idx];
     const Component& c = b.components[ci];
+    bool flipped = c.side == Side::Bottom;
+    // P-CAD turns a flipped part before mirroring it (see the reader).
+    double rot = flipped ? std::fmod(720.0 - c.angle, 360.0) : c.angle;
     if (Node* p = findChild(inst, "pt")) *p = pt(c.pos.v());
-    if (Node* r = findChild(inst, "rotation")) *r = numNode("rotation", c.angle);
-    else if (std::abs(c.angle) > 1e-9) {
-      // P-CAD expects rotation right after pt.
+    auto afterPt = [&](Node n) {
       auto it = std::find_if(inst.kids.begin(), inst.kids.end(), [](const Node& k) { return k.is("pt"); });
-      inst.kids.insert(it == inst.kids.end() ? inst.kids.end() : it + 1, numNode("rotation", c.angle));
+      inst.kids.insert(it == inst.kids.end() ? inst.kids.end() : it + 1, std::move(n));
+    };
+    if (Node* f = findChild(inst, "isFlipped")) {
+      Node n = Node::list("isFlipped");
+      n.addAtom(flipped ? "True" : "False");
+      *f = std::move(n);
+    } else if (flipped) {
+      Node n = Node::list("isFlipped");
+      n.addAtom("True");
+      afterPt(std::move(n));
     }
+    // P-CAD expects rotation right after pt.
+    if (Node* r = findChild(inst, "rotation")) *r = numNode("rotation", rot);
+    else if (std::abs(rot) > 1e-9) afterPt(numNode("rotation", rot));
   }
 
   // Routing: copper lines/arcs that belong to a net are replaced.

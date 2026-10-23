@@ -7,6 +7,7 @@ target_include_directories(xrgeom PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 add_library(xrcore STATIC
   core/Board.cpp
   core/Connectivity.cpp
+  core/Edit.cpp
   core/Rules.cpp
   core/SpatialIndex.cpp
   core/ZoneFill.cpp

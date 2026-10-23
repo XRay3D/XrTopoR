@@ -26,6 +26,7 @@
 #include <QVBoxLayout>
 #include <QtConcurrent/QtConcurrent>
 
+#include "core/Edit.h"
 #include "core/ZoneFill.h"
 #include "gui/AppSettings.h"
 #include "gui/AutorouteWindow.h"
@@ -180,7 +181,13 @@ void MainWindow::bindCommands() {
   c.bind("Accel_Delete", [this] { view_->deleteSelection(); });
   c.bind("Accel_SelAll", [this] { view_->selectAll(); });
   c.bind("Accel_Fix", [this] { view_->toggleFix(); });
-  c.bind("Accel_Layer", [this] { view_->toggleLayer(); });
+  c.bind("Accel_Layer", [this] { view_->changeLayer(); });
+  c.bind("Accel_Reduce", [this] { view_->straighten(); });
+  c.bind("Accel_Unlink", [this] { view_->unlinkSelection(); });
+  c.bind("Accel_ChangeNet", [this] { view_->changeNet(); });
+  c.bind("Accel_SelInvert", [this] { view_->invertSelection(); });
+  c.bind("Accel_FlipHorizontally", [this] { view_->flipSelection(false); });
+  c.bind("Accel_FlipVertically", [this] { view_->flipSelection(true); });
   c.bind("Accel_Width", [this] { view_->changeTrackWidth(); });
   c.bind("Accel_Pour", [this] { pourSelected(0); });
   c.bind("Accel_UnPourWithRestore", [this] { pourSelected(1); });
@@ -248,6 +255,13 @@ void MainWindow::bindCommands() {
 
   // Инструменты
   c.bind("Accel_DRC", [this] { runDrc(); });
+  c.bind("Cmd_RemoveExcessVias", [this] {
+    auto before = doc_->beginEdit();
+    int n = edit::removeExcessVias(*doc_->board());
+    doc_->clearSelection();
+    doc_->commitEdit(before, tr("Удалить избыточные переходы"));
+    showHint(tr("Удалено избыточных переходов: %1").arg(n));
+  });
   c.bind("Accel_PourAllPoly", [this] { pour(true, false, tr("Залить все")); });
   c.bind("Accel_UnPourAllPoly", [this] { pour(false, true, tr("Удалить заливку у всех")); });
   c.bind("Accel_RePourAllPoly", [this] { pour(true, true, tr("Перезалить все")); });
@@ -1008,11 +1022,13 @@ void MainWindow::showContextMenu(QPoint globalPos) {
   if (tracks) m.addAction(tr("Выделить весь проводник"), view_, &BoardView::selectWire);
   if (tracks || vias || pads || zones) m.addAction(tr("Выделить всю цепь"), view_, &BoardView::selectNet);
   if (tracks || vias || !comps.empty()) m.addAction(c["Accel_Fix"]);
-  if (tracks) m.addAction(c["Accel_Width"]);
-  if (!comps.empty()) {
+  if (tracks) c.fill(&m, {"Accel_Width", "Accel_Layer", "Accel_Reduce"});
+  if (tracks || vias || pads || zones) m.addAction(c["Accel_ChangeNet"]);
+  if (!comps.empty() || tracks || vias || zones) {
     c.fill(m.addMenu(tr("Повернуть")), {"Accel_RotateLeft", "Accel_RotateRight", "Cmd_RotateAngle"});
     c.fill(m.addMenu(tr("Перевернуть")), {"Accel_FlipHorizontally", "Accel_FlipVertically"});
   }
+  if (!comps.empty() || vias) m.addAction(c["Accel_Unlink"]);
   if (zones) c.fill(&m, {"Accel_Pour", "Accel_UnPourWithRestore", "Cmd_RePour"});
   if (net != kNoNet) {
     m.addSeparator();

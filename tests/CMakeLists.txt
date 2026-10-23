@@ -5,6 +5,7 @@ add_executable(xrtests
   test_io.cpp
   test_fst.cpp
   test_drc.cpp
+  test_edit.cpp
   test_router.cpp
 )
 target_link_libraries(xrtests PRIVATE xrio xrdrc xrrouter GTest::gtest_main)

@@ -149,6 +149,53 @@ void setAt(Node& at, Vec2 p, double angle, bool withAngle) {
   at = std::move(n);
 }
 
+// A footprint the editor took to the other side: its layers change sides (F.* ↔ B.*) and its own
+// drawings are mirrored in the footprint frame (x negated), as the model mirrors the pads.
+void flipFootprint(Node& fp) {
+  auto swapLayer = [](Node& atom) {
+    if (atom.isList || atom.text.size() < 2 || atom.text[1] != '.') return;
+    if (atom.text[0] == 'F') atom.text[0] = 'B';
+    else if (atom.text[0] == 'B') atom.text[0] = 'F';
+  };
+  auto mirror = [](auto& self, Node& n) -> void {
+    if (!n.isList) return;
+    if ((n.is("start") || n.is("end") || n.is("mid") || n.is("center") || n.is("xy") || n.is("at")) && n.argc() >= 2) {
+      double x = n.num(0);
+      n.kids[1] = Node::atom(sexpr::fmtNum(-x, 6));
+      return;
+    }
+    for (size_t i = 1; i < n.kids.size(); ++i) self(self, n.kids[i]);
+  };
+  for (size_t i = 1; i < fp.kids.size(); ++i) {
+    Node& k = fp.kids[i];
+    if (!k.isList) continue;
+    if (k.is("layer") || k.is("layers")) {
+      for (size_t j = 1; j < k.kids.size(); ++j) swapLayer(k.kids[j]);
+      continue;
+    }
+    if (k.is("pad")) {
+      if (Node* l = k.find("layers"))
+        for (size_t j = 1; j < l->kids.size(); ++j) swapLayer(l->kids[j]);
+      continue;  // pads are written from the model
+    }
+    bool drawing = k.head().starts_with("fp_") || k.is("property");
+    if (!drawing) continue;
+    if (Node* l = k.find("layer"))
+      for (size_t j = 1; j < l->kids.size(); ++j) swapLayer(l->kids[j]);
+    mirror(mirror, k);
+    // Texts read mirrored on the bottom side.
+    if (k.is("fp_text") || k.is("property"))
+      if (Node* eff = k.find("effects")) {
+        Node* just = eff->find("justify");
+        if (!just) just = &eff->add(Node::list("justify"));
+        auto it = std::ranges::find_if(just->kids, [](const Node& a) { return !a.isList && a.text == "mirror"; });
+        if (it != just->kids.end()) just->kids.erase(it);
+        else just->addAtom("mirror");
+        if (just->kids.size() == 1) std::erase_if(eff->kids, [](const Node& a) { return a.is("justify"); });
+      }
+  }
+}
+
 std::string patchSource(const Board& b) {
   Node tree = *b.source->tree;
   Node& root = tree.kids[0];
@@ -162,6 +209,7 @@ std::string patchSource(const Board& b) {
   for (size_t ci = 0; ci < b.components.size() && ci < b.source->componentNodes.size(); ++ci) {
     Node& fp = root.kids[b.source->componentNodes[ci]];
     const Component& c = b.components[ci];
+    if (const Node* l = fp.find("layer"); l && (l->arg(0) == "B.Cu") != (c.side == Side::Bottom)) flipFootprint(fp);
     if (Node* at = fp.find("at")) setAt(*at, c.pos.v(), c.angle, true);
     if (Node* tf = fp.find("transform")) {
       if (Node* t = tf->find("translate")) {
