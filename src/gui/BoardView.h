@@ -18,8 +18,8 @@ class BoardView : public QWidget {
 
   Mode mode() const { return mode_; }
   RouteAngle routeAngle() const { return angle_; }
-  bool ratsnestVisible() const { return showRatsnest_; }
-  bool onlyActiveLayer() const { return onlyActive_; }
+  bool ratsnestVisible() const;
+  bool onlyActiveLayer() const;
   bool isRouting() const { return routing_; }
 
  public slots:
@@ -79,7 +79,13 @@ class BoardView : public QWidget {
   bool layerVisible(LayerId l) const;
 
   void drawBoard(QPainter& p);
-  void drawLayer(QPainter& p, LayerId l, bool dim);
+  void drawLayer(QPainter& p, LayerId l);
+  void drawGrid(QPainter& p);
+  void drawVias(QPainter& p);
+  void drawLabels(QPainter& p);
+  std::optional<QColor> netColor(int net, bool enabledForKind) const;
+  bool componentVisible(int ci) const;
+  Vec2 snapped(Vec2 w) const;  // «Привязка к сетке»
   void drawTrack(QPainter& p, const Track& t, const QColor& c, double extra = 0);
   void drawPad(QPainter& p, const Pad& pad, LayerId l, const QColor& c);
   void drawVia(QPainter& p, const Via& v, const QColor& c);
@@ -96,8 +102,6 @@ class BoardView : public QWidget {
   Document* doc_;
   Mode mode_ = Mode::Select;
   RouteAngle angle_ = RouteAngle::Free;
-  bool showRatsnest_ = true;
-  bool onlyActive_ = false;
   Vec2 center_;
   double scale_ = 1e-5;  // px per nm
   QPointF lastMouse_;

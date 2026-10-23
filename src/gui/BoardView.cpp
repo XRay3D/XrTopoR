@@ -12,7 +12,7 @@
 #include <numeric>
 #include <ranges>
 
-#include "gui/Theme.h"
+#include "gui/Schemes.h"
 #include "router/topo/Realizer.h"
 
 namespace xr::gui {
@@ -24,7 +24,13 @@ BoardView::BoardView(Document* doc, QWidget* parent) : QWidget(parent), doc_(doc
   connect(doc_, &Document::boardReplaced, this, [this] { fitBoard(); });
   connect(doc_, &Document::boardChanged, this, qOverload<>(&QWidget::update));
   connect(doc_, &Document::selectionChanged, this, qOverload<>(&QWidget::update));
-  connect(doc_, &Document::layersChanged, this, qOverload<>(&QWidget::update));
+  connect(doc_, &Document::layersChanged, this, [this] {
+    // The 45° routing mode follows «Привязка к углу» of the display settings.
+    if (doc_->hasBoard() && doc_->display().snapToAngle != (angle_ == RouteAngle::Deg45))
+      setRouteAngle(doc_->display().snapToAngle ? RouteAngle::Deg45 : RouteAngle::Free);
+    emit viewChanged();
+    update();
+  });
   connect(doc_, &Document::drcChanged, this, qOverload<>(&QWidget::update));
 }
 
@@ -89,11 +95,7 @@ void BoardView::resizeEvent(QResizeEvent*) { update(); }
 
 // ---------------------------------------------------------------- layers / picking
 
-bool BoardView::layerVisible(LayerId l) const {
-  if (l < 0 || l >= LayerId(doc_->layerViews().size())) return false;
-  if (onlyActive_ && doc_->board()->layers[l].kind == LayerKind::Copper) return l == doc_->activeLayer();
-  return doc_->layerViews()[l].visible;
-}
+bool BoardView::layerVisible(LayerId l) const { return doc_->layerVisible(l); }
 
 LayerMask BoardView::visibleCopper() const {
   LayerMask m = 0;
@@ -102,12 +104,23 @@ LayerMask BoardView::visibleCopper() const {
   return m;
 }
 
+bool BoardView::ratsnestVisible() const { return doc_->hasBoard() && doc_->display().flag("showNetLines"); }
+bool BoardView::onlyActiveLayer() const { return doc_->hasBoard() && doc_->display().flag("showActiveLayerOnly", false); }
+
+Vec2 BoardView::snapped(Vec2 w) const {
+  if (!doc_->hasBoard() || !doc_->display().alignToGrid) return w;
+  const DisplayControl& d = doc_->display();
+  return {std::round(w.x / d.gridX) * d.gridX, std::round(w.y / d.gridY) * d.gridY};
+}
+
 BoardView::Pick BoardView::pick(QPointF screen) const {
   Pick pk;
   if (!doc_->hasBoard()) return pk;
   const Board& b = *doc_->board();
+  const DisplayControl& d = doc_->display();
+  uint32_t filter = doc_->selectionFilter();
   Vec2 w = toWorld(screen);
-  pk.snap = w;
+  pk.snap = snapped(w);
   double tol = 4.0 / scale_;  // 4 px
   BBox q;
   q.add(w);
@@ -117,28 +130,35 @@ BoardView::Pick BoardView::pick(QPointF screen) const {
   int bestRank = 99;
   auto consider = [&](ItemRef r, int rank) {
     for (auto& s : itemShapes(b, r)) {
-      double d = s.distance(w);
-      if (d > tol) continue;
+      double dist = s.distance(w);
+      if (dist > tol) continue;
       bool active = itemLayers(b, r) & (LayerMask(1) << doc_->activeLayer());
       int rk = rank + (active ? 0 : 10);
-      if (rk < bestRank || (rk == bestRank && d < best)) {
-        best = d;
+      if (rk < bestRank || (rk == bestRank && dist < best)) {
+        best = dist;
         bestRank = rk;
         pk.item = r;
       }
     }
   };
+  bool pads = (filter & (SelPins | SelComponents)) && d.flag("showMetalPads");
   doc_->index().query(q.inflated(tol), vis, [&](ItemRef r) {
     switch (r.type) {
-      case ItemType::Via: consider(r, 0); break;
-      case ItemType::Track: consider(r, 1); break;
-      case ItemType::Pad: consider(r, 2); break;
+      case ItemType::Via:
+        if ((filter & SelVias) && d.flag("showVias")) consider(r, 0);
+        break;
+      case ItemType::Track:
+        if ((filter & SelWires) && d.flag("showWires")) consider(r, 1);
+        break;
+      case ItemType::Pad:
+        if (pads) consider(r, 2);
+        break;
       case ItemType::Zone: break;
     }
   });
   if (pk.item) {
     if (pk.item->type == ItemType::Pad) {
-      pk.component = b.pads[pk.item->index].component;
+      pk.component = filter & SelComponents ? b.pads[pk.item->index].component : -1;
       pk.snap = b.pads[pk.item->index].pos.v();
     } else if (pk.item->type == ItemType::Via) {
       pk.snap = b.vias[pk.item->index].pos.v();
@@ -150,14 +170,17 @@ BoardView::Pick BoardView::pick(QPointF screen) const {
     }
     return pk;
   }
-  // Component by silk/courtyard graphics or pad bounding box.
+  if (!(filter & SelComponents) || !d.flag("showComponents")) return pk;
+  // Component by its drawings or pad bounding box.
   for (int ci = 0; ci < int(b.components.size()); ++ci) {
+    if (!componentVisible(ci)) continue;
     const Component& c = b.components[ci];
     BBox bb;
     for (int pi : c.pads) bb.add(b.pads[pi].shapeGeom().bbox());
     for (auto& g : c.graphics) {
       if (g.layer < 0 || !layerVisible(g.layer)) continue;
-      bb.add(g.a); bb.add(g.b);
+      bb.add(g.a);
+      bb.add(g.b);
       if (g.kind == GraphicKind::Arc) bb.add(g.m);
       for (auto& p : g.pts) bb.add(p);
     }
@@ -169,16 +192,13 @@ BoardView::Pick BoardView::pick(QPointF screen) const {
   return pk;
 }
 
-// ---------------------------------------------------------------- painting
-
-void BoardView::paintEvent(QPaintEvent*) {
-  QPainter p(this);
-  p.fillRect(rect(), Theme::background());
-  if (!doc_->hasBoard()) return;
-  p.setRenderHint(QPainter::Antialiasing, true);
-  drawBoard(p);
-  drawOverlay(p);
+bool BoardView::componentVisible(int ci) const {
+  const DisplayControl& d = doc_->display();
+  if (!d.flag("showComponents")) return false;
+  return doc_->board()->components[ci].side == Side::Bottom ? d.flag("showCompBot") : d.flag("showCompTop");
 }
+
+// ---------------------------------------------------------------- painting
 
 static QPolygonF toPoly(const Polyline& pl, auto&& map) {
   QPolygonF poly;
@@ -187,8 +207,56 @@ static QPolygonF toPoly(const Polyline& pl, auto&& map) {
   return poly;
 }
 
+// TopoR shows selected objects brighter by «Выделенные объекты, %».
+static QColor brighter(QColor c, int rate) {
+  auto up = [&](int v) { return v + (255 - v) * rate / 100; };
+  return QColor(up(c.red()), up(c.green()), up(c.blue()), c.alpha());
+}
+
+void BoardView::paintEvent(QPaintEvent*) {
+  QPainter p(this);
+  if (!doc_->hasBoard()) {
+    p.fillRect(rect(), QColor(0x03, 0x0b, 0x10));
+    return;
+  }
+  p.fillRect(rect(), doc_->color("background", 0x030b10));
+  drawGrid(p);
+  p.setRenderHint(QPainter::Antialiasing, true);
+  drawBoard(p);
+  drawOverlay(p);
+}
+
+void BoardView::drawGrid(QPainter& p) {
+  const DisplayControl& d = doc_->display();
+  if (!d.gridShow || d.gridX <= 0 || d.gridY <= 0) return;
+  // Too dense a grid is drawn at a multiple of its step.
+  double sx = d.gridX, sy = d.gridY;
+  while (px(sx) < 8) sx *= 2;
+  while (px(sy) < 8) sy *= 2;
+  Vec2 a = toWorld({0, 0}), b = toWorld({double(width()), double(height())});
+  QColor c = QColor::fromRgb(QRgb(d.gridColor));
+  c.setAlpha(d.gridDots ? 160 : 60);
+  p.setPen(QPen(c, d.gridDots ? 1.5 : 1));
+  if (d.gridDots) {
+    QVector<QPointF> pts;
+    for (double x = std::floor(a.x / sx) * sx; x <= b.x; x += sx)
+      for (double y = std::floor(a.y / sy) * sy; y <= b.y; y += sy) pts << toScreen({x, y});
+    p.drawPoints(pts.data(), int(pts.size()));
+  } else {
+    for (double x = std::floor(a.x / sx) * sx; x <= b.x; x += sx) {
+      double sxp = toScreen({x, 0}).x();
+      p.drawLine(QPointF(sxp, 0), QPointF(sxp, height()));
+    }
+    for (double y = std::floor(a.y / sy) * sy; y <= b.y; y += sy) {
+      double syp = toScreen({0, y}).y();
+      p.drawLine(QPointF(0, syp), QPointF(width(), syp));
+    }
+  }
+}
+
 void BoardView::drawTrack(QPainter& p, const Track& t, const QColor& c, double extra) {
-  QPen pen(c, px(double(t.width) + extra), Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+  bool thin = doc_->display().flag("showThinWires", false);
+  QPen pen(c, thin ? 1.0 : px(double(t.width) + extra), Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
   p.setPen(pen);
   p.setBrush(Qt::NoBrush);
   if (!t.isArc()) {
@@ -230,7 +298,10 @@ void BoardView::drawGraphic(QPainter& p, const Graphic& g, const QColor& c) {
     case GraphicKind::Line: p.drawLine(toScreen(g.a), toScreen(g.b)); break;
     case GraphicKind::Arc: {
       auto arc = ArcGeom::fromThreePoints(g.a, g.m, g.b);
-      if (!arc.valid) { p.drawLine(toScreen(g.a), toScreen(g.b)); break; }
+      if (!arc.valid) {
+        p.drawLine(toScreen(g.a), toScreen(g.b));
+        break;
+      }
       p.drawPolyline(toPoly(arc.tessellate(std::max(2000.0, 0.5 / scale_)), [&](Vec2 v) { return toScreen(v); }));
       break;
     }
@@ -248,68 +319,147 @@ void BoardView::drawGraphic(QPainter& p, const Graphic& g, const QColor& c) {
       if (g.pts.size() < 2) break;
       QPolygonF poly = toPoly(g.pts, [&](Vec2 v) { return toScreen(v); });
       if (g.filled) p.drawPolygon(poly);
-      else { poly << poly.first(); p.drawPolyline(poly); }
+      else {
+        poly << poly.first();
+        p.drawPolyline(poly);
+      }
       break;
     }
   }
 }
 
-void BoardView::drawLayer(QPainter& p, LayerId l, bool dim) {
+// Special colour of a net («Цепи» tab), if any and enabled for this kind of object.
+std::optional<QColor> BoardView::netColor(int net, bool enabledForKind) const {
+  const DisplayControl& d = doc_->display();
+  if (net < 0 || !d.colorNets || !enabledForKind) return std::nullopt;
+  const std::string& name = doc_->board()->nets[net].name;
+  for (auto& nc : d.netColors)
+    if (nc.net == name) return QColor::fromRgb(QRgb(nc.color));
+  return std::nullopt;
+}
+
+void BoardView::drawLayer(QPainter& p, LayerId l) {
   const Board& b = *doc_->board();
-  QColor c = doc_->layerViews()[l].color;
-  if (dim) c.setAlpha(110);
+  const DisplayControl& d = doc_->display();
+  const LayerDisplay* ld = d.layer(b.layers[l].name);
+  QColor details = QColor::fromRgb(QRgb(ld ? ld->details : 0xc0c0c0));
+  QColor padColor = QColor::fromRgb(QRgb(ld ? ld->pads : 0xc0c0c0));
+  QColor fixColor = QColor::fromRgb(QRgb(ld ? ld->fix : 0x808080));
+  bool showDetails = !ld || ld->showDetails, showPads = !ld || ld->showPads;
   const Layer& L = b.layers[l];
   if (L.kind == LayerKind::Copper) {
-    QColor zc = c;
-    zc.setAlpha(zc.alpha() / 2);
-    p.setPen(Qt::NoPen);
-    p.setBrush(zc);
-    for (auto& z : b.zones)
-      if (z.layer == l)
-        for (auto& f : z.filled) p.drawPolygon(toPoly(f, [&](Vec2 v) { return toScreen(v); }));
-    for (auto& t : b.tracks)
-      if (t.layer == l) drawTrack(p, t, c);
-    for (auto& pad : b.pads)
-      if (pad.onLayer(l)) drawPad(p, pad, l, c);
-    for (auto& v : b.vias)
-      if (v.onLayer(l)) drawVia(p, v, c);
-  } else {
-    // Board outline contours are closed polygons but must never be filled.
-    auto draw = [&](const Graphic& g) {
-      if (L.kind == LayerKind::Edge && g.filled) {
-        Graphic h = g;
-        h.filled = false;
-        drawGraphic(p, h, c);
-      } else {
-        drawGraphic(p, g, c);
+    if (d.flag("showCoppers")) {
+      p.setPen(Qt::NoPen);
+      for (auto& z : b.zones)
+        if (z.layer == l) {
+          p.setBrush(netColor(z.net, d.colorizeCopper).value_or(details));
+          for (auto& f : z.filled) p.drawPolygon(toPoly(f, [&](Vec2 v) { return toScreen(v); }));
+        }
+    }
+    if (d.flag("showWires") && showDetails)
+      for (auto& t : b.tracks)
+        if (t.layer == l) drawTrack(p, t, netColor(t.net, d.colorizeWire).value_or(t.locked ? fixColor : details));
+    if (d.flag("showMetalPads") && showPads) {
+      bool special = d.flag("throughPad", false);
+      QColor through = doc_->color("clrThroughPads", 0xc0c0c0);
+      for (auto& pad : b.pads) {
+        if (!pad.onLayer(l)) continue;
+        if (pad.component >= 0 && !componentVisible(pad.component)) continue;
+        QColor c = special && pad.drill > 0 ? through : padColor;
+        drawPad(p, pad, l, netColor(pad.net, d.colorizePad).value_or(c));
       }
-    };
-    for (auto& comp : b.components)
-      for (auto& g : comp.graphics)
+    }
+    return;
+  }
+  // Technical layers: drawings of the board and of visible components.
+  int group = layerGroup(b, l);
+  if (!showDetails || (group == 0 && !d.flag("showTopMechDetails")) || (group == 2 && !d.flag("showBotMechDetails")))
+    return;
+  auto draw = [&](const Graphic& g) {
+    if (L.kind == LayerKind::Edge && g.filled) {  // board contours are never filled
+      Graphic h = g;
+      h.filled = false;
+      drawGraphic(p, h, details);
+    } else {
+      drawGraphic(p, g, details);
+    }
+  };
+  for (int ci = 0; ci < int(b.components.size()); ++ci)
+    if (componentVisible(ci))
+      for (auto& g : b.components[ci].graphics)
         if (g.layer == l) draw(g);
-    for (auto& g : b.graphics)
-      if (g.layer == l) draw(g);
+  for (auto& g : b.graphics)
+    if (g.layer == l) draw(g);
+}
+
+void BoardView::drawVias(QPainter& p) {
+  const Board& b = *doc_->board();
+  const DisplayControl& d = doc_->display();
+  if (!d.flag("showVias")) return;
+  LayerMask vis = visibleCopper();
+  QColor through = doc_->color("clrThroughVias", 0x949494), fixed = doc_->color("clrFixedVias", 0x7070b8);
+  bool showFixed = d.flag("fixedVia");
+  for (auto& v : b.vias)
+    if (v.layers & vis) drawVia(p, v, netColor(v.net, d.colorizeVia).value_or(v.locked && showFixed ? fixed : through));
+}
+
+void BoardView::drawLabels(QPainter& p) {
+  const Board& b = *doc_->board();
+  const DisplayControl& d = doc_->display();
+  QFont f = font();
+  // Component names at the component origin.
+  if (d.flag("showCompsDes")) {
+    f.setPixelSize(std::clamp(int(px(1.0 * kNmPerMm)), 7, 18));
+    p.setFont(f);
+    p.setPen(doc_->color("compsName", 0xffffff));
+    if (px(0.6 * kNmPerMm) >= 3)
+      for (int ci = 0; ci < int(b.components.size()); ++ci)
+        if (componentVisible(ci)) {
+          QRectF r(toScreen(b.components[ci].pos.v()) - QPointF(60, 10), QSizeF(120, 20));
+          p.drawText(r, Qt::AlignCenter, QString::fromStdString(b.components[ci].ref));
+        }
+  }
+  // Pin names and nets inside pads big enough on screen.
+  bool names = d.flag("showPinsName"), nets = d.flag("showPinsNet");
+  if (!names && !nets) return;
+  for (auto& pad : b.pads) {
+    if (pad.component >= 0 && !componentVisible(pad.component)) continue;
+    if (!(pad.copper & visibleCopper())) continue;
+    double size = px(double(std::min(pad.shape.w, pad.shape.h)));
+    if (size < 14) continue;
+    f.setPixelSize(std::clamp(int(size / 3), 6, 14));
+    p.setFont(f);
+    QRectF r(toScreen(pad.pos.v()) - QPointF(size, size / 2), QSizeF(2 * size, size));
+    if (names) {
+      p.setPen(doc_->color("pinsName", 0xbad3ef));
+      p.drawText(r, nets ? Qt::AlignHCenter | Qt::AlignTop : Qt::AlignCenter, QString::fromStdString(pad.number));
+    }
+    if (nets && pad.net >= 0) {
+      p.setPen(doc_->color("pinsNet", 0xbad3ef));
+      p.drawText(r, names ? Qt::AlignHCenter | Qt::AlignBottom : Qt::AlignCenter, QString::fromStdString(b.nets[pad.net].name));
+    }
   }
 }
 
 void BoardView::drawBoard(QPainter& p) {
   const Board& b = *doc_->board();
-  // Board area
-  p.setPen(QPen(Theme::outline(), 1));
-  p.setBrush(Theme::boardFill());
-  for (auto& loop : b.outline) p.drawPolygon(toPoly(loop, [&](Vec2 v) { return toScreen(v); }));
-
-  // Layers: bottom copper first, active copper last, then technical layers on top.
+  const DisplayControl& d = doc_->display();
+  // Bottom side first, active copper last among copper, top side over it, documenting layers on top.
+  auto groupOf = [&](LayerId l) { return layerGroup(b, l); };
+  for (LayerId l = 0; l < LayerId(b.layers.size()); ++l)
+    if (groupOf(l) == 2 && layerVisible(l)) drawLayer(p, l);
   auto cu = b.copperLayers();
   LayerId active = doc_->activeLayer();
   for (LayerId l : cu | std::views::reverse)
-    if (l != active && layerVisible(l)) drawLayer(p, l, true);
-  if (layerVisible(active)) drawLayer(p, active, false);
-  // Drill holes
+    if (l != active && layerVisible(l)) drawLayer(p, l);
+  if (layerVisible(active)) drawLayer(p, active);
+  drawVias(p);
+  // Drill holes in the background colour.
   p.setPen(Qt::NoPen);
-  p.setBrush(Theme::drill());
+  p.setBrush(doc_->color("background", 0x030b10));
+  LayerMask vis = visibleCopper();
   for (auto& pad : b.pads)
-    if (pad.drill > 0 && (pad.copper & visibleCopper() || !pad.copper)) {
+    if (pad.drill > 0 && (pad.copper & vis || !pad.copper)) {
       double r = px(pad.drill / 2.0);
       if (pad.drillH > 0 && pad.drillH != pad.drill) {
         Shape s = Shape::rect(pad.pos.v(), double(pad.drill), double(pad.drillH), -degToRad(pad.angle),
@@ -319,76 +469,104 @@ void BoardView::drawBoard(QPainter& p) {
         p.drawEllipse(toScreen(pad.pos.v()), r, r);
       }
     }
-  for (auto& v : b.vias)
-    if (v.layers & visibleCopper()) {
-      double r = px(v.drill / 2.0);
-      if (r >= 0.5) p.drawEllipse(toScreen(v.pos.v()), r, r);
-    }
-  for (LayerId l = 0; l < LayerId(b.layers.size()); ++l)
-    if (b.layers[l].kind != LayerKind::Copper && b.layers[l].kind != LayerKind::Edge && layerVisible(l))
-      drawLayer(p, l, false);
-  for (LayerId l = 0; l < LayerId(b.layers.size()); ++l)
-    if (b.layers[l].kind == LayerKind::Edge && layerVisible(l)) drawLayer(p, l, false);
-
-  // Ratsnest
-  if (showRatsnest_) {
-    p.setPen(QPen(Theme::ratsnest(), 1));
-    for (auto& r : doc_->connectivity().ratsnest) p.drawLine(toScreen(r.a), toScreen(r.b));
-  }
-
-  // Net highlight and selection
-  QColor hl = Theme::highlight();
-  int hn = doc_->highlightedNet();
-  if (hn != kNoNet) {
-    for (auto& t : b.tracks)
-      if (t.net == hn) drawTrack(p, t, hl, 2.0 / scale_);
+  if (d.flag("showVias"))
     for (auto& v : b.vias)
-      if (v.net == hn) drawVia(p, v, hl);
-    for (auto& pad : b.pads)
-      if (pad.net == hn) drawPad(p, pad, -1, hl);
+      if (v.layers & vis) {
+        double r = px(v.drill / 2.0);
+        if (r >= 0.5) p.drawEllipse(toScreen(v.pos.v()), r, r);
+      }
+  for (LayerId l = 0; l < LayerId(b.layers.size()); ++l)
+    if ((groupOf(l) == 0 || groupOf(l) == 3) && layerVisible(l)) drawLayer(p, l);
+  // Board outline.
+  if (d.flag("showBoardOutline")) {
+    p.setPen(QPen(doc_->color("board", 0xd4d4d4), 1));
+    p.setBrush(Qt::NoBrush);
+    for (auto& loop : b.outline) p.drawPolygon(toPoly(loop, [&](Vec2 v) { return toScreen(v); }));
+    for (LayerId l = 0; l < LayerId(b.layers.size()); ++l)
+      if (groupOf(l) == -1) drawLayer(p, l);
   }
-  QColor sc = Theme::selection();
-  for (ItemRef r : doc_->selectedItems()) {
-    switch (r.type) {
-      case ItemType::Track: drawTrack(p, b.tracks[r.index], sc, 3.0 / scale_); break;
-      case ItemType::Via: drawVia(p, b.vias[r.index], sc); break;
-      case ItemType::Pad: drawPad(p, b.pads[r.index], -1, sc); break;
-      default: break;
+  drawLabels(p);
+
+  // Ratsnest, with the «Показывать связи» filter.
+  if (d.flag("showNetLines")) {
+    QColor nl = doc_->color("netLines", 0xaf7d3a);
+    for (auto& r : doc_->connectivity().ratsnest) {
+      if (d.filterNetlines && !d.netlineNets.empty()) {
+        bool listed = std::ranges::contains(d.netlineNets, b.nets[r.net].name);
+        if (listed == d.hideFilteredNetlines) continue;
+      }
+      p.setPen(QPen(netColor(r.net, d.colorizeNetline).value_or(nl), 1));
+      p.drawLine(toScreen(r.a), toScreen(r.b));
     }
-  }
-  p.setPen(QPen(sc, 1, Qt::DashLine));
-  p.setBrush(Qt::NoBrush);
-  for (int ci : doc_->selectedComponents()) {
-    const Component& c = b.components[ci];
-    BBox bb;
-    for (int pi : c.pads) bb.add(b.pads[pi].shapeGeom().bbox());
-    for (auto& g : c.graphics) {
-      bb.add(g.a); bb.add(g.b);
-      for (auto& q : g.pts) bb.add(q);
-    }
-    if (bb.valid()) p.drawRect(QRectF(toScreen({bb.minX, bb.minY}), toScreen({bb.maxX, bb.maxY})));
   }
 
-  // DRC markers
-  p.setPen(QPen(Theme::drcMarker(), 2));
-  p.setBrush(Qt::NoBrush);
-  for (auto& v : doc_->drc()) {
-    QPointF c = toScreen(v.pos);
-    p.drawEllipse(c, 7, 7);
-    p.drawLine(c + QPointF(-4, -4), c + QPointF(4, 4));
-    p.drawLine(c + QPointF(-4, 4), c + QPointF(4, -4));
+  // Selection and the highlighted net: others darkened by «Затемнение объектов», selected brightened.
+  auto items = doc_->selectedItems();
+  auto comps = doc_->selectedComponents();
+  int hn = doc_->highlightedNet();
+  if (!items.empty() || !comps.empty() || hn != kNoNet) {
+    if (d.darkRate > 0) {
+      QColor dark = doc_->color("background", 0x030b10);
+      dark.setAlpha(d.darkRate * 255 / 100);
+      p.fillRect(rect(), dark);
+    }
+    int rate = d.hilightRate;
+    auto lit = [&](LayerId l) { return brighter(doc_->layerColor(l), rate); };
+    auto litPad = [&](const Pad& pad) {
+      for (LayerId l : b.copperLayers())
+        if (pad.onLayer(l) && layerVisible(l)) {
+          const LayerDisplay* ld = d.layer(b.layers[l].name);
+          return brighter(QColor::fromRgb(QRgb(ld ? ld->pads : 0xc0c0c0)), rate);
+        }
+      return brighter(QColor(0xc0, 0xc0, 0xc0), rate);
+    };
+    QColor viaLit = brighter(doc_->color("clrThroughVias", 0x949494), rate);
+    if (hn != kNoNet) {
+      for (auto& t : b.tracks)
+        if (t.net == hn && layerVisible(t.layer)) drawTrack(p, t, lit(t.layer));
+      for (auto& v : b.vias)
+        if (v.net == hn) drawVia(p, v, viaLit);
+      for (auto& pad : b.pads)
+        if (pad.net == hn) drawPad(p, pad, -1, litPad(pad));
+    }
+    for (ItemRef r : items) {
+      switch (r.type) {
+        case ItemType::Track: drawTrack(p, b.tracks[r.index], lit(b.tracks[r.index].layer)); break;
+        case ItemType::Via: drawVia(p, b.vias[r.index], viaLit); break;
+        case ItemType::Pad: drawPad(p, b.pads[r.index], -1, litPad(b.pads[r.index])); break;
+        default: break;
+      }
+    }
+    for (int ci : comps) {
+      const Component& c = b.components[ci];
+      for (auto& g : c.graphics)
+        if (g.layer >= 0 && layerVisible(g.layer)) drawGraphic(p, g, lit(g.layer));
+      for (int pi : c.pads) drawPad(p, b.pads[pi], -1, litPad(b.pads[pi]));
+    }
+  }
+
+  // DRC markers.
+  if (d.flag("showViolations") && d.flag("showDRCViolations")) {
+    p.setPen(QPen(doc_->color("drcViolation", 0xffffff), 2));
+    p.setBrush(Qt::NoBrush);
+    for (auto& v : doc_->drc()) {
+      QPointF c = toScreen(v.pos);
+      p.drawEllipse(c, 7, 7);
+      p.drawLine(c + QPointF(-4, -4), c + QPointF(4, 4));
+      p.drawLine(c + QPointF(-4, 4), c + QPointF(4, -4));
+    }
   }
 }
 
 void BoardView::drawOverlay(QPainter& p) {
   if (!routing_) return;
-  QColor c = doc_->layerViews()[routeLayer_].color;
-  for (auto& t : routeTracks_) drawTrack(p, t, doc_->layerViews()[t.layer].color);
-  for (auto& v : routeVias_) drawVia(p, v, Theme::viaRing());
-  if (auto seg = makeSegment(routeLast_, constrained(routeLast_, cursor_))) {
+  QColor c = doc_->layerColor(routeLayer_);
+  for (auto& t : routeTracks_) drawTrack(p, t, doc_->layerColor(t.layer));
+  for (auto& v : routeVias_) drawVia(p, v, doc_->color("clrThroughVias", 0x949494));
+  if (auto seg = makeSegment(routeLast_, constrained(routeLast_, snapped(cursor_)))) {
     double m = rubberMargin(*seg);
-    QColor rc = m < 0 ? Theme::drcMarker() : c;
-    rc.setAlpha(180);
+    QColor rc = m < 0 ? QColor(0xff, 0x30, 0x30) : brighter(c, 30);
+    rc.setAlpha(200);
     drawTrack(p, *seg, rc);
   }
 }
@@ -404,7 +582,7 @@ void BoardView::mousePressEvent(QMouseEvent* e) {
   }
   if (e->button() != Qt::LeftButton || !doc_->hasBoard()) return;
   Pick pk = pick(e->position());
-  Vec2 w = toWorld(e->position());
+  Vec2 w = snapped(toWorld(e->position()));
   emit clicked(w);
   switch (mode_) {
     case Mode::Select: {
@@ -457,7 +635,7 @@ void BoardView::mouseMoveEvent(QMouseEvent* e) {
     return;
   }
   if (dragging_ && doc_->hasBoard()) {
-    Vec2 d = cursor_ - dragStart_;
+    Vec2 d = snapped(cursor_) - snapped(dragStart_);
     auto comps = doc_->selectedComponents();
     for (size_t i = 0; i < comps.size(); ++i)
       doc_->board()->moveComponent(comps[i], dragOrigins_[i] + Point(d));
@@ -525,20 +703,25 @@ void BoardView::setMode(Mode m) {
 void BoardView::setRouteAngle(RouteAngle a) {
   if (angle_ == a) return;
   angle_ = a;
+  // «Привязка к углу» of the display settings is the 45° mode.
+  if (doc_->hasBoard() && doc_->display().snapToAngle != (a == RouteAngle::Deg45)) {
+    doc_->display().snapToAngle = a == RouteAngle::Deg45;
+    doc_->displayChanged();
+  }
   emit routeAngleChanged(a);
   update();
 }
 
 void BoardView::setRatsnestVisible(bool on) {
-  showRatsnest_ = on;
-  emit viewChanged();
-  update();
+  if (!doc_->hasBoard()) return;
+  doc_->display().show["showNetLines"] = on;
+  doc_->displayChanged();
 }
 
 void BoardView::setOnlyActiveLayer(bool on) {
-  onlyActive_ = on;
-  emit viewChanged();
-  update();
+  if (!doc_->hasBoard()) return;
+  doc_->display().show["showActiveLayerOnly"] = on;
+  doc_->displayChanged();
 }
 
 void BoardView::deleteSelection() {
@@ -773,10 +956,9 @@ void BoardView::selectCopper(int toporIndex) {
 
 void BoardView::toggleMetalLayers() {
   if (!doc_->hasBoard()) return;
-  auto cu = doc_->board()->copperLayers();
-  bool anyVisible = std::ranges::any_of(cu, [&](LayerId l) { return doc_->layerViews()[l].visible; });
-  for (LayerId l : cu) doc_->layerViews()[l].visible = !anyVisible;
-  emit doc_->layersChanged();
+  auto& show = doc_->display().show;
+  show["showSignalLayers"] = !doc_->display().flag("showSignalLayers");
+  doc_->displayChanged();
 }
 
 void BoardView::toggleFix() {

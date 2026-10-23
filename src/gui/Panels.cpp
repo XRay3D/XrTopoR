@@ -1,6 +1,5 @@
 #include "gui/Panels.h"
 
-#include <QColorDialog>
 #include <QDate>
 #include <QFileInfo>
 #include <QTabWidget>
@@ -13,73 +12,6 @@
 #include "gui/BoardView.h"
 
 namespace xr::gui {
-
-// ---------------------------------------------------------------- layers
-
-LayersPanel::LayersPanel(Document* doc, QWidget* parent) : QWidget(parent), doc_(doc) {
-  auto* lay = new QVBoxLayout(this);
-  lay->setContentsMargins(0, 0, 0, 0);
-  tree_ = new QTreeWidget(this);
-  tree_->setColumnCount(2);
-  tree_->setHeaderLabels({tr("Слой"), tr("Цвет")});
-  tree_->header()->setStretchLastSection(false);
-  tree_->header()->setSectionResizeMode(0, QHeaderView::Stretch);
-  tree_->setRootIsDecorated(false);
-  lay->addWidget(tree_);
-  connect(doc_, &Document::boardReplaced, this, &LayersPanel::rebuild);
-  connect(doc_, &Document::layersChanged, this, [this] {
-    if (building_) return;
-    building_ = true;
-    for (int i = 0; i < tree_->topLevelItemCount(); ++i) {
-      auto* it = tree_->topLevelItem(i);
-      LayerId l = it->data(0, Qt::UserRole).toInt();
-      it->setCheckState(0, doc_->layerViews()[l].visible ? Qt::Checked : Qt::Unchecked);
-      QFont f = it->font(0);
-      f.setBold(l == doc_->activeLayer());
-      it->setFont(0, f);
-    }
-    building_ = false;
-  });
-  connect(tree_, &QTreeWidget::itemChanged, this, [this](QTreeWidgetItem* it, int col) {
-    if (building_ || col != 0) return;
-    LayerId l = it->data(0, Qt::UserRole).toInt();
-    doc_->layerViews()[l].visible = it->checkState(0) == Qt::Checked;
-    emit doc_->layersChanged();
-  });
-  connect(tree_, &QTreeWidget::itemClicked, this, [this](QTreeWidgetItem* it, int col) {
-    LayerId l = it->data(0, Qt::UserRole).toInt();
-    if (col == 1) {
-      QColor c = QColorDialog::getColor(doc_->layerViews()[l].color, this, tr("Цвет слоя"));
-      if (c.isValid()) {
-        doc_->layerViews()[l].color = c;
-        it->setBackground(1, c);
-        emit doc_->layersChanged();
-      }
-      return;
-    }
-    if (doc_->board()->layers[l].kind == LayerKind::Copper) doc_->setActiveLayer(l);
-  });
-}
-
-void LayersPanel::rebuild() {
-  building_ = true;
-  tree_->clear();
-  if (doc_->hasBoard()) {
-    const Board& b = *doc_->board();
-    for (LayerId l = 0; l < LayerId(b.layers.size()); ++l) {
-      auto* it = new QTreeWidgetItem(tree_);
-      it->setText(0, QString::fromStdString(b.layers[l].name));
-      it->setData(0, Qt::UserRole, int(l));
-      it->setFlags(it->flags() | Qt::ItemIsUserCheckable);
-      it->setCheckState(0, doc_->layerViews()[l].visible ? Qt::Checked : Qt::Unchecked);
-      it->setBackground(1, doc_->layerViews()[l].color);
-      QFont f = it->font(0);
-      f.setBold(l == doc_->activeLayer());
-      it->setFont(0, f);
-    }
-  }
-  building_ = false;
-}
 
 // ---------------------------------------------------------------- nets
 

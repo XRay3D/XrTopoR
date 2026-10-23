@@ -52,12 +52,14 @@ if(XR_BUILD_GUI)
   add_library(xrgui STATIC
     gui/AppSettings.cpp
     gui/BoardView.cpp
+    gui/BuiltinSchemes.cpp
     gui/Commands.cpp
+    gui/DisplayPanel.cpp
     gui/Document.cpp
     gui/MainWindow.cpp
     gui/ModeBar.cpp
     gui/Panels.cpp
-    gui/Theme.cpp
+    gui/Schemes.cpp
     gui/Units.cpp
     gui/icons.qrc
   )

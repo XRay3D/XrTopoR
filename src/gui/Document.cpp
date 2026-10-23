@@ -1,6 +1,6 @@
 #include "gui/Document.h"
 
-#include "gui/Theme.h"
+#include "gui/Schemes.h"
 
 namespace xr::gui {
 
@@ -44,17 +44,26 @@ void Document::setBoard(std::unique_ptr<Board> b, const QString& path) {
   selComponents_.clear();
   highlightNet_ = kNoNet;
   drc_.clear();
-  layerViews_.clear();
   if (board_) {
-    for (LayerId l = 0; l < LayerId(board_->layers.size()); ++l) {
-      LayerView v;
-      v.color = Theme::layerColor(*board_, l);
-      v.visible = board_->layers[l].kind != LayerKind::Other && board_->layers[l].kind != LayerKind::Mask &&
-                  board_->layers[l].kind != LayerKind::Paste && board_->layers[l].kind != LayerKind::Fab;
-      layerViews_.push_back(v);
-    }
+    // Designs without saved display settings get the default schemes; saved ones are completed.
+    bool saved = board_->display.has_value();
+    if (!saved) board_->display.emplace();
+    auto colors = allColorSchemes();
+    auto views = allViewSchemes();
+    DisplayControl& d = *board_->display;
+    completeDisplay(d, *board_, colorSchemeByName(colors, saved ? d.colorScheme : defaultColorScheme()),
+                    viewSchemeByName(views, saved ? d.displayScheme : defaultViewScheme()));
     activeLayer_ = board_->topCopper();
-    unit_ = designUnit(*board_);
+    if (LayerId l = board_->findLayer(d.activeLayer); l >= 0 && board_->layers[l].kind == LayerKind::Copper)
+      activeLayer_ = l;
+    d.activeLayer = board_->layers[activeLayer_].name;
+    if (saved) {
+      const std::string& u = d.units;
+      unit_ = (u == "Imperial" || u == "mil" || u == "inch") ? Unit::Mil : Unit::Mm;
+    } else {
+      unit_ = designUnit(*board_);
+      d.units = unit_ == Unit::Mil ? "Imperial" : "Metric";
+    }
   }
   invalidate();
   emit boardReplaced();
@@ -66,6 +75,7 @@ void Document::setBoard(std::unique_ptr<Board> b, const QString& path) {
 void Document::setActiveLayer(LayerId l) {
   if (l < 0 || !board_ || l >= LayerId(board_->layers.size()) || l == activeLayer_) return;
   activeLayer_ = l;
+  display().activeLayer = board_->layers[l].name;
   emit layersChanged();
 }
 
@@ -113,7 +123,39 @@ void Document::validateSelection() {
 void Document::setUnit(Unit u) {
   if (u == unit_) return;
   unit_ = u;
+  if (board_) display().units = u == Unit::Mil ? "Imperial" : "Metric";
   emit unitChanged();
+}
+
+bool Document::layerVisible(LayerId l) const {
+  if (!board_ || l < 0 || l >= LayerId(board_->layers.size())) return false;
+  const DisplayControl& d = display();
+  const LayerDisplay* ld = d.layer(board_->layers[l].name);
+  if (ld && !ld->visible) return false;
+  switch (layerGroup(*board_, l)) {
+    case 1:
+      if (d.flag("showActiveLayerOnly", false)) return l == activeLayer_;
+      return d.flag("showSignalLayers");
+    case 0: return d.flag("showTopMechLayers");
+    case 2: return d.flag("showBotMechLayers");
+    case 3: return d.flag("showDocLayers", false);
+    default: return d.flag("showBoardOutline");
+  }
+}
+
+QColor Document::color(const std::string& name, uint32_t def) const {
+  return QColor::fromRgb(QRgb(display().color(name, def)));
+}
+
+QColor Document::layerColor(LayerId l) const {
+  const LayerDisplay* ld = display().layer(board_->layers[l].name);
+  return QColor::fromRgb(QRgb(ld ? ld->details : 0xc0c0c0));
+}
+
+void Document::setSelectionFilter(uint32_t f) {
+  if (f == selFilter_) return;
+  selFilter_ = f;
+  emit selectionFilterChanged();
 }
 
 void Document::setHighlightedNet(int net) {

@@ -14,6 +14,7 @@
 #include "gui/Commands.h"
 #include "gui/Document.h"
 #include "gui/MainWindow.h"
+#include "gui/Schemes.h"
 #include "io/BoardIO.h"
 
 using namespace xr;
@@ -258,4 +259,58 @@ TEST(Gui, ViaKeyWhileRouting) {
   QTest::mouseClick(&view, Qt::LeftButton, {}, screenOf(view, c, mid, scale));
   EXPECT_FALSE(view.isRouting());
   EXPECT_EQ(b.vias.size(), vias + 1);
+}
+
+// Designs from other CADs get TopoR's default schemes; a colour scheme recolours the layers.
+TEST(Gui, DisplaySchemes) {
+  app();
+  Document doc;
+  auto r = io::loadBoard(data("el4134_pcad_ascii.pcb"));
+  ASSERT_TRUE(r) << r.error();
+  doc.setBoard(std::move(*r), "el4134.pcb");
+  const Board& b = *doc.board();
+  DisplayControl& d = doc.display();
+  EXPECT_EQ(d.colorScheme, "TopoR 6.0");
+  EXPECT_EQ(d.color("background", 0), 0x030b10u);
+  LayerId top = b.topCopper(), bottom = b.bottomCopper();
+  EXPECT_EQ(d.layer(b.layers[top].name)->details, 0xa52310u);
+  EXPECT_EQ(d.layer(b.layers[bottom].name)->details, 0x0f7140u);
+  EXPECT_EQ(doc.unit(), Unit::Mil);  // the P-CAD design is in mils
+  // Routing view: copper and component outlines on, masks off.
+  for (LayerId l = 0; l < LayerId(b.layers.size()); ++l) {
+    if (b.layers[l].kind == LayerKind::Copper) EXPECT_TRUE(doc.layerVisible(l)) << b.layers[l].name;
+    if (b.layers[l].kind == LayerKind::Mask) EXPECT_FALSE(doc.layerVisible(l)) << b.layers[l].name;
+  }
+  auto all = allColorSchemes();
+  applyColorScheme(d, b, colorSchemeByName(all, "P-CAD 2006"));
+  EXPECT_EQ(d.color("background", 1), 0x000000u);
+  EXPECT_EQ(d.layer(b.layers[top].name)->details, 0xff0000u);
+  // «Только активный слой» hides the other metal layers.
+  d.show["showActiveLayerOnly"] = true;
+  EXPECT_TRUE(doc.layerVisible(top));
+  EXPECT_FALSE(doc.layerVisible(bottom));
+}
+
+// The selection filter decides what a click may select.
+TEST(Gui, SelectionFilter) {
+  app();
+  Document doc;
+  BoardView view(&doc);
+  view.resize(800, 600);
+  auto r = io::loadBoard(data("tt.kicad_pcb"));
+  ASSERT_TRUE(r) << r.error();
+  doc.setBoard(std::move(*r), "tt.kicad_pcb");
+  const Board& b = *doc.board();
+  ASSERT_FALSE(b.vias.empty());
+  Vec2 at = b.vias[0].pos.v();
+  view.centerOn(at, 5);
+  double scale = view.width() / (5.0 * kNmPerMm);
+  QPoint p = screenOf(view, at, at, scale);
+  doc.setSelectionFilter(SelAll & ~SelVias);
+  QTest::mouseClick(&view, Qt::LeftButton, {}, p);
+  for (ItemRef it : doc.selectedItems()) EXPECT_NE(it.type, ItemType::Via);
+  doc.setSelectionFilter(SelAll);
+  QTest::mouseClick(&view, Qt::LeftButton, {}, p);
+  ASSERT_EQ(doc.selectedItems().size(), 1u);
+  EXPECT_EQ(doc.selectedItems()[0].type, ItemType::Via);
 }

@@ -5,9 +5,11 @@
 #include <inplace_vector>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
+#include "core/Display.h"
 #include "geom/Shape.h"
 
 namespace xr {
@@ -160,6 +162,7 @@ struct Board {
   Coord edgeClearance = mmToNm(0.25);
   double designUnitNm = kNmPerMm;  // unit the design was drawn in (lengths are shown in it)
   std::shared_ptr<SourceDoc> source;       // original file tree for lossless round-trip
+  std::optional<DisplayControl> display;   // display settings saved with the design (TopoR .fst)
 
   // Layers
   LayerList copperLayers() const;  // top to bottom

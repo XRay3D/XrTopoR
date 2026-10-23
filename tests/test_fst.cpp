@@ -319,3 +319,46 @@ TEST(FstIO, NetAndLayerRules) {
   EXPECT_EQ(c.clearance(gc, c.bottomCopper()), mmToNm(0.5));
   EXPECT_EQ(c.clearance(gc, c.topCopper()), mmToNm(0.3));
 }
+
+// TopoR keeps a design's display settings in the file: they are read and written back.
+TEST(FstIO, DisplayControlRoundTrip) {
+  auto r = io::loadBoard(data("topor/Example_05/MinVia_standard_routing.fst"));
+  ASSERT_TRUE(r) << r.error();
+  const Board& a = **r;
+  ASSERT_TRUE(a.display);
+  const DisplayControl& d = *a.display;
+  EXPECT_EQ(d.color("background", 0), 0x030b10u);
+  EXPECT_EQ(d.color("netLines", 0), 0xaf7d3au);
+  EXPECT_EQ(d.hilightRate, 42);
+  EXPECT_TRUE(d.flag("showWires"));
+  EXPECT_TRUE(d.gridDots);
+  EXPECT_NEAR(d.gridX, 0.5 * kNmPerMil, 1e-6);  // 5000 database units of 0.0001 mil
+  ASSERT_TRUE(d.layer("TopMask"));
+  EXPECT_EQ(d.layer("TopMask")->details, 0xb15738u);
+  EXPECT_FALSE(d.layer("TopMask")->visible);
+  EXPECT_TRUE(d.layer("Top")->visible);
+  EXPECT_EQ(d.activeLayer, "Top");
+
+  Board b = a;
+  b.display->netColors.push_back({"VCC", 0x00ff00});
+  b.display->filterNetlines = true;
+  b.display->netlineNets = {"GND"};
+  auto again = io::readFst(io::writeFst(b), "display.fst");
+  ASSERT_TRUE(again) << again.error();
+  ASSERT_TRUE((*again)->display);
+  const DisplayControl& e = *(*again)->display;
+  EXPECT_EQ(e.colors, d.colors);
+  EXPECT_EQ(e.show, d.show);
+  EXPECT_NEAR(e.gridX, d.gridX, 1e-6);
+  ASSERT_EQ(e.layers.size(), d.layers.size());
+  for (size_t i = 0; i < e.layers.size(); ++i) {
+    EXPECT_EQ(e.layers[i].layer, d.layers[i].layer);
+    EXPECT_EQ(e.layers[i].details, d.layers[i].details);
+    EXPECT_EQ(e.layers[i].visible, d.layers[i].visible);
+  }
+  ASSERT_EQ(e.netColors.size(), 1u);
+  EXPECT_EQ(e.netColors[0].net, "VCC");
+  EXPECT_EQ(e.netColors[0].color, 0x00ff00u);
+  EXPECT_TRUE(e.filterNetlines);
+  EXPECT_EQ(e.netlineNets, std::vector<std::string>{"GND"});
+}

@@ -15,6 +15,7 @@ class QLabel;
 
 namespace xr::gui {
 
+class DisplayPanel;
 class ModeBar;
 class ProjectPanel;
 
@@ -73,6 +74,7 @@ class MainWindow : public QMainWindow {
   ModeBar* modeBar_ = nullptr;
   ModeBar* autoBar_ = nullptr;
   ProjectPanel* project_ = nullptr;
+  DisplayPanel* display_ = nullptr;
   QLabel* stMain_ = nullptr;
   QLabel* stHint_ = nullptr;
   QLabel* stXY_ = nullptr;

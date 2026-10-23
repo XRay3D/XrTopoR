@@ -278,13 +278,22 @@ void Writer::startTag(std::string_view name, std::initializer_list<std::pair<std
   pad();
   out_ += '<';
   out_ += name;
-  for (auto& [k, v] : attrs) {
-    out_ += ' ';
-    out_ += k;
-    out_ += "=\"";
-    out_ += escape(v);
-    out_ += '"';
-  }
+  for (auto& [k, v] : attrs) attribute(k, v);
+}
+
+void Writer::attribute(std::string_view k, std::string_view v) {
+  out_ += ' ';
+  out_ += k;
+  out_ += "=\"";
+  out_ += escape(v);
+  out_ += '"';
+}
+
+void Writer::emptyList(std::string_view name, const std::vector<std::pair<std::string, std::string>>& attrs) {
+  startTag(name, {});
+  for (auto& [k, v] : attrs) attribute(k, v);
+  out_ += "/>";
+  out_ += eol_;
 }
 
 void Writer::open(std::string_view name, std::initializer_list<std::pair<std::string_view, std::string_view>> attrs) {

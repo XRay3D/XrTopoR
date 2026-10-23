@@ -651,6 +651,60 @@ struct Writer {
     x.close();
   }
 
+  // --- display settings ---
+  static std::string hexColor(uint32_t c) { return std::format("#{:06x}", c & 0xffffff); }
+
+  void writeDisplay(const DisplayControl& d) {
+    x.open("DisplayControl", {{"version", "1.3"}});
+    if (d.viewScale > 0)
+      x.empty("View", {{"scale", num(d.viewScale)}, {"scrollHorz", num(d.scrollX)}, {"scrollVert", num(d.scrollY)}});
+    if (!d.activeLayer.empty())
+      if (LayerId l = b.findLayer(d.activeLayer); l >= 0 && !layerName[l].empty())
+        x.empty("ActiveLayer", {{"name", layerName[l]}});
+    x.empty("Units", {{"preference", d.units}});
+    // Attribute lists vary: build them as owned strings.
+    std::vector<std::pair<std::string, std::string>> colors;
+    if (!d.colorScheme.empty()) colors.emplace_back("colorScheme", d.colorScheme);
+    colors.emplace_back("hilightRate", std::to_string(d.hilightRate));
+    colors.emplace_back("darkRate", std::to_string(d.darkRate));
+    for (auto& [k, v] : d.colors) colors.emplace_back(k, hexColor(v));
+    x.emptyList("Colors", colors);
+    std::vector<std::pair<std::string, std::string>> show;
+    if (!d.displayScheme.empty()) show.emplace_back("displayScheme", d.displayScheme);
+    for (auto& [k, v] : d.show) show.emplace_back(k, onOff(v));
+    x.emptyList("Show", show);
+    x.open("Grid", {{"gridColor", hexColor(d.gridColor)}, {"gridKind", d.gridDots ? "Dots" : "Lines"},
+                    {"gridShow", onOff(d.gridShow)}, {"alignToGrid", onOff(d.alignToGrid)},
+                    {"snapToAngle", onOff(d.snapToAngle)}, {"saveProportion", onOff(d.saveProportion)}});
+    x.empty("GridSpace", {{"x", num(d.gridX * 10000.0 / kNmPerMil, 2)}, {"y", num(d.gridY * 10000.0 / kNmPerMil, 2)}});
+    x.close();
+    x.open("LayersVisualOptions");
+    for (auto& l : d.layers) {
+      // TopoR's pseudo-layers (e.g. «Board») are not board layers: kept by name.
+      LayerId id = b.findLayer(l.layer);
+      if (id >= 0 && layerName[id].empty()) continue;
+      x.open("LayerOptions");
+      x.empty("LayerRef", {{"name", id >= 0 ? layerName[id] : l.layer}});
+      x.empty("Colors", {{"details", hexColor(l.details)}, {"pads", hexColor(l.pads)}, {"fix", hexColor(l.fix)}});
+      x.empty("Show", {{"visible", onOff(l.visible)}, {"details", onOff(l.showDetails)}, {"pads", onOff(l.showPads)}});
+      x.close();
+    }
+    x.close();
+    x.open("ColorNets", {{"enabled", onOff(d.colorNets)}, {"colorizeWire", onOff(d.colorizeWire)},
+                         {"colorizePad", onOff(d.colorizePad)}, {"colorizeCopper", onOff(d.colorizeCopper)},
+                         {"colorizeVia", onOff(d.colorizeVia)}, {"colorizeNetline", onOff(d.colorizeNetline)}});
+    for (auto& nc : d.netColors) {
+      x.open("SetColor", {{"color", hexColor(nc.color)}});
+      x.empty("NetRef", {{"name", nc.net}});
+      x.close();
+    }
+    x.close();
+    x.open("FilterNetlines", {{"enabled", onOff(d.filterNetlines)}});
+    for (auto& n : d.netlineNets) x.empty("NetRef", {{"name", n}});
+    x.close();
+    x.close();
+  }
+
   // --- rules ---
   // ObjectNet of a class (0 = all nets) or of a layer rule.
   void classObject(size_t c) {
@@ -949,6 +1003,10 @@ struct Writer {
     x.empty("Autoroute", {{"autoEqu", "None"}});
     x.empty("Labels", {{"rotateWithComp", "on"}});
     x.close();
+    if (b.display) {
+      x.blank();
+      writeDisplay(*b.display);
+    }
     x.close();
     std::string out = "\xEF\xBB\xBF" + std::move(x).str();
     return out;

@@ -43,6 +43,8 @@ class Writer {
   void close();
   // Self-closing element.
   void empty(std::string_view name, std::initializer_list<std::pair<std::string_view, std::string_view>> attrs = {});
+  // Self-closing element with a run-time list of attributes.
+  void emptyList(std::string_view name, const std::vector<std::pair<std::string, std::string>>& attrs);
   // <name>text</name> on one line.
   void textElement(std::string_view name, std::string_view text);
   std::string str() && { return std::move(out_); }
@@ -50,6 +52,7 @@ class Writer {
 
  private:
   void startTag(std::string_view name, std::initializer_list<std::pair<std::string_view, std::string_view>> attrs);
+  void attribute(std::string_view k, std::string_view v);
   void pad();
   std::string indent_, eol_, out_;
   std::vector<std::string> stack_;

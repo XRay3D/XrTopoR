@@ -3,6 +3,7 @@
 // mirrored about the footprint's vertical axis before rotation, like Specctra.
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <format>
 #include <iterator>
@@ -849,6 +850,94 @@ struct Reader {
     if (it->second.drill > 0) nc.viaDrill = it->second.drill;
   }
 
+  // --- display settings ---
+  static uint32_t color(std::string_view c) {
+    if (!c.empty() && c[0] == '#') c.remove_prefix(1);
+    std::string hex(c);
+    if (hex.size() == 3) hex = {hex[0], hex[0], hex[1], hex[1], hex[2], hex[2]};
+    return uint32_t(std::strtoul(hex.c_str(), nullptr, 16));
+  }
+
+  // Objects of a FilterNetlines / SetColor: net names (net groups expanded).
+  std::vector<std::string> netNames(const Element& e) {
+    std::vector<std::string> out;
+    for (auto& k : e.kids) {
+      if (k.is("NetRef")) out.emplace_back(k.attr("name"));
+      else if (k.is("NetGroupRef"))
+        if (auto it = netGroups.find(k.attr("name")); it != netGroups.end())
+          for (int n : it->second) out.push_back(b.nets[n].name);
+    }
+    return out;
+  }
+
+  void readDisplay(const Element& dc) {
+    DisplayControl d;
+    if (auto* v = dc.find("View")) {
+      d.viewScale = v->num("scale");
+      d.scrollX = v->num("scrollHorz");
+      d.scrollY = v->num("scrollVert");
+    }
+    if (auto* a = dc.find("ActiveLayer")) d.activeLayer = std::string(a->attr("name"));
+    if (auto* u = dc.find("Units")) d.units = std::string(u->attr("preference", "Metric"));
+    if (auto* c = dc.find("Colors")) {
+      for (auto& [k, v] : c->attrs) {
+        if (k == "colorScheme") d.colorScheme = v;
+        else if (k == "hilightRate") d.hilightRate = std::atoi(v.c_str());
+        else if (k == "darkRate") d.darkRate = std::atoi(v.c_str());
+        else d.colors[k] = color(v);
+      }
+    }
+    if (auto* s = dc.find("Show"))
+      for (auto& [k, v] : s->attrs) {
+        if (k == "displayScheme") d.displayScheme = v;
+        else d.show[k] = v == "on" || v == "true" || v == "1";
+      }
+    if (auto* g = dc.find("Grid")) {
+      d.gridColor = color(g->attr("gridColor", "#f2f2f2"));
+      d.gridDots = g->attr("gridKind", "Dots") != "Lines";
+      d.gridShow = g->flag("gridShow");
+      d.alignToGrid = g->flag("alignToGrid");
+      d.snapToAngle = g->flag("snapToAngle");
+      d.saveProportion = g->flag("saveProportion", true);
+      if (auto* sp = g->find("GridSpace")) {
+        // Grid steps are in database units of 0.0001 mil.
+        d.gridX = sp->num("x", 5000) * kNmPerMil / 10000.0;
+        d.gridY = sp->num("y", 5000) * kNmPerMil / 10000.0;
+      }
+    }
+    if (auto* lv = dc.find("LayersVisualOptions"))
+      for (auto* lo : lv->findAll("LayerOptions")) {
+        LayerDisplay l;
+        if (auto* r = lo->find("LayerRef")) l.layer = std::string(r->attr("name"));
+        if (auto* c = lo->find("Colors")) {
+          l.details = color(c->attr("details", "#c0c0c0"));
+          l.pads = color(c->attr("pads", "#c0c0c0"));
+          l.fix = color(c->attr("fix", "#808080"));
+        }
+        if (auto* s = lo->find("Show")) {
+          l.visible = s->flag("visible");
+          l.showDetails = s->flag("details", true);
+          l.showPads = s->flag("pads", true);
+        }
+        d.layers.push_back(std::move(l));
+      }
+    if (auto* cn = dc.find("ColorNets")) {
+      d.colorNets = cn->flag("enabled", true);
+      d.colorizeWire = cn->flag("colorizeWire", true);
+      d.colorizePad = cn->flag("colorizePad", true);
+      d.colorizeCopper = cn->flag("colorizeCopper", true);
+      d.colorizeVia = cn->flag("colorizeVia", true);
+      d.colorizeNetline = cn->flag("colorizeNetline", true);
+      for (auto* sc : cn->findAll("SetColor"))
+        for (auto& n : netNames(*sc)) d.netColors.push_back({n, color(sc->attr("color", "#ff0000"))});
+    }
+    if (auto* fn = dc.find("FilterNetlines")) {
+      d.filterNetlines = fn->flag("enabled");
+      d.netlineNets = netNames(*fn);
+    }
+    b.display = std::move(d);
+  }
+
   // --- connectivity ---
   void readConnectivity(const Element& cn) {
     if (auto* vias = cn.find("Vias"))
@@ -1007,6 +1096,7 @@ Result<BoardPtr> readFst(const std::string& text, const std::string& path) {
   if (auto* rules = root.find("Rules")) r.readRules(*rules);
   else r.applyVia(b->netClasses[0], r.firstViastack);
   if (auto* cn = root.find("Connectivity")) r.readConnectivity(*cn);
+  if (auto* dc = root.find("DisplayControl")) r.readDisplay(*dc);
   // Plane layers: board-wide zones of their net, poured right away (TopoR shows them solid).
   size_t zonesBefore = b->zones.size();
   addPlaneZones(*b);

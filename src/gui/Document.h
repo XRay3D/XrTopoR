@@ -1,5 +1,5 @@
 #pragma once
-// Editable board document: the Board, per-layer view state, selection and the undo stack.
+// Editable board document: the Board, its display settings, selection and the undo stack.
 #include <QColor>
 #include <QObject>
 #include <QUndoStack>
@@ -13,9 +13,21 @@
 
 namespace xr::gui {
 
-struct LayerView {
-  bool visible = true;
-  QColor color;
+// «Фильтр выделения»: kinds of objects a click may select.
+enum SelFilter : uint32_t {
+  SelComponents = 1 << 0,
+  SelPins = 1 << 1,
+  SelCompDetails = 1 << 2,
+  SelCoppers = 1 << 3,
+  SelWires = 1 << 4,
+  SelVias = 1 << 5,
+  SelNetlines = 1 << 6,
+  SelViolations = 1 << 7,
+  SelTexts = 1 << 8,
+  SelKeepouts = 1 << 9,
+  SelBoard = 1 << 10,
+  SelMechDetails = 1 << 11,
+  SelAll = (1 << 12) - 1,
 };
 
 // Everything the user can edit, copied whole for undo (boards of this class are small enough).
@@ -50,7 +62,18 @@ class Document : public QObject {
   Unit unit() const { return unit_; }
   void setUnit(Unit u);
 
-  std::vector<LayerView>& layerViews() { return layerViews_; }
+  // Display settings of the board (saved with it in .fst). Call displayChanged() after editing them.
+  DisplayControl& display() { return board_->display.value(); }
+  const DisplayControl& display() const { return board_->display.value(); }
+  void displayChanged() { emit layersChanged(); }
+  // Visible copper/technical layer, with «Только активный слой» and the layer groups applied.
+  bool layerVisible(LayerId l) const;
+  QColor color(const std::string& name, uint32_t def) const;
+  QColor layerColor(LayerId l) const;  // details colour of a layer
+
+  uint32_t selectionFilter() const { return selFilter_; }
+  void setSelectionFilter(uint32_t f);
+
   LayerId activeLayer() const { return activeLayer_; }
   void setActiveLayer(LayerId l);
 
@@ -83,12 +106,13 @@ class Document : public QObject {
   void layersChanged();
   void drcChanged();
   void unitChanged();
+  void selectionFilterChanged();
 
  private:
   std::unique_ptr<Board> board_;
   QString path_;
   QUndoStack undo_;
-  std::vector<LayerView> layerViews_;
+  uint32_t selFilter_ = SelAll;
   LayerId activeLayer_ = 0;
   Unit unit_ = Unit::Mm;
   std::optional<SpatialIndex> index_;

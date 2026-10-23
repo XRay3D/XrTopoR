@@ -26,6 +26,7 @@
 
 #include "core/ZoneFill.h"
 #include "gui/AppSettings.h"
+#include "gui/DisplayPanel.h"
 #include "gui/ModeBar.h"
 #include "gui/Panels.h"
 #include "io/BoardIO.h"
@@ -110,6 +111,9 @@ MainWindow::MainWindow()
   connect(view_, &BoardView::viewChanged, this, [this] {
     (*cmds_)["Accel_ToggleNetlines"]->setChecked(view_->ratsnestVisible());
     (*cmds_)["Accel_ToggleActiveLayerOnly"]->setChecked(view_->onlyActiveLayer());
+    bool snap = doc_->hasBoard() && doc_->display().alignToGrid;
+    stGrid_->setText(snap ? "Grid:on" : "Grid:off");
+    (*cmds_)["Accel_ToogleGrid"]->setChecked(snap);
   });
   connect(doc_, &Document::boardReplaced, this, [this] {
     cmds_->setBoardOpen(doc_->hasBoard());
@@ -175,6 +179,30 @@ void MainWindow::bindCommands() {
   c.bind("Accel_ToggleMetalLayers", [this] { view_->toggleMetalLayers(); });
   c.bind("Accel_ToggleNetlines", [this] { view_->setRatsnestVisible(!view_->ratsnestVisible()); });
   c.bind("Accel_ToggleActiveLayerOnly", [this] { view_->setOnlyActiveLayer(!view_->onlyActiveLayer()); });
+  auto toggleShow = [this](const char* flag, bool def) {
+    return [this, flag, def] {
+      if (!doc_->hasBoard()) return;
+      doc_->display().show[flag] = !doc_->display().flag(flag, def);
+      doc_->displayChanged();
+    };
+  };
+  c.bind("Accel_TogglePadDetails", toggleShow("showMetalPads", true));
+  c.bind("Accel_ToggleWires", toggleShow("showWires", true));
+  c.bind("Accel_ToggleThinWires", toggleShow("showThinWires", false));
+  c.bind("Accel_ToggleCoppers", toggleShow("showCoppers", true));
+  c.bind("Accel_ToggleKeepouts", toggleShow("showKeepouts", true));
+  c.bind("Accel_ToggleGrid", [this] {
+    doc_->display().gridShow = !doc_->display().gridShow;
+    doc_->displayChanged();
+  });
+  c.bind("Accel_ToogleGrid", [this] {
+    doc_->display().alignToGrid = !doc_->display().alignToGrid;
+    doc_->displayChanged();
+  });
+  for (int i = 0; i < 20; ++i) {
+    c.bind(QString("Accel_ColorScheme_%1").arg(i), [this, i] { display_->applyColorScheme(i); });
+    c.bind(QString("Accel_VisibilityScheme_%1").arg(i), [this, i] { display_->applyViewScheme(i); });
+  }
 
   // Дизайн
   c.bind("Cmd_Summary", [this] { showSummary(); });
@@ -330,8 +358,9 @@ void MainWindow::buildDocks() {
   auto* output = addDock("Output_View", tr("Окно сообщений"), new DrcPanel(doc_, view_, this), Qt::BottomDockWidgetArea,
                          "Accel_ViewOutput");
   splitDockWidget(props, output, Qt::Horizontal);
-  auto* display = addDock("display_control", tr("Управление отображением"), new LayersPanel(doc_, this),
-                          Qt::RightDockWidgetArea, "Accel_ViewDispCtrl");
+  display_ = new DisplayPanel(doc_, this);
+  auto* display = addDock("display_control", tr("Управление отображением"), display_, Qt::RightDockWidgetArea,
+                          "Accel_ViewDispCtrl");
   // TopoR default sizes.
   resizeDocks({projectDock, display}, {229, 227}, Qt::Horizontal);
   resizeDocks({props}, {146}, Qt::Vertical);
