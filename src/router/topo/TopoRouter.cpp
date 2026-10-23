@@ -863,13 +863,22 @@ std::vector<int> Router::realizeAll() {
     rw.layer = layers_[w.li];
     rw.width = w.width;
     rw.clearance = w.clr;
+    // The sketch follows the chords through the triangle centroids: crossing points alone can be
+    // collinear with pad centres (rows of THT pads), which is ambiguous for the realiser.
+    auto centroid = [&](int t) {
+      const MTri& T = m_.tris[t];
+      return (P(T.v[0]) + P(T.v[1]) + P(T.v[2])) / 3.0;
+    };
     rw.sketch.push_back(P(w.v0));
-    for (int cid : w.cids) {
+    for (size_t i = 0; i < w.cids.size(); ++i) {
+      if (i < w.tris.size()) rw.sketch.push_back(centroid(w.tris[i]));
+      int cid = w.cids[i];
       int e = s_.crossings[cid].edge;
       const auto& list = s_.cross[w.li, e];
       auto pos = std::ranges::find(list, cid) - list.begin();
       rw.sketch.push_back(intervalPoint(e, (double(pos) + 1) / (double(list.size()) + 1)));
     }
+    if (w.cids.size() < w.tris.size()) rw.sketch.push_back(centroid(w.tris[w.cids.size()]));
     rw.sketch.push_back(P(w.v1));
     wires.push_back(std::move(rw));
   }
@@ -1038,7 +1047,7 @@ RouterResult Router::run() {
   std::optional<Snapshot> bestGeom;
   presFac_ = 8;
   hardCap_ = false;
-  for (int round = 0; round <= o_.maxPasses && !std::getenv("XR_SKETCH"); ++round) {
+  for (int round = 0; round <= o_.maxPasses && !std::getenv("XR_SKETCH") && !std::getenv("XR_NOFEEDBACK"); ++round) {
     auto conflicts = checkRealized(tracks0, trackWire);
     res_.log.push_back(std::format("geometry round {}: {} conflict(s)", round, conflicts.size()));
     if (!bestGeom || conflicts.size() < bestGeom->conflicts)

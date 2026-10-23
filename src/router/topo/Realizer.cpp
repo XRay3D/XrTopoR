@@ -126,7 +126,10 @@ std::vector<EdgeHit> crossings(const CDT& cdt, const Polyline& sk) {
     if ((q - p).len2() < 1) continue;
     int entry = -1;
     for (int guard = 0; guard < 100000; ++guard) {
-      if (f == nullptr || cdt.is_infinite(f)) return out;
+      if (f == nullptr || cdt.is_infinite(f)) {
+        if (std::getenv("XR_DEBUG6")) std::println(stderr, "walk left the triangulation after {} hits", out.size());
+        return out;
+      }
       Vec2 a0 = P(f->vertex(0)), a1 = P(f->vertex(1)), a2 = P(f->vertex(2));
       if (orient(a0, a1, q) >= 0 && orient(a1, a2, q) >= 0 && orient(a2, a0, q) >= 0) break;
       int exit = -1;
@@ -136,7 +139,12 @@ std::vector<EdgeHit> crossings(const CDT& cdt, const Polyline& sk) {
         double oa = orient(p, q, a), ob = orient(p, q, b);
         if (orient(a, b, q) < 0 && ((oa >= 0 && ob <= 0) || (oa <= 0 && ob >= 0))) exit = i;
       }
-      if (exit < 0) return out;
+      if (exit < 0) {
+        if (std::getenv("XR_DEBUG6"))
+          std::println(stderr, "walk stuck at segment {} ({:.3f},{:.3f})->({:.3f},{:.3f}) after {} hits", s, p.x / 1e6,
+                       p.y / 1e6, q.x / 1e6, q.y / 1e6, out.size());
+        return out;
+      }
       auto va = f->vertex((exit + 1) % 3), vb = f->vertex((exit + 2) % 3);
       Vec2 a = P(va), b = P(vb);
       double den = (b - a).cross(q - p);
@@ -242,7 +250,10 @@ LayerObstacles collect(const Board& b, LayerId layer, const std::vector<RealVia>
 // the required spacing to the end obstacles and to the other wires crossing the same edge.
 struct Slot {
   double lo = 0, hi = 0;  // distances from u
-  double ru = 0, rv = 0;  // bend radii around u and v implied by the slot bounds
+  // Bend circles implied by the slot bounds: around the obstacle itself (packed stack) or around
+  // the inner wire's actual crossing point when that is what pushes the bound out.
+  Vec2 cu, cv;
+  double ru = 0, rv = 0;
 };
 
 struct FunnelApex {
@@ -306,16 +317,30 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
   std::vector<std::vector<EdgeHit>> hits(NW);
   std::vector<std::vector<Slot>> slots(NW);
   std::map<LayerId, LayerObstacles> obstacles;
+  std::map<LayerId, std::map<std::pair<int, int>, std::vector<std::pair<int, int>>>> edgeLists;
   for (auto&& [layer, ids] : byLayer) {
     LayerObstacles& ob = obstacles.emplace(layer, collect(b, layer, vias, opt)).first->second;
     auto cdt = triangulate(ob, kNoNet);
-    std::map<std::pair<int, int>, std::vector<std::pair<int, int>>> onEdge;  // edge -> (wire, hit index)
+    auto& onEdge = edgeLists[layer];  // edge -> (wire, hit index)
     for (int wi : ids) {
       if (cdt->number_of_vertices() >= 3) hits[wi] = crossings(*cdt, wires[wi].sketch);
       slots[wi].resize(hits[wi].size());
       for (int k = 0; k < int(hits[wi].size()); ++k) onEdge[{hits[wi][k].u, hits[wi][k].v}].push_back({wi, k});
     }
-    for (auto& [uv, list] : onEdge) {
+  }
+  // Bend radius each wire actually uses around each obstacle (merged over the fan); the stacks of
+  // outer wires must build on it, so slots and bends are iterated.
+  std::vector<std::flat_map<int, double>> bendR(NW);
+  std::vector<std::vector<Circle>> bendsOf(NW);
+  std::vector<std::vector<Vec2>> tinOf(NW), toutOf(NW);
+  // Where each wire's realised path actually crosses each of its edges (distance from u), from the
+  // previous round: outer wires stack on these rather than on the packed minimum.
+  std::vector<std::vector<double>> actual(NW);
+  for (int wi = 0; wi < NW; ++wi) actual[wi].assign(hits[wi].size(), -1.0);
+  for (int round = 0; round < 6; ++round) {
+  for (auto&& [layer, ids] : byLayer) {
+    const LayerObstacles& ob = obstacles.at(layer);
+    for (auto& [uv, list] : edgeLists[layer]) {
       const OPt& U = ob.pts[uv.first];
       const OPt& V = ob.pts[uv.second];
       double L = (V.p - U.p).len();
@@ -329,19 +354,57 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
       auto need = [&](const OPt& o, const RealWire& w) {
         return own(o, w) ? 0.0 : o.r + std::max(o.clr, double(w.clearance)) + kMargin + w.width / 2.0;
       };
+      auto usedR = [&](int wi, int o, double packed) {
+        auto it = bendR[wi].find(o);
+        return it != bendR[wi].end() ? std::max(packed, it->second) : packed;
+      };
+      auto actualFromU = [&](int k) { return actual[list[k].first][list[k].second]; };
+      Vec2 dir = L > 0 ? (V.p - U.p) / L : Vec2{};
+      std::vector<double> aCenter(n, 0), bCenter(n, 0);  // distance from u/v of the bend centre
+      std::vector<double> aR(n, 0), bR(n, 0);
       for (int k = 0; k < n; ++k) {
         const RealWire& w = wires[list[k].first];
-        a[k] = k == 0 ? need(U, w)
-                      : a[k - 1] + wires[list[k - 1].first].width / 2.0 +
-                            std::max(double(wires[list[k - 1].first].clearance), double(w.clearance)) + kMargin +
-                            w.width / 2.0;
+        if (k == 0) {
+          a[k] = need(U, w);
+          aR[k] = a[k];
+        } else {
+          int pw = list[k - 1].first;
+          // Stack on the inner wire (packed radius, or its actual crossing from the previous round),
+          // but never closer to the obstacle than the wire's own rule allows.
+          double spacing = wires[pw].width / 2.0 + std::max(double(wires[pw].clearance), double(w.clearance)) +
+                           kMargin + w.width / 2.0;
+          double packed = usedR(pw, uv.first, a[k - 1]) + spacing;
+          double act = actualFromU(k - 1) >= 0 ? actualFromU(k - 1) + spacing : -1;
+          a[k] = std::max({packed, act, need(U, w)});
+          if (act > packed && act > need(U, w)) {
+            aCenter[k] = actualFromU(k - 1);  // bend around the inner wire's crossing point
+            aR[k] = spacing;
+          } else {
+            aR[k] = a[k];
+          }
+        }
       }
       for (int k = n - 1; k >= 0; --k) {
         const RealWire& w = wires[list[k].first];
-        bb[k] = k == n - 1 ? need(V, w)
-                           : bb[k + 1] + wires[list[k + 1].first].width / 2.0 +
-                                 std::max(double(wires[list[k + 1].first].clearance), double(w.clearance)) + kMargin +
-                                 w.width / 2.0;
+        if (k == n - 1) {
+          bb[k] = need(V, w);
+          bR[k] = bb[k];
+        } else {
+          int nw = list[k + 1].first;
+          double spacing = wires[nw].width / 2.0 + std::max(double(wires[nw].clearance), double(w.clearance)) +
+                           kMargin + w.width / 2.0;
+          double packed = usedR(nw, uv.second, bb[k + 1]) + spacing;
+          // Only outer wires adapt to inner ones (monotone: paths move outward only); the v side
+          // stays packed so that the two directions cannot push each other back and forth.
+          double act = -1;
+          bb[k] = std::max({packed, act, need(V, w)});
+          if (act > packed && act > need(V, w)) {
+            bCenter[k] = L - actualFromU(k + 1);
+            bR[k] = spacing;
+          } else {
+            bR[k] = bb[k];
+          }
+        }
       }
       double slack = L - a[n - 1] - bb[n - 1];
       for (int k = 0; k < n; ++k) {
@@ -356,28 +419,22 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
           sl.lo = a[k];
           sl.hi = L - bb[k];
         }
-        sl.ru = sl.lo;
-        sl.rv = L - sl.hi;
+        // Bend circles through the slot bounds.
+        sl.cu = U.p + dir * aCenter[k];
+        sl.ru = slack <= 0 ? sl.lo - aCenter[k] : aR[k];
+        sl.cv = V.p - dir * bCenter[k];
+        sl.rv = slack <= 0 ? (L - sl.hi) - bCenter[k] : bR[k];
       }
     }
   }
 
   // Taut path of every wire inside its slots: funnel over the slot segments, apexes become bends
   // around the edge end obstacles with the slot radius, consecutive bends around one obstacle merge.
+  bool radiiChanged = false;
   for (int wi = 0; wi < NW; ++wi) {
     const RealWire& w = wires[wi];
     const LayerObstacles& ob = obstacles.at(w.layer);
-    auto emitSeg = [&](Vec2 p, Vec2 q) {
-      Track t;
-      t.a = Point(p);
-      t.b = Point(q);
-      t.width = w.width;
-      t.layer = w.layer;
-      t.net = w.net;
-      if (t.a == t.b) return;
-      b.tracks.push_back(t);
-      st.trackWire.push_back(wi);
-    };
+    bendsOf[wi].clear();
     if (w.sketch.size() < 2) continue;
     std::vector<std::pair<Vec2, Vec2>> portals;
     portals.push_back({w.sketch.front(), w.sketch.front()});
@@ -401,16 +458,24 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
       bool atU = (ap.side > 0) == h.uLeft;  // the apex endpoint lies on u's side of the slot
       int o = atU ? h.u : h.v;
       double R = atU ? sl.ru : sl.rv;
-      if (!cs.empty() && cs.back().obst == o && (cs.back().rho > 0) == (ap.side > 0)) {
+      Vec2 c = atU ? sl.cu : sl.cv;
+      if (!cs.empty() && cs.back().obst == o && (cs.back().c - c).len2() < 1 && (cs.back().rho > 0) == (ap.side > 0)) {
         cs.back().rho = ap.side * std::max(std::abs(cs.back().rho), R);
       } else {
-        cs.push_back({ob.pts[o].p, ap.side * R, o, ap.portal});
+        cs.push_back({c, ap.side * R, o, ap.portal});
       }
     }
     cs.push_back({w.sketch.back(), 0, -1, int(portals.size()) - 1});
     if (std::getenv("XR_DEBUG2")) {
       std::print(stderr, "wire {} net {} sketch {} hits {} bends:", wi, b.nets[w.net].name, w.sketch.size(), hits[wi].size());
       for (auto& c : cs) std::print(stderr, " [o{} rho{:+.3f} ({:.3f},{:.3f})]", c.obst, c.rho / 1e6, c.c.x / 1e6, c.c.y / 1e6);
+      std::print(stderr, "\n  hits:");
+      for (int k = 0; k < int(hits[wi].size()); ++k) {
+        const EdgeHit& h = hits[wi][k];
+        std::print(stderr, " [{}-{} t{:.2f} lo{:.3f} hi{:.3f} U({:.2f},{:.2f}) V({:.2f},{:.2f})]", h.u, h.v, h.t,
+                   slots[wi][k].lo / 1e6, slots[wi][k].hi / 1e6, ob.pts[h.u].p.x / 1e6, ob.pts[h.u].p.y / 1e6,
+                   ob.pts[h.v].p.x / 1e6, ob.pts[h.v].p.y / 1e6);
+      }
       std::println(stderr, "");
     }
 
@@ -478,13 +543,19 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
           if (hi < 1 || hi > int(hits[wi].size())) continue;
           const EdgeHit& h = hits[wi][hi - 1];
           const Slot& sl = slots[wi][hi - 1];
-          for (auto [o, R] : {std::pair{h.u, sl.ru}, std::pair{h.v, sl.rv}}) {
-            if (R <= 0 || dropped.contains(o) || std::ranges::any_of(cs, [&](const Circle& x) { return x.obst == o; }))
+          for (auto [o, R, c] : {std::tuple{h.u, sl.ru, sl.cu}, std::tuple{h.v, sl.rv, sl.cv}}) {
+            if (R <= 0 || dropped.contains(o) ||
+                std::ranges::any_of(cs, [&](const Circle& x) { return x.obst == o && (x.c - c).len2() < 1; }))
               continue;
-            Vec2 c = ob.pts[o].p;
             double t = (c - p).dot(q - p) / (q - p).len2();
             if (t <= 0 || t >= 1) continue;
             double pen = R - distPointSegment(c, p, q);
+            // Sides incident to the obstacle point (pad edges, outline, stub wires) with their own radius.
+            if ((c - ob.pts[o].p).len2() < 1) {
+              double extra = R - ob.pts[o].r;  // clearance + half width + margin + nesting
+              for (const Side& sd : ob.adj[o])
+                pen = std::max(pen, sd.r + extra - distSegmentSegment(p, q, c, ob.pts[sd.to].p));
+            }
             if (pen > worst) {
               worst = pen;
               at = int(k) + 1;
@@ -496,6 +567,91 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
       if (at < 0) break;
       cs.insert(cs.begin() + at, ins);
     }
+    if (std::getenv("XR_DEBUG2")) {
+      std::print(stderr, "  final {}:", wi);
+      for (size_t k = 0; k < cs.size(); ++k)
+        std::print(stderr, " [o{} rho{:+.3f} in({:.3f},{:.3f}) out({:.3f},{:.3f})]", cs[k].obst, cs[k].rho / 1e6,
+                   ti[k].x / 1e6, ti[k].y / 1e6, to[k].x / 1e6, to[k].y / 1e6);
+      std::println(stderr, "");
+    }
+    for (const Circle& c : cs)
+      if (c.obst >= 0) {
+        double r = std::abs(c.rho);
+        auto it = bendR[wi].find(c.obst);
+        if (it == bendR[wi].end() || r > it->second + 1) {
+          bendR[wi][c.obst] = r;
+          radiiChanged = true;
+        }
+      }
+    bendsOf[wi] = cs;
+    tinOf[wi] = ti;
+    toutOf[wi] = to;
+    // Realised centre line as a polyline (arcs tessellated) and its crossings of the wire's edges.
+    Polyline path;
+    {
+      size_t n = cs.size();
+      path.push_back(cs[0].c);
+      for (size_t k = 0; k + 1 < n; ++k) {
+        Vec2 p = (k == 0) ? cs[0].c : to[k];
+        Vec2 q = (k + 1 == n - 1) ? cs[n - 1].c : ti[k + 1];
+        path.push_back(p);
+        path.push_back(q);
+        if (k + 1 < n - 1) {
+          double sw = sweepOf(cs[k + 1], ti[k + 1], to[k + 1]);
+          auto g = ArcGeom::fromCenter(cs[k + 1].c, ti[k + 1], sw);
+          if (g.valid)
+            for (auto& v : g.tessellate(20000)) path.push_back(v);
+        }
+      }
+      path.push_back(cs[n - 1].c);
+    }
+    for (int k = 0; k < int(hits[wi].size()); ++k) {
+      const EdgeHit& h = hits[wi][k];
+      Vec2 U = ob.pts[h.u].p, V = ob.pts[h.v].p;
+      double L = (V - U).len();
+      double best = -1;
+      for (size_t i = 1; i < path.size(); ++i) {
+        Vec2 p = path[i - 1], q = path[i];
+        double den = (V - U).cross(q - p);
+        if (std::abs(den) < 1e-9) continue;
+        double s = (p - U).cross(q - p) / den;  // along U->V
+        double r = (p - U).cross(V - U) / den;  // along p->q
+        if (s < 0 || s > 1 || r < 0 || r > 1) continue;
+        double d = s * L;
+        double prev = actual[wi][k];
+        // Keep the crossing nearest to the previous estimate (or the slot) when there are several.
+        double ref = prev >= 0 ? prev : (slots[wi][k].lo + slots[wi][k].hi) / 2;
+        if (best < 0 || std::abs(d - ref) < std::abs(best - ref)) best = d;
+      }
+      // Experimental (XR_ACTUAL=<rounds>): outer wires stack on the inner wires' actual crossings.
+      static const int kActualRounds = std::getenv("XR_ACTUAL") ? std::atoi(std::getenv("XR_ACTUAL")) : 0;
+      if (round < kActualRounds && best >= 0) {
+        if (std::abs(best - actual[wi][k]) > 1000) radiiChanged = true;
+        actual[wi][k] = best;
+      }
+    }
+  }
+  if (!radiiChanged) break;
+  st.droppedApexes = 0;
+  }  // rounds
+
+  for (int wi = 0; wi < NW; ++wi) {
+    const RealWire& w = wires[wi];
+    auto emitSeg = [&](Vec2 p, Vec2 q) {
+      Track t;
+      t.a = Point(p);
+      t.b = Point(q);
+      t.width = w.width;
+      t.layer = w.layer;
+      t.net = w.net;
+      if (t.a == t.b) return;
+      b.tracks.push_back(t);
+      st.trackWire.push_back(wi);
+    };
+    const auto& cs = bendsOf[wi];
+    const auto& ti = tinOf[wi];
+    const auto& to = toutOf[wi];
+    if (cs.size() < 2) continue;
     size_t n = cs.size();
     Vec2 cur = cs[0].c;
     for (size_t k = 0; k + 1 < n; ++k) {

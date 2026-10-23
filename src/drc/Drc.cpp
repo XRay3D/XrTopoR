@@ -119,7 +119,24 @@ std::vector<DrcViolation> runDrc(const Board& b, const DrcOptions& opt) {
         for (auto& s1 : shapes)
           for (auto& s2 : cs) {
             double d = s1.distance(s2);
-            if (d < best) { best = d; where = (s1.center() + s2.center()) * 0.5; }
+            if (d < best) {
+              best = d;
+              // Marker near the actual contact: the closest of the shapes' key points to the other shape.
+              auto keyPts = [](const Shape& s) {
+                if (s.kind == Shape::Kind::Point) return Polyline{s.a};
+                if (s.kind == Shape::Kind::Segment) return Polyline{s.a, (s.a + s.b) * 0.5, s.b};
+                return s.poly;
+              };
+              double bd = std::numeric_limits<double>::max();
+              for (auto& p : keyPts(s1)) {
+                double dd = s2.distance(p);
+                if (dd < bd) { bd = dd; where = p; }
+              }
+              for (auto& p : keyPts(s2)) {
+                double dd = s1.distance(p);
+                if (dd < bd) { bd = dd; where = p; }
+              }
+            }
           }
         if (best >= req - kDrcTolerance) return;
         DrcViolation v;
