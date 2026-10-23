@@ -1,7 +1,11 @@
 #include "gui/MainWindow.h"
 
 #include <QApplication>
+#include <QDialog>
 #include <QDockWidget>
+#include <QFontDatabase>
+#include <QPlainTextEdit>
+#include <QVBoxLayout>
 #include <QFileDialog>
 #include <QFutureWatcher>
 #include <QInputDialog>
@@ -16,6 +20,7 @@
 
 #include "gui/Panels.h"
 #include "io/BoardIO.h"
+#include "io/Report.h"
 #include "io/gerber/GerberWriter.h"
 #include "io/svg/SvgWriter.h"
 #include "core/ZoneFill.h"
@@ -56,6 +61,27 @@ void MainWindow::buildMenus() {
   file->addAction(tr("Import routing (.ses)..."), this, &MainWindow::importSes);
   file->addAction(tr("Export Gerber/Excellon..."), this, &MainWindow::exportGerber);
   file->addAction(tr("Export SVG..."), this, &MainWindow::exportSvg);
+  file->addAction(tr("Export BOM (CSV)..."), this, [this] {
+    if (!doc_->hasBoard()) return;
+    QString f = QFileDialog::getSaveFileName(this, tr("Export BOM"), {}, tr("CSV (*.csv)"));
+    if (f.isEmpty()) return;
+    if (auto r = io::writeFile(f.toStdString(), io::bomCsv(*doc_->board())); !r)
+      QMessageBox::warning(this, tr("BOM"), QString::fromStdString(r.error()));
+  });
+  file->addAction(tr("Routing report..."), this, [this] {
+    if (!doc_->hasBoard()) return;
+    auto* dlg = new QDialog(this);
+    dlg->setWindowTitle(tr("Routing report"));
+    dlg->resize(760, 600);
+    auto* lay = new QVBoxLayout(dlg);
+    auto* text = new QPlainTextEdit(dlg);
+    text->setReadOnly(true);
+    text->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+    text->setPlainText(QString::fromStdString(io::routingReport(*doc_->board())));
+    lay->addWidget(text);
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->show();
+  });
   file->addSeparator();
   file->addAction(tr("&Quit"), QKeySequence::Quit, qApp, &QApplication::quit);
 

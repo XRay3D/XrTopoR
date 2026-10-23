@@ -11,6 +11,7 @@
 #include "core/ZoneFill.h"
 #include "drc/Drc.h"
 #include "io/BoardIO.h"
+#include "io/Report.h"
 #include "io/gerber/GerberWriter.h"
 #include "io/svg/SvgWriter.h"
 #include "router/topo/Optimizer.h"
@@ -34,6 +35,7 @@ void usage() {
       "  reshape    <board> -o <out>              recompute track shapes (TopoR F5) for all tracks\n"
       "  optimize   <board> -o <out> [--iterations N] [--step MM] [--components]   move vias/parts (F7)\n"
       "  fill       <board> -o <out> [--no-thermals]  pour copper zones\n"
+      "  report     <board> [--bom out.csv]          routing statistics per layer and net, BOM\n"
       "boards: .kicad_pcb, .dsn, P-CAD ASCII .pcb");
 }
 
@@ -139,6 +141,14 @@ int main(int argc, char** argv) {
     return cmdDrc(b, m.empty() ? 50 : std::stoul(std::string(m)));
   }
   if (cmd == "route") return cmdRoute(b, a);
+  if (cmd == "report") {
+    std::print("{}", io::routingReport(b));
+    if (auto p = a.opt("--bom"); !p.empty()) {
+      if (auto r = io::writeFile(std::string(p), io::bomCsv(b)); !r) return fail(r.error());
+      std::println("BOM written to {}", p);
+    }
+    return 0;
+  }
   if (cmd == "fill" && !a.opt("-o").empty()) {
     ZoneFillOptions zo;
     zo.thermals = !a.flag("--no-thermals");

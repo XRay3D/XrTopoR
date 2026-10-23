@@ -17,6 +17,7 @@ target_link_libraries(xrcore PUBLIC xrgeom Boost::headers)
 add_library(xrio STATIC
   io/BoardIO.cpp
   io/Encoding.cpp
+  io/Report.cpp
   io/kicad/KicadReader.cpp
   io/kicad/KicadWriter.cpp
   io/dsn/DsnReader.cpp
