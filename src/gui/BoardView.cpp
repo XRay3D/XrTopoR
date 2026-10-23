@@ -638,7 +638,7 @@ void BoardView::routeStart(const Pick& pk, Vec2 at) {
       for (LayerId l : b.copperLayers())
         if ((lm >> l) & 1) { routeLayer_ = l; doc_->setActiveLayer(l); break; }
   }
-  routeWidth_ = b.classOf(routeNet_).trackWidth;
+  routeWidth_ = b.trackWidth(routeNet_, routeLayer_);
   routeTracks_.clear();
   routeVias_.clear();
   routeLast_ = at;
@@ -735,6 +735,7 @@ void BoardView::routeAddVia() {
   auto it = std::ranges::find(cu, routeLayer_);
   size_t idx = it == cu.end() ? 0 : size_t(it - cu.begin());
   routeLayer_ = cu[(idx + 1) % cu.size()];
+  routeWidth_ = b.trackWidth(routeNet_, routeLayer_);
   doc_->setActiveLayer(routeLayer_);
   update();
 }

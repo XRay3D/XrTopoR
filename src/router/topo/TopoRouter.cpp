@@ -154,6 +154,7 @@ class Router {
   // Current search context.
   int net_ = kNoNet;
   double width_ = 0, clr_ = 0, viaR_ = 0, viaClr_ = 0;
+  std::vector<double> widthL_, clrL_;  // the net's width and clearance on each routing layer
   Coord viaDia_ = 0, viaDrill_ = 0;
   std::vector<int> treeStamp_;
   int stamp_ = 0;
@@ -317,6 +318,12 @@ void Router::setNet(int net) {
   const NetClass& nc = b_.classOf(net);
   width_ = double(nc.trackWidth);
   clr_ = double(nc.clearance);
+  widthL_.assign(NL_, 0);
+  clrL_.assign(NL_, 0);
+  for (int li = 0; li < NL_; ++li) {
+    widthL_[li] = double(b_.trackWidth(net, layers_[li]));
+    clrL_[li] = double(b_.clearance(net, layers_[li]));
+  }
   viaDia_ = nc.viaDiameter;
   viaDrill_ = nc.viaDrill;
   viaR_ = nc.viaDiameter / 2.0;
@@ -331,17 +338,17 @@ std::optional<ObstInfo> Router::obst(int v, int li, int net) const {
       const Pad& p = b_.pads[mv.pad];
       bool on = p.onLayer(layers_[li]) || (p.drill > 0 && !p.copper);
       if (!on || (net != kNoNet && p.net == net)) return std::nullopt;
-      return ObstInfo{&padShape_[mv.pad], double(b_.classOf(p.net).clearance), mv.pad};
+      return ObstInfo{&padShape_[mv.pad], double(b_.clearance(p.net, layers_[li])), mv.pad};
     }
     case VKind::ViaSite: {
       int vn = s_.viaNet[v];
       if (vn < 0 || vn == net) return std::nullopt;
-      return ObstInfo{&vshape_[v], double(b_.classOf(vn).clearance), -2 - v};
+      return ObstInfo{&vshape_[v], double(b_.clearance(vn, layers_[li])), -2 - v};
     }
     case VKind::FixedVia: {
       const Via& bv = b_.vias[mv.fixedVia];
       if ((net != kNoNet && bv.net == net) || !bv.onLayer(layers_[li])) return std::nullopt;
-      return ObstInfo{&vshape_[v], double(b_.classOf(bv.net).clearance), -2 - v};
+      return ObstInfo{&vshape_[v], double(b_.clearance(bv.net, layers_[li])), -2 - v};
     }
     case VKind::Outline: return ObstInfo{&vshape_[v], double(b_.edgeClearance), -1};
   }
@@ -372,13 +379,14 @@ double Router::crossCost(int e, int li, bool& blocked) const {
   bool ou, ov;
   double free = freeLength(e, li, net_, cu, ou, cv, ov);
   const EdgeUse& u = s_.use[li, e];
-  double cc = std::max(u.maxC, clr_);
-  double ends = (ou ? std::max(cu, clr_) : 0) + (ov ? std::max(cv, clr_) : 0);
-  if (!relaxed_ && width_ + ends > free + 1) {
+  const double wl = widthL_[li], cl = clrL_[li];
+  double cc = std::max(u.maxC, cl);
+  double ends = (ou ? std::max(cu, cl) : 0) + (ov ? std::max(cv, cl) : 0);
+  if (!relaxed_ && wl + ends > free + 1) {
     blocked = true;
     return 0;
   }
-  double need = u.sumW + width_ + u.n * cc + ends + (u.n + 1) * kRealizeMargin;
+  double need = u.sumW + wl + u.n * cc + ends + (u.n + 1) * kRealizeMargin;
   double over = need - free;
   double cost = hist_[li, e] * kUnit;
   if (over > 1 && !relaxed_) {
@@ -386,7 +394,7 @@ double Router::crossCost(int e, int li, bool& blocked) const {
       blocked = true;
       return 0;
     }
-    cost += presFac_ * kUnit * (1 + over / (width_ + clr_));
+    cost += presFac_ * kUnit * (1 + over / (wl + cl));
   }
   return cost;
 }
@@ -688,8 +696,8 @@ void Router::commit(const std::vector<SNode>& path, std::vector<int>& joinedPads
     w.net = net_;
     w.li = li;
     w.v0 = v0;
-    w.width = Coord(width_);
-    w.clr = Coord(clr_);
+    w.width = Coord(widthL_[li]);
+    w.clr = Coord(clrL_[li]);
     s_.wires.push_back(std::move(w));
     return int(s_.wires.size() - 1);
   };
@@ -979,7 +987,7 @@ std::vector<Router::Conflict> Router::checkRealized(size_t firstTrack, const std
   SpatialIndex idx;
   idx.build(b_);
   double maxClr = 0;
-  for (auto& nc : b_.netClasses) maxClr = std::max(maxClr, double(nc.clearance));
+  maxClr = std::max(maxClr, double(b_.maxClearance()));
   std::set<std::pair<int, int>> seen;
   for (size_t ti = firstTrack; ti < b_.tracks.size(); ++ti) {
     const Track& t = b_.tracks[ti];
@@ -998,7 +1006,7 @@ std::vector<Router::Conflict> Router::checkRealized(size_t firstTrack, const std
         wb = trackWire[o.index - firstTrack];
         if (wb < wa) return;  // each wire pair once
       }
-      double req = requiredClearance(b_, t.net, on);
+      double req = requiredClearance(b_, t.net, on, LayerMask(1) << t.layer);
       for (auto& s1 : shapes)
         for (auto& s2 : itemShapes(b_, o))
           if (s1.distance(s2) < req - 1) {

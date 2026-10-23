@@ -26,7 +26,7 @@ struct DrcOptions {
 
 std::vector<DrcViolation> runDrc(const Board& b, const DrcOptions& opt = {});
 // Required clearance between two nets (max of their class clearances).
-double requiredClearance(const Board& b, int netA, int netB);
+double requiredClearance(const Board& b, int netA, int netB, LayerMask layers = 0);
 const char* drcTypeName(DrcViolation::Type t);
 
 // Online check of a prospective copper shape: returns the worst (smallest) margin

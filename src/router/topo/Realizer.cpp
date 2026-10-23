@@ -201,7 +201,7 @@ LayerObstacles collect(const Board& b, LayerId layer, const std::vector<RealVia>
   LayerObstacles ob;
   auto inRegion = [&](const BBox& bb) { return !opt.region || opt.region->intersects(bb); };
   for (const Pad& pad : b.pads) {
-    double clr = double(b.classOf(pad.net).clearance);
+    double clr = double(b.clearance(pad.net, layer));
     if (!inRegion(pad.shapeGeom().bbox())) continue;
     if (!pad.onLayer(layer)) {
       if (pad.drill > 0 && !pad.copper) ob.add(pad.pos.v(), pad.drill / 2.0, clr, kNoNet);
@@ -226,8 +226,8 @@ LayerObstacles collect(const Board& b, LayerId layer, const std::vector<RealVia>
   }
   for (const Via& v : b.vias)
     if (v.onLayer(layer) && inRegion(Shape::circle(v.pos.v(), v.diameter / 2.0).bbox()))
-      ob.add(v.pos.v(), v.diameter / 2.0, double(b.classOf(v.net).clearance), v.net);
-  for (const RealVia& v : vias) ob.add(v.pos, v.diameter / 2.0, double(b.classOf(v.net).clearance), v.net);
+      ob.add(v.pos.v(), v.diameter / 2.0, double(b.clearance(v.net, layer)), v.net);
+  for (const RealVia& v : vias) ob.add(v.pos, v.diameter / 2.0, double(b.clearance(v.net, layer)), v.net);
   for (auto& loop : b.outline) {
     int first = int(ob.pts.size());
     int n = int(loop.size());
@@ -244,7 +244,7 @@ LayerObstacles collect(const Board& b, LayerId layer, const std::vector<RealVia>
         if (t.mid) tb.add(t.mid->v());
         if (!inRegion(tb.inflated(t.width))) continue;
       }
-      double r = t.width / 2.0, clr = double(b.classOf(t.net).clearance);
+      double r = t.width / 2.0, clr = double(b.clearance(t.net, layer));
       int prev = -1;
       for (Vec2 p : t.path(20000)) {
         int o = ob.add(p, r, clr, t.net);
@@ -762,7 +762,7 @@ RealizeStats reshapeTracks(Board& b, std::vector<char> chosen, std::vector<RealW
     w.net = t0.net;
     w.layer = t0.layer;
     w.width = t0.width;
-    w.clearance = b.classOf(t0.net).clearance;
+    w.clearance = b.clearance(t0.net, t0.layer);
     Point cur = from;
     int ti = start;
     w.sketch.push_back(cur.v());

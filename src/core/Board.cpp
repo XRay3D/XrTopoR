@@ -111,6 +111,31 @@ const NetClass& Board::classOf(int net) const {
   return netClasses.front();
 }
 
+Coord Board::trackWidth(int net, LayerId layer) const {
+  Coord w = classOf(net).trackWidth;
+  if (layer >= 0)
+    for (auto& r : layerRules)
+      if (r.width > 0 && (!r.layers || ((r.layers >> layer) & 1)) && (r.nets.empty() || std::ranges::contains(r.nets, net)))
+        w = r.width;
+  return w;
+}
+
+Coord Board::clearance(int net, LayerId layer) const {
+  Coord c = classOf(net).clearance;
+  if (layer >= 0)
+    for (auto& r : layerRules)
+      if (r.clearance > 0 && (!r.layers || ((r.layers >> layer) & 1)) && (r.nets.empty() || std::ranges::contains(r.nets, net)))
+        c = r.clearance;
+  return c;
+}
+
+Coord Board::maxClearance() const {
+  Coord m = 0;
+  for (auto& nc : netClasses) m = std::max(m, nc.clearance);
+  for (auto& r : layerRules) m = std::max(m, r.clearance);
+  return m;
+}
+
 int Board::findNetClass(const std::string& name) const {
   for (int i = 0; i < int(netClasses.size()); ++i)
     if (netClasses[i].name == name) return i;

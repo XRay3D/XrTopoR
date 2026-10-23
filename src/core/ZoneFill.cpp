@@ -123,8 +123,7 @@ ZoneFillStats fillZones(Board& b, const ZoneFillOptions& opt) {
     Zone& z = b.zones[zi];
     if (z.outline.size() < 3 || !selected(zi)) continue;
     ++st.zones;
-    const NetClass& zc = b.classOf(z.net);
-    double zoneClr = double(std::max(z.clearance, zc.clearance));
+    double zoneClr = double(std::max(z.clearance, b.clearance(z.net, z.layer)));
     BMulti area = toMulti(z.outline);
     if (!board.empty()) {
       BMulti tmp;
@@ -134,8 +133,7 @@ ZoneFillStats fillZones(Board& b, const ZoneFillOptions& opt) {
     if (area.empty()) continue;
     BBox zb;
     for (auto& p : z.outline) zb.add(p);
-    double maxClr = zoneClr;
-    for (auto& nc : b.netClasses) maxClr = std::max(maxClr, double(nc.clearance));
+    double maxClr = std::max(zoneClr, double(b.maxClearance()));
 
     std::vector<BMulti> holes;
     std::vector<std::pair<Vec2, const Pad*>> thermalPads;
@@ -150,7 +148,7 @@ ZoneFillStats fillZones(Board& b, const ZoneFillOptions& opt) {
         if (!(r.type == ItemType::Pad && z.padConnection == PadConnection::None)) return;
       }
       // Outlines are inscribed polygons: grow by the chord error so the true clearance holds.
-      double clr = std::max(zoneClr, double(b.classOf(net).clearance)) + opt.arcTolerance;
+      double clr = std::max(zoneClr, double(b.clearance(net, z.layer))) + opt.arcTolerance;
       for (auto& s : itemShapes(b, r)) holes.push_back(toMulti(s.inflated(clr).outline(opt.arcTolerance)));
     });
     // Already poured zones (higher priority) of other nets on this layer.
@@ -158,7 +156,7 @@ ZoneFillStats fillZones(Board& b, const ZoneFillOptions& opt) {
       if (oz == zi) break;
       const Zone& o = b.zones[oz];
       if (o.layer != z.layer || o.net == z.net) continue;
-      double clr = std::max(zoneClr, double(b.classOf(o.net).clearance)) + opt.arcTolerance;
+      double clr = std::max(zoneClr, double(b.clearance(o.net, z.layer))) + opt.arcTolerance;
       for (auto& f : o.filled) holes.push_back(toMulti(Shape::polygon(f, clr).outline(opt.arcTolerance)));
     }
     // Non-plated holes without copper are keep-outs on every layer.

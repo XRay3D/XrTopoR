@@ -45,6 +45,14 @@ struct Net {
   int netClass = 0;
 };
 
+// Layer-specific override of width/clearance for some nets (empty = all), applied in order.
+struct LayerRule {
+  std::vector<int> nets;
+  LayerMask layers = 0;  // 0 = all copper layers
+  Coord width = 0;       // 0 = keep
+  Coord clearance = 0;   // 0 = keep
+};
+
 enum class PadShapeKind { Circle, Rect, Oval, RoundRect, Polygon };
 
 struct PadShape {
@@ -140,6 +148,7 @@ struct Board {
   std::string name;
   std::vector<Layer> layers;
   std::vector<NetClass> netClasses{NetClass{}};
+  std::vector<LayerRule> layerRules;
   std::vector<Net> nets;
   std::vector<Component> components;
   std::vector<Pad> pads;
@@ -165,6 +174,10 @@ struct Board {
   int findNet(const std::string& name) const;
   int addNet(const std::string& name);  // returns existing index if present
   const NetClass& classOf(int net) const;
+  // Effective rules of a net on a copper layer (net class + layer rules); layer < 0 = class only.
+  Coord trackWidth(int net, LayerId layer) const;
+  Coord clearance(int net, LayerId layer) const;
+  Coord maxClearance() const;  // over all classes and layer rules
   int findNetClass(const std::string& name) const;
 
   int findComponent(const std::string& ref) const;

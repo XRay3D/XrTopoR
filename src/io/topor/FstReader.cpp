@@ -4,7 +4,12 @@
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <format>
+#include <iterator>
 #include <map>
+#include <optional>
+#include <set>
+#include <tuple>
 
 #include "core/ZoneFill.h"
 #include "io/topor/Fst.h"
@@ -628,14 +633,85 @@ struct Reader {
     }
   }
 
+  // --- groups ---
+  std::map<std::string, std::vector<int>, std::less<>> netGroups;
+  std::map<std::string, LayerMask, std::less<>> layerGroups;
+
+  void readGroups(const Element& g) {
+    // Groups may refer to groups defined later: resolve lazily with a recursion guard.
+    std::map<std::string, const Element*, std::less<>> netDefs, layerDefs;
+    if (auto* ng = g.find("NetGroups"))
+      for (auto* e : ng->findAll("NetGroup")) netDefs[std::string(e->attr("name"))] = e;
+    if (auto* lg = g.find("LayerGroups"))
+      for (auto* e : lg->findAll("LayerGroup")) layerDefs[std::string(e->attr("name"))] = e;
+    std::set<std::string, std::less<>> busy;
+    auto nets = [&](this auto& self, std::string_view name) -> std::vector<int> {
+      if (auto it = netGroups.find(name); it != netGroups.end()) return it->second;
+      auto d = netDefs.find(name);
+      if (d == netDefs.end() || !busy.emplace(name).second) return {};
+      std::vector<int> out;
+      for (auto& k : d->second->kids) {
+        if (k.is("NetRef")) out.push_back(b.addNet(std::string(k.attr("name"))));
+        else if (k.is("NetGroupRef")) std::ranges::copy(self(k.attr("name")), std::back_inserter(out));
+      }
+      std::ranges::sort(out);
+      out.erase(std::ranges::unique(out).begin(), out.end());
+      return netGroups[std::string(name)] = out;
+    };
+    auto layers = [&](this auto& self, std::string_view name) -> LayerMask {
+      if (auto it = layerGroups.find(name); it != layerGroups.end()) return it->second;
+      auto d = layerDefs.find(name);
+      if (d == layerDefs.end() || !busy.emplace(name).second) return 0;
+      LayerMask m = 0;
+      for (auto& k : d->second->kids) {
+        if (k.is("LayerRef")) {
+          if (LayerId l = b.findLayer(std::string(k.attr("name"))); l >= 0) m |= LayerMask(1) << l;
+        } else if (k.is("LayerGroupRef")) m |= self(k.attr("name"));
+      }
+      return layerGroups[std::string(name)] = m;
+    };
+    for (auto& [name, e] : netDefs) nets(name);
+    busy.clear();
+    for (auto& [name, e] : layerDefs) layers(name);
+  }
+
   // --- rules ---
-  static bool affectsAllNets(const Element& rule) {
-    auto* oa = rule.find("ObjectsAffected");
-    return oa && oa->find("AllNets");
+  // Nets of one ObjectNet item (NetRef / NetGroupRef / AllNets); nullopt = all nets.
+  std::optional<std::vector<int>> objectNets(const Element& o) {
+    if (o.is("AllNets")) return std::nullopt;
+    if (o.is("NetRef")) return std::vector<int>{b.addNet(std::string(o.attr("name")))};
+    if (o.is("NetGroupRef"))
+      if (auto it = netGroups.find(o.attr("name")); it != netGroups.end()) return it->second;
+    return std::vector<int>{};  // signals and unknown references affect no net
+  }
+
+  // LayersRef of a rule as a copper mask; nullopt = all layers.
+  std::optional<LayerMask> ruleLayers(const Element& rule) {
+    auto cu = b.copperLayers();
+    LayerMask m = 0;
+    bool any = false;
+    auto add = [&](auto pred) {
+      for (size_t i = 0; i < cu.size(); ++i)
+        if (pred(i == 0 || i + 1 == cu.size(), b.layers[cu[i]])) m |= LayerMask(1) << cu[i];
+    };
+    for (auto& k : rule.kids) {
+      if (k.is("AllLayers")) return std::nullopt;
+      if (k.is("AllLayersInner")) add([](bool outer, const Layer&) { return !outer; });
+      else if (k.is("AllLayersInnerSignal")) add([](bool outer, const Layer& L) { return !outer && !L.plane; });
+      else if (k.is("AllLayersSignal")) add([](bool, const Layer& L) { return !L.plane; });
+      else if (k.is("AllLayersOuter")) add([](bool outer, const Layer&) { return outer; });
+      else if (k.is("LayerRef")) {
+        if (LayerId l = b.findLayer(std::string(k.attr("name"))); l >= 0) m |= LayerMask(1) << l;
+      } else if (k.is("LayerGroupRef")) {
+        if (auto it = layerGroups.find(k.attr("name")); it != layerGroups.end()) m |= it->second;
+      } else continue;
+      any = true;
+    }
+    if (!any || m == b.allCopperMask()) return std::nullopt;
+    return m;
   }
 
   void readRules(const Element& rules) {
-    NetClass& d = b.netClasses[0];
     if (auto* pl = rules.find("RulesPlaneLayersNets"))
       for (auto* r : pl->findAll("PlaneLayerNets")) {
         if (!r->flag("enabled", true)) continue;
@@ -646,23 +722,124 @@ struct Reader {
         auto* nr = oa->find("NetRef");
         if (l >= 0 && nr) b.layers[l].planeNet = b.addNet(std::string(nr->attr("name")));
       }
+    // Rules are applied in file order, later ones taking priority (as in TopoR's rule list). Rules
+    // for all layers set per-net values; layer-limited ones become layer rules.
+    NetClass d = b.netClasses[0];
+    struct PerNet {
+      Coord width = 0, clearance = 0;
+      std::string via;
+    };
+    std::vector<PerNet> per(b.nets.size());
+    auto forNets = [&](const std::optional<std::vector<int>>& nets, auto fn) {
+      if (!nets) {
+        fn(-1);
+        return;
+      }
+      for (int n : *nets) {
+        if (n >= int(per.size())) per.resize(n + 1);
+        fn(n);
+      }
+    };
+    auto objects = [&](const Element& r) {
+      std::vector<const Element*> out;
+      if (auto* oa = r.find("ObjectsAffected"))
+        for (auto& k : oa->kids) out.push_back(&k);
+      return out;
+    };
     if (auto* rw = rules.find("RulesWidthOfWires"))
-      for (auto* r : rw->findAll("WidthOfWires"))
-        if (affectsAllNets(*r) && r->flag("enabled", true)) d.trackWidth = len(r->num("widthNom", r->num("widthMin")));
+      for (auto* r : rw->findAll("WidthOfWires")) {
+        if (!r->flag("enabled", true)) continue;
+        Coord w = len(r->num("widthNom", r->num("widthMin")));
+        auto obj = objects(*r);
+        if (obj.empty() || w <= 0) continue;
+        auto nets = objectNets(*obj[0]);
+        if (auto lm = ruleLayers(*r)) {
+          if (*lm) b.layerRules.push_back({nets.value_or(std::vector<int>{}), *lm, w, 0});
+          continue;
+        }
+        forNets(nets, [&](int n) {
+          if (n < 0) {
+            d.trackWidth = w;
+            for (auto& p : per) p.width = 0;
+          } else {
+            per[n].width = w;
+          }
+        });
+      }
     if (auto* rc = rules.find("RulesClearancesNetToNet"))
-      for (auto* r : rc->findAll("ClearanceNetToNet"))
+      for (auto* r : rc->findAll("ClearanceNetToNet")) {
+        if (!r->flag("enabled", true)) continue;
         // TopoR uses the nominal clearance where there is room and the minimum in tight spots; the
         // single value our rules carry is the one every spot must satisfy: the minimum.
-        if (affectsAllNets(*r) && r->flag("enabled", true)) d.clearance = len(r->num("clrnMin", r->num("clrnNom")));
+        Coord c = len(r->num("clrnMin", r->num("clrnNom")));
+        auto obj = objects(*r);
+        if (obj.empty() || c <= 0) continue;
+        // Net-to-net pairs map onto per-net clearances (a pair takes the larger one): a rule
+        // between two specific sets is applied to both of them, which is conservative.
+        auto a = objectNets(*obj[0]);
+        auto bn = obj.size() > 1 ? objectNets(*obj[1]) : std::nullopt;
+        std::optional<std::vector<int>> nets;
+        if (a && bn) {
+          nets = *a;
+          nets->insert(nets->end(), bn->begin(), bn->end());
+        } else if (a || bn) {
+          nets = a ? *a : *bn;
+        }
+        if (auto lm = ruleLayers(*r)) {
+          if (*lm) b.layerRules.push_back({nets.value_or(std::vector<int>{}), *lm, 0, c});
+          continue;
+        }
+        forNets(nets, [&](int n) {
+          if (n < 0) {
+            d.clearance = c;
+            for (auto& p : per) p.clearance = 0;
+          } else {
+            per[n].clearance = c;
+          }
+        });
+      }
     if (auto* rb = rules.find("RulesClearancesToBoard"))
       if (rb->has("wires")) b.edgeClearance = len(rb->num("wires"));
     std::string via = firstViastack;
     if (auto* rv = rules.find("RulesViastacksOfNets"))
-      for (auto* r : rv->findAll("ViastacksOfNets"))
-        if (affectsAllNets(*r))
-          if (auto* vs = r->find("Viastacks"))
-            if (auto* ref = vs->find("ViastackRef")) via = std::string(ref->attr("name"));
+      for (auto* r : rv->findAll("ViastacksOfNets")) {
+        if (!r->flag("enabled", true)) continue;
+        auto obj = objects(*r);
+        auto* vs = r->find("Viastacks");
+        auto* ref = vs ? vs->find("ViastackRef") : nullptr;
+        if (obj.empty() || !ref) continue;
+        std::string name(ref->attr("name"));
+        forNets(objectNets(*obj[0]), [&](int n) {
+          if (n < 0) {
+            via = name;
+            for (auto& p : per) p.via.clear();
+          } else {
+            per[n].via = name;
+          }
+        });
+      }
     applyVia(d, via);
+    b.netClasses[0] = d;
+
+    // One net class per distinct (width, clearance, via) combination.
+    std::map<std::tuple<Coord, Coord, Coord, Coord>, int> classes;
+    for (size_t n = 0; n < per.size() && n < b.nets.size(); ++n) {
+      const PerNet& p = per[n];
+      if (!p.width && !p.clearance && p.via.empty()) continue;
+      NetClass nc = d;
+      if (p.width) nc.trackWidth = p.width;
+      if (p.clearance) nc.clearance = p.clearance;
+      if (!p.via.empty()) applyVia(nc, p.via);
+      auto key = std::tuple{nc.trackWidth, nc.clearance, nc.viaDiameter, nc.viaDrill};
+      if (key == std::tuple{d.trackWidth, d.clearance, d.viaDiameter, d.viaDrill}) continue;
+      auto [it, added] = classes.try_emplace(key, int(b.netClasses.size()));
+      if (added) {
+        nc.name = std::format("W{:g}_C{:g}", nc.trackWidth / double(kNmPerMm), nc.clearance / double(kNmPerMm));
+        if (nc.viaDiameter != d.viaDiameter || nc.viaDrill != d.viaDrill) nc.name += "_V" + p.via;
+        b.netClasses.push_back(nc);
+      }
+      b.nets[n].netClass = it->second;
+    }
   }
 
   void applyVia(NetClass& nc, const std::string& name) {
@@ -825,6 +1002,7 @@ Result<BoardPtr> readFst(const std::string& text, const std::string& path) {
   if (auto* cs = root.find("Constructive")) r.readConstructive(*cs);
   if (auto* cob = root.find("ComponentsOnBoard")) r.readComponents(*cob);
   if (auto* nl = root.find("NetList")) r.readNetList(*nl);
+  if (auto* groups = root.find("Groups")) r.readGroups(*groups);
   if (auto* rules = root.find("Rules")) r.readRules(*rules);
   else r.applyVia(b->netClasses[0], r.firstViastack);
   if (auto* cn = root.find("Connectivity")) r.readConnectivity(*cn);

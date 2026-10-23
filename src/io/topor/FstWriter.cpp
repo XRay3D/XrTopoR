@@ -606,22 +606,78 @@ struct Writer {
     x.close();
   }
 
-  // --- rules ---
-  void writeRules() {
-    x.open("Rules", {{"version", "2.0"}});
-    // Later rules take priority: the default class first, specific classes after it.
-    std::vector<std::vector<int>> netsOfClass(b.netClasses.size());
+  // --- groups ---
+  // Rules affect one net or one net group: each non-default class and each multi-net layer rule
+  // gets a NetGroup.
+  std::vector<std::vector<int>> netsOfClass;
+  std::vector<std::string> classGroup, ruleGroup;
+
+  void prepareGroups() {
+    netsOfClass.assign(b.netClasses.size(), {});
     for (size_t n = 0; n < b.nets.size(); ++n) {
       int c = b.nets[n].netClass;
       if (c > 0 && c < int(b.netClasses.size())) netsOfClass[c].push_back(int(n));
     }
-    auto objects = [&](int cls, int lists) {
+    std::set<std::string> used;
+    auto unique = [&](std::string name) {
+      std::string u = name;
+      for (int k = 2; !used.insert(u).second; ++k) u = std::format("{}_{}", name, k);
+      return u;
+    };
+    classGroup.assign(b.netClasses.size(), {});
+    for (size_t c = 1; c < b.netClasses.size(); ++c)
+      if (!netsOfClass[c].empty())
+        classGroup[c] = unique(b.netClasses[c].name.empty() ? std::format("Class{}", c) : b.netClasses[c].name);
+    ruleGroup.assign(b.layerRules.size(), {});
+    for (size_t r = 0; r < b.layerRules.size(); ++r)
+      if (b.layerRules[r].nets.size() > 1) ruleGroup[r] = unique(std::format("LayerRule{}", r + 1));
+  }
+
+  void writeGroups() {
+    x.open("Groups", {{"version", "1.1"}});
+    auto group = [&](const std::string& name, const std::vector<int>& nets) {
+      x.open("NetGroup", {{"name", name}});
+      for (int n : nets) x.empty("NetRef", {{"name", b.nets[n].name}});
+      x.close();
+    };
+    if (std::ranges::any_of(classGroup, &std::string::size) || std::ranges::any_of(ruleGroup, &std::string::size)) {
+      x.open("NetGroups");
+      for (size_t c = 0; c < classGroup.size(); ++c)
+        if (!classGroup[c].empty()) group(classGroup[c], netsOfClass[c]);
+      for (size_t r = 0; r < ruleGroup.size(); ++r)
+        if (!ruleGroup[r].empty()) group(ruleGroup[r], b.layerRules[r].nets);
+      x.close();
+    }
+    x.close();
+  }
+
+  // --- rules ---
+  // ObjectNet of a class (0 = all nets) or of a layer rule.
+  void classObject(size_t c) {
+    if (c == 0) x.empty("AllNets");
+    else x.empty("NetGroupRef", {{"name", classGroup[c]}});
+  }
+  void ruleObject(size_t r) {
+    const LayerRule& lr = b.layerRules[r];
+    if (lr.nets.empty()) x.empty("AllNets");
+    else if (lr.nets.size() == 1) x.empty("NetRef", {{"name", b.nets[lr.nets[0]].name}});
+    else x.empty("NetGroupRef", {{"name", ruleGroup[r]}});
+  }
+  void ruleLayers(LayerMask m) {
+    if (!m) {
+      x.empty("AllLayers");
+      return;
+    }
+    for (LayerId l : b.copperLayers())
+      if ((m >> l) & 1) x.empty("LayerRef", {{"name", layerName[l]}});
+  }
+
+  void writeRules() {
+    x.open("Rules", {{"version", "2.0"}});
+    // Later rules take priority: the default class first, specific classes after it, layer rules last.
+    auto objects = [&](size_t cls) {
       x.open("ObjectsAffected");
-      for (int l = 0; l < lists; ++l) {
-        if (cls == 0) x.empty("AllNets");
-        else
-          for (int n : netsOfClass[cls]) x.empty("NetRef", {{"name", b.nets[n].name}});
-      }
+      classObject(cls);
       x.close();
     };
     x.open("RulesWidthOfWires");
@@ -630,7 +686,18 @@ struct Writer {
       std::string w = mm(b.netClasses[c].trackWidth);
       x.open("WidthOfWires", {{"enabled", "on"}, {"widthMin", w}, {"widthNom", w}});
       x.empty("AllLayers");
-      objects(int(c), 1);
+      objects(c);
+      x.close();
+    }
+    for (size_t r = 0; r < b.layerRules.size(); ++r) {
+      const LayerRule& lr = b.layerRules[r];
+      if (lr.width <= 0) continue;
+      std::string w = mm(lr.width);
+      x.open("WidthOfWires", {{"enabled", "on"}, {"widthMin", w}, {"widthNom", w}});
+      ruleLayers(lr.layers);
+      x.open("ObjectsAffected");
+      ruleObject(r);
+      x.close();
       x.close();
     }
     x.close();
@@ -642,9 +709,19 @@ struct Writer {
       x.empty("AllLayers");
       // Two object lists: class nets against all nets.
       x.open("ObjectsAffected");
-      if (c == 0) x.empty("AllNets");
-      else
-        for (int n : netsOfClass[c]) x.empty("NetRef", {{"name", b.nets[n].name}});
+      classObject(c);
+      x.empty("AllNets");
+      x.close();
+      x.close();
+    }
+    for (size_t r = 0; r < b.layerRules.size(); ++r) {
+      const LayerRule& lr = b.layerRules[r];
+      if (lr.clearance <= 0) continue;
+      std::string clr = mm(lr.clearance);
+      x.open("ClearanceNetToNet", {{"enabled", "on"}, {"clrnMin", clr}, {"clrnNom", clr}});
+      ruleLayers(lr.layers);
+      x.open("ObjectsAffected");
+      ruleObject(r);
       x.empty("AllNets");
       x.close();
       x.close();
@@ -663,7 +740,7 @@ struct Writer {
     for (size_t c = 0; c < b.netClasses.size(); ++c) {
       if (c > 0 && netsOfClass[c].empty()) continue;
       x.open("ViastacksOfNets", {{"enabled", "on"}});
-      objects(int(c), 1);
+      objects(c);
       x.open("Viastacks");
       x.empty("ViastackRef", {{"name", viastackName(b.netClasses[c].viaDiameter, b.netClasses[c].viaDrill)}});
       x.close();
@@ -858,8 +935,8 @@ struct Writer {
     x.blank();
     writeNetList();
     x.blank();
-    x.open("Groups", {{"version", "1.1"}});
-    x.close();
+    prepareGroups();
+    writeGroups();
     x.blank();
     x.open("HiSpeedRules", {{"version", "3.0"}});
     x.close();

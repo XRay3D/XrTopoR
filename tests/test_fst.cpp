@@ -287,3 +287,35 @@ TEST(FstIO, WriteKicadBoard) {
   }
   EXPECT_EQ(Connectivity::compute(c).ratsnest.size(), Connectivity::compute(a).ratsnest.size());
 }
+
+// Width/clearance rules for nets, net groups and layers become net classes and layer rules, and are
+// written back through net groups.
+TEST(FstIO, NetAndLayerRules) {
+  auto r = io::loadBoard(data("topor/Example_02/Placement.fst"));
+  ASSERT_TRUE(r) << r.error();
+  Board& a = **r;
+  auto width = [](const Board& b, const char* net) { return b.trackWidth(b.findNet(net), b.topCopper()); };
+  EXPECT_EQ(width(a, "UN000016"), mmToNm(0.4));  // default rule
+  EXPECT_EQ(width(a, "UN000087"), mmToNm(1.0));  // group WD10000
+  EXPECT_EQ(width(a, "+5V"), mmToNm(1.5));       // group WD15000
+  EXPECT_EQ(a.clearance(a.findNet("+5V"), a.topCopper()), mmToNm(0.3));
+
+  // A layer rule overrides the class on its layer only.
+  int g = a.findNet("G");
+  LayerId top = a.topCopper(), bottom = a.bottomCopper();
+  a.layerRules.push_back({{g}, LayerMask(1) << bottom, mmToNm(0.6), mmToNm(0.5)});
+  EXPECT_EQ(a.trackWidth(g, top), mmToNm(1.5));
+  EXPECT_EQ(a.trackWidth(g, bottom), mmToNm(0.6));
+  EXPECT_EQ(a.clearance(g, bottom), mmToNm(0.5));
+  EXPECT_EQ(a.maxClearance(), mmToNm(0.5));
+
+  auto again = io::readFst(io::writeFst(a), "rules.fst");
+  ASSERT_TRUE(again) << again.error();
+  const Board& c = **again;
+  for (const char* n : {"UN000016", "UN000087", "+5V", "G"}) EXPECT_EQ(width(c, n), width(a, n)) << n;
+  int gc = c.findNet("G");
+  EXPECT_EQ(c.layerRules.size(), 2u);  // width and clearance are separate TopoR rules
+  EXPECT_EQ(c.trackWidth(gc, c.bottomCopper()), mmToNm(0.6));
+  EXPECT_EQ(c.clearance(gc, c.bottomCopper()), mmToNm(0.5));
+  EXPECT_EQ(c.clearance(gc, c.topCopper()), mmToNm(0.3));
+}

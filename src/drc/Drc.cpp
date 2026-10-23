@@ -19,8 +19,12 @@ const char* drcTypeName(DrcViolation::Type t) {
 // deficits below this are rounding, not design errors.
 constexpr double kDrcTolerance = 2000;
 
-double requiredClearance(const Board& b, int netA, int netB) {
-  return double(std::max(b.classOf(netA).clearance, b.classOf(netB).clearance));
+double requiredClearance(const Board& b, int netA, int netB, LayerMask layers) {
+  if (!layers) return double(std::max(b.clearance(netA, -1), b.clearance(netB, -1)));
+  Coord req = 0;
+  for (LayerId l = 0; l < 64; ++l)
+    if ((layers >> l) & 1) req = std::max({req, b.clearance(netA, l), b.clearance(netB, l)});
+  return double(req);
 }
 
 namespace {
@@ -66,12 +70,11 @@ bool skipPair(const Board& b, ItemRef a, ItemRef c) {
 
 double shapeMargin(const Board& b, const SpatialIndex& idx, const Shape& s, LayerMask layers, int net, ItemRef* hit) {
   double worst = std::numeric_limits<double>::max();
-  double maxClr = 0;
-  for (auto& nc : b.netClasses) maxClr = std::max(maxClr, double(nc.clearance));
+  double maxClr = double(b.maxClearance());
   idx.query(s.bbox().inflated(maxClr), layers, [&](ItemRef r) {
     int on = itemNet(b, r);
     if (net != kNoNet && on == net) return;
-    double req = requiredClearance(b, net, on);
+    double req = requiredClearance(b, net, on, layers & itemLayers(b, r));
     for (auto& os : itemShapes(b, r)) {
       double m = s.distance(os) - req;
       if (m < worst) {
@@ -95,8 +98,7 @@ std::vector<DrcViolation> runDrc(const Board& b, const DrcOptions& opt) {
   std::vector<DrcViolation> out;
   SpatialIndex idx;
   idx.build(b);
-  double maxClr = 0;
-  for (auto& nc : b.netClasses) maxClr = std::max(maxClr, double(nc.clearance));
+  double maxClr = double(b.maxClearance());
 
   if (opt.clearance) {
     std::set<std::pair<int, int>> seen;
@@ -112,7 +114,7 @@ std::vector<DrcViolation> runDrc(const Board& b, const DrcOptions& opt) {
         int ka = gid(a), kc = gid(c);
         if (!seen.insert({std::min(ka, kc), std::max(ka, kc)}).second) return;
         int na = itemNet(b, a), nc = itemNet(b, c);
-        double req = requiredClearance(b, na, nc);
+        double req = requiredClearance(b, na, nc, lm & itemLayers(b, c));
         auto cs = itemShapes(b, c);
         double best = std::numeric_limits<double>::max();
         Vec2 where;
