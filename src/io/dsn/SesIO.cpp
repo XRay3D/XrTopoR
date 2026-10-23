@@ -42,7 +42,7 @@ Result<void> applySes(Board& b, const std::string& text) {
   if (!routes) {
     return std::unexpected(std::string("session has no routes"));
   }
-  double s = dsn::coordScale(*routes, 100);
+  double s = dsn::coordScale(*routes, 100, true);
   std::map<std::string, ViaDef> vias;
   if (const Node* lib = routes->find("library_out"))
     for (auto* ps : lib->findAll("padstack")) vias[ps->arg(0)] = parseViaPadstack(ps, s);

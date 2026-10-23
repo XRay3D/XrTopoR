@@ -25,6 +25,8 @@ Result<void> saveBoard(const Board& b, const std::string& path);
 // Format-specific entry points
 Result<BoardPtr> readKicad(const std::string& text, const std::string& path);
 std::string writeKicad(const Board& b);
+// JSON project file (net classes) matching a generated .kicad_pcb.
+std::string writeKicadProject(const Board& b);
 Result<BoardPtr> readDsn(const std::string& text, const std::string& path);
 std::string writeDsn(const Board& b);
 std::string writeSes(const Board& b);

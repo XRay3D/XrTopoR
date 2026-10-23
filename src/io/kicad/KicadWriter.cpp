@@ -1,6 +1,7 @@
 // KiCad .kicad_pcb writer. When the board was loaded from KiCad the original tree is patched
 // (placement updated, routing replaced) so everything we do not model survives the round trip.
 #include <algorithm>
+#include <boost/json.hpp>
 #include <cmath>
 
 #include "io/BoardIO.h"
@@ -388,6 +389,40 @@ std::string generate(const Board& b) {
 }
 
 }  // namespace
+
+std::string writeKicadProject(const Board& b) {
+  namespace json = boost::json;
+  json::array classes;
+  for (auto& nc : b.netClasses) {
+    classes.push_back(json::object{{"name", nc.name},
+                                   {"clearance", nc.clearance / double(kNmPerMm)},
+                                   {"track_width", nc.trackWidth / double(kNmPerMm)},
+                                   {"via_diameter", nc.viaDiameter / double(kNmPerMm)},
+                                   {"via_drill", nc.viaDrill / double(kNmPerMm)},
+                                   {"microvia_diameter", 0.3},
+                                   {"microvia_drill", 0.1},
+                                   {"diff_pair_gap", 0.25},
+                                   {"diff_pair_width", nc.trackWidth / double(kNmPerMm)},
+                                   {"diff_pair_via_gap", 0.25},
+                                   {"wire_width", 6},
+                                   {"bus_width", 12},
+                                   {"line_style", 0},
+                                   {"pcb_color", "rgba(0, 0, 0, 0.000)"},
+                                   {"schematic_color", "rgba(0, 0, 0, 0.000)"}});
+  }
+  json::array patterns;
+  for (auto& n : b.nets)
+    if (n.netClass > 0 && n.netClass < int(b.netClasses.size()))
+      patterns.push_back(json::object{{"netclass", b.netClasses[n.netClass].name}, {"pattern", n.name}});
+  json::object rules{{"min_copper_edge_clearance", b.edgeClearance / double(kNmPerMm)},
+                     {"min_clearance", 0.0},
+                     {"min_hole_clearance", 0.25}};
+  json::object root{{"board", json::object{{"design_settings", json::object{{"rules", rules}}}}},
+                    {"meta", json::object{{"filename", b.name + ".kicad_pro"}, {"version", 3}}},
+                    {"net_settings", json::object{{"classes", classes}, {"meta", json::object{{"version", 4}}},
+                                                  {"netclass_patterns", patterns}}}};
+  return json::serialize(root) + "\n";
+}
 
 std::string writeKicad(const Board& b) {
   if (b.source && b.source->format == SourceDoc::Format::Kicad && b.source->tree && !b.source->tree->kids.empty())
