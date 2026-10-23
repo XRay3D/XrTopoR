@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <flat_map>
 #include <inplace_vector>
 #include <mdspan>
@@ -811,8 +812,8 @@ void Router::realizeAll() {
     for (int cid : w.cids) {
       int e = s_.crossings[cid].edge;
       const auto& list = s_.cross[w.li, e];
-      double k = double(std::ranges::find(list, cid) - list.begin());
-      rw.sketch.push_back(intervalPoint(e, (k + 1) / (double(list.size()) + 1)));
+      auto pos = std::ranges::find(list, cid) - list.begin();
+      rw.sketch.push_back(intervalPoint(e, (double(pos) + 1) / (double(list.size()) + 1)));
     }
     rw.sketch.push_back(P(w.v1));
     wires.push_back(std::move(rw));
@@ -824,6 +825,20 @@ void Router::realizeAll() {
     vias.push_back({P(int(v)), net, nc.viaDiameter, nc.viaDrill});
   }
   size_t before = b_.tracks.size();
+  if (std::getenv("XR_SKETCH")) {  // debug: emit the topological sketches instead of taut geometry
+    for (auto& w : wires)
+      for (auto [a, c] : w.sketch | std::views::adjacent<2>) {
+        Track t;
+        t.a = Point(a);
+        t.b = Point(c);
+        t.width = w.width;
+        t.layer = w.layer;
+        t.net = w.net;
+        b_.tracks.push_back(t);
+      }
+    for (auto& v : vias) b_.vias.push_back(Via{Point(v.pos), v.diameter, v.drill, b_.allCopperMask(), v.net, false});
+    return;
+  }
   auto st = realize(b_, wires, vias);
   res_.vias = int(vias.size());
   for (size_t i = before; i < b_.tracks.size(); ++i) {

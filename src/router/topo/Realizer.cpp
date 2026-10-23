@@ -6,7 +6,11 @@
 
 #include <algorithm>
 #include <flat_map>
+#include <flat_set>
+#include <cstdlib>
 #include <map>
+#include <memory>
+#include <print>
 
 namespace xr::topo {
 
@@ -81,7 +85,10 @@ bool walk(const CDT& cdt, const Polyline& sk, std::vector<Portal>& out) {
       auto va = f->vertex((exit + 1) % 3), vb = f->vertex((exit + 2) % 3);
       Vec2 a = P(va);
       Portal pt = orient(p, q, a) > 0 ? Portal{va->info(), vb->info()} : Portal{vb->info(), va->info()};
-      if (!out.empty() && out.back().l == pt.r && out.back().r == pt.l) out.pop_back();  // went back
+      // An edge through the start or end point is no constraint (pads in a column share x/y).
+      bool touchesEnd = distPointSegment(sk.front(), a, P(vb)) < 1 || distPointSegment(sk.back(), a, P(vb)) < 1;
+      if (touchesEnd) {
+      } else if (!out.empty() && out.back().l == pt.r && out.back().r == pt.l) out.pop_back();  // went back
       else out.push_back(pt);
       auto n = f->neighbor(exit);
       entry = n->index(f);
@@ -89,6 +96,51 @@ bool walk(const CDT& cdt, const Polyline& sk, std::vector<Portal>& out) {
     }
   }
   return true;
+}
+
+// Where a sketch crosses the edges of a triangulation (cancelled back-and-forth crossings removed).
+struct EdgeHit {
+  int u, v;  // obstacle ids, u < v
+  double t;  // position along u -> v
+};
+
+std::vector<EdgeHit> crossings(const CDT& cdt, const Polyline& sk) {
+  std::vector<EdgeHit> out;
+  if (sk.size() < 2) return out;
+  CDT::Face_handle f = cdt.locate(CPoint(sk[0].x, sk[0].y));
+  auto P = [](const CDT::Vertex_handle& v) { return Vec2{v->point().x(), v->point().y()}; };
+  for (size_t s = 1; s < sk.size(); ++s) {
+    Vec2 p = sk[s - 1], q = sk[s];
+    if ((q - p).len2() < 1) continue;
+    int entry = -1;
+    for (int guard = 0; guard < 100000; ++guard) {
+      if (f == nullptr || cdt.is_infinite(f)) return out;
+      Vec2 a0 = P(f->vertex(0)), a1 = P(f->vertex(1)), a2 = P(f->vertex(2));
+      if (orient(a0, a1, q) >= 0 && orient(a1, a2, q) >= 0 && orient(a2, a0, q) >= 0) break;
+      int exit = -1;
+      for (int i = 0; i < 3 && exit < 0; ++i) {
+        if (i == entry) continue;
+        Vec2 a = P(f->vertex((i + 1) % 3)), b = P(f->vertex((i + 2) % 3));
+        double oa = orient(p, q, a), ob = orient(p, q, b);
+        if (orient(a, b, q) < 0 && ((oa >= 0 && ob <= 0) || (oa <= 0 && ob >= 0))) exit = i;
+      }
+      if (exit < 0) return out;
+      auto va = f->vertex((exit + 1) % 3), vb = f->vertex((exit + 2) % 3);
+      Vec2 a = P(va), b = P(vb);
+      double den = (b - a).cross(q - p);
+      double t = std::abs(den) > 0 ? (p - a).cross(q - p) / den : 0.5;
+      int u = va->info(), v = vb->info();
+      if (u > v) { std::swap(u, v); t = 1 - t; }
+      bool touchesEnd = distPointSegment(sk.front(), a, b) < 1 || distPointSegment(sk.back(), a, b) < 1;
+      if (touchesEnd) {
+      } else if (!out.empty() && out.back().u == u && out.back().v == v) out.pop_back();  // went back
+      else out.push_back({u, v, std::clamp(t, 0.0, 1.0)});
+      auto n = f->neighbor(exit);
+      entry = n->index(f);
+      f = n;
+    }
+  }
+  return out;
 }
 
 // Simple stupid funnel algorithm over point portals (first = start, last = end).
@@ -164,15 +216,6 @@ double sweepOf(const Circle& c, Vec2 in, Vec2 out) {
   return -normalizeAngle(ai - ao);
 }
 
-double distToPolyline(Vec2 p, const Polyline& pl, Vec2* closest) {
-  double best = std::numeric_limits<double>::max();
-  for (size_t i = 1; i < pl.size(); ++i) {
-    Vec2 c = closestPointOnSegment(p, pl[i - 1], pl[i]);
-    double d = (c - p).len();
-    if (d < best) { best = d; if (closest) *closest = c; }
-  }
-  return best;
-}
 
 LayerObstacles collect(const Board& b, LayerId layer, const std::vector<RealVia>& vias) {
   LayerObstacles ob;
@@ -273,6 +316,19 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
         bs.push_back({ob.pts[a.id].p, double(a.side), a.id, a.portal});
       bs.push_back({w.sketch.back(), 0, -1, int(pl.size()) - 1});
       walked[wi] = 1;
+      if (std::getenv("XR_DEBUG2")) {
+        std::print(stderr, "wire {} net {} sketch:", wi, b.nets[w.net].name);
+        for (auto& p : w.sketch) std::print(stderr, " ({:.3f},{:.3f})", p.x / 1e6, p.y / 1e6);
+        std::print(stderr, "\n portals:");
+        for (auto& p : pl) {
+          auto P = [&](int id) { return id >= 0 ? ob.pts[id].p : Vec2{}; };
+          std::print(stderr, " [L{}({:.2f},{:.2f}) R{}({:.2f},{:.2f})]", p.l, P(p.l).x / 1e6, P(p.l).y / 1e6, p.r,
+                     P(p.r).x / 1e6, P(p.r).y / 1e6);
+        }
+        std::print(stderr, "\n funnel:");
+        for (auto& c : bs) std::print(stderr, " [o{} s{:+.0f} p{} ({:.2f},{:.2f})]", c.obst, c.rho, c.portal, c.c.x / 1e6, c.c.y / 1e6);
+        std::println(stderr, "");
+      }
     }
   }
 
@@ -294,6 +350,7 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
       if (c.obst >= 0) c.rho = (c.rho > 0 ? 1 : -1) * radius(c.obst);
     auto& ti = tin[wi];
     auto& to = tout[wi];
+    std::flat_set<int> dropped;  // obstacles removed once are not re-inserted (prevents oscillation)
     for (int iter = 0; iter < 400; ++iter) {
       size_t n = cs.size();
       ti.assign(n, {});
@@ -308,6 +365,7 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
       for (size_t k = 1; k + 1 < n && bad < 0; ++k)
         if (std::abs(sweepOf(cs[k], ti[k], to[k])) > 1.6 * kPi) bad = int(k);
       if (bad > 0 && bad < int(n) - 1) {
+        dropped.insert(cs[bad].obst);
         cs.erase(cs.begin() + bad);
         ++st.droppedApexes;
         continue;
@@ -323,10 +381,13 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
         if ((c - a).len2() < 1) continue;
         for (int p = cs[k].portal + 1; p < cs[k + 1].portal; ++p)
           for (auto [o, side] : {std::pair{pl[p].l, +1}, std::pair{pl[p].r, -1}}) {
-            if (o < 0 || std::ranges::any_of(cs, [&](const Circle& x) { return x.obst == o; })) continue;
+            if (o < 0 || dropped.contains(o) || std::ranges::any_of(cs, [&](const Circle& x) { return x.obst == o; }))
+              continue;
             Vec2 q = ob.pts[o].p;
             double d = distPointSegment(q, a, c);
-            bool wrongSide = orient(a, c, q) * side < 0;
+            // Crossing over the obstacle only counts where it projects onto the segment itself.
+            double t = (q - a).dot(c - a) / (c - a).len2();
+            bool wrongSide = t > 0 && t < 1 && orient(a, c, q) * side < 0;
             double pen = radius(o) + (wrongSide ? d : -d);
             if (pen > worst) {
               worst = pen;
@@ -343,36 +404,52 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
   for (int wi = 0; wi < int(wires.size()); ++wi)
     if (walked[wi]) thicken(wi, {});
 
-  // Nesting: wires that bend around the same obstacle on the same side are stacked outward in the
-  // order of their sketch distance to the obstacle.
-  struct Use {
-    int wire;
-    double dist;
-    Vec2 dir;
-  };
-  std::map<std::pair<LayerId, int>, std::vector<Use>> uses;
-  for (int wi = 0; wi < int(wires.size()); ++wi) {
-    const LayerObstacles& ob = obstacles[wires[wi].layer];
-    for (const Circle& c : bends[wi]) {
-      if (c.obst < 0) continue;
-      const OPt& o = ob.pts[c.obst];
-      Vec2 cl;
-      double d = distToPolyline(o.p, wires[wi].sketch, &cl);
-      uses[{wires[wi].layer, c.obst}].push_back({wi, d, (cl - o.p).normalized()});
-    }
-  }
+  // Nesting: in a triangulation of all obstacles of the layer, other-net wires crossing an edge at
+  // obstacle o between o and this wire must stay inside this wire's bend around o.
+  std::flat_map<LayerId, std::unique_ptr<CDT>> common;
+  std::vector<std::vector<EdgeHit>> hits(wires.size());
+  std::map<std::pair<int, int>, std::vector<std::pair<double, int>>> edgeHits;  // per layer below
   std::vector<std::flat_map<int, double>> offset(wires.size());
-  for (auto& [key, list] : uses) {
-    std::ranges::sort(list, {}, &Use::dist);
-    for (size_t i = 0; i < list.size(); ++i) {
-      double off = 0;
-      const RealWire& wi = wires[list[i].wire];
-      for (size_t j = 0; j < i; ++j) {
-        if (list[j].dir.dot(list[i].dir) < 0.0) continue;  // opposite side of the obstacle
-        const RealWire& wj = wires[list[j].wire];
-        off += double(wj.width) + double(std::max(wi.clearance, wj.clearance));
+  std::flat_map<LayerId, std::vector<int>> byLayer;
+  for (int wi = 0; wi < int(wires.size()); ++wi)
+    if (walked[wi]) byLayer[wires[wi].layer].push_back(wi);
+  for (auto&& [layer, ids] : byLayer) {
+    const LayerObstacles& ob = obstacles[layer];
+    CDT cdt;
+    std::vector<CDT::Vertex_handle> vh(ob.pts.size());
+    CDT::Face_handle hint;
+    for (int i = 0; i < int(ob.pts.size()); ++i) {
+      size_t before = cdt.number_of_vertices();
+      auto h = cdt.insert(CPoint(ob.pts[i].p.x, ob.pts[i].p.y), hint);
+      hint = h->face();
+      if (cdt.number_of_vertices() > before) h->info() = i;
+      vh[i] = h;
+    }
+    for (auto v = cdt.finite_vertices_begin(); v != cdt.finite_vertices_end(); ++v)
+      if (v->info() < 0 || v->info() >= int(ob.pts.size()) || vh[v->info()] != CDT::Vertex_handle(v)) v->info() = 0;
+    edgeHits.clear();
+    for (int wi : ids) {
+      hits[wi] = crossings(cdt, wires[wi].sketch);
+      for (auto& h : hits[wi]) edgeHits[{h.u, h.v}].push_back({h.t, wi});
+    }
+    for (int wi : ids) {
+      const RealWire& w = wires[wi];
+      // Every obstacle at the end of a crossed edge may become a bend when the path is pulled taut,
+      // so the inner wires at each of them are accounted for, not only at the funnel apexes.
+      for (auto& h : hits[wi]) {
+        double sumU = 0, sumV = 0;
+        for (auto [t, other] : edgeHits[{h.u, h.v}]) {
+          const RealWire& ow = wires[other];
+          if (other == wi || ow.net == w.net) continue;
+          double space = double(ow.width) + double(std::max(ow.clearance, w.clearance)) + kMargin;
+          (t < h.t ? sumU : sumV) += space;
+        }
+        auto bump = [&](int o, double v) {
+          if (v > 0) offset[wi][o] = std::max(offset[wi][o], v);
+        };
+        bump(h.u, sumU);
+        bump(h.v, sumV);
       }
-      if (off > 0) offset[list[i].wire][key.second] = off;
     }
   }
 
@@ -394,6 +471,18 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
     }
     thicken(wi, offset[wi]);
     const auto& cs = bends[wi];
+    if (std::getenv("XR_DEBUG2")) {
+      std::print(stderr, "wire {} final:", wi);
+      for (auto [k, c] : std::views::enumerate(cs))
+        std::print(stderr, " [o{} rho{:+.3f} p{} c({:.3f},{:.3f}) in({:.3f},{:.3f}) out({:.3f},{:.3f})]", c.obst, c.rho / 1e6,
+                   c.portal, c.c.x / 1e6, c.c.y / 1e6, tin[wi][k].x / 1e6, tin[wi][k].y / 1e6, tout[wi][k].x / 1e6,
+                   tout[wi][k].y / 1e6);
+      std::println(stderr, "");
+    }
+    if (std::getenv("XR_DEBUG"))
+      std::println(stderr, "wire {} net {} layer {} sketch {} portals {} bends {} ({:.2f},{:.2f})->({:.2f},{:.2f})", wi,
+                   b.nets[w.net].name, b.layers[w.layer].name, w.sketch.size(), portals[wi].size(), cs.size(),
+                   w.sketch.front().x / 1e6, w.sketch.front().y / 1e6, w.sketch.back().x / 1e6, w.sketch.back().y / 1e6);
     const auto& ti = tin[wi];
     const auto& to = tout[wi];
     size_t n = cs.size();
@@ -407,7 +496,8 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
       if (k + 1 < n - 1) {
         const Circle& C = cs[k + 1];
         double sw = sweepOf(C, ti[k + 1], to[k + 1]);
-        if (std::abs(sw) * std::abs(C.rho) > 2000) {
+        double sagitta = std::abs(C.rho) * (1 - std::cos(sw / 2));
+        if (sagitta > 1000) {  // flatter arcs would not survive rounding to whole nanometres
           auto g = ArcGeom::fromCenter(C.c, ti[k + 1], sw);
           Track t;
           t.a = Point(ti[k + 1]);

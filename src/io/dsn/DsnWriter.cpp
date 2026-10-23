@@ -250,7 +250,7 @@ std::string writeDsn(const Board& b) {
   Node wiring = Node::list("wiring");
   for (const auto& t : b.tracks) {
     if (t.net < 0) continue;
-    auto pts = t.path(20000);
+    auto pts = t.path(1000);
     Node w = Node::list("wire");
     Node path = Node::list("path");
     path.add(qatom(b.layers[t.layer].name));

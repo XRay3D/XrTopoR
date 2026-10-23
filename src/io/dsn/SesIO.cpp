@@ -153,7 +153,7 @@ std::string writeSes(const Board& b) {
     Node path = Node::list("path");
     path.add(q(b.layers[t.layer].name));
     path.addAtom(u(double(t.width)));
-    for (auto& p : t.path(20000)) { path.addAtom(u(p.x)); path.addAtom(uy(p.y)); }
+    for (auto& p : t.path(1000)) { path.addAtom(u(p.x)); path.addAtom(uy(p.y)); }
     w.add(std::move(path));
     netNode(t.net).add(std::move(w));
   }
