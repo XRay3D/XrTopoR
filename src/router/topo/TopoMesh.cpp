@@ -6,6 +6,7 @@
 #include <CGAL/Triangulation_vertex_base_with_info_2.h>
 
 #include <list>
+#include <set>
 #include <map>
 
 #include "core/SpatialIndex.h"
@@ -203,6 +204,37 @@ void TopoMesh::build(const Board& b, const MeshOptions& opt) {
     return false;
   };
 
+  // The obstacles alone triangulated first: every edge between two obstacles (the gap a wire must fit
+  // through) is kept as a constraint of the final mesh, so that the via sites added next only
+  // subdivide those triangles and never hide a gap behind a site vertex (a free site between two pads
+  // let two wires pass, one on each side of it, where the gap holds one; arz_2L with 1.016 mm vias:
+  // 195 overflowed realiser edges from a topology with 3). Experiment (XR_OBSTEDGES): the stricter
+  // capacity leaves the negotiation unable to settle (MinVia: 119 overflowed edges in the best pass, 84
+  // failed connections in the hard one, 1096 violations), so the leak is closed elsewhere first.
+  std::vector<std::pair<int, int>> obstEdges;
+  if (std::getenv("XR_OBSTEDGES")) {
+    CDT ocdt;
+    std::vector<CDT::Vertex_handle> oh(verts.size());
+    CDT::Face_handle ohint;
+    for (size_t i = 0; i < verts.size(); ++i) {
+      size_t before = ocdt.number_of_vertices();
+      auto vh = ocdt.insert(CPoint(verts[i].p.x, verts[i].p.y), ohint);
+      ohint = vh->face();
+      if (ocdt.number_of_vertices() > before) vh->info() = int(i);
+      oh[i] = vh;
+    }
+    for (auto [a, c] : constraints)
+      if (oh[a] != oh[c]) ocdt.insert_constraint(oh[a], oh[c]);
+    for (auto [a, c] : barrierConstraints)
+      if (oh[a] != oh[c]) ocdt.insert_constraint(oh[a], oh[c]);
+    for (auto e = ocdt.finite_edges_begin(); e != ocdt.finite_edges_end(); ++e) {
+      int a = e->first->vertex(CDT::cw(e->second))->info(), c = e->first->vertex(CDT::ccw(e->second))->info();
+      if (a < 0 || c < 0 || a >= int(verts.size()) || c >= int(verts.size()) || a == c) continue;
+      if (ocdt.is_constrained(*e)) continue;  // already a constraint
+      obstEdges.push_back({a, c});
+    }
+  }
+
   // Via candidate sites: a staggered grid away from pads and the board edge, and fanout sites in front
   // of every SMD pad's ends, on the pad's axis, where a via of the pad's net fits among the other
   // copper (TopoR puts a via right over the end of a fine-pitch pad whose row leaves no room between).
@@ -300,6 +332,8 @@ void TopoMesh::build(const Board& b, const MeshOptions& opt) {
     if (handles[a] != handles[c]) cdt.insert_constraint(handles[a], handles[c]);
   for (auto [a, c] : barrierConstraints)
     if (handles[a] != handles[c]) cdt.insert_constraint(handles[a], handles[c]);
+  for (auto [a, c] : obstEdges)
+    if (handles[a] != handles[c]) cdt.insert_constraint(handles[a], handles[c]);
   // Constraint intersections may create new vertices.
   for (auto v = cdt.finite_vertices_begin(); v != cdt.finite_vertices_end(); ++v) {
     int id = v->info();
@@ -321,7 +355,7 @@ void TopoMesh::build(const Board& b, const MeshOptions& opt) {
   };
   markDomains(cdt, [&](const CDT::Edge& e) {
     if (!cdt.is_constrained(e)) return false;
-    if (barrierConstraints.empty()) return true;
+    if (barrierConstraints.empty() && obstEdges.empty()) return true;
     auto [p, q] = edgePts(e);
     return onOutline(p, q);
   });
@@ -379,8 +413,14 @@ void TopoMesh::build(const Board& b, const MeshOptions& opt) {
   // Keepout boundaries and kept wires block their layers; only the board outline separates the domain.
   auto keepoutOf = [&](int v) { return verts[v].kind == VKind::Keepout ? verts[v].keepout : -1; };
   auto trackOf = [&](int v) { return verts[v].kind == VKind::Track ? verts[v].track : -1; };
+  std::set<std::pair<int, int>> obstSet;
+  for (auto [a, c] : obstEdges) obstSet.insert({std::min(a, c), std::max(a, c)});
   for (auto& me : edges) {
-    if (!me.constrained || barrierConstraints.empty() || onOutline(verts[me.v[0]].p, verts[me.v[1]].p)) continue;
+    if (!me.constrained || (barrierConstraints.empty() && obstEdges.empty()) || onOutline(verts[me.v[0]].p, verts[me.v[1]].p)) continue;
+    if (obstSet.contains({std::min(me.v[0], me.v[1]), std::max(me.v[0], me.v[1])})) {
+      me.constrained = false;  // an obstacle-to-obstacle edge: a gap to measure, not a wall
+      continue;
+    }
     int ta = trackOf(me.v[0]), tc = trackOf(me.v[1]);
     int ka = keepoutOf(me.v[0]), kc = keepoutOf(me.v[1]);
     if (int ti = ta >= 0 ? ta : tc; ti >= 0) {
