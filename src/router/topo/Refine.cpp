@@ -314,6 +314,9 @@ RefineResult refine(Board& b, const RefineOptions& o) {
   else
     for (int ti : o.tracks)
       if (ti >= 0 && ti < int(chosen.size())) chosen[ti] = 1;
+  if (!o.nets.empty())
+    for (size_t i = 0; i < b.tracks.size(); ++i)
+      if (!std::ranges::contains(o.nets, b.tracks[i].net)) chosen[i] = 0;
   std::vector<Chain> chains = chainsOf(b, chosen);
   // Longest first: they gain the most and leave room for the rest.
   std::ranges::sort(chains, std::greater{}, &Chain::length);
@@ -321,7 +324,7 @@ RefineResult refine(Board& b, const RefineOptions& o) {
   size_t unrouted = Connectivity::compute(b).ratsnest.size();
   std::vector<LayerId> signal;
   for (LayerId l : b.copperLayers())
-    if (!b.layers[l].plane) signal.push_back(l);
+    if (!b.layers[l].plane && (o.layers.empty() || std::ranges::contains(o.layers, l))) signal.push_back(l);
 
   for (size_t ci = 0; ci < chains.size(); ++ci) {
     if (o.cancel && o.cancel->load()) break;

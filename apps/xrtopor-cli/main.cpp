@@ -29,7 +29,7 @@ void usage() {
       "  info       <board>                        summary of a board\n"
       "  convert    <board> <out.kicad_pcb|.dsn|.ses>\n"
       "  drc        <board> [--max N]               design rule check\n"
-      "  route      <board> [-o out] [--passes N] [--via-cost MM] [--no-vias] [--nets a,b] [--keep] [--soft] [--no-optimize] [--no-refine] [--no-fill] [--svg out.svg]\n"
+      "  route      <board> [-o out] [--passes N] [--via-cost MM] [--no-vias] [--layers 0,1] [--nets a,b] [--keep] [--soft] [--no-optimize] [--no-refine] [--no-fill] [--svg out.svg]\n"
       "  import-ses <board> <routes.ses> -o <out>\n"
       "  gerber     <board> <outdir>\n"
       "  svg        <board> <out.svg>\n"
@@ -96,6 +96,8 @@ int cmdRoute(Board& b, const Args& a) {
   if (auto p = a.opt("--passes"); !p.empty()) ro.maxPasses = std::stoi(std::string(p));
   if (auto p = a.opt("--via-cost"); !p.empty()) ro.viaCost = std::stod(std::string(p));
   ro.useVias = !a.flag("--no-vias");
+  if (auto p = a.opt("--layers"); !p.empty())  // copper indices, 0 = top
+    for (auto part : std::views::split(p, ',')) ro.copperIndices.push_back(std::stoi(std::string(part.begin(), part.end())));
   ro.ripupExisting = !a.flag("--keep");
   ro.softPlanarity = a.flag("--soft");
   if (a.flag("--no-optimize")) ro.optimizeIterations = 0;

@@ -25,6 +25,7 @@
 #include <ranges>
 #include <unordered_map>
 
+#include "core/Connectivity.h"
 #include "core/ZoneFill.h"
 #include "drc/Drc.h"
 #include "router/topo/Optimizer.h"
@@ -148,6 +149,7 @@ class Router {
   Grid<double> hist_;
   State s_;
   std::vector<NetJob> jobs_;
+  std::vector<int> padCluster_;  // pads joined by the wires kept on the board (Connectivity clusters)
   double presFac_ = 1;
   bool hardCap_ = false;
   // Soft planarity (PathFinder for topology): crossing another net's chord is allowed at a cost in
@@ -256,6 +258,7 @@ void Router::setup() {
   vshape_.resize(m_.verts.size());
   for (auto [i, v] : std::views::enumerate(m_.verts)) {
     if (v.kind == VKind::FixedVia) vshape_[i] = Shape::circle(v.p, b_.vias[v.fixedVia].diameter / 2.0);
+    else if (v.kind == VKind::Track) vshape_[i] = Shape::circle(v.p, b_.tracks[v.track].width / 2.0);
     else vshape_[i] = Shape::circle(v.p, 0);
   }
 
@@ -320,6 +323,7 @@ void Router::setup() {
   }
   std::ranges::sort(jobs_, {}, &NetJob::estLen);
   s_.failed.assign(jobs_.size(), {});
+  padCluster_ = Connectivity::compute(b_).padCluster;
   for (auto& j : jobs_) res_.connections += int(j.pads.size()) - 1;
 }
 
@@ -370,6 +374,11 @@ std::optional<ObstInfo> Router::obst(int v, int li, int net) const {
       if (!k.onLayer(layers_[li])) return std::nullopt;
       return ObstInfo{&vshape_[v], 0.0, -1};
     }
+    case VKind::Track: {
+      const Track& t = b_.tracks[mv.track];
+      if (t.layer != layers_[li] || (net != kNoNet && t.net == net)) return std::nullopt;
+      return ObstInfo{&vshape_[v], double(b_.clearance(t.net, layers_[li])), -2 - v};
+    }
   }
   return std::nullopt;
 }
@@ -395,7 +404,8 @@ double Router::crossCost(int e, int li, bool& blocked, bool* narrow) const {
   // Edges between two vertices of the wire's own pad lie inside its copper: never a constraint.
   int pu = m_.verts[m_.edges[e].v[0]].pad, pv = m_.verts[m_.edges[e].v[1]].pad;
   if (pu >= 0 && pu == pv && b_.pads[pu].net == net_ && b_.pads[pu].onLayer(layers_[li])) return 0;
-  if ((m_.edges[e].blocked >> layers_[li]) & 1) {  // a keepout boundary
+  if ((m_.edges[e].blocked >> layers_[li]) & 1) {  // a keepout boundary or a kept wire
+    if (m_.edges[e].net != kNoNet && m_.edges[e].net == net_) return 0;  // crossing its own wire: a junction
     blocked = true;
     return 0;
   }
@@ -852,15 +862,17 @@ void Router::routeJob(int ji) {
   targets_.clear();
   targetBox_ = BBox{};
   std::vector<char> done(job.pads.size(), 0);
-  addPadToTree(job.pads[0]);
-  done[0] = 1;
+  // A pad joins the tree with every pad the kept wires already connect it to.
   auto markJoined = [&](int pad) {
+    addPadToTree(pad);
+    int cl = pad < int(padCluster_.size()) ? padCluster_[pad] : -1;
     for (size_t k = 0; k < job.pads.size(); ++k)
-      if (job.pads[k] == pad && !done[k]) {
+      if (!done[k] && (job.pads[k] == pad || (cl >= 0 && padCluster_[job.pads[k]] == cl))) {
         done[k] = 1;
-        addPadToTree(pad);
+        addPadToTree(job.pads[k]);
       }
   };
+  markJoined(job.pads[0]);
   while (true) {
     // Unconnected pad closest to the tree.
     int pick = -1;
@@ -923,7 +935,7 @@ void Router::routeJob(int ji) {
     }
     std::vector<int> joined;
     commit(*path, joined);
-    addPadToTree(pad);
+    markJoined(pad);
     for (int p : joined) markJoined(p);
   }
   startPad_ = -1;
@@ -1028,6 +1040,7 @@ std::vector<int> Router::realizeAll() {
     return {};
   }
   RealizeOptions ro;
+  ro.tracksAsObstacles = true;  // wires kept on the board
   // The realiser on the router's own mesh (XR_UNIMESH): consistent slots, but its bends around pad
   // centres and merged radii are not better yet; kept for the obstacle-only mesh to come.
   if (std::getenv("XR_UNIMESH")) ro.mesh = &m_;
@@ -1063,9 +1076,8 @@ std::vector<Router::Conflict> Router::checkRealized(size_t firstTrack, const std
       if (o == me) return;
       int on = itemNet(b_, o);
       if (on == t.net || o.type == ItemType::Zone) return;
-      int wb = -1;
-      if (o.type == ItemType::Track) {
-        if (o.index < int(firstTrack)) return;  // pre-existing (locked) copper is not ours to fix
+      int wb = -1;  // -1: a static obstacle, kept wires among them
+      if (o.type == ItemType::Track && o.index >= int(firstTrack)) {
         wb = trackWire[o.index - firstTrack];
         if (wb < wa) return;  // each wire pair once
       }
@@ -1255,6 +1267,8 @@ RouterResult Router::run() {
   if (o_.optimizeIterations > 0 && !cancelled() && !std::getenv("XR_SKETCH")) {
     OptimizeOptions oo;
     oo.iterations = o_.optimizeIterations;
+    if (!o_.ripupExisting || !o_.nets.empty())
+      for (auto& j : jobs_) oo.nets.push_back(j.net);  // the wires kept on the board stay as they are
     oo.cancel = o_.cancel;
     oo.progress = o_.progress;
     auto r = optimize(b_, oo);
@@ -1277,6 +1291,8 @@ RouterResult Router::run() {
     RefineOptions ro;
     ro.cancel = o_.cancel;
     ro.progress = o_.progress;
+    for (auto& j : jobs_) ro.nets.push_back(j.net);  // the nets routed here, not the wires kept
+    ro.layers.assign(layers_.begin(), layers_.end());
     auto r = refine(b_, ro);
     res_.vias = int(b_.vias.size());
     res_.length = r.lengthAfter;

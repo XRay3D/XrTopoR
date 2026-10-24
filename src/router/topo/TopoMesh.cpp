@@ -139,7 +139,7 @@ void TopoMesh::build(const Board& b, const MeshOptions& opt) {
     bool area;
   };
   std::vector<KeepoutLoop> keepoutLoops;
-  std::vector<std::pair<int, int>> keepoutConstraints;
+  std::vector<std::pair<int, int>> barrierConstraints;  // keepout boundaries and kept wires
   for (int ki = 0; ki < int(b.keepouts.size()); ++ki) {
     const Keepout& k = b.keepouts[ki];
     if (k.role != Keepout::Role::Route || !k.wires) continue;
@@ -164,9 +164,34 @@ void TopoMesh::build(const Board& b, const MeshOptions& opt) {
         verts[v].keepout = ki;
         kl.verts.push_back(v);
       }
-      for (size_t i = 0; i + 1 < kl.verts.size(); ++i) keepoutConstraints.push_back({kl.verts[i], kl.verts[i + 1]});
-      if (kl.area && kl.verts.size() > 2) keepoutConstraints.push_back({kl.verts.back(), kl.verts.front()});
+      for (size_t i = 0; i + 1 < kl.verts.size(); ++i) barrierConstraints.push_back({kl.verts[i], kl.verts[i + 1]});
+      if (kl.area && kl.verts.size() > 2) barrierConstraints.push_back({kl.verts.back(), kl.verts.front()});
       keepoutLoops.push_back(std::move(kl));
+    }
+  }
+  // Wires kept on the board (locked, or all of them when the routing is a starting point): points
+  // along them, linked into barriers of their layer; the points carry the wire's width as obstacles.
+  {
+    double step = std::min(pitch, 1.0 * kNmPerMm);
+    for (int ti = 0; ti < int(b.tracks.size()); ++ti) {
+      auto pts = b.tracks[ti].path(20000);
+      if (pts.size() < 2) continue;
+      std::vector<int> chain;
+      auto addPt = [&](Vec2 p) {
+        int v = addVert(p, VKind::Track, -1);
+        verts[v].track = ti;
+        chain.push_back(v);
+      };
+      addPt(pts.front());
+      double carry = 0;
+      for (size_t i = 1; i < pts.size(); ++i) {
+        Vec2 a = pts[i - 1], c = pts[i];
+        double len = (c - a).len();
+        for (double s = step - carry; s < len; s += step) addPt(a + (c - a) * (s / len));
+        carry = std::fmod(carry + len, step);
+      }
+      if ((pts.back() - verts[chain.back()].p).len() > 1) addPt(pts.back());
+      for (size_t i = 0; i + 1 < chain.size(); ++i) barrierConstraints.push_back({chain[i], chain[i + 1]});
     }
   }
   // No via sites where the via's copper would touch a keepout that keeps vias out.
@@ -200,7 +225,7 @@ void TopoMesh::build(const Board& b, const MeshOptions& opt) {
         BBox q;
         q.add(p);
         idx.query(q.inflated(need + 5 * kNmPerMm), cuMask, [&](ItemRef r) {
-          if (!ok || r.type == ItemType::Track || r.type == ItemType::Zone) return;
+          if (!ok || r.type == ItemType::Zone) return;
           // A track of the pad's class must be able to leave the pad past the via.
           double exitRoom = r.type == ItemType::Pad ? double(b.classOf(b.pads[r.index].net).trackWidth) : 0.0;
           for (auto& s : itemShapes(b, r))
@@ -230,7 +255,7 @@ void TopoMesh::build(const Board& b, const MeshOptions& opt) {
   }
   for (auto [a, c] : constraints)
     if (handles[a] != handles[c]) cdt.insert_constraint(handles[a], handles[c]);
-  for (auto [a, c] : keepoutConstraints)
+  for (auto [a, c] : barrierConstraints)
     if (handles[a] != handles[c]) cdt.insert_constraint(handles[a], handles[c]);
   // Constraint intersections may create new vertices.
   for (auto v = cdt.finite_vertices_begin(); v != cdt.finite_vertices_end(); ++v) {
@@ -253,7 +278,7 @@ void TopoMesh::build(const Board& b, const MeshOptions& opt) {
   };
   markDomains(cdt, [&](const CDT::Edge& e) {
     if (!cdt.is_constrained(e)) return false;
-    if (keepoutConstraints.empty()) return true;
+    if (barrierConstraints.empty()) return true;
     auto [p, q] = edgePts(e);
     return onOutline(p, q);
   });
@@ -308,13 +333,17 @@ void TopoMesh::build(const Board& b, const MeshOptions& opt) {
       if (me.t[0] < 0) me.t[0] = ti; else me.t[1] = ti;
     }
   }
-  // Keepout boundaries block their layers; only the board outline separates the domain.
+  // Keepout boundaries and kept wires block their layers; only the board outline separates the domain.
   auto keepoutOf = [&](int v) { return verts[v].kind == VKind::Keepout ? verts[v].keepout : -1; };
+  auto trackOf = [&](int v) { return verts[v].kind == VKind::Track ? verts[v].track : -1; };
   for (auto& me : edges) {
-    if (!me.constrained || keepoutConstraints.empty() || onOutline(verts[me.v[0]].p, verts[me.v[1]].p)) continue;
+    if (!me.constrained || barrierConstraints.empty() || onOutline(verts[me.v[0]].p, verts[me.v[1]].p)) continue;
+    int ta = trackOf(me.v[0]), tc = trackOf(me.v[1]);
     int ka = keepoutOf(me.v[0]), kc = keepoutOf(me.v[1]);
-    int ki = ka >= 0 ? ka : kc;  // pieces between two crossing keepouts block for either
-    if (ki >= 0) {
+    if (int ti = ta >= 0 ? ta : tc; ti >= 0) {
+      me.blocked |= LayerMask(1) << b.tracks[ti].layer;
+      me.net = b.tracks[ti].net;
+    } else if (int ki = ka >= 0 ? ka : kc; ki >= 0) {  // pieces between two crossing keepouts block for either
       const Keepout& k = b.keepouts[ki];
       me.blocked |= k.layers ? k.layers : cuMask;
     } else {

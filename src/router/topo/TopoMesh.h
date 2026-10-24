@@ -1,7 +1,7 @@
 #pragma once
 // Routing mesh: one constrained Delaunay triangulation shared by all copper layers.
 // Vertices are pad centres and corners, via candidate sites, board outline points and the boundary
-// points of routing keepouts. Per-layer occupancy (which vertex is an obstacle on which layer) is
+// points of routing keepouts and points along the wires kept on the board. Per-layer occupancy (which vertex is an obstacle on which layer) is
 // kept by the router; keepouts block the edges along their boundary and the triangles inside them
 // on their layers only.
 #include <vector>
@@ -10,7 +10,7 @@
 
 namespace xr::topo {
 
-enum class VKind { PadCenter, PadCorner, ViaSite, Outline, FixedVia, Keepout };
+enum class VKind { PadCenter, PadCorner, ViaSite, Outline, FixedVia, Keepout, Track };
 
 struct MVertex {
   Vec2 p;
@@ -18,6 +18,7 @@ struct MVertex {
   int pad = -1;       // owning pad (PadCenter / PadCorner)
   int fixedVia = -1;  // board via index (FixedVia)
   int keepout = -1;   // board keepout index (Keepout)
+  int track = -1;     // board track index (Track: a point along a wire kept on the board)
   std::vector<int> tris;  // incident inside triangles
 };
 
@@ -33,7 +34,8 @@ struct MEdge {
   int v[2] = {-1, -1};  // canonical orientation v[0] -> v[1]
   int t[2] = {-1, -1};
   bool constrained = false;
-  LayerMask blocked = 0;  // layers on which wires may not cross (keepout boundary)
+  LayerMask blocked = 0;  // layers on which wires may not cross (keepout boundary, kept wire)
+  int net = kNoNet;       // of a kept wire the edge runs along: its own net crosses it freely (a junction)
 };
 
 struct MeshOptions {

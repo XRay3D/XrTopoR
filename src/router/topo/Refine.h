@@ -18,6 +18,8 @@ namespace xr::topo {
 struct RefineOptions {
   bool changeLayers = true;
   std::vector<int> tracks;  // wires to refine (grown to whole chains); empty: all unlocked ones
+  std::vector<int> nets;    // only wires of these nets; empty: any
+  std::vector<LayerId> layers;  // layers a wire may move to; empty: every signal layer
   std::function<void(int done, int total, const std::string& stage)> progress;
   const std::atomic<bool>* cancel = nullptr;
 };

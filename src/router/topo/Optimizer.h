@@ -16,6 +16,7 @@ struct OptimizeOptions {
   double step = 0.4 * kNmPerMm;  // first trial displacement; halved every iteration
   bool vias = true;
   bool components = false;  // also move unlocked components (pads keep their relative layout)
+  std::vector<int> nets;    // only vias of these nets (and no components); empty: everything unlocked
   std::function<void(int done, int total, const std::string& stage)> progress;
   const std::atomic<bool>* cancel = nullptr;
 };

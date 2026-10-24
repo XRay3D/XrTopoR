@@ -1,9 +1,13 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <cstdlib>
+
 #include "core/Connectivity.h"
 #include "drc/Drc.h"
 #include "io/BoardIO.h"
 #include "router/topo/Optimizer.h"
+#include "router/topo/TopoMesh.h"
 #include "router/topo/TopoRouter.h"
 
 using namespace xr;
@@ -170,4 +174,77 @@ TEST(Router, NetsOnAssignedLayers) {
   EXPECT_EQ(res.routed, res.connections);
   ASSERT_FALSE(b.tracks.empty());
   for (auto& t : b.tracks) EXPECT_EQ(t.layer, b.bottomCopper());
+}
+
+// Wires kept on the board are obstacles: a kept wire of another net across most of the only routing
+// layer is gone around; a net removed from a routed board is routed again without violations against
+// the rest, which stays as it was.
+TEST(Router, KeptWiresAreObstacles) {
+  auto mm = [](double x, double y) { return Vec2{x * kNmPerMm, y * kNmPerMm}; };
+  {
+    Board b = twoPads();
+    int nb = b.addNet("B");
+    Track wall;
+    wall.a = Point(mm(20, 2));
+    wall.b = Point(mm(20, 24));
+    wall.width = mmToNm(0.3);
+    wall.layer = b.topCopper();
+    wall.net = nb;
+    wall.locked = true;
+    b.tracks.push_back(wall);
+    if (const char* dump = std::getenv("XR_DUMP")) (void)io::saveBoard(b, dump);
+    {
+      topo::TopoMesh m;
+      topo::MeshOptions mo;
+      mo.viaDiameter = double(b.netClasses[0].viaDiameter);
+      mo.clearance = double(b.netClasses[0].clearance);
+      m.build(b, mo);
+      int trackVerts = 0, barrier = 0;
+      for (auto& v : m.verts) trackVerts += v.kind == topo::VKind::Track;
+      for (auto& e : m.edges) barrier += e.blocked != 0 && e.net == nb;
+      EXPECT_GE(trackVerts, 20);
+      EXPECT_GE(barrier, 20);
+    }
+    for (int stage = 0; stage < 3; ++stage) {
+      SCOPED_TRACE(stage == 0 ? "route only" : stage == 1 ? "with the optimiser" : "with the refinement");
+      Board bb = b;
+      topo::RouterOptions o;
+      o.copperIndices = {0};
+      o.ripupExisting = false;
+      o.optimizeIterations = stage == 1 ? 2 : 0;
+      o.refine = stage == 2;
+      auto r = topo::routeBoard(bb, o);
+      EXPECT_EQ(r.routed, r.connections);
+      EXPECT_EQ(clearanceViolations(bb), 0);
+      double maxY = 0;
+      for (auto& t : bb.tracks)
+        if (t.net != nb) maxY = std::max({maxY, t.a.v().y, t.b.v().y});
+      EXPECT_GT(maxY, 24 * kNmPerMm);
+    }
+  }
+  {
+    auto lb = io::loadBoard(data("tt.kicad_pcb"));
+    ASSERT_TRUE(lb);
+    Board& b = **lb;
+    ASSERT_EQ(Connectivity::compute(b).ratsnest.size(), 0u);
+    // The net with the most wire is taken out.
+    std::vector<double> len(b.nets.size(), 0);
+    for (auto& t : b.tracks)
+      if (t.net >= 0) len[size_t(t.net)] += (t.b.v() - t.a.v()).len();
+    int net = int(std::ranges::max_element(len) - len.begin());
+    std::erase_if(b.tracks, [&](const Track& t) { return t.net == net; });
+    std::erase_if(b.vias, [&](const Via& v) { return v.net == net; });
+    size_t others = b.tracks.size();
+    int before = clearanceViolations(b);
+    topo::RouterOptions o;
+    o.ripupExisting = false;
+    o.nets = {b.nets[size_t(net)].name};
+    auto r = topo::routeBoard(b, o);
+    EXPECT_EQ(r.routed, r.connections);
+    EXPECT_EQ(Connectivity::compute(b).ratsnest.size(), 0u);
+    EXPECT_LE(clearanceViolations(b), before);
+    size_t kept = 0;
+    for (auto& t : b.tracks) kept += t.net != net;
+    EXPECT_EQ(kept, others);
+  }
 }

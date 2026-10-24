@@ -134,7 +134,7 @@ OptimizeResult optimize(Board& b, const OptimizeOptions& o) {
       for (int vi = 0; vi < int(b.vias.size()) && !cancelled(); ++vi) {
         if (o.progress) o.progress(++done, total, std::format("optimise {}: vias", it + 1));
         const Via& v = b.vias[vi];
-        if (v.locked) continue;
+        if (v.locked || (!o.nets.empty() && !std::ranges::contains(o.nets, v.net))) continue;
         Shape vs = Shape::circle(v.pos.v(), v.diameter / 2.0);
         auto chosen = attachedTo(b, vs, v.layers, v.net);
         if (std::ranges::none_of(chosen, [](char c) { return c != 0; })) continue;
@@ -177,7 +177,7 @@ OptimizeResult optimize(Board& b, const OptimizeOptions& o) {
         }
       }
 
-    if (o.components)
+    if (o.components && o.nets.empty())
       for (int ci = 0; ci < int(b.components.size()) && !cancelled(); ++ci) {
         if (o.progress) o.progress(++done, total, std::format("optimise {}: components", it + 1));
         const Component& comp = b.components[ci];
