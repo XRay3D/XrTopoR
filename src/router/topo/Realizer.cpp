@@ -8,6 +8,7 @@
 #include <CGAL/Triangulation_vertex_base_with_info_2.h>
 
 #include <algorithm>
+#include <array>
 #include <flat_map>
 #include <flat_set>
 #include <cstdlib>
@@ -483,12 +484,104 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
   // slot of every crossing from the ordered crossings of that edge.
   std::vector<std::vector<EdgeHit>> hits(NW);
   std::vector<std::vector<Slot>> slots(NW);
+  // A wire leaves a narrow pad straight through its end (TopoR does): the taut path from the pad
+  // centre would cut the pad's own corner and brush the neighbouring pad. Such a wire is realised
+  // from an exit point in front of the end; a stub joins it to the pad and keeps the other wires out.
+  struct Stub {
+    Vec2 from, mid, to;  // pad point -> middle of the end -> exit point
+    bool on = false;
+  };
+  std::vector<std::array<Stub, 2>> stubs(NW);
+  std::vector<Polyline> sketches(NW);
+  {
+    SpatialIndex idx;
+    idx.build(b);
+    for (int wi = 0; wi < NW; ++wi) {
+      const RealWire& w = wires[wi];
+      Polyline& sk = sketches[wi];
+      sk = w.sketch;
+      if (sk.size() < 2 || w.net == kNoNet || opt.mesh) continue;
+      double reach = double(w.clearance) + w.width / 2.0 + kMargin;  // the wire's envelope beyond the copper
+      for (int end = 0; end < 2; ++end) {
+        if (end) std::ranges::reverse(sk);
+        Vec2 p = sk.front();
+        std::optional<Shape> pad;
+        BBox q;
+        q.add(p);
+        idx.query(q.inflated(1000), LayerMask(1) << w.layer, [&](ItemRef r) {
+          if (pad || r.type != ItemType::Pad || b.pads[r.index].net != w.net) return;
+          Shape s = b.pads[r.index].shapeGeom();
+          if (s.kind != Shape::Kind::Point && s.contains(p)) pad = s;
+        });
+        bool on = false;
+        if (pad) {
+          size_t k = 1;  // the first sketch point clear of the pad
+          while (k < sk.size() && pad->distance(sk[k]) <= 0) ++k;
+          Vec2 M, n;
+          double len = -1;  // width of the end the wire leaves through, copper included
+          if (k < sk.size()) {
+            // Where the sketch leaves the copper: the end it crosses is the side nearest to that point.
+            Vec2 in = sk[k - 1], out = sk[k];
+            Vec2 X = in;
+            if (pad->distance(in) < -1000)
+              for (int it = 0; it < 30; ++it) {
+                Vec2 mid = (in + out) * 0.5;
+                (pad->distance(mid) <= 0 ? in : out) = mid;
+                X = out;
+              }
+            if (pad->kind == Shape::Kind::Polygon) {
+              const Polyline& pl = pad->poly;
+              size_t m = pl.size();
+              double bd = std::numeric_limits<double>::max();
+              for (size_t i = 0; i < m; ++i) {
+                Vec2 a = pl[i], c = pl[(i + 1) % m];
+                if ((c - a).len2() < 1) continue;
+                double d = distPointSegment(X, a, c);
+                if (d < bd) {
+                  bd = d;
+                  M = (a + c) * 0.5;
+                  n = (c - a).perp().normalized();
+                  if (n.dot(M - pad->center()) < 0) n = -n;
+                  len = (c - a).len() + 2 * pad->r;
+                }
+              }
+            } else if (pad->kind == Shape::Kind::Segment && (pad->b - pad->a).len2() > 1) {
+              Vec2 e = (X - pad->a).len2() < (X - pad->b).len2() ? pad->a : pad->b;
+              M = e;
+              n = (e - (pad->a + pad->b - e)).normalized();
+              len = 2 * pad->r;
+            }
+          }
+          if (len >= 0 && len < w.width + 2.0 * double(w.clearance)) {
+            Vec2 E = M + n * (pad->r + reach);
+            size_t drop = 1;
+            while (drop + 1 < sk.size() && pad->distance(sk[drop]) < reach) ++drop;
+            sk.erase(sk.begin(), sk.begin() + drop);
+            sk.insert(sk.begin(), E);
+            stubs[wi][end] = {p, M, E, true};
+            on = true;
+          }
+        }
+        if (std::getenv("XR_DEBUG_STUB") && pad)
+          std::println(stderr, "stub? net {} L{} end {} at ({:.3f},{:.3f}) kind {} -> {}; sketch {}", b.nets[w.net].name, int(w.layer), end,
+                       p.x / 1e6, -p.y / 1e6, int(pad->kind), on, sk.size());
+        if (end) std::ranges::reverse(sk);
+      }
+    }
+  }
   std::map<LayerId, LayerObstacles> obstacles;
   std::map<LayerId, std::map<std::pair<int, int>, std::vector<std::pair<int, int>>>> edgeLists;
   std::map<LayerId, std::set<std::pair<int, int>>> cdtEdges;  // debug: obstacle pairs joined by an edge
   for (auto&& [layer, ids] : byLayer) {
     LayerObstacles& ob = obstacles.emplace(layer, opt.mesh ? collectFromMesh(b, layer, *opt.mesh, vias)
                                                             : collect(b, layer, vias, opt)).first->second;
+    for (int wi : ids)
+      for (const Stub& st : stubs[wi])
+        if (st.on) {
+          double r = wires[wi].width / 2.0, clr = double(wires[wi].clearance);
+          int i = ob.add(st.mid, r, clr, wires[wi].net), j = ob.add(st.to, r, clr, wires[wi].net);
+          ob.link(i, j, r);
+        }
     auto cdt = triangulate(ob, kNoNet);
     if (std::getenv("XR_DEBUG4"))
       for (auto e = cdt->finite_edges_begin(); e != cdt->finite_edges_end(); ++e) {
@@ -497,7 +590,7 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
       }
     auto& onEdge = edgeLists[layer];  // edge -> (wire, hit index)
     for (int wi : ids) {
-      if (cdt->number_of_vertices() >= 3) hits[wi] = crossings(*cdt, wires[wi].sketch);
+      if (cdt->number_of_vertices() >= 3) hits[wi] = crossings(*cdt, sketches[wi]);
       slots[wi].resize(hits[wi].size());
       for (int k = 0; k < int(hits[wi].size()); ++k) onEdge[{hits[wi][k].u, hits[wi][k].v}].push_back({wi, k});
     }
@@ -648,10 +741,11 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
   for (int wi = 0; wi < NW; ++wi) {
     const RealWire& w = wires[wi];
     const LayerObstacles& ob = obstacles.at(w.layer);
+    const Polyline& sk = sketches[wi];
     bendsOf[wi].clear();
-    if (w.sketch.size() < 2) continue;
+    if (sk.size() < 2) continue;
     std::vector<std::pair<Vec2, Vec2>> portals;
-    portals.push_back({w.sketch.front(), w.sketch.front()});
+    portals.push_back({sk.front(), sk.front()});
     for (int k = 0; k < int(hits[wi].size()); ++k) {
       const EdgeHit& h = hits[wi][k];
       const Slot& sl = slots[wi][k];
@@ -661,14 +755,14 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
       Vec2 nearU = U + d * sl.lo, nearV = U + d * sl.hi;
       portals.push_back(h.uLeft ? std::pair{nearU, nearV} : std::pair{nearV, nearU});
     }
-    portals.push_back({w.sketch.back(), w.sketch.back()});
+    portals.push_back({sk.back(), sk.back()});
     auto apexes = funnel(portals);
 
     auto L_of = [&](const EdgeHit& h) { return (ob.pts[h.v].p - ob.pts[h.u].p).len(); };
     // The ends take the width of the first and last crossing: a wire leaving a fine-pitch pad from
     // its end is narrowed from the pad on.
     std::vector<Circle> cs;
-    cs.push_back({w.sketch.front(), 0, -1, 0, hw[wi].empty() ? double(w.width) : hw[wi].front()});
+    cs.push_back({sk.front(), 0, -1, 0, hw[wi].empty() ? double(w.width) : hw[wi].front()});
     for (const FunnelApex& ap : apexes) {
       const EdgeHit& h = hits[wi][ap.portal - 1];
       const Slot& sl = slots[wi][ap.portal - 1];
@@ -699,9 +793,9 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
         cs.push_back({c, ap.side * R, o, ap.portal, width});
       }
     }
-    cs.push_back({w.sketch.back(), 0, -1, int(portals.size()) - 1, hw[wi].empty() ? double(w.width) : hw[wi].back()});
+    cs.push_back({sk.back(), 0, -1, int(portals.size()) - 1, hw[wi].empty() ? double(w.width) : hw[wi].back()});
     if (std::getenv("XR_DEBUG2")) {
-      std::print(stderr, "wire {} net {} sketch {} hits {} bends:", wi, b.nets[w.net].name, w.sketch.size(), hits[wi].size());
+      std::print(stderr, "wire {} net {} sketch {} hits {} bends:", wi, b.nets[w.net].name, sk.size(), hits[wi].size());
       for (auto& c : cs) std::print(stderr, " [o{} rho{:+.3f} ({:.3f},{:.3f})]", c.obst, c.rho / 1e6, c.c.x / 1e6, c.c.y / 1e6);
       std::print(stderr, "\n  hits:");
       for (int k = 0; k < int(hits[wi].size()); ++k) {
@@ -896,6 +990,10 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
     const auto& to = toutOf[wi];
     if (cs.size() < 2) continue;
     size_t n = cs.size();
+    if (stubs[wi][0].on) {
+      emitSeg(stubs[wi][0].from, stubs[wi][0].mid, cs[0].width);
+      emitSeg(stubs[wi][0].mid, stubs[wi][0].to, cs[0].width);
+    }
     Vec2 cur = cs[0].c;
     for (size_t k = 0; k + 1 < n; ++k) {
       Vec2 p = (k == 0) ? cs[0].c : to[k];
@@ -926,6 +1024,10 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
           cur = to[k + 1];
         }
       }
+    }
+    if (stubs[wi][1].on) {
+      emitSeg(stubs[wi][1].to, stubs[wi][1].mid, cs[n - 1].width);
+      emitSeg(stubs[wi][1].mid, stubs[wi][1].from, cs[n - 1].width);
     }
     ++st.wires;
   }
