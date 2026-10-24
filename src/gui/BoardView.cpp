@@ -18,6 +18,7 @@
 #include "gui/SmallDialogs.h"
 #include "io/BoardIO.h"
 #include "router/topo/Realizer.h"
+#include "router/topo/Refine.h"
 
 namespace xr::gui {
 
@@ -824,6 +825,20 @@ void BoardView::drawOverlay(QPainter& p) {
   QColor c = doc_->layerColor(routeLayer_);
   for (auto& t : routeTracks_) drawTrack(p, t, doc_->layerColor(t.layer));
   for (auto& v : routeVias_) drawVia(p, v, doc_->color("clrThroughVias", 0x949494));
+  // The suggested path to the target (dash-dotted), or a pointer to it when there is none.
+  if (!routeHint_.empty()) {
+    QColor hc = brighter(c, 50);
+    for (auto& t : routeHint_) {
+      QPen pen(hc, 1.5, Qt::DashDotLine);
+      p.setPen(pen);
+      p.setBrush(Qt::NoBrush);
+      auto pts = t.path(std::max(500.0, 0.3 / scale_));
+      p.drawPolyline(toPoly(pts, [&](Vec2 v) { return toScreen(v); }));
+    }
+  } else if (routeTarget_) {
+    p.setPen(QPen(brighter(c, 50), 1, Qt::DashLine));
+    p.drawLine(toScreen(routeLast_), toScreen(*routeTarget_));
+  }
   if (auto seg = makeSegment(routeLast_, constrained(routeLast_, snapped(cursor_)))) {
     double m = rubberMargin(*seg);
     QColor rc = m < 0 ? QColor(0xff, 0x30, 0x30) : brighter(c, 30);
@@ -2075,6 +2090,8 @@ void BoardView::cancelTool() {
 void BoardView::routeStart(const Pick& pk, Vec2 at) {
   Board& b = *doc_->board();
   routing_ = true;
+  routeFrom_ = pk.item;
+  targetIndex_ = 0;
   routeNet_ = pk.item ? itemNet(b, *pk.item) : kNoNet;
   routeLayer_ = doc_->activeLayer();
   if (pk.item) {
@@ -2088,7 +2105,9 @@ void BoardView::routeStart(const Pick& pk, Vec2 at) {
   routeVias_.clear();
   routeLast_ = at;
   routeDir_.reset();
-  emit status(tr("Прокладка цепи %1 на слое %2: V — переход, Backspace — отменить сегмент, Enter — завершить, Esc — отмена")
+  updateRouteHint();
+  emit status(tr("Прокладка цепи %1 на слое %2: «;» — проложить до цели, Q — другая цель, V — переход, Backspace — отменить, "
+                 "Enter — завершить")
                   .arg(routeNet_ >= 0 ? QString::fromStdString(b.nets[routeNet_].name) : tr("(без цепи)"))
                   .arg(QString::fromStdString(b.layers[routeLayer_].name)));
 }
@@ -2155,6 +2174,7 @@ void BoardView::routeAddPoint(Vec2 at, const Pick& pk) {
     }
     routeDir_ = dir;
     routeLast_ = at;
+    updateRouteHint();
   }
   // Clicking an item of the same net ends the route on it.
   if (pk.item && routeNet_ != kNoNet && itemNet(*doc_->board(), *pk.item) == routeNet_ && pk.item->type != ItemType::Track)
@@ -2181,6 +2201,7 @@ void BoardView::routeAddVia() {
   routeLayer_ = cu[(idx + 1) % cu.size()];
   routeWidth_ = b.trackWidth(routeNet_, routeLayer_);
   doc_->setActiveLayer(routeLayer_);
+  updateRouteHint();
   update();
 }
 
@@ -2396,7 +2417,60 @@ void BoardView::routeUndoLast() {
     const Track& pr = routeTracks_.back();
     routeDir_ = (pr.b.v() - pr.a.v()).normalized();
   }
+  updateRouteHint();
   update();
+}
+
+void BoardView::updateRouteHint() {
+  routeHint_.clear();
+  routeTarget_.reset();
+  if (!routing_ || routeNet_ == kNoNet) return;
+  const Board& b = *doc_->board();
+  const Connectivity& conn = doc_->connectivity();
+  auto clusterOf = [&](ItemRef r) {
+    switch (r.type) {
+      case ItemType::Pad: return conn.padCluster[r.index];
+      case ItemType::Track: return conn.trackCluster[r.index];
+      case ItemType::Via: return conn.viaCluster[r.index];
+      default: return -1;
+    }
+  };
+  int from = routeFrom_ ? clusterOf(*routeFrom_) : -1;
+  // Unconnected pads and vias of the net on the routing layer, nearest first.
+  std::vector<std::pair<double, Vec2>> cands;
+  for (int i = 0; i < int(b.pads.size()); ++i) {
+    const Pad& p = b.pads[i];
+    if (p.net != routeNet_ || !p.onLayer(routeLayer_) || (from >= 0 && conn.padCluster[i] == from)) continue;
+    cands.push_back({(p.pos.v() - routeLast_).len(), p.pos.v()});
+  }
+  for (int i = 0; i < int(b.vias.size()); ++i) {
+    const Via& v = b.vias[i];
+    if (v.net != routeNet_ || !v.onLayer(routeLayer_) || (from >= 0 && conn.viaCluster[i] == from)) continue;
+    cands.push_back({(v.pos.v() - routeLast_).len(), v.pos.v()});
+  }
+  std::erase_if(cands, [&](auto& c) { return c.first < 1; });
+  if (cands.empty()) return;
+  std::ranges::sort(cands, {}, &std::pair<double, Vec2>::first);
+  routeTarget_ = cands[size_t(targetIndex_) % cands.size()].second;
+  routeHint_ = topo::routeConnection(b, routeLast_, *routeTarget_, routeLayer_, routeNet_, routeWidth_);
+}
+
+void BoardView::nextTarget() {
+  if (!routing_) return;
+  ++targetIndex_;
+  updateRouteHint();
+  update();
+}
+
+void BoardView::routeToTarget() {
+  if (!routing_) return;
+  if (routeHint_.empty()) {
+    emit status(tr("Путь до цели в текущем слое не найден"));
+    return;
+  }
+  for (auto& t : routeHint_) routeTracks_.push_back(t);
+  routeHint_.clear();
+  finishRoute();
 }
 
 void BoardView::selectCopper(int toporIndex) {
@@ -2410,6 +2484,7 @@ void BoardView::selectCopper(int toporIndex) {
     routeAddVia();
     routeLayer_ = l;
     routeWidth_ = b.trackWidth(routeNet_, routeLayer_);
+    updateRouteHint();
   }
   doc_->setActiveLayer(l);
 }

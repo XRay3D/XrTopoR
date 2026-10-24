@@ -910,3 +910,27 @@ TEST(Gui, ViaRowAndMatrix) {
   QTest::mouseClick(&f.view, Qt::LeftButton, {}, f.at(c + Vec2{pitch * 2.5, -5e6 + pitch * 1.5}));
   EXPECT_EQ(b.vias.size(), vias + 4 + 6);
 }
+
+// While routing, «;» lays the suggested path to the nearest unconnected pad and ends the route.
+TEST(Gui, RouteToTarget) {
+  Fixture f("astable.kicad_pcb");
+  Board& b = *f.doc.board();
+  b.clearRouting(false);
+  f.doc.invalidate();
+  size_t unrouted = Connectivity::compute(b).ratsnest.size();
+  ASSERT_GT(unrouted, 0u);
+  const RatsLine& r = Connectivity::compute(b).ratsnest[0];
+  ASSERT_EQ(r.from.type, ItemType::Pad);
+  Vec2 a = b.pads[r.from.index].pos.v();
+  f.look(a, 30);
+  f.view.setMode(Mode::Route);
+  QTest::mouseClick(&f.view, Qt::LeftButton, {}, f.at(a));
+  ASSERT_TRUE(f.view.isRouting());
+  f.view.routeToTarget();
+  EXPECT_FALSE(f.view.isRouting());
+  EXPECT_FALSE(b.tracks.empty());
+  EXPECT_EQ(Connectivity::compute(b).ratsnest.size(), unrouted - 1);
+  DrcOptions o;
+  o.unconnected = false;
+  EXPECT_EQ(runDrc(b, o).size(), 0u);
+}

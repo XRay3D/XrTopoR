@@ -317,6 +317,8 @@ void MainWindow::bindCommands() {
   // Ручная прокладка, выделение, слои
   c.bind("Accel_Cancel", [this] { view_->cancelTool(); });
   c.bind("Accel_DelLast", [this] { view_->routeUndoLast(); });
+  c.bind("Accel_Route2Target", [this] { view_->routeToTarget(); });
+  c.bind("Accel_NavTarget", [this] { view_->nextTarget(); });
   c.bind("Accel_ToogleOrtho", [this] {
     view_->setRouteAngle(view_->routeAngle() == RouteAngle::Deg45 ? RouteAngle::Free : RouteAngle::Deg45);
   });

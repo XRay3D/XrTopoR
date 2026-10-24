@@ -260,6 +260,32 @@ std::optional<Polyline> findPath(const Board& b, Vec2 from, Vec2 to, LayerId lay
   return simplify(path);
 }
 
+std::vector<Track> routeConnection(const Board& b, Vec2 from, Vec2 to, LayerId layer, int net, Coord width) {
+  BBox board = b.bbox();
+  BBox region;
+  region.add(from);
+  region.add(to);
+  region = region.inflated(std::max(3.0 * kNmPerMm, 0.5 * (to - from).len()));
+  std::optional<Polyline> path = findPath(b, from, to, layer, net, width, region);
+  if (!path && board.valid()) path = findPath(b, from, to, layer, net, width, board.inflated(kNmPerMm));
+  if (!path) return {};
+  Board trial = b;
+  RealWire w;
+  w.net = net;
+  w.layer = layer;
+  w.width = width;
+  w.clearance = b.clearance(net, layer);
+  w.sketch = *path;
+  RealizeOptions ro;
+  ro.tracksAsObstacles = true;
+  BBox pb;
+  for (Vec2 p : *path) pb.add(p);
+  ro.region = pb.inflated(2 * kNmPerMm);
+  size_t before = trial.tracks.size();
+  realize(trial, {w}, {}, ro);
+  return {trial.tracks.begin() + long(before), trial.tracks.end()};
+}
+
 RefineResult refine(Board& b, const RefineOptions& o) {
   auto t0 = std::chrono::steady_clock::now();
   RefineResult r;

@@ -72,6 +72,8 @@ class BoardView : public QWidget {
   void toggleLayer();      // L: while routing, a via to the next copper layer
   void viaKey();           // V: a via while routing, otherwise the via tool
   void routeUndoLast();    // Backspace: drops the last routed segment (and its via)
+  void routeToTarget();    // «;»: the suggested path to the target is laid and the route finished
+  void nextTarget();       // Q: the next unconnected object of the net becomes the target
   void selectCopper(int toporIndex);  // 0 = bottom, 1 = top, 2..9 = inner layers (with a via while routing)
   void toggleMetalLayers();           // all copper layers on/off
   void toggleFix();                   // F: lock/unlock the selection
@@ -239,6 +241,13 @@ class BoardView : public QWidget {
   std::vector<Via> routeVias_;
   Vec2 routeLast_;
   std::optional<Vec2> routeDir_;  // direction of the last segment (for tangent arcs)
+  // TopoR's target and suggested path: the nearest unconnected object of the net on the routing
+  // layer and the way to it without violations (dash-dotted); none found: a dashed pointer.
+  std::optional<ItemRef> routeFrom_;
+  int targetIndex_ = 0;
+  std::optional<Vec2> routeTarget_;
+  std::vector<Track> routeHint_;
+  void updateRouteHint();
 };
 
 }  // namespace xr::gui
