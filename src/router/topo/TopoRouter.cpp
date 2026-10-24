@@ -351,6 +351,12 @@ std::optional<ObstInfo> Router::obst(int v, int li, int net) const {
       return ObstInfo{&vshape_[v], double(b_.clearance(bv.net, layers_[li])), -2 - v};
     }
     case VKind::Outline: return ObstInfo{&vshape_[v], double(b_.edgeClearance), -1};
+    case VKind::Keepout: {
+      // Wires keep off the keepout itself (no clearance), on its layers only.
+      const Keepout& k = b_.keepouts[mv.keepout];
+      if (!k.onLayer(layers_[li])) return std::nullopt;
+      return ObstInfo{&vshape_[v], 0.0, -1};
+    }
   }
   return std::nullopt;
 }
@@ -375,6 +381,10 @@ double Router::crossCost(int e, int li, bool& blocked) const {
   // Edges between two vertices of the wire's own pad lie inside its copper: never a constraint.
   int pu = m_.verts[m_.edges[e].v[0]].pad, pv = m_.verts[m_.edges[e].v[1]].pad;
   if (pu >= 0 && pu == pv && b_.pads[pu].net == net_ && b_.pads[pu].onLayer(layers_[li])) return 0;
+  if ((m_.edges[e].blocked >> layers_[li]) & 1) {  // a keepout boundary
+    blocked = true;
+    return 0;
+  }
   double cu, cv;
   bool ou, ov;
   double free = freeLength(e, li, net_, cu, ou, cv, ov);
@@ -570,7 +580,7 @@ std::optional<std::vector<SNode>> Router::search(int pad) {
     const SNode& n = nodes[from];
     int e = m_.tris[t].e[le2];
     int t2 = m_.tris[t].nb[le2];
-    if (t2 < 0) { ++nNoNb; return; }
+    if (t2 < 0 || ((m_.tris[t2].blocked >> layers_[n.li]) & 1)) { ++nNoNb; return; }
     bool blocked = false;
     double cc = crossCost(e, n.li, blocked);
     if (blocked) { ++nBlocked; return; }

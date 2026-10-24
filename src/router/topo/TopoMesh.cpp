@@ -27,7 +27,9 @@ using Itag = CGAL::Exact_predicates_tag;
 using CDT = CGAL::Constrained_Delaunay_triangulation_2<K, Tds, Itag>;
 using CPoint = CDT::Point;
 
-void markDomains(CDT& cdt, CDT::Face_handle start, int index, std::list<CDT::Edge>& border) {
+// Domains are separated by the board outline only (`border(e)`): keepout boundaries are constraints too.
+template <class Border>
+void markDomains(CDT& cdt, CDT::Face_handle start, int index, std::list<CDT::Edge>& border, const Border& isBorder) {
   if (start->info().nesting != -1) return;
   std::list<CDT::Face_handle> queue;
   queue.push_back(start);
@@ -40,7 +42,7 @@ void markDomains(CDT& cdt, CDT::Face_handle start, int index, std::list<CDT::Edg
         CDT::Edge e(fh, i);
         auto n = fh->neighbor(i);
         if (n->info().nesting == -1) {
-          if (cdt.is_constrained(e)) border.push_back(e);
+          if (isBorder(e)) border.push_back(e);
           else queue.push_back(n);
         }
       }
@@ -48,15 +50,16 @@ void markDomains(CDT& cdt, CDT::Face_handle start, int index, std::list<CDT::Edg
   }
 }
 
-void markDomains(CDT& cdt) {
+template <class Border>
+void markDomains(CDT& cdt, const Border& isBorder) {
   for (auto f = cdt.all_faces_begin(); f != cdt.all_faces_end(); ++f) f->info().nesting = -1;
   std::list<CDT::Edge> border;
-  markDomains(cdt, cdt.infinite_face(), 0, border);
+  markDomains(cdt, cdt.infinite_face(), 0, border, isBorder);
   while (!border.empty()) {
     CDT::Edge e = border.front();
     border.pop_front();
     auto n = e.first->neighbor(e.second);
-    if (n->info().nesting == -1) markDomains(cdt, n, e.first->info().nesting + 1, border);
+    if (n->info().nesting == -1) markDomains(cdt, n, e.first->info().nesting + 1, border, isBorder);
   }
 }
 
@@ -127,6 +130,54 @@ void TopoMesh::build(const Board& b, const MeshOptions& opt) {
     constraints.push_back({prev, first});
   }
 
+  // Routing keepouts that keep wires out: boundary points (dense enough for the clearance), linked
+  // as constraints that block their layers only.
+  struct KeepoutLoop {
+    int keepout;
+    LayerMask layers;
+    std::vector<int> verts;
+    bool area;
+  };
+  std::vector<KeepoutLoop> keepoutLoops;
+  std::vector<std::pair<int, int>> keepoutConstraints;
+  for (int ki = 0; ki < int(b.keepouts.size()); ++ki) {
+    const Keepout& k = b.keepouts[ki];
+    if (k.role != Keepout::Role::Route || !k.wires) continue;
+    LayerMask layers = k.layers ? k.layers : cuMask;
+    for (const Shape& s : k.shapes()) {
+      KeepoutLoop kl{ki, layers, {}, s.kind != Shape::Kind::Segment};
+      Polyline pts = s.kind == Shape::Kind::Polygon ? s.poly
+                     : s.kind == Shape::Kind::Point ? s.outline(std::max(2000.0, s.r * 0.02))
+                                                    : Polyline{s.a, s.b};
+      size_t n = pts.size(), segs = kl.area ? n : n - 1;
+      for (size_t i = 0; i < segs; ++i) {
+        Vec2 a = pts[i], c = pts[(i + 1) % n];
+        int parts = std::max(1, int(std::ceil((c - a).len() / pitch)));
+        for (int k2 = 0; k2 < parts; ++k2) {
+          int v = addVert(a + (c - a) * (double(k2) / parts), VKind::Keepout, -1);
+          verts[v].keepout = ki;
+          kl.verts.push_back(v);
+        }
+      }
+      if (!kl.area) {
+        int v = addVert(pts.back(), VKind::Keepout, -1);
+        verts[v].keepout = ki;
+        kl.verts.push_back(v);
+      }
+      for (size_t i = 0; i + 1 < kl.verts.size(); ++i) keepoutConstraints.push_back({kl.verts[i], kl.verts[i + 1]});
+      if (kl.area && kl.verts.size() > 2) keepoutConstraints.push_back({kl.verts.back(), kl.verts.front()});
+      keepoutLoops.push_back(std::move(kl));
+    }
+  }
+  // No via sites where the via's copper would touch a keepout that keeps vias out.
+  auto viaKeptOut = [&](Vec2 p) {
+    for (const Keepout& k : b.keepouts)
+      if (k.role == Keepout::Role::Route && k.vias)
+        for (const Shape& s : k.shapes())
+          if (s.distance(p) < opt.viaDiameter / 2) return true;
+    return false;
+  };
+
   // Via candidate sites on a staggered grid, away from pads and the board edge.
   if (opt.viaSites && bb.valid()) {
     SpatialIndex idx;
@@ -140,7 +191,7 @@ void TopoMesh::build(const Board& b, const MeshOptions& opt) {
         bool inside = b.outline.empty();
         for (size_t li = 0; li < b.outline.size(); ++li)
           if (pointInPolygon(p, b.outline[li])) inside = !inside;
-        if (!inside) continue;
+        if (!inside || viaKeptOut(p)) continue;
         bool ok = true;
         for (auto& loop : b.outline)
           for (size_t i = 0; i < loop.size() && ok; ++i)
@@ -179,13 +230,33 @@ void TopoMesh::build(const Board& b, const MeshOptions& opt) {
   }
   for (auto [a, c] : constraints)
     if (handles[a] != handles[c]) cdt.insert_constraint(handles[a], handles[c]);
+  for (auto [a, c] : keepoutConstraints)
+    if (handles[a] != handles[c]) cdt.insert_constraint(handles[a], handles[c]);
   // Constraint intersections may create new vertices.
   for (auto v = cdt.finite_vertices_begin(); v != cdt.finite_vertices_end(); ++v) {
     int id = v->info();
     if (id >= 0 && id < int(handles.size()) && handles[id] == CDT::Vertex_handle(v)) continue;
     v->info() = addVert({v->point().x(), v->point().y()}, VKind::Outline, -1);
   }
-  markDomains(cdt);
+  // Outline pieces: constrained edges lying on the board contour (keepout lines may run along it).
+  std::vector<std::pair<Vec2, Vec2>> contour;
+  for (auto [a, c] : constraints) contour.push_back({verts[a].p, verts[c].p});
+  auto onOutline = [&](Vec2 p, Vec2 q) {
+    Vec2 m = (p + q) * 0.5;
+    for (auto& [a, c] : contour)
+      if (distPointSegment(m, a, c) < 10 && distPointSegment(p, a, c) < 10 && distPointSegment(q, a, c) < 10) return true;
+    return false;
+  };
+  auto edgePts = [&](const CDT::Edge& e) {
+    auto pa = e.first->vertex(CDT::cw(e.second))->point(), pc = e.first->vertex(CDT::ccw(e.second))->point();
+    return std::pair{Vec2{pa.x(), pa.y()}, Vec2{pc.x(), pc.y()}};
+  };
+  markDomains(cdt, [&](const CDT::Edge& e) {
+    if (!cdt.is_constrained(e)) return false;
+    if (keepoutConstraints.empty()) return true;
+    auto [p, q] = edgePts(e);
+    return onOutline(p, q);
+  });
 
   for (auto f = cdt.finite_faces_begin(); f != cdt.finite_faces_end(); ++f) {
     f->info().id = int(tris.size());
@@ -227,6 +298,27 @@ void TopoMesh::build(const Board& b, const MeshOptions& opt) {
       MEdge& me = edges[e];
       if (me.t[0] < 0) me.t[0] = ti; else me.t[1] = ti;
     }
+  }
+  // Keepout boundaries block their layers; only the board outline separates the domain.
+  auto keepoutOf = [&](int v) { return verts[v].kind == VKind::Keepout ? verts[v].keepout : -1; };
+  for (auto& me : edges) {
+    if (!me.constrained || keepoutConstraints.empty() || onOutline(verts[me.v[0]].p, verts[me.v[1]].p)) continue;
+    int ka = keepoutOf(me.v[0]), kc = keepoutOf(me.v[1]);
+    int ki = ka >= 0 ? ka : kc;  // pieces between two crossing keepouts block for either
+    if (ki >= 0) {
+      const Keepout& k = b.keepouts[ki];
+      me.blocked |= k.layers ? k.layers : cuMask;
+    } else {
+      me.blocked |= cuMask;
+    }
+    me.constrained = false;
+  }
+  for (const KeepoutLoop& kl : keepoutLoops) {
+    if (!kl.area) continue;
+    Polyline poly;
+    for (int v : kl.verts) poly.push_back(verts[v].p);
+    for (auto& t : tris)
+      if (t.inside && pointInPolygon((verts[t.v[0]].p + verts[t.v[1]].p + verts[t.v[2]].p) / 3.0, poly)) t.blocked |= kl.layers;
   }
   for (auto& t : tris)
     for (int i = 0; i < 3; ++i)

@@ -234,6 +234,32 @@ LayerObstacles collect(const Board& b, LayerId layer, const std::vector<RealVia>
     for (auto& p : loop) ob.add(p, 0, double(b.edgeClearance), -2);  // -2: belongs to no net, blocks all
     for (int k = 0; k < n; ++k) ob.link(first + k, first + (k + 1) % n, 0);
   }
+  // Routing keepouts of the layer: their boundaries, kept by every net (no clearance).
+  // Points every half millimetre, so that no bend between two of them can reach over the boundary.
+  for (const Keepout& k : b.keepouts) {
+    if (!k.onLayer(layer) || !k.wires) continue;
+    for (const Shape& s : k.shapes()) {
+      if (!inRegion(s.bbox())) continue;
+      bool closed = s.kind != Shape::Kind::Segment;
+      Polyline pts = s.kind == Shape::Kind::Polygon ? s.poly
+                     : closed                       ? s.outline(std::max(2000.0, s.r * 0.02))
+                                                    : Polyline{s.a, s.b};
+      int prev = -1, first = -1;
+      size_t n = pts.size(), segs = closed ? n : n - 1;
+      for (size_t i = 0; i < segs; ++i) {
+        Vec2 a = pts[i], c = pts[(i + 1) % n];
+        int parts = std::max(1, int(std::ceil((c - a).len() / (0.5 * kNmPerMm))));
+        for (int q = 0; q < parts; ++q) {
+          int o = ob.add(a + (c - a) * (double(q) / parts), 0, 0, -2);
+          if (prev >= 0) ob.link(prev, o, 0);
+          else first = o;
+          prev = o;
+        }
+      }
+      if (closed) ob.link(prev, first, 0);
+      else ob.link(prev, ob.add(pts.back(), 0, 0, -2), 0);
+    }
+  }
   if (opt.tracksAsObstacles)
     for (const Track& t : b.tracks) {
       if (t.layer != layer) continue;
