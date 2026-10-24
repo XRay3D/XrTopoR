@@ -19,6 +19,8 @@ struct MVertex {
   int fixedVia = -1;  // board via index (FixedVia)
   int keepout = -1;   // board keepout index (Keepout)
   int track = -1;     // board track index (Track: a point along a wire kept on the board)
+  int onlyNet = kNoNet;  // a via site reserved for one net (fanout site in front of a pad's end)
+  int sitePad = -1;      // the pad a fanout site belongs to: nothing else passes between the two
   std::vector<int> tris;  // incident inside triangles
 };
 

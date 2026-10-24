@@ -37,6 +37,7 @@ struct RealizeStats {
   int narrowed = 0;  // edge crossings realised at the minimum width
   int overflowEdges = 0;  // edges of the realiser's triangulation whose wires did not fit (violations)
   int droppedApexes = 0;
+  int guardBends = 0;  // bends added by geometry around copper the taut path ran into
   std::vector<int> trackWire;  // wire index of every track appended, in order
 };
 

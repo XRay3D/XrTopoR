@@ -557,7 +557,10 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
             size_t drop = 1;
             while (drop + 1 < sk.size() && pad->distance(sk[drop]) < reach) ++drop;
             sk.erase(sk.begin(), sk.begin() + drop);
-            sk.insert(sk.begin(), E);
+            // A via right in front of the end (a fanout site): the stub ends at it, no exit point beyond.
+            Vec2 q = sk.front() - M;
+            if (q.dot(n) < (E - M).dot(n) && std::abs(q.cross(n)) <= w.width / 2.0) E = sk.front();
+            else sk.insert(sk.begin(), E);
             stubs[wi][end] = {p, M, E, true};
             on = true;
           }
@@ -796,6 +799,14 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
     cs.push_back({sk.back(), 0, -1, int(portals.size()) - 1, hw[wi].empty() ? double(w.width) : hw[wi].back()});
     if (std::getenv("XR_DEBUG2")) {
       std::print(stderr, "wire {} net {} sketch {} hits {} bends:", wi, b.nets[w.net].name, sk.size(), hits[wi].size());
+      if (std::getenv("XR_DEBUG2SK")) {
+        std::print(stderr, "\n  sketch:");
+        for (Vec2 q : sk) std::print(stderr, " ({:.2f},{:.2f})", q.x / 1e6, -q.y / 1e6);
+        std::print(stderr, "\n  obstacles within 3 mm of the end:");
+        for (int o = 0; o < int(ob.pts.size()); ++o)
+          if ((ob.pts[o].p - sk.back()).len() < 3 * kNmPerMm)
+            std::print(stderr, " o{}({:.2f},{:.2f} r{:.2f} net{})", o, ob.pts[o].p.x / 1e6, -ob.pts[o].p.y / 1e6, ob.pts[o].r / 1e6, ob.pts[o].net);
+      }
       for (auto& c : cs) std::print(stderr, " [o{} rho{:+.3f} ({:.3f},{:.3f})]", c.obst, c.rho / 1e6, c.c.x / 1e6, c.c.y / 1e6);
       std::print(stderr, "\n  hits:");
       for (int k = 0; k < int(hits[wi].size()); ++k) {
@@ -898,6 +909,36 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
           }
         }
       }
+      if (at < 0) {
+        // Guard by geometry: copper of other nets the straight segments run into although it is no end
+        // of a crossed edge (a sketch waypoint that skipped a fan, a dropped apex): bend around it.
+        for (size_t k = 0; k + 1 < n && at < 0; ++k) {
+          Vec2 p = k == 0 ? cs[0].c : to[k];
+          Vec2 q = k + 1 == n - 1 ? cs[n - 1].c : ti[k + 1];
+          if ((q - p).len2() < 1) continue;
+          BBox bb;
+          bb.add(p);
+          bb.add(q);
+          bb = bb.inflated(3 * kNmPerMm + w.width);
+          double width = std::min(cs[k].width, cs[k + 1].width);
+          for (int o = 0; o < int(ob.pts.size()); ++o) {
+            const OPt& op = ob.pts[o];
+            if (op.net == kTransparent || (op.net == w.net && w.net != kNoNet) || !bb.contains(op.p)) continue;
+            if (op.r <= 0 && op.shape < 0) continue;  // a bare point (outline, keepout) has sides handled elsewhere
+            if (dropped.contains(o) || std::ranges::any_of(cs, [&](const Circle& x) { return x.obst == o; })) continue;
+            Vec2 on = closestPointOnSegment(op.p, p, q);
+            double t = (on - p).dot(q - p) / (q - p).len2();
+            if (t <= 0 || t >= 1) continue;
+            double R = ob.reach(op, (on - op.p).normalized()) + std::max(op.clr, double(w.clearance)) + kMargin + width / 2.0;
+            if ((on - op.p).len() < R - 1000) {
+              at = int(k) + 1;
+              ins = {op.p, (orient(p, q, op.p) > 0 ? 1 : -1) * R, o, cs[k].portal, width};
+              break;
+            }
+          }
+        }
+        if (at >= 0) ++st.guardBends;
+      }
       if (at < 0) break;
       cs.insert(cs.begin() + at, ins);
     }
@@ -988,6 +1029,11 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
     const auto& cs = bendsOf[wi];
     const auto& ti = tinOf[wi];
     const auto& to = toutOf[wi];
+    for (int end = 0; end < 2; ++end)  // a wire that is nothing but its stubs (pad to the via in front of it)
+      if (cs.size() < 2 && stubs[wi][end].on) {
+        emitSeg(stubs[wi][end].from, stubs[wi][end].mid, double(w.width));
+        emitSeg(stubs[wi][end].mid, stubs[wi][end].to, double(w.width));
+      }
     if (cs.size() < 2) continue;
     size_t n = cs.size();
     if (stubs[wi][0].on) {

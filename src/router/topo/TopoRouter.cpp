@@ -153,6 +153,14 @@ class Router {
   LayerList layers_;
   int NL_ = 0;
   std::vector<Shape> padShape_, vshape_;
+  // Narrow-ended SMD pads (the end narrower than width + 2 clearances): wires leave them straight
+  // through the end on a stub (see the realiser), so the stub's room in front of each end is part of
+  // the pad for everyone else. Outward end normals and the stub's reach beyond the copper.
+  struct PadExit {
+    std::inplace_vector<Vec2, 2> normals;
+    double reach = 0;
+  };
+  std::vector<PadExit> padExit_;
   std::vector<char> cornerOk_;  // pad corners may carry a track end (corner radius >= width / 2)
   std::vector<std::pair<Vec2, Vec2>> interval_;  // free part of each edge (canonical direction)
   std::vector<std::vector<int>> vertEdges_;
@@ -269,6 +277,9 @@ class Router {
   bool isTarget(int v, int li) const;
   bool isJunction(int v, int li) const;
   bool isViaSite(int v) const;
+  // The radius a free site stands for (reserved fanout sites counted as their via from the start was
+  // tried: too pessimistic, the sites of neighbouring fine-pitch pads exclude each other anyway).
+  double siteRadius(int) const { return 0.0; }
   void addPadToTree(int pad);
   void addVertexToTree(int v);
   double heuristic(Vec2 p) const;
@@ -326,11 +337,37 @@ void Router::setup() {
     for (LayerId l : b_.copperLayers()) narrowest = std::min(narrowest, b_.minTrackWidth(p.net, l));
     cornerOk_[i] = padShape_[i].r >= narrowest / 2.0;
   }
+  padExit_.assign(b_.pads.size(), {});
+  for (auto [i, p] : std::views::enumerate(b_.pads)) {
+    if (p.drill > 0 || p.net == kNoNet) continue;
+    const Shape& s = padShape_[i];
+    const NetClass& nc = b_.classOf(p.net);
+    double envelope = double(nc.trackWidth) + 2.0 * double(nc.clearance);
+    PadExit& ex = padExit_[i];
+    ex.reach = double(nc.clearance) + double(nc.trackWidth) / 2.0 + kRealizeMargin;
+    if (s.kind == Shape::Kind::Segment && (s.b - s.a).len2() > 1 && 2 * s.r < envelope) {
+      Vec2 d = (s.b - s.a).normalized();
+      ex.normals.push_back(d * -1.0);
+      ex.normals.push_back(d);
+    } else if (s.kind == Shape::Kind::Polygon && s.poly.size() == 4) {
+      double l0 = (s.poly[1] - s.poly[0]).len(), l1 = (s.poly[2] - s.poly[1]).len();
+      double shortSide = std::min(l0, l1) + 2 * s.r;
+      if (std::abs(l0 - l1) >= 1000 && shortSide < envelope) {
+        int k0 = l0 < l1 ? 0 : 1;
+        for (int k : {k0, k0 + 2}) {
+          Vec2 a = s.poly[size_t(k)], c = s.poly[size_t((k + 1) % 4)];
+          Vec2 n = (c - a).perp().normalized();
+          if (n.dot((a + c) * 0.5 - s.center()) < 0) n = n * -1.0;
+          ex.normals.push_back(n);
+        }
+      }
+    }
+  }
   vshape_.resize(m_.verts.size());
   for (auto [i, v] : std::views::enumerate(m_.verts)) {
     if (v.kind == VKind::FixedVia) vshape_[i] = Shape::circle(v.p, b_.vias[v.fixedVia].diameter / 2.0);
     else if (v.kind == VKind::Track) vshape_[i] = Shape::circle(v.p, b_.tracks[v.track].width / 2.0);
-    else vshape_[i] = Shape::circle(v.p, 0);
+    else vshape_[i] = Shape::circle(v.p, siteRadius(int(i)));
   }
 
   // Free interval of every edge: the part not covered by pad copper.
@@ -461,8 +498,16 @@ double Router::freeLength(int e, int li, int net, double& cu, bool& ou, double& 
 double Router::crossCost(int e, int li, bool& blocked, bool* narrow) const {
   if (narrow) *narrow = false;
   // Edges between two vertices of the wire's own pad lie inside its copper: never a constraint.
-  int pu = m_.verts[m_.edges[e].v[0]].pad, pv = m_.verts[m_.edges[e].v[1]].pad;
+  const MVertex& vu = m_.verts[m_.edges[e].v[0]];
+  const MVertex& vv = m_.verts[m_.edges[e].v[1]];
+  int pu = vu.pad, pv = vv.pad;
   if (pu >= 0 && pu == pv && b_.pads[pu].net == net_ && b_.pads[pu].onLayer(layers_[li])) return 0;
+  // Between a pad and its fanout site only the pad's own net passes (the stub to the via lies there).
+  if ((vu.sitePad >= 0 && vu.sitePad == pv) || (vv.sitePad >= 0 && vv.sitePad == pu)) {
+    if ((vu.sitePad >= 0 ? vu.onlyNet : vv.onlyNet) == net_) return 0;
+    blocked = true;
+    return 0;
+  }
   if ((m_.edges[e].blocked >> layers_[li]) & 1) {  // a keepout boundary or a kept wire
     if (m_.edges[e].net != kNoNet && m_.edges[e].net == net_) return 0;  // crossing its own wire: a junction
     blocked = true;
@@ -507,6 +552,21 @@ double Router::viaPenalty(int w, bool& blocked, const std::vector<SNode>& nodes,
   std::inplace_vector<int, 16> pathVias;
   for (int i = from; i >= 0 && pathVias.size() < pathVias.capacity(); i = nodes[i].parent)
     if (nodes[i].via && nodes[i].vtx != w) pathVias.push_back(nodes[i].vtx);
+  // The via itself must keep its clearance from the vias and pads at the other ends of its edges
+  // (fanout sites of neighbouring pads lie closer than a via pitch).
+  {
+    Shape via = Shape::circle(P(w), viaR_);
+    for (int e : vertEdges_[w]) {
+      int other = m_.edges[e].v[0] == w ? m_.edges[e].v[1] : m_.edges[e].v[0];
+      const MVertex& mo = m_.verts[other];
+      if (mo.kind != VKind::ViaSite && mo.kind != VKind::FixedVia) continue;
+      auto o = obst(other, 0, net_);
+      if (o && o->shape->distance(via) < std::max(viaClr_, o->clr)) {
+        blocked = true;
+        return 0;
+      }
+    }
+  }
   for (int li = 0; li < NL_; ++li)
     for (int e : vertEdges_[w]) {
       // Wires of other nets crossing the edge: the net's own need no clearance from its via.
@@ -548,7 +608,16 @@ void Router::computeInterval(int e) {
   Vec2 d = len > 0 ? (c - a) / len : Vec2{};
   auto exitOf = [&](int v, Vec2 from, Vec2 dir) {
     int pad = m_.verts[v].pad;
-    return pad >= 0 ? padShape_[pad].rayExit(from, dir) : 0.0;
+    if (pad < 0) return 0.0;
+    double x = padShape_[pad].rayExit(from, dir);
+    // The stub in front of a narrow end reaches further along edges that leave the end forward
+    // (XR_STUBREACH, experiment: consistent with the realiser's stubs, but it costs the QFP escape
+    // capacity on Arcs, 86 → 185 violations).
+    static const bool kStubReach = std::getenv("XR_STUBREACH") != nullptr;
+    if (!kStubReach) return x;
+    for (Vec2 n : padExit_[pad].normals)
+      if (double dot = dir.dot(n); dot > 0) x = std::max(x, padShape_[pad].rayExit(from, dir) + padExit_[pad].reach * dot);
+    return x;
   };
   double ea = exitOf(me.v[0], a, d), ec = exitOf(me.v[1], c, -d);
   if (ea + ec >= len) {
@@ -1118,7 +1187,8 @@ bool Router::isJunction(int v, int li) const {
 }
 
 bool Router::isViaSite(int v) const {
-  return o_.useVias && NL_ > 1 && m_.verts[v].kind == VKind::ViaSite && s_.viaNet[v] < 0;
+  const MVertex& mv = m_.verts[v];
+  return o_.useVias && NL_ > 1 && mv.kind == VKind::ViaSite && s_.viaNet[v] < 0 && (mv.onlyNet == kNoNet || mv.onlyNet == net_);
 }
 
 void Router::addVertexToTree(int v) {
@@ -1459,7 +1529,12 @@ void Router::commit(const std::vector<SNode>& path, std::vector<int>& joinedPads
       std::print(stderr, "  path of net {}:", b_.nets[net_].name);
       for (const SNode& n : path)
         std::print(stderr, " [{}L{} {}{}{}{}]", n.transit ? "T" : "", n.li,
-                   n.viaTri >= 0 ? std::format("via@{}", n.viaTri) : n.atVertex ? std::format("v{}", n.vtx) : std::format("t{} e{} g{}", n.tri, n.edge, n.gap),
+                   n.viaTri >= 0 ? std::format("via@{}", n.viaTri)
+                   : n.atVertex  ? std::format("v{} k{} ({:.3f},{:.3f})", n.vtx, int(m_.verts[n.vtx].kind), P(n.vtx).x / 1e6, -P(n.vtx).y / 1e6)
+                                 : std::format("t{} e{} g{} ({:.3f},{:.3f})k{}p{}-({:.3f},{:.3f})k{}p{}", n.tri, n.edge, n.gap,
+                                               P(m_.edges[n.edge].v[0]).x / 1e6, -P(m_.edges[n.edge].v[0]).y / 1e6, int(m_.verts[m_.edges[n.edge].v[0]].kind),
+                                               m_.verts[m_.edges[n.edge].v[0]].sitePad, P(m_.edges[n.edge].v[1]).x / 1e6, -P(m_.edges[n.edge].v[1]).y / 1e6,
+                                               int(m_.verts[m_.edges[n.edge].v[1]].kind), m_.verts[m_.edges[n.edge].v[1]].sitePad),
                    n.chordTri >= 0 ? std::format(" c{}", n.chordTri) : "", n.goal ? " goal" : "", n.via ? " via" : "");
       std::println(stderr, "");
     }
@@ -1497,7 +1572,7 @@ void Router::ripup(int job) {
   for (auto [v, vn] : std::views::enumerate(s_.viaNet))
     if (vn == net) {
       vn = -1;
-      vshape_[v] = Shape::circle(P(int(v)), 0);
+      vshape_[v] = Shape::circle(P(int(v)), siteRadius(int(v)));
       unsplitIfClean(int(v));
     }
   s_.failed[job].clear();
@@ -1740,8 +1815,8 @@ std::vector<int> Router::realizeAll() {
     if (t.isArc()) res_.length += ArcGeom::fromThreePoints(t.a.v(), t.mid->v(), t.b.v()).length();
     else res_.length += (t.b.v() - t.a.v()).len();
   }
-  res_.log.push_back(std::format("realised {} wires ({} alive of {} total), {} arcs, {} narrowed crossings, {} tracks narrowed to fit, {} overflowed edges, {} apexes dropped",
-                                 st.wires, wires.size(), s_.wires.size(), st.arcs, st.narrowed, narrowed, st.overflowEdges, st.droppedApexes));
+  res_.log.push_back(std::format("realised {} wires ({} alive of {} total), {} arcs, {} narrowed crossings, {} tracks narrowed to fit, {} overflowed edges, {} apexes dropped, {} guard bends",
+                                 st.wires, wires.size(), s_.wires.size(), st.arcs, st.narrowed, narrowed, st.overflowEdges, st.droppedApexes, st.guardBends));
   return st.trackWire;
 }
 
@@ -1819,7 +1894,12 @@ RouterResult Router::run() {
   int softPasses = soft ? std::max(1, maxPasses * 3 / 5) : 0;
   for (int pass = 0; pass < maxPasses && !cancelled(); ++pass) {
     presFac_ = std::min(64.0, std::pow(2.0, pass < softPasses ? pass : pass - softPasses));
-    hardCap_ = pass == maxPasses - 1 && maxPasses > 1;
+    // The last pass enforces capacity strictly, first come first served. XR_HARD=<n> makes the last n
+    // passes hard: the later ones rip up the blockers of what failed and try again — more connections
+    // (Placement 270/270, Arcs 209 vs 204) at the price of conflicts (MinVia 5 → 16), so one by default.
+    static const int kHardEnv = std::getenv("XR_HARD") ? std::atoi(std::getenv("XR_HARD")) : 0;
+    int hardPasses = maxPasses > 1 ? std::clamp(kHardEnv > 0 ? kHardEnv : 1, 1, maxPasses - 1) : 0;
+    hardCap_ = pass >= maxPasses - hardPasses;
     softPlanar_ = pass < softPasses;
     crossPenalty_ = 5 * kUnit * presFac_;  // a crossing costs like 5 mm of track, doubling each pass
     if (pass > 0) {

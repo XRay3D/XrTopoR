@@ -72,6 +72,7 @@ struct Reader {
   std::map<std::string, std::string> componentValues;  // schematic component -> value attribute
   std::map<std::string, int> pinToPad;                 // "comp\x01pinName" and "comp\x02padNum"
   std::string firstViastack;
+  std::string preferredViastack;  // the type the design's own vias use (TopoR routes with it when any type is allowed)
   LayerId edge = -1;
 
   explicit Reader(Board& board) : b(board) {}
@@ -783,10 +784,24 @@ struct Reader {
       for (int n : nets) g.nets.push_back(b.nets[n].name);
       r.netGroups.push_back(std::move(g));
     }
+    // The default type (a rule that allows every type uses it): the one the design's vias already use,
+    // as TopoR does (its autorouter keeps the design's via on arz_2L, Arcs, MinVia, Placement rather
+    // than the synthetic «(Default)» or the first listed); without any, the smallest; then the first.
+    std::string def = preferredViastack;
+    if (def.empty() || !viastacks.contains(def)) {
+      def = firstViastack;
+      for (auto& [name, v] : viastacks) {
+        bool synthetic = name == "(Default)" || name == "[Default]";  // TopoR's own placeholder type
+        bool defSynthetic = def == "(Default)" || def == "[Default]";
+        if (v.diameter <= 0) continue;
+        if (viastacks[def].diameter <= 0 || (defSynthetic && !synthetic) ||
+            (synthetic == defSynthetic && std::tuple{v.diameter, v.drill} < std::tuple{viastacks[def].diameter, viastacks[def].drill}))
+          def = name;
+      }
+    }
     for (auto& [name, v] : viastacks) {
-      // Keep the file's order: the first viastack is the default.
       ViaType t{name, v.diameter, v.drill};
-      if (name == firstViastack) r.viaTypes.insert(r.viaTypes.begin(), t);
+      if (name == def) r.viaTypes.insert(r.viaTypes.begin(), t);
       else r.viaTypes.push_back(t);
     }
     auto objects = [&](const Element& rule) {
@@ -1107,6 +1122,14 @@ Result<BoardPtr> readFst(const std::string& text, const std::string& path) {
   if (auto* cob = root.find("ComponentsOnBoard")) r.readComponents(*cob);
   if (auto* nl = root.find("NetList")) r.readNetList(*nl);
   if (auto* groups = root.find("Groups")) r.readGroups(*groups);
+  if (auto* cn = root.find("Connectivity"))
+    if (auto* vias = cn->find("Vias")) {
+      std::map<std::string, int> use;
+      for (auto* v : vias->findAll("Via"))
+        if (auto* ref = v->find("ViastackRef")) ++use[std::string(ref->attr("name"))];
+      for (auto& [name, n] : use)
+        if (r.preferredViastack.empty() || n > use[r.preferredViastack]) r.preferredViastack = name;
+    }
   if (auto* rules = root.find("Rules")) r.readRules(*rules);
   else r.applyVia(b->netClasses[0], r.firstViastack);
   if (auto* cn = root.find("Connectivity")) r.readConnectivity(*cn);

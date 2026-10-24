@@ -203,39 +203,82 @@ void TopoMesh::build(const Board& b, const MeshOptions& opt) {
     return false;
   };
 
-  // Via candidate sites on a staggered grid, away from pads and the board edge.
+  // Via candidate sites: a staggered grid away from pads and the board edge, and fanout sites in front
+  // of every SMD pad's ends, on the pad's axis, where a via of the pad's net fits among the other
+  // copper (TopoR puts a via right over the end of a fine-pitch pad whose row leaves no room between).
   if (opt.viaSites && bb.valid()) {
     SpatialIndex idx;
     idx.build(b);
     double need = opt.viaDiameter / 2 + opt.clearance;
     double edgeNeed = opt.viaDiameter / 2 + double(b.edgeClearance);
+    auto siteOk = [&](Vec2 p, int ownPad) {
+      bool inside = b.outline.empty();
+      for (size_t li = 0; li < b.outline.size(); ++li)
+        if (pointInPolygon(p, b.outline[li])) inside = !inside;
+      if (!inside || viaKeptOut(p)) return false;
+      for (auto& loop : b.outline)
+        for (size_t i = 0; i < loop.size(); ++i)
+          if (distPointSegment(p, loop[i], loop[(i + 1) % loop.size()]) < edgeNeed) return false;
+      bool ok = true;
+      BBox q;
+      q.add(p);
+      idx.query(q.inflated(need + 5 * kNmPerMm), cuMask, [&](ItemRef r) {
+        if (!ok || r.type == ItemType::Zone || r == ItemRef{ItemType::Pad, ownPad}) return;
+        // A track of the pad's class must be able to leave the pad past the via.
+        double exitRoom = r.type == ItemType::Pad ? double(b.classOf(b.pads[r.index].net).trackWidth) : 0.0;
+        for (auto& s : itemShapes(b, r))
+          if (s.distance(p) < need + exitRoom) ok = false;
+      });
+      // Non-plated holes have no copper but still block vias.
+      if (ok)
+        for (auto& pad : b.pads)
+          if (pad.drill > 0 && !pad.copper && (pad.pos.v() - p).len() < pad.drill / 2.0 + need) ok = false;
+      return ok;
+    };
     int row = 0;
-    for (double y = bb.minY + pitch / 2; y < bb.maxY; y += pitch * 0.866, ++row) {
-      for (double x = bb.minX + pitch / 2 + (row % 2 ? pitch / 2 : 0); x < bb.maxX; x += pitch) {
-        Vec2 p{x, y};
-        bool inside = b.outline.empty();
-        for (size_t li = 0; li < b.outline.size(); ++li)
-          if (pointInPolygon(p, b.outline[li])) inside = !inside;
-        if (!inside || viaKeptOut(p)) continue;
-        bool ok = true;
-        for (auto& loop : b.outline)
-          for (size_t i = 0; i < loop.size() && ok; ++i)
-            if (distPointSegment(p, loop[i], loop[(i + 1) % loop.size()]) < edgeNeed) ok = false;
-        if (!ok) continue;
-        BBox q;
-        q.add(p);
-        idx.query(q.inflated(need + 5 * kNmPerMm), cuMask, [&](ItemRef r) {
-          if (!ok || r.type == ItemType::Zone) return;
-          // A track of the pad's class must be able to leave the pad past the via.
-          double exitRoom = r.type == ItemType::Pad ? double(b.classOf(b.pads[r.index].net).trackWidth) : 0.0;
-          for (auto& s : itemShapes(b, r))
-            if (s.distance(p) < need + exitRoom) ok = false;
-        });
-        // Non-plated holes have no copper but still block vias.
-        if (ok)
-          for (auto& pad : b.pads)
-            if (pad.drill > 0 && !pad.copper && (pad.pos.v() - p).len() < pad.drill / 2.0 + need) ok = false;
-        if (ok) addVert(p, VKind::ViaSite, -1);
+    for (double y = bb.minY + pitch / 2; y < bb.maxY; y += pitch * 0.866, ++row)
+      for (double x = bb.minX + pitch / 2 + (row % 2 ? pitch / 2 : 0); x < bb.maxX; x += pitch)
+        if (siteOk({x, y}, -1)) addVert({x, y}, VKind::ViaSite, -1);
+    // Fanout sites, reserved for the pad's net: the nearest place along the axis where the via fits,
+    // and a second one a via further out so that the vias of neighbouring pads can stagger.
+    // Fanout sites are an experiment (XR_FANOUT): they let arz_2L route more connections but choke the
+    // mesh around a 0.65 mm QFP (Arcs 90 → 362 violations); the capacity model does not yet know that
+    // the sites of neighbouring pads exclude each other.
+    static const bool kFanout = std::getenv("XR_FANOUT") != nullptr;
+    for (int i = 0; i < int(b.pads.size()) && kFanout; ++i) {
+      const Pad& pad = b.pads[i];
+      if (pad.drill > 0 || pad.net == kNoNet || !(pad.copper & cuMask)) continue;
+      Shape s = pad.shapeGeom();
+      std::vector<std::pair<Vec2, Vec2>> ends;  // (end point on the copper boundary, outward direction)
+      if (s.kind == Shape::Kind::Segment && (s.b - s.a).len2() > 1) {
+        Vec2 d = (s.b - s.a).normalized();
+        ends = {{s.a - d * s.r, d * -1.0}, {s.b + d * s.r, d}};
+      } else if (s.kind == Shape::Kind::Polygon && s.poly.size() == 4) {
+        double l0 = (s.poly[1] - s.poly[0]).len(), l1 = (s.poly[2] - s.poly[1]).len();
+        if (std::abs(l0 - l1) < 1000) continue;  // square: no axis
+        int k0 = l0 < l1 ? 0 : 1;
+        for (int k : {k0, k0 + 2}) {
+          Vec2 a = s.poly[size_t(k)], c = s.poly[size_t((k + 1) % 4)];
+          Vec2 M = (a + c) * 0.5;
+          Vec2 n = (c - a).perp().normalized();
+          if (n.dot(M - s.center()) < 0) n = n * -1.0;
+          ends.push_back({M + n * s.r, n});
+        }
+      } else {
+        continue;
+      }
+      for (auto& [M, n] : ends) {
+        int levels = 0;
+        double from = opt.viaDiameter / 2;  // the via's edge at the pad's end
+        for (double d = from; d <= from + 3 * kNmPerMm && levels < 2; d += 0.1 * kNmPerMm) {
+          Vec2 p = M + n * d;
+          if (!siteOk(p, i)) continue;
+          int v = addVert(p, VKind::ViaSite, -1);
+          verts[v].onlyNet = pad.net;
+          verts[v].sitePad = i;
+          ++levels;
+          d += opt.viaDiameter + opt.clearance - 0.1 * kNmPerMm;
+        }
       }
     }
   }
