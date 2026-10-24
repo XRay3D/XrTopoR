@@ -255,6 +255,8 @@ struct Writer {
         x.open("Padstack", {{"name", name}, {"holeDiameter", mm(k.drill)}, {"metallized", onOff(k.plated)}});
       else
         x.open("Padstack", {{"name", name}, {"type", "SMD"}, {"metallized", "on"}});
+      // TopoR's importer wants the thermal spokes before the pads of every padstack, SMD ones too.
+      x.empty("Thermal", {{"spokeNum", "4"}, {"minSpokeNum", "4"}, {"angle", "45"}, {"spokeWidth", "0.381"}, {"backoff", "0.381"}});
       x.open("Pads");
       writePadShape(k, false);
       if (k.through) {
