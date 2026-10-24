@@ -173,6 +173,7 @@ struct Circle {
   double rho = 0;   // signed radius: + counter-clockwise (obstacle on the left)
   int obst = -1;    // obstacle id, -1 for the end points
   int portal = 0;   // index in the portal list
+  double width = 0; // wire width at this bend (narrowed where the slot needed it)
 };
 
 // Directed common tangent leaving circle a and arriving at circle b.
@@ -373,6 +374,10 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
   // previous round: outer wires stack on these rather than on the packed minimum.
   std::vector<std::vector<double>> actual(NW);
   for (int wi = 0; wi < NW; ++wi) actual[wi].assign(hits[wi].size(), -1.0);
+  // Width of every wire at every crossing: nominal, or the minimum where an edge cannot take the
+  // nominal widths of the wires crossing it (TopoR's «подрезка»).
+  std::vector<std::vector<double>> hw(NW);
+  for (int wi = 0; wi < NW; ++wi) hw[wi].assign(hits[wi].size(), double(wires[wi].width));
   for (int round = 0; round < 6; ++round) {
   for (auto&& [layer, ids] : byLayer) {
     const LayerObstacles& ob = obstacles.at(layer);
@@ -387,8 +392,12 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
       // Own-net obstacles (the wire's pad corners, its vias) are no constraint: the centre line may
       // pass through the point itself, so no radius there at all.
       auto own = [&](const OPt& o, const RealWire& w) { return o.net == w.net && w.net != kNoNet; };
-      auto need = [&](const OPt& o, const RealWire& w) {
-        return own(o, w) ? 0.0 : o.r + std::max(o.clr, double(w.clearance)) + kMargin + w.width / 2.0;
+      auto wAt = [&](int k) { return hw[list[k].first][list[k].second]; };
+      // The safety margin against tessellation is dropped where the wires fit exactly without it
+      // (TopoR lays a wire between two pads at the bare rule distance).
+      double margin = kMargin;
+      auto need = [&](const OPt& o, const RealWire& w, double width) {
+        return own(o, w) ? 0.0 : o.r + std::max(o.clr, double(w.clearance)) + margin + width / 2.0;
       };
       auto usedR = [&](int wi, int o, double packed) {
         auto it = bendR[wi].find(o);
@@ -398,51 +407,78 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
       Vec2 dir = L > 0 ? (V.p - U.p) / L : Vec2{};
       std::vector<double> aCenter(n, 0), bCenter(n, 0);  // distance from u/v of the bend centre
       std::vector<double> aR(n, 0), bR(n, 0);
-      for (int k = 0; k < n; ++k) {
-        const RealWire& w = wires[list[k].first];
-        if (k == 0) {
-          a[k] = need(U, w);
-          aR[k] = a[k];
-        } else {
-          int pw = list[k - 1].first;
-          // Stack on the inner wire (packed radius, or its actual crossing from the previous round),
-          // but never closer to the obstacle than the wire's own rule allows.
-          double spacing = wires[pw].width / 2.0 + std::max(double(wires[pw].clearance), double(w.clearance)) +
-                           kMargin + w.width / 2.0;
-          double packed = usedR(pw, uv.first, a[k - 1]) + spacing;
-          double act = actualFromU(k - 1) >= 0 ? actualFromU(k - 1) + spacing : -1;
-          a[k] = std::max({packed, act, need(U, w)});
-          if (act > packed && act > need(U, w)) {
-            aCenter[k] = actualFromU(k - 1);  // bend around the inner wire's crossing point
-            aR[k] = spacing;
-          } else {
+      auto pack = [&] {
+        for (int k = 0; k < n; ++k) {
+          const RealWire& w = wires[list[k].first];
+          if (k == 0) {
+            a[k] = need(U, w, wAt(k));
             aR[k] = a[k];
-          }
-        }
-      }
-      for (int k = n - 1; k >= 0; --k) {
-        const RealWire& w = wires[list[k].first];
-        if (k == n - 1) {
-          bb[k] = need(V, w);
-          bR[k] = bb[k];
-        } else {
-          int nw = list[k + 1].first;
-          double spacing = wires[nw].width / 2.0 + std::max(double(wires[nw].clearance), double(w.clearance)) +
-                           kMargin + w.width / 2.0;
-          double packed = usedR(nw, uv.second, bb[k + 1]) + spacing;
-          // Only outer wires adapt to inner ones (monotone: paths move outward only); the v side
-          // stays packed so that the two directions cannot push each other back and forth.
-          double act = -1;
-          bb[k] = std::max({packed, act, need(V, w)});
-          if (act > packed && act > need(V, w)) {
-            bCenter[k] = L - actualFromU(k + 1);
-            bR[k] = spacing;
           } else {
-            bR[k] = bb[k];
+            int pw = list[k - 1].first;
+            // Stack on the inner wire (packed radius, or its actual crossing from the previous round),
+            // but never closer to the obstacle than the wire's own rule allows.
+            double spacing = wAt(k - 1) / 2.0 + std::max(double(wires[pw].clearance), double(w.clearance)) + margin +
+                             wAt(k) / 2.0;
+            double packed = usedR(pw, uv.first, a[k - 1]) + spacing;
+            double act = actualFromU(k - 1) >= 0 ? actualFromU(k - 1) + spacing : -1;
+            a[k] = std::max({packed, act, need(U, w, wAt(k))});
+            if (act > packed && act > need(U, w, wAt(k))) {
+              aCenter[k] = actualFromU(k - 1);  // bend around the inner wire's crossing point
+              aR[k] = spacing;
+            } else {
+              aR[k] = a[k];
+            }
           }
         }
+        for (int k = n - 1; k >= 0; --k) {
+          const RealWire& w = wires[list[k].first];
+          if (k == n - 1) {
+            bb[k] = need(V, w, wAt(k));
+            bR[k] = bb[k];
+          } else {
+            int nw = list[k + 1].first;
+            double spacing = wAt(k + 1) / 2.0 + std::max(double(wires[nw].clearance), double(w.clearance)) + margin +
+                             wAt(k) / 2.0;
+            double packed = usedR(nw, uv.second, bb[k + 1]) + spacing;
+            // Only outer wires adapt to inner ones (monotone: paths move outward only); the v side
+            // stays packed so that the two directions cannot push each other back and forth.
+            double act = -1;
+            bb[k] = std::max({packed, act, need(V, w, wAt(k))});
+            if (act > packed && act > need(V, w, wAt(k))) {
+              bCenter[k] = L - actualFromU(k + 1);
+              bR[k] = spacing;
+            } else {
+              bR[k] = bb[k];
+            }
+          }
+        }
+        return L - a[n - 1] - bb[n - 1];
+      };
+      double slack = pack();
+      if (slack <= 0) {        // No room for the nominal widths: the wires that may be narrowed are, on this edge.
+        bool any = false;
+        for (int k = 0; k < n; ++k) {
+          const RealWire& w = wires[list[k].first];
+          if (w.widthMin > 0 && w.widthMin < w.width && wAt(k) > double(w.widthMin)) {
+            hw[list[k].first][list[k].second] = double(w.widthMin);
+            any = true;
+          }
+        }
+        if (any) slack = pack();
       }
-      double slack = L - a[n - 1] - bb[n - 1];
+      if (slack <= 0 && slack > -2.0 * kMargin * (n + 1)) {
+        margin = 0;
+        slack = pack();
+      }
+      if (slack <= 0) {
+        if (round == 0) ++st.overflowEdges;
+        if (round == 0 && std::getenv("XR_OVF")) {
+          std::print(stderr, "ovf L{:.3f} need{:.3f} U({:.3f},{:.3f} r{:.2f} net{}) V({:.3f},{:.3f} r{:.2f} net{}) wires:", L / 1e6,
+                     (a[n - 1] + bb[n - 1]) / 1e6, U.p.x / 1e6, -U.p.y / 1e6, U.r / 1e6, U.net, V.p.x / 1e6, -V.p.y / 1e6, V.r / 1e6, V.net);
+          for (int k = 0; k < n; ++k) std::print(stderr, " {}/w{:.2f}", wires[list[k].first].net, wAt(k) / 1e6);
+          std::println(stderr, "");
+        }
+      }
       for (int k = 0; k < n; ++k) {
         Slot& sl = slots[list[k].first][list[k].second];
         if (slack <= 0) {
@@ -487,7 +523,7 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
     auto apexes = funnel(portals);
 
     std::vector<Circle> cs;
-    cs.push_back({w.sketch.front(), 0, -1, 0});
+    cs.push_back({w.sketch.front(), 0, -1, 0, double(w.width)});
     for (const FunnelApex& ap : apexes) {
       const EdgeHit& h = hits[wi][ap.portal - 1];
       const Slot& sl = slots[wi][ap.portal - 1];
@@ -495,13 +531,15 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
       int o = atU ? h.u : h.v;
       double R = atU ? sl.ru : sl.rv;
       Vec2 c = atU ? sl.cu : sl.cv;
+      double width = hw[wi][ap.portal - 1];
       if (!cs.empty() && cs.back().obst == o && (cs.back().c - c).len2() < 1 && (cs.back().rho > 0) == (ap.side > 0)) {
         cs.back().rho = ap.side * std::max(std::abs(cs.back().rho), R);
+        cs.back().width = std::min(cs.back().width, width);
       } else {
-        cs.push_back({c, ap.side * R, o, ap.portal});
+        cs.push_back({c, ap.side * R, o, ap.portal, width});
       }
     }
-    cs.push_back({w.sketch.back(), 0, -1, int(portals.size()) - 1});
+    cs.push_back({w.sketch.back(), 0, -1, int(portals.size()) - 1, double(w.width)});
     if (std::getenv("XR_DEBUG2")) {
       std::print(stderr, "wire {} net {} sketch {} hits {} bends:", wi, b.nets[w.net].name, w.sketch.size(), hits[wi].size());
       for (auto& c : cs) std::print(stderr, " [o{} rho{:+.3f} ({:.3f},{:.3f})]", c.obst, c.rho / 1e6, c.c.x / 1e6, c.c.y / 1e6);
@@ -595,7 +633,7 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
             if (pen > worst) {
               worst = pen;
               at = int(k) + 1;
-              ins = {c, (orient(p, q, c) > 0 ? 1 : -1) * R, o, hi};
+              ins = {c, (orient(p, q, c) > 0 ? 1 : -1) * R, o, hi, hw[wi][hi - 1]};
             }
           }
         }
@@ -673,11 +711,14 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
 
   for (int wi = 0; wi < NW; ++wi) {
     const RealWire& w = wires[wi];
-    auto emitSeg = [&](Vec2 p, Vec2 q) {
+    for (double x : hw[wi])
+      if (x < double(w.width)) ++st.narrowed;
+    // A tangent between two bends is as narrow as the narrower bend (the step sits where there is room).
+    auto emitSeg = [&](Vec2 p, Vec2 q, double width) {
       Track t;
       t.a = Point(p);
       t.b = Point(q);
-      t.width = w.width;
+      t.width = Coord(std::llround(width));
       t.layer = w.layer;
       t.net = w.net;
       if (t.a == t.b) return;
@@ -693,8 +734,12 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
     for (size_t k = 0; k + 1 < n; ++k) {
       Vec2 p = (k == 0) ? cs[0].c : to[k];
       Vec2 q = (k + 1 == n - 1) ? cs[n - 1].c : ti[k + 1];
-      emitSeg(cur, p);
-      emitSeg(p, q);
+      // The tangent runs through every portal between its bends: as narrow as the narrowest of them.
+      double width = std::min(cs[k].width, cs[k + 1].width);
+      for (int hi = cs[k].portal + 1; hi < cs[k + 1].portal; ++hi)
+        if (hi >= 1 && hi <= int(hits[wi].size())) width = std::min(width, hw[wi][hi - 1]);
+      emitSeg(cur, p, cs[k].width);
+      emitSeg(p, q, width);
       cur = q;
       if (k + 1 < n - 1) {
         const Circle& C = cs[k + 1];
@@ -706,7 +751,7 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
           t.a = Point(ti[k + 1]);
           t.mid = Point(g.mid());
           t.b = Point(to[k + 1]);
-          t.width = w.width;
+          t.width = Coord(std::llround(C.width));
           t.layer = w.layer;
           t.net = w.net;
           b.tracks.push_back(t);
@@ -788,6 +833,7 @@ RealizeStats reshapeTracks(Board& b, std::vector<char> chosen, std::vector<RealW
     w.net = t0.net;
     w.layer = t0.layer;
     w.width = t0.width;
+    w.widthMin = std::min(t0.width, b.minTrackWidth(t0.net, t0.layer));
     w.clearance = b.clearance(t0.net, t0.layer);
     Point cur = from;
     int ti = start;

@@ -17,7 +17,8 @@ constexpr double kRealizeMargin = 2000;
 struct RealWire {
   int net = kNoNet;
   LayerId layer = 0;
-  Coord width = 0;
+  Coord width = 0;     // nominal
+  Coord widthMin = 0;  // TopoR's «подрезка»: the width used where the nominal one does not fit (0: none)
   Coord clearance = 0;
   Polyline sketch;  // start vertex, edge crossing points..., end vertex
 };
@@ -32,6 +33,8 @@ struct RealVia {
 struct RealizeStats {
   int wires = 0;
   int arcs = 0;
+  int narrowed = 0;  // edge crossings realised at the minimum width
+  int overflowEdges = 0;  // edges of the realiser's triangulation whose wires did not fit (violations)
   int droppedApexes = 0;
   std::vector<int> trackWire;  // wire index of every track appended, in order
 };

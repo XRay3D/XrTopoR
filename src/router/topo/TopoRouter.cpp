@@ -38,7 +38,8 @@ namespace {
 constexpr double kUnit = 1e6;  // congestion cost unit: 1 mm of track
 constexpr double kCrossHistory = 3.0;  // history added to the edges of a triangle with crossings
 constexpr size_t kMaxExpansions = 3'000'000;
-constexpr double kOffLayer = 10 * kUnit;  // each edge crossed on a layer the net is not assigned to
+constexpr double kOffLayer = 10 * kUnit;
+constexpr double kNarrowCost = 0.5 * kUnit;  // a crossing at the minimum width («подрезка»)  // each edge crossed on a layer the net is not assigned to
 
 // rows x cols table with row-major storage, indexed as grid[r, c] through std::mdspan.
 template <class T>
@@ -71,6 +72,7 @@ struct Chord {
 struct Crossing {
   int wire = -1;
   int edge = -1;
+  double width = 0;  // the wire's width on this edge (nominal, or the minimum where that is all that fits)
 };
 
 struct Wire {
@@ -79,7 +81,7 @@ struct Wire {
   int v0 = -1, v1 = -1;
   std::vector<int> cids;
   std::vector<int> tris;
-  Coord width = 0, clr = 0;
+  Coord width = 0, widthMin = 0, clr = 0;
   bool alive = true;
 };
 
@@ -115,6 +117,7 @@ struct SNode {
   int vtx = -1;                    // vertex nodes
   int chordTri = -1;               // triangle holding the chord leading here (-1: start / layer change)
   bool via = false;                // layer change through a new via at vtx
+  bool narrow = false;             // edge entry at the minimum width
   bool transit = false;            // via arrival on the old layer (not expanded)
   bool goal = false;
   Vec2 pt;
@@ -155,7 +158,7 @@ class Router {
   // Current search context.
   int net_ = kNoNet;
   double width_ = 0, clr_ = 0, viaR_ = 0, viaClr_ = 0;
-  std::vector<double> widthL_, clrL_;  // the net's width and clearance on each routing layer
+  std::vector<double> widthL_, widthMinL_, clrL_;  // the net's width (nominal, minimum) and clearance per layer
   LayerMask assigned_ = 0;             // «Назначение цепей на слои» of the net (0: any layer)
   Coord viaDia_ = 0, viaDrill_ = 0;
   std::vector<int> treeStamp_;
@@ -172,7 +175,7 @@ class Router {
   void setNet(int net);
   std::optional<ObstInfo> obst(int v, int li, int net) const;
   double freeLength(int e, int li, int net, double& cu, bool& ou, double& cv, bool& ov) const;
-  double crossCost(int e, int li, bool& blocked) const;
+  double crossCost(int e, int li, bool& blocked, bool* narrow = nullptr) const;
   double viaPenalty(int w, bool& blocked) const;
 
   double crossCoord(int li, int t, int le, int cid) const;
@@ -201,7 +204,7 @@ class Router {
 
   std::optional<std::vector<SNode>> search(int pad);
   void commit(const std::vector<SNode>& path, std::vector<int>& joinedPads);
-  int insertCrossing(int li, int e, int gap, int wire);
+  int insertCrossing(int li, int e, int gap, int wire, bool narrow);
   void removeWire(int w);
   void ripup(int job);
   void routeJob(int job);
@@ -321,9 +324,11 @@ void Router::setNet(int net) {
   width_ = double(nc.trackWidth);
   clr_ = double(nc.clearance);
   widthL_.assign(NL_, 0);
+  widthMinL_.assign(NL_, 0);
   clrL_.assign(NL_, 0);
   for (int li = 0; li < NL_; ++li) {
     widthL_[li] = double(b_.trackWidth(net, layers_[li]));
+    widthMinL_[li] = std::min(widthL_[li], double(b_.minTrackWidth(net, layers_[li])));
     clrL_[li] = double(b_.clearance(net, layers_[li]));
   }
   assigned_ = b_.assignedLayers(net);
@@ -380,7 +385,8 @@ double Router::freeLength(int e, int li, int net, double& cu, bool& ou, double& 
   return (P(u) - P(v)).len();
 }
 
-double Router::crossCost(int e, int li, bool& blocked) const {
+double Router::crossCost(int e, int li, bool& blocked, bool* narrow) const {
+  if (narrow) *narrow = false;
   // Edges between two vertices of the wire's own pad lie inside its copper: never a constraint.
   int pu = m_.verts[m_.edges[e].v[0]].pad, pv = m_.verts[m_.edges[e].v[1]].pad;
   if (pu >= 0 && pu == pv && b_.pads[pu].net == net_ && b_.pads[pu].onLayer(layers_[li])) return 0;
@@ -392,16 +398,23 @@ double Router::crossCost(int e, int li, bool& blocked) const {
   bool ou, ov;
   double free = freeLength(e, li, net_, cu, ou, cv, ov);
   const EdgeUse& u = s_.use[li, e];
-  const double wl = widthL_[li], cl = clrL_[li];
+  double wl = widthL_[li];
+  const double cl = clrL_[li];
   double cc = std::max(u.maxC, cl);
   double ends = (ou ? std::max(cu, cl) : 0) + (ov ? std::max(cv, cl) : 0);
+  double cost = hist_[li, e] * kUnit;
+  // Where the nominal width does not fit, the minimum may (TopoR narrows the wire there).
   if (!relaxed_ && wl + ends > free + 1) {
-    blocked = true;
-    return 0;
+    if (widthMinL_[li] + ends > free + 1) {
+      blocked = true;
+      return 0;
+    }
+    wl = widthMinL_[li];
+    cost += kNarrowCost;
+    if (narrow) *narrow = true;
   }
   double need = u.sumW + wl + u.n * cc + ends + (u.n + 1) * kRealizeMargin;
   double over = need - free;
-  double cost = hist_[li, e] * kUnit;
   // Other layers than the assigned ones only for short stretches (an SMD pad to its via).
   if (assigned_ && !((assigned_ >> layers_[li]) & 1)) cost += kOffLayer;
   if (over > 1 && !relaxed_) {
@@ -586,8 +599,8 @@ std::optional<std::vector<SNode>> Router::search(int pad) {
     int e = m_.tris[t].e[le2];
     int t2 = m_.tris[t].nb[le2];
     if (t2 < 0 || ((m_.tris[t2].blocked >> layers_[n.li]) & 1)) { ++nNoNb; return; }
-    bool blocked = false;
-    double cc = crossCost(e, n.li, blocked);
+    bool blocked = false, narrow = false;
+    double cc = crossCost(e, n.li, blocked, &narrow);
     if (blocked) { ++nBlocked; return; }
     auto gx = exitGap(n.li, t, le2, s);
     if (!gx) { ++nNoGap; return; }
@@ -599,6 +612,7 @@ std::optional<std::vector<SNode>> Router::search(int pad) {
     c.tri = t2;
     c.le = m_.localEdge(t2, e);
     c.gap = g;
+    c.narrow = narrow;
     c.chordTri = t;
     c.pt = intervalPoint(e, (g + 1.0) / (m + 2.0));
     c.g = n.g + (c.pt - n.pt).len() + cc + gx->second * crossPenalty_;
@@ -691,15 +705,16 @@ std::optional<std::vector<SNode>> Router::search(int pad) {
   return std::nullopt;
 }
 
-int Router::insertCrossing(int li, int e, int gap, int wire) {
+int Router::insertCrossing(int li, int e, int gap, int wire, bool narrow) {
   int cid = int(s_.crossings.size());
-  s_.crossings.push_back({wire, e});
+  const Wire& w = s_.wires[wire];
+  double width = narrow ? double(w.widthMin) : double(w.width);
+  s_.crossings.push_back({wire, e, width});
   auto& list = s_.cross[li, e];
   gap = std::clamp(gap, 0, int(list.size()));
   list.insert(list.begin() + gap, cid);
   EdgeUse& u = s_.use[li, e];
-  const Wire& w = s_.wires[wire];
-  u.sumW += double(w.width);
+  u.sumW += width;
   u.n += 1;
   u.maxC = std::max(u.maxC, double(w.clr));
   return cid;
@@ -712,6 +727,7 @@ void Router::commit(const std::vector<SNode>& path, std::vector<int>& joinedPads
     w.li = li;
     w.v0 = v0;
     w.width = Coord(widthL_[li]);
+    w.widthMin = Coord(widthMinL_[li]);
     w.clr = Coord(clrL_[li]);
     s_.wires.push_back(std::move(w));
     return int(s_.wires.size() - 1);
@@ -751,7 +767,7 @@ void Router::commit(const std::vector<SNode>& path, std::vector<int>& joinedPads
     End a = resolve(t);
     if (!n.atVertex) {
       int e = m_.tris[n.tri].e[n.le];
-      int cid = insertCrossing(n.li, e, n.gap, wire);
+      int cid = insertCrossing(n.li, e, n.gap, wire, n.narrow);
       s_.wires[wire].cids.push_back(cid);
       addChord(n.li, t, wire, a, End{false, m_.localEdge(t, e), cid});
       last = {false, -1, cid, e};
@@ -779,7 +795,7 @@ void Router::removeWire(int wi) {
     auto& list = s_.cross[w.li, e];
     std::erase(list, cid);
     EdgeUse& u = s_.use[w.li, e];
-    u.sumW -= double(w.width);
+    u.sumW -= s_.crossings[cid].width;
     u.n -= 1;
     u.maxC = 0;
     for (int c : list) u.maxC = std::max(u.maxC, double(s_.wires[s_.crossings[c].wire].clr));
@@ -943,6 +959,7 @@ std::vector<int> Router::realizeAll() {
     rw.net = w.net;
     rw.layer = layers_[w.li];
     rw.width = w.width;
+    rw.widthMin = w.widthMin;
     rw.clearance = w.clr;
     // The sketch follows the chords through the triangle centroids: crossing points alone can be
     // collinear with pad centres (rows of THT pads), which is ambiguous for the realiser.
@@ -950,17 +967,20 @@ std::vector<int> Router::realizeAll() {
       const MTri& T = m_.tris[t];
       return (P(T.v[0]) + P(T.v[1]) + P(T.v[2])) / 3.0;
     };
-    rw.sketch.push_back(P(w.v0));
+    std::vector<Vec2> pts{P(w.v0)};
     for (size_t i = 0; i < w.cids.size(); ++i) {
-      if (i < w.tris.size()) rw.sketch.push_back(centroid(w.tris[i]));
       int cid = w.cids[i];
       int e = s_.crossings[cid].edge;
       const auto& list = s_.cross[w.li, e];
       auto pos = std::ranges::find(list, cid) - list.begin();
-      rw.sketch.push_back(intervalPoint(e, (double(pos) + 1) / (double(list.size()) + 1)));
+      pts.push_back(intervalPoint(e, (double(pos) + 1) / (double(list.size()) + 1)));
     }
-    if (w.cids.size() < w.tris.size()) rw.sketch.push_back(centroid(w.tris[w.cids.size()]));
-    rw.sketch.push_back(P(w.v1));
+    pts.push_back(P(w.v1));
+    for (size_t i = 0; i + 1 < pts.size(); ++i) {
+      rw.sketch.push_back(pts[i]);
+      if (i < w.tris.size()) rw.sketch.push_back(centroid(w.tris[i]));
+    }
+    rw.sketch.push_back(pts.back());
     wires.push_back(std::move(rw));
   }
   std::vector<RealVia> vias;
@@ -992,8 +1012,8 @@ std::vector<int> Router::realizeAll() {
     if (t.isArc()) res_.length += ArcGeom::fromThreePoints(t.a.v(), t.mid->v(), t.b.v()).length();
     else res_.length += (t.b.v() - t.a.v()).len();
   }
-  res_.log.push_back(std::format("realised {} wires ({} alive of {} total), {} arcs, {} apexes dropped", st.wires,
-                                 wires.size(), s_.wires.size(), st.arcs, st.droppedApexes));
+  res_.log.push_back(std::format("realised {} wires ({} alive of {} total), {} arcs, {} narrowed crossings, {} overflowed edges, {} apexes dropped",
+                                 st.wires, wires.size(), s_.wires.size(), st.arcs, st.narrowed, st.overflowEdges, st.droppedApexes));
   return st.trackWire;
 }
 
@@ -1164,12 +1184,19 @@ RouterResult Router::run() {
   std::optional<Snapshot> bestGeom;
   presFac_ = 8;
   hardCap_ = false;
+  // An unconnected pad weighs as two conflicts: rerouting must not trade connections for clearance.
+  auto failedNow = [&] {
+    size_t n = 0;
+    for (auto& f : s_.failed) n += f.size();
+    return n;
+  };
   for (int round = 0; round <= o_.maxPasses && !std::getenv("XR_SKETCH") && !std::getenv("XR_NOFEEDBACK"); ++round) {
     auto conflicts = checkRealized(tracks0, trackWire);
-    res_.log.push_back(std::format("geometry round {}: {} conflict(s)", round, conflicts.size()));
-    if (!bestGeom || conflicts.size() < bestGeom->conflicts)
+    size_t score = conflicts.size() + 2 * failedNow();
+    res_.log.push_back(std::format("geometry round {}: {} conflict(s), {} failed", round, conflicts.size(), failedNow()));
+    if (!bestGeom || score < bestGeom->conflicts)
       bestGeom = Snapshot{s_, {b_.tracks.begin() + tracks0, b_.tracks.end()}, {b_.vias.begin() + vias0, b_.vias.end()},
-                          conflicts.size()};
+                          score};
     if (conflicts.empty() || round == o_.maxPasses || cancelled()) break;
     std::flat_set<int> reroute;
     for (auto& c : conflicts) {
