@@ -214,7 +214,32 @@ ZoneFillStats fillZones(Board& b, const ZoneFillOptions& opt) {
     bg::difference(area, obstacles, fill);
     // Opening removes necks narrower than minWidth.
     double minW = double(z.minWidth > 0 ? z.minWidth : opt.minWidth);
-    if (minW > 0) fill = grow(grow(fill, -minW / 2), minW / 2 - 1);
+    if (std::getenv("XR_DEBUG_FILL"))
+      std::fprintf(stderr, "zone %d: net %d layer %d clr %.3f minW %.3f gap %.3f spoke %.3f conn %d priority %d cutouts %zu; %zu polygons after difference, area %.1f mm2\n",
+                   zi, z.net, int(z.layer), zoneClr / 1e6, minW / 1e6, gap / 1e6, spoke / 1e6, int(z.padConnection), z.priority, z.cutouts.size(),
+                   fill.size(), bg::area(fill) / 1e12);
+    // Polygon by polygon: the pieces are disjoint, so the opening of the whole is the union of the
+    // openings, and boost's buffer of one big multipolygon with thousands of holes went wrong (a KiCad
+    // GND pour of 17690 mm² came back as 5018 mm² in 401 pieces). A piece whose opening loses more
+    // than its rim can explain is kept as it was.
+    if (minW > 0) {
+      BMulti opened;
+      for (auto& poly : fill) {
+        BMulti one{poly};
+        BMulti eroded = grow(one, -minW / 2);
+        BMulti back = grow(eroded, minW / 2 - 1);
+        double a0 = std::abs(bg::area(one)), a1 = std::abs(bg::area(back));
+        double rim = bg::perimeter(one) * minW;  // the most an opening can honestly take away
+        if (!bg::is_valid(back) || a1 > a0 * 1.001 + 1e6 || a0 - a1 > rim + 1e6) {
+          if (std::getenv("XR_DEBUG_FILL"))
+            std::fprintf(stderr, "  opening rejected for a piece of %.3f mm2 -> %.3f mm2 (rim %.3f)\n", a0 / 1e12, a1 / 1e12, rim / 1e12);
+          back = std::move(one);
+        }
+        for (auto& q : back) opened.push_back(std::move(q));
+      }
+      fill = std::move(opened);
+    }
+    if (std::getenv("XR_DEBUG_FILL")) std::fprintf(stderr, "  after opening: %zu polygons, area %.1f mm2\n", fill.size(), bg::area(fill) / 1e12);
 
     for (auto& poly : fill) {
       Polyline outer = ringToPolyline(poly.outer());
@@ -222,6 +247,11 @@ ZoneFillStats fillZones(Board& b, const ZoneFillOptions& opt) {
       std::vector<Polyline> inner;
       for (auto& h : poly.inners()) inner.push_back(ringToPolyline(h));
       Polyline f = fracture(outer, inner);
+      if (std::getenv("XR_DEBUG_FILL")) {
+        double want = std::abs(bg::area(poly)), got = std::abs(polygonArea(f));
+        if (std::abs(want - got) > 0.01 * want + 1e9)
+          std::fprintf(stderr, "  fracture area mismatch: polygon %.3f mm2 (%zu holes) -> %.3f mm2\n", want / 1e12, inner.size(), got / 1e12);
+      }
       if (opt.removeIslands && z.net != kNoNet) {
         // Keep the piece only if copper of the zone's net touches it.
         Shape piece = Shape::polygon(f);
