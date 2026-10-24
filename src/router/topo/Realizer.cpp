@@ -1,6 +1,7 @@
 #include "router/topo/Realizer.h"
 
 #include "core/SpatialIndex.h"
+#include "drc/Drc.h"
 
 #include <CGAL/Constrained_Delaunay_triangulation_2.h>
 #include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
@@ -51,6 +52,8 @@ struct Side {
 struct LayerObstacles {
   std::vector<OPt> pts;
   std::vector<Shape> shapes;
+  // A wire never bends around the centre of a pad that has corners: the nearest corner takes the bend.
+  std::map<int, std::vector<int>> cornersOf;  // centre point -> corner points
   std::vector<std::pair<int, int>> constraints;
   std::vector<std::vector<Side>> adj;  // sides incident to each obstacle point (pads, outline, stubs)
 
@@ -351,6 +354,8 @@ LayerObstacles collectFromMesh(const Board& b, LayerId layer, const TopoMesh& m,
     const Shape& s = ob.shapes[size_t(padShape[pi])];
     const auto& pv = m.padVerts[pi];
     int n = int(pv.size()) - 1;
+    for (int k = 1; k <= n; ++k)
+      if (pv[size_t(k)] != pv[0]) ob.cornersOf[pv[0]].push_back(pv[size_t(k)]);
     for (int k = 0; k < n; ++k) {
       int a = pv[size_t(k) + 1], c = pv[size_t((k + 1) % n) + 1];
       if (s.kind == Shape::Kind::Segment && k > 0) break;
@@ -427,6 +432,46 @@ std::vector<FunnelApex> funnel(const std::vector<std::pair<Vec2, Vec2>>& portals
 
 }  // namespace
 
+int narrowToFit(Board& b, size_t firstTrack) {
+  int n = 0;
+  // Two rounds: a track narrowed in the first gives its neighbours room in the second.
+  for (int round = 0; round < 2; ++round) {
+    SpatialIndex idx;
+    idx.build(b);
+    double maxClr = double(b.maxClearance());
+    bool any = false;
+    for (size_t ti = firstTrack; ti < b.tracks.size(); ++ti) {
+      Track& t = b.tracks[ti];
+      Coord minW = std::min(t.width, b.minTrackWidth(t.net, t.layer));
+      if (minW >= t.width) continue;
+      // Room: the smallest (distance to other copper − required clearance) along the centre line.
+      double room = std::numeric_limits<double>::max();
+      auto centre = itemShapes(b, {ItemType::Track, int(ti)});
+      for (auto& s : centre) s.r = 0;
+      BBox bb;
+      for (auto& s : centre) bb.add(s.bbox());
+      LayerMask lm = LayerMask(1) << t.layer;
+      idx.query(bb.inflated(maxClr + t.width), lm, [&](ItemRef r) {
+        if (r == ItemRef{ItemType::Track, int(ti)} || r.type == ItemType::Zone) return;
+        int on = itemNet(b, r);
+        if (on == t.net && t.net != kNoNet) return;
+        double req = requiredClearance(b, t.net, on, lm);
+        for (auto& s1 : centre)
+          for (auto& s2 : itemShapes(b, r)) room = std::min(room, s1.distance(s2) - req);
+      });
+      if (room >= t.width / 2.0) continue;
+      Coord w = std::max(minW, Coord(std::llround(2 * room)));
+      if (w < t.width) {
+        t.width = w;
+        ++n;
+        any = true;
+      }
+    }
+    if (!any) break;
+  }
+  return n;
+}
+
 RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::vector<RealVia>& vias,
                      const RealizeOptions& opt) {
   RealizeStats st;
@@ -440,10 +485,16 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
   std::vector<std::vector<Slot>> slots(NW);
   std::map<LayerId, LayerObstacles> obstacles;
   std::map<LayerId, std::map<std::pair<int, int>, std::vector<std::pair<int, int>>>> edgeLists;
+  std::map<LayerId, std::set<std::pair<int, int>>> cdtEdges;  // debug: obstacle pairs joined by an edge
   for (auto&& [layer, ids] : byLayer) {
     LayerObstacles& ob = obstacles.emplace(layer, opt.mesh ? collectFromMesh(b, layer, *opt.mesh, vias)
                                                             : collect(b, layer, vias, opt)).first->second;
     auto cdt = triangulate(ob, kNoNet);
+    if (std::getenv("XR_DEBUG4"))
+      for (auto e = cdt->finite_edges_begin(); e != cdt->finite_edges_end(); ++e) {
+        int a = e->first->vertex(CDT::cw(e->second))->info(), c = e->first->vertex(CDT::ccw(e->second))->info();
+        cdtEdges[layer].insert({std::min(a, c), std::max(a, c)});
+      }
     auto& onEdge = edgeLists[layer];  // edge -> (wire, hit index)
     for (int wi : ids) {
       if (cdt->number_of_vertices() >= 3) hits[wi] = crossings(*cdt, wires[wi].sketch);
@@ -613,8 +664,11 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
     portals.push_back({w.sketch.back(), w.sketch.back()});
     auto apexes = funnel(portals);
 
+    auto L_of = [&](const EdgeHit& h) { return (ob.pts[h.v].p - ob.pts[h.u].p).len(); };
+    // The ends take the width of the first and last crossing: a wire leaving a fine-pitch pad from
+    // its end is narrowed from the pad on.
     std::vector<Circle> cs;
-    cs.push_back({w.sketch.front(), 0, -1, 0, double(w.width)});
+    cs.push_back({w.sketch.front(), 0, -1, 0, hw[wi].empty() ? double(w.width) : hw[wi].front()});
     for (const FunnelApex& ap : apexes) {
       const EdgeHit& h = hits[wi][ap.portal - 1];
       const Slot& sl = slots[wi][ap.portal - 1];
@@ -623,6 +677,21 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
       double R = atU ? sl.ru : sl.rv;
       Vec2 c = atU ? sl.cu : sl.cv;
       double width = hw[wi][ap.portal - 1];
+      if (auto it = ob.cornersOf.find(o); it != ob.cornersOf.end() && (c - ob.pts[o].p).len2() < 1 && !std::getenv("XR_NOCORNER")) {
+        // The bend goes around the corner nearest to where the taut path meets the slot.
+        Vec2 at = h.uLeft == atU ? ob.pts[h.u].p + (ob.pts[h.v].p - ob.pts[h.u].p).normalized() * sl.lo
+                                 : ob.pts[h.v].p + (ob.pts[h.u].p - ob.pts[h.v].p).normalized() * (L_of(h) - sl.hi);
+        int best = -1;
+        double bd = std::numeric_limits<double>::max();
+        for (int q : it->second)
+          if (double d = (ob.pts[q].p - at).len2(); d < bd) { bd = d; best = q; }
+        if (best >= 0) {
+          const OPt& cp = ob.pts[best];
+          o = best;
+          c = cp.p;
+          R = cp.r + std::max(cp.clr, double(w.clearance)) + kMargin + width / 2.0;
+        }
+      }
       if (!cs.empty() && cs.back().obst == o && (cs.back().c - c).len2() < 1 && (cs.back().rho > 0) == (ap.side > 0)) {
         cs.back().rho = ap.side * std::max(std::abs(cs.back().rho), R);
         cs.back().width = std::min(cs.back().width, width);
@@ -630,7 +699,7 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
         cs.push_back({c, ap.side * R, o, ap.portal, width});
       }
     }
-    cs.push_back({w.sketch.back(), 0, -1, int(portals.size()) - 1, double(w.width)});
+    cs.push_back({w.sketch.back(), 0, -1, int(portals.size()) - 1, hw[wi].empty() ? double(w.width) : hw[wi].back()});
     if (std::getenv("XR_DEBUG2")) {
       std::print(stderr, "wire {} net {} sketch {} hits {} bends:", wi, b.nets[w.net].name, w.sketch.size(), hits[wi].size());
       for (auto& c : cs) std::print(stderr, " [o{} rho{:+.3f} ({:.3f},{:.3f})]", c.obst, c.rho / 1e6, c.c.x / 1e6, c.c.y / 1e6);
@@ -688,10 +757,16 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
         if (std::abs(sweepOf(cs[k], ti[k], to[k])) > 1.6 * kPi) bad = int(k);
       if (bad > 0 && bad < int(n) - 1) {
         dropped.insert(cs[bad].obst);
-        if (std::getenv("XR_DEBUG4"))
-          std::println(stderr, "drop wire {} net {} bend {} of {}: o{} rho {:+.3f} at ({:.3f},{:.3f}); prev o{} rho {:+.3f} next o{} rho {:+.3f}",
-                       wi, b.nets[w.net].name, bad, n, cs[bad].obst, cs[bad].rho / 1e6, cs[bad].c.x / 1e6, cs[bad].c.y / 1e6,
-                       cs[bad - 1].obst, cs[bad - 1].rho / 1e6, cs[bad + 1].obst, cs[bad + 1].rho / 1e6);
+        if (std::getenv("XR_DEBUG4")) {
+          auto joined = [&](int o1, int o2) {
+            return o1 >= 0 && o2 >= 0 && cdtEdges[w.layer].contains({std::min(o1, o2), std::max(o1, o2)});
+          };
+          auto gap = [&](const Circle& x, const Circle& y) { return ((x.c - y.c).len() - std::abs(x.rho) - std::abs(y.rho)) / 1e6; };
+          std::println(stderr, "drop wire {} net {} bend {} of {}: o{} rho {:+.3f} at ({:.3f},{:.3f}); prev o{} rho {:+.3f} gap {:.3f} edge {}; next o{} rho {:+.3f} gap {:.3f} edge {}",
+                       wi, b.nets[w.net].name, bad, n, cs[bad].obst, cs[bad].rho / 1e6, cs[bad].c.x / 1e6, -cs[bad].c.y / 1e6,
+                       cs[bad - 1].obst, cs[bad - 1].rho / 1e6, gap(cs[bad - 1], cs[bad]), joined(cs[bad - 1].obst, cs[bad].obst),
+                       cs[bad + 1].obst, cs[bad + 1].rho / 1e6, gap(cs[bad], cs[bad + 1]), joined(cs[bad].obst, cs[bad + 1].obst));
+        }
         cs.erase(cs.begin() + bad);
         ++st.droppedApexes;
         continue;

@@ -247,8 +247,11 @@ void Router::setup() {
   cornerOk_.resize(b_.pads.size());
   for (auto [i, p] : std::views::enumerate(b_.pads)) {
     padShape_[i] = (!p.copper && p.drill > 0) ? Shape::circle(p.pos.v(), p.drill / 2.0) : p.shapeGeom();
-    // TopoR rule: tracks attach to the pad anchor; corners only when they are rounded enough.
-    cornerOk_[i] = padShape_[i].r >= b_.classOf(p.net).trackWidth / 2.0;
+    // TopoR rule: tracks attach to the pad anchor; corners only when they are rounded enough for the
+    // narrowest wire the net may use (fine-pitch pads are left from their ends, narrowed).
+    Coord narrowest = b_.classOf(p.net).trackWidth;
+    for (LayerId l : b_.copperLayers()) narrowest = std::min(narrowest, b_.minTrackWidth(p.net, l));
+    cornerOk_[i] = padShape_[i].r >= narrowest / 2.0;
   }
   vshape_.resize(m_.verts.size());
   for (auto [i, v] : std::views::enumerate(m_.verts)) {
@@ -437,13 +440,21 @@ double Router::viaPenalty(int w, bool& blocked, const std::vector<SNode>& nodes,
     if (nodes[i].via && nodes[i].vtx != w) pathVias.push_back(nodes[i].vtx);
   for (int li = 0; li < NL_; ++li)
     for (int e : vertEdges_[w]) {
-      const EdgeUse& u = s_.use[li, e];
+      // Wires of other nets crossing the edge: the net's own need no clearance from its via.
+      EdgeUse u;
+      for (int cid : s_.cross[li, e]) {
+        const Crossing& c = s_.crossings[cid];
+        if (s_.wires[c.wire].net == net_) continue;
+        u.sumW += c.width;
+        u.n += 1;
+        u.maxC = std::max(u.maxC, double(s_.wires[c.wire].clr));
+      }
       if (u.n == 0) continue;
       int other = m_.edges[e].v[0] == w ? m_.edges[e].v[1] : m_.edges[e].v[0];
       auto o = obst(other, li, kNoNet);
       Shape via = Shape::circle(P(w), viaR_);
       Shape otherVia = Shape::circle(P(other), viaR_);
-      bool pathVia = std::ranges::contains(pathVias, other);
+      bool pathVia = std::ranges::contains(pathVias, other) && !std::getenv("XR_NOPATHVIAS");
       if (pathVia && !o) o = ObstInfo{&otherVia, viaClr_, -2 - other};
       double free = o ? o->shape->distance(via) : via.distance(P(other));
       double need = u.sumW + (u.n - 1) * u.maxC + std::max(viaClr_, u.maxC) + (o ? std::max(o->clr, u.maxC) : 0) +
@@ -645,6 +656,9 @@ std::optional<std::vector<SNode>> Router::search(int pad) {
     c.parent = from;
     if (isTarget(w, n.li)) {
       c.goal = true;
+      push(c, keyVertex(n.li, w));
+    } else if (m_.verts[w].pad == startPad_ && startPad_ >= 0 && (m_.verts[w].kind != VKind::PadCorner || cornerOk_[startPad_])) {
+      // Another vertex of the start pad: the wire may leave the pad from any of its vertices.
       push(c, keyVertex(n.li, w));
     } else if (isJunction(w, n.li)) {
       int j = push(c, keyVertex(n.li, w));
@@ -1014,8 +1028,11 @@ std::vector<int> Router::realizeAll() {
     return {};
   }
   RealizeOptions ro;
-  ro.mesh = &m_;
+  // The realiser on the router's own mesh (XR_UNIMESH): consistent slots, but its bends around pad
+  // centres and merged radii are not better yet; kept for the obstacle-only mesh to come.
+  if (std::getenv("XR_UNIMESH")) ro.mesh = &m_;
   auto st = realize(b_, wires, vias, ro);
+  int narrowed = narrowToFit(b_, before);
   res_.vias = int(vias.size());
   res_.length = 0;
   for (size_t i = before; i < b_.tracks.size(); ++i) {
@@ -1023,8 +1040,8 @@ std::vector<int> Router::realizeAll() {
     if (t.isArc()) res_.length += ArcGeom::fromThreePoints(t.a.v(), t.mid->v(), t.b.v()).length();
     else res_.length += (t.b.v() - t.a.v()).len();
   }
-  res_.log.push_back(std::format("realised {} wires ({} alive of {} total), {} arcs, {} narrowed crossings, {} overflowed edges, {} apexes dropped",
-                                 st.wires, wires.size(), s_.wires.size(), st.arcs, st.narrowed, st.overflowEdges, st.droppedApexes));
+  res_.log.push_back(std::format("realised {} wires ({} alive of {} total), {} arcs, {} narrowed crossings, {} tracks narrowed to fit, {} overflowed edges, {} apexes dropped",
+                                 st.wires, wires.size(), s_.wires.size(), st.arcs, st.narrowed, narrowed, st.overflowEdges, st.droppedApexes));
   return st.trackWire;
 }
 
@@ -1195,7 +1212,8 @@ RouterResult Router::run() {
   std::optional<Snapshot> bestGeom;
   presFac_ = 8;
   hardCap_ = false;
-  // An unconnected pad weighs as two conflicts: rerouting must not trade connections for clearance.
+  // An unconnected pad outweighs conflicts by far: those the refinement repairs, a missing wire it
+  // cannot make.
   auto failedNow = [&] {
     size_t n = 0;
     for (auto& f : s_.failed) n += f.size();
@@ -1203,7 +1221,7 @@ RouterResult Router::run() {
   };
   for (int round = 0; round <= o_.maxPasses && !std::getenv("XR_SKETCH") && !std::getenv("XR_NOFEEDBACK"); ++round) {
     auto conflicts = checkRealized(tracks0, trackWire);
-    size_t score = conflicts.size() + 2 * failedNow();
+    size_t score = conflicts.size() + 10 * failedNow();
     res_.log.push_back(std::format("geometry round {}: {} conflict(s), {} failed", round, conflicts.size(), failedNow()));
     if (!bestGeom || score < bestGeom->conflicts)
       bestGeom = Snapshot{s_, {b_.tracks.begin() + tracks0, b_.tracks.end()}, {b_.vias.begin() + vias0, b_.vias.end()},
@@ -1246,6 +1264,13 @@ RouterResult Router::run() {
                                    r.viaMoves, r.conflictsBefore, r.conflictsAfter, r.lengthBefore / 1e6,
                                    r.lengthAfter / 1e6));
   }
+  auto drcCount = [&] {
+    DrcOptions d;
+    d.unconnected = false;
+    d.widths = false;
+    return runDrc(b_, d).size();
+  };
+  res_.log.push_back(std::format("DRC before refine: {} violation(s)", drcCount()));
   if (o_.refine && !cancelled() && !std::getenv("XR_SKETCH")) {
     // The grid refinement: every wire still in violation looks for a path around the copper as it
     // lies now, over the whole board if need be.
@@ -1255,8 +1280,8 @@ RouterResult Router::run() {
     auto r = refine(b_, ro);
     res_.vias = int(b_.vias.size());
     res_.length = r.lengthAfter;
-    res_.log.push_back(std::format("refined: {} wire(s) re-laid, {} repaired, {} moved to another layer, {} via(s) removed",
-                                   r.improved, r.repaired, r.layerChanges, r.viasRemoved));
+    res_.log.push_back(std::format("refined: {} wire(s) re-laid, {} repaired, {} moved to another layer, {} via(s) removed; DRC {} violation(s)",
+                                   r.improved, r.repaired, r.layerChanges, r.viasRemoved, drcCount()));
   }
   if (o_.fillZones && !b_.zones.empty() && !std::getenv("XR_SKETCH")) {
     auto zs = xr::fillZones(b_);

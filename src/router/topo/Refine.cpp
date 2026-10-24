@@ -176,14 +176,17 @@ std::optional<Polyline> findPath(const Board& b, Vec2 from, Vec2 to, LayerId lay
   g.blocked.assign(size_t(g.nx) * size_t(g.ny), 0);
   double half = width / 2.0;
   LayerMask lm = LayerMask(1) << layer;
-  // Copper of other nets with the clearance between the two nets.
+  // Copper of other nets with the clearance between the two nets. Half a cell of tolerance: wires
+  // packed at the bare rule distance leave corridors a grid cannot hit exactly, and the path is
+  // pulled taut (or checked) afterwards anyway.
   SpatialIndex idx;
   idx.build(b);
+  const double tol = 0.5 * g.h;
   idx.query(region.inflated(double(b.maxClearance()) + half), lm, [&](ItemRef r) {
     int on = itemNet(b, r);
     if (on == net && net != kNoNet) return;
     if (r.type == ItemType::Track && r.index < int(ignore.size()) && ignore[r.index]) return;
-    double req = requiredClearance(b, net, on, lm) + half;
+    double req = requiredClearance(b, net, on, lm) + half - tol;
     if (r.type == ItemType::Zone) {
       for (auto& poly : b.zones[r.index].filled) g.markPolygon(poly, req);
       return;
@@ -251,7 +254,21 @@ std::optional<Polyline> findPath(const Board& b, Vec2 from, Vec2 to, LayerId lay
       }
     }
   }
-  if (!found) return std::nullopt;
+  if (!found) {
+    if (std::getenv("XR_REFINE_DEBUG")) {
+      auto freeAround = [&](int c) {
+        int x = c % g.nx, y = c / g.nx, nfree = 0;
+        for (int k = 0; k < 8; ++k) {
+          int nx = x + dx[k], ny = y + dy[k];
+          if (nx >= 0 && ny >= 0 && nx < g.nx && ny < g.ny && !g.blocked[ny * g.nx + nx]) ++nfree;
+        }
+        return nfree;
+      };
+      std::fprintf(stderr, "  findPath L%d w%.3f grid %dx%d h%.3f: start (%.3f,%.3f) free nb %d, end (%.3f,%.3f) free nb %d\n", layer,
+                   width / 1e6, g.nx, g.ny, g.h / 1e6, from.x / 1e6, -from.y / 1e6, freeAround(s), to.x / 1e6, -to.y / 1e6, freeAround(t));
+    }
+    return std::nullopt;
+  }
   Polyline cells;
   for (int c = t; c != s; c = prev[c]) cells.push_back(g.centre(c));
   std::ranges::reverse(cells);
@@ -341,7 +358,7 @@ RefineResult refine(Board& b, const RefineOptions& o) {
     int conflicts0 = regionConflicts(b, idx0, judge).count;
     std::optional<Board> best;
     double bestLen = c.length - std::max(0.05 * kNmPerMm, 0.01 * c.length);
-    int bestConflicts = conflicts0;
+    int bestGain = 0;  // conflicts removed by the best candidate over its own region
     LayerId bestLayer = c.layer;
     static const bool kDebug = std::getenv("XR_REFINE_DEBUG") != nullptr;
     for (LayerId l : layers) {
@@ -388,22 +405,29 @@ RefineResult refine(Board& b, const RefineOptions& o) {
           ro.tracksAsObstacles = true;
           ro.region = region;
           realize(trial, {w}, {}, ro);
+          narrowToFit(trial, before);
         }
         double len = 0;
-        for (size_t i = before; i < trial.tracks.size(); ++i) len += trackLength(trial.tracks[i]);
+        BBox judge1 = judge;  // the new path may lie far from the old one: judge both, before and after
+        for (size_t i = before; i < trial.tracks.size(); ++i) {
+          len += trackLength(trial.tracks[i]);
+          for (auto& s : itemShapes(trial, {ItemType::Track, int(i)})) judge1.add(s.bbox().inflated(double(b.maxClearance())));
+        }
         if (len <= 0) continue;
         SpatialIndex idx1;
         idx1.build(trial);
-        int conflicts1 = regionConflicts(trial, idx1, judge).count;
+        int conflicts1 = regionConflicts(trial, idx1, judge1).count;
+        int was = regionConflicts(b, idx0, judge1).count;
         if (kDebug && conflicts0 > 0)
-          std::fprintf(stderr, "chain net %s L%d tracks %zu conflicts %d: layer %d path %zu pts, %s %.2f mm (was %.2f), conflicts %d\n",
+          std::fprintf(stderr, "chain net %s L%d tracks %zu conflicts %d: layer %d path %zu pts, %s %.2f mm (was %.2f), conflicts %d -> %d\n",
                        b.nets[c.net].name.c_str(), c.layer, c.tracks.size(), conflicts0, l, path->size(), raw ? "grid" : "realised",
-                       len / 1e6, c.length / 1e6, conflicts1);
-        // Fewer conflicts first; among equals the shorter path.
-        if (conflicts1 > bestConflicts || (conflicts1 == bestConflicts && len >= bestLen)) continue;
+                       len / 1e6, c.length / 1e6, was, conflicts1);
+        // Fewer conflicts first (the gain over the same region); among equals the shorter path.
+        int gain = was - conflicts1;
+        if (gain < bestGain || (gain == bestGain && len >= bestLen)) continue;
         if (Connectivity::compute(trial, idx1).ratsnest.size() > unrouted) continue;  // must join what it joined
         bestLen = len;
-        bestConflicts = conflicts1;
+        bestGain = gain;
         bestLayer = l;
         best = std::move(trial);
         if (conflicts1 == 0 && !raw) break;  // the taut path is clean: no need for the angular one
@@ -420,7 +444,7 @@ RefineResult refine(Board& b, const RefineOptions& o) {
       for (int& ti : chains[k].tracks) ti -= int(std::ranges::lower_bound(gone, ti) - gone.begin());
     b = std::move(*best);
     ++r.improved;
-    if (bestConflicts < conflicts0) ++r.repaired;
+    if (bestGain > 0) ++r.repaired;
     if (bestLayer != c.layer) ++r.layerChanges;
     r.lengthAfter += bestLen;
   }

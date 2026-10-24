@@ -265,12 +265,21 @@ void TopoMesh::build(const Board& b, const MeshOptions& opt) {
     t.inside = (f->info().nesting % 2) == 1;
     tris.push_back(t);
   }
-  // Remap duplicates: pad vertices that coincide with another vertex refer to the first one.
+  // Remap duplicates: pad vertices that coincide with another vertex refer to the first one. Of
+  // coincident pads (a connector drawn as two parts, one without nets) the one with a net owns the
+  // vertex, or its own net could not reach it.
   for (size_t i = 0; i < alias.size(); ++i)
-    if (alias[i] >= 0)
+    if (alias[i] >= 0) {
+      int keep = alias[i];
+      int mine = verts[i].pad, theirs = verts[keep].pad;
+      if (mine >= 0 && theirs >= 0 && b.pads[theirs].net == kNoNet && b.pads[mine].net != kNoNet) {
+        verts[keep].pad = mine;
+        verts[keep].kind = verts[i].kind;
+      }
       for (auto& pv : padVerts)
         for (auto& v : pv)
-          if (v == int(i)) v = alias[i];
+          if (v == int(i)) v = keep;
+    }
 
   std::map<std::pair<int, int>, int> edgeIdx;
   for (auto f = cdt.finite_faces_begin(); f != cdt.finite_faces_end(); ++f) {

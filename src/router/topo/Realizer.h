@@ -60,6 +60,11 @@ struct RealizeOptions {
 RealizeStats reshapeTracks(Board& b, std::vector<char> chosen, std::vector<RealWire>* wires = nullptr,
                            std::vector<char>* grown = nullptr, bool local = false);
 
+// TopoR's «подрезка» by the copper as it lies: every track from `firstTrack` on that comes closer to
+// other nets' copper than its clearance is narrowed to what fits, down to the minimum width of its
+// net on its layer. Returns the number of tracks narrowed.
+int narrowToFit(Board& b, size_t firstTrack);
+
 // Appends tracks for the wires and vias to the board.
 RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::vector<RealVia>& vias,
                      const RealizeOptions& opt = {});
