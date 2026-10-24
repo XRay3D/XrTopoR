@@ -48,7 +48,8 @@ struct PlaneRule {
   std::string layer, net;
 };
 
-// «Назначение цепей на слои»: nets meant to be routed on a layer (kept and shown; not yet routed by).
+// «Назначение цепей на слои»: nets meant to be routed on a layer (a net may have several); routing
+// elsewhere is TopoR's warning 5047, the autorouter avoids it.
 struct LayerNetsRule {
   bool enabled = true;
   std::string layer;

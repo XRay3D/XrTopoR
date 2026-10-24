@@ -228,6 +228,8 @@ struct Board {
   // The narrowest a wire may be: «Мин.» of the last width rule that applies (Rules.cpp); the class
   // width for designs without rules.
   Coord minTrackWidth(int net, LayerId layer) const;
+  // Copper layers a net is assigned to by «Назначение цепей на слои»; 0 = no assignment.
+  LayerMask assignedLayers(int net) const;
   int findNetClass(const std::string& name) const;
 
   int findComponent(const std::string& ref) const;

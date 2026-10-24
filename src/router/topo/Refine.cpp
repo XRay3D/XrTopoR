@@ -301,9 +301,11 @@ RefineResult refine(Board& b, const RefineOptions& o) {
       region.maxY = std::min(region.maxY, bb.maxY + kNmPerMm);
     }
     std::vector<LayerId> layers{c.layer};
+    LayerMask assigned = b.assignedLayers(c.net);
     if (o.changeLayers)
       for (LayerId l : signal)
-        if (l != c.layer && reaches(b, c.a, l, c.net) && reaches(b, c.b, l, c.net)) layers.push_back(l);
+        if (l != c.layer && (!assigned || ((assigned >> l) & 1)) && reaches(b, c.a, l, c.net) && reaches(b, c.b, l, c.net))
+          layers.push_back(l);
 
     BBox judge = region.inflated(double(b.maxClearance()));
     SpatialIndex idx0;

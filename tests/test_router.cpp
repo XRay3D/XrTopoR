@@ -152,3 +152,22 @@ TEST(Router, Keepouts) {
     EXPECT_TRUE(bottom);
   }
 }
+
+// «Назначение цепей на слои»: a net assigned to the bottom is routed there.
+TEST(Router, NetsOnAssignedLayers) {
+  {
+    Board free = twoPads();  // without the rule the route takes the top
+    topo::routeBoard(free);
+    ASSERT_FALSE(free.tracks.empty());
+    EXPECT_EQ(free.tracks[0].layer, free.topCopper());
+  }
+  Board b = twoPads();
+  DesignRules r;
+  r.layerNets.push_back({true, "Bottom", {RuleNets{RuleNets::Kind::Net, "A"}}});
+  b.rules = r;
+  EXPECT_EQ(b.assignedLayers(0), LayerMask(1) << b.bottomCopper());
+  auto res = topo::routeBoard(b);
+  EXPECT_EQ(res.routed, res.connections);
+  ASSERT_FALSE(b.tracks.empty());
+  for (auto& t : b.tracks) EXPECT_EQ(t.layer, b.bottomCopper());
+}

@@ -59,6 +59,21 @@ Coord Board::minTrackWidth(int net, LayerId layer) const {
   return w > 0 ? w : b.trackWidth(net, layer);
 }
 
+LayerMask Board::assignedLayers(int net) const {
+  if (!rules || net < 0) return 0;
+  LayerMask m = 0;
+  for (auto& rule : rules->layerNets) {
+    LayerId l = findLayer(rule.layer);
+    if (!rule.enabled || l < 0 || layers[l].kind != LayerKind::Copper) continue;
+    for (auto& o : rule.nets)
+      if (auto nets = netsOf(*this, *rules, o); !nets || std::ranges::contains(*nets, net)) {
+        m |= LayerMask(1) << l;
+        break;
+      }
+  }
+  return m;
+}
+
 void compileRules(Board& b) {
   if (!b.rules) return;
   const DesignRules& r = *b.rules;

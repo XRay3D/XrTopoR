@@ -38,6 +38,7 @@ namespace {
 constexpr double kUnit = 1e6;  // congestion cost unit: 1 mm of track
 constexpr double kCrossHistory = 3.0;  // history added to the edges of a triangle with crossings
 constexpr size_t kMaxExpansions = 3'000'000;
+constexpr double kOffLayer = 10 * kUnit;  // each edge crossed on a layer the net is not assigned to
 
 // rows x cols table with row-major storage, indexed as grid[r, c] through std::mdspan.
 template <class T>
@@ -155,6 +156,7 @@ class Router {
   int net_ = kNoNet;
   double width_ = 0, clr_ = 0, viaR_ = 0, viaClr_ = 0;
   std::vector<double> widthL_, clrL_;  // the net's width and clearance on each routing layer
+  LayerMask assigned_ = 0;             // «Назначение цепей на слои» of the net (0: any layer)
   Coord viaDia_ = 0, viaDrill_ = 0;
   std::vector<int> treeStamp_;
   int stamp_ = 0;
@@ -324,6 +326,7 @@ void Router::setNet(int net) {
     widthL_[li] = double(b_.trackWidth(net, layers_[li]));
     clrL_[li] = double(b_.clearance(net, layers_[li]));
   }
+  assigned_ = b_.assignedLayers(net);
   viaDia_ = nc.viaDiameter;
   viaDrill_ = nc.viaDrill;
   viaR_ = nc.viaDiameter / 2.0;
@@ -399,6 +402,8 @@ double Router::crossCost(int e, int li, bool& blocked) const {
   double need = u.sumW + wl + u.n * cc + ends + (u.n + 1) * kRealizeMargin;
   double over = need - free;
   double cost = hist_[li, e] * kUnit;
+  // Other layers than the assigned ones only for short stretches (an SMD pad to its via).
+  if (assigned_ && !((assigned_ >> layers_[li]) & 1)) cost += kOffLayer;
   if (over > 1 && !relaxed_) {
     if (hardCap_) {
       blocked = true;
