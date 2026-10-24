@@ -40,8 +40,9 @@ namespace {
 constexpr double kUnit = 1e6;  // congestion cost unit: 1 mm of track
 constexpr double kCrossHistory = 3.0;  // history added to the edges of a triangle with crossings
 constexpr size_t kMaxExpansions = 3'000'000;
-constexpr double kOffLayer = 10 * kUnit;
-constexpr double kNarrowCost = 0.5 * kUnit;  // a crossing at the minimum width («подрезка»)  // each edge crossed on a layer the net is not assigned to
+static const bool kTriVia = std::getenv("XR_TRIVIA") != nullptr;  // vias on demand inside triangles (experiment)
+constexpr double kOffLayer = 10 * kUnit;      // each edge crossed on a layer the net is not assigned to
+constexpr double kNarrowCost = 0.5 * kUnit;  // a crossing at the minimum width («подрезка»)
 
 // rows x cols table indexed as grid[r, c]; the columns grow with the mesh (vias split triangles).
 template <class T>
@@ -130,7 +131,8 @@ struct SNode {
   bool transit = false;            // via arrival on the old layer (not expanded)
   int viaTri = -1;                 // a new via placed inside this triangle (at pt), on demand
   bool goal = false;
-  Vec2 pt;
+  Vec2 pt;                         // where the path is: the crossing's fixed place, a vertex, a via spot
+  Vec2 cpt;                        // the same for the length cost: crossings spread evenly over the edge, as the realiser lays them
 };
 
 struct ObstInfo {
@@ -190,6 +192,7 @@ class Router {
   void computeInterval(int e);
   // A via placed on demand inside triangle t for the current net: where it fits (nullopt: nowhere).
   std::optional<Vec2> viaSpot(int t, double* penalty) const;
+  mutable std::array<size_t, 7> viaStats_{};  // calls, blocked tri, vertex obstacles, copper, neighbour vias, keepout, chords
   // Other-net chords of t (layer li) the straight chord P-Q crosses; -1 if it shares an end vertex.
   int hitsGeom(int li, int t, Vec2 P, Vec2 Q, int qVertex = -1) const;
   Vec2 endPoint(int li, int t, const End& e) const;
@@ -307,8 +310,10 @@ void Router::setup() {
     mo.viaDiameter = std::max(mo.viaDiameter, double(nc.viaDiameter));
     mo.clearance = std::max(mo.clearance, double(nc.clearance));
   }
-  // Vias are placed on demand inside triangles (XR_SITES: the old pre-seeded candidate grid).
-  mo.viaSites = o_.useVias && NL_ > 1 && std::getenv("XR_SITES");
+  // Via candidates are pre-seeded in the mesh (a staggered grid of sites). XR_TRIVIA instead places
+  // vias on demand inside triangles, splitting them: topologically sound, but the realiser lays the
+  // wires worse on the sparser mesh (MinVia 205 vs 5 violations), so it stays an experiment.
+  mo.viaSites = o_.useVias && NL_ > 1 && !kTriVia;
   m_.build(b_, mo);
 
   padShape_.resize(b_.pads.size());
@@ -606,7 +611,8 @@ int Router::hitsGeom(int li, int t, Vec2 P0, Vec2 Q, int qVertex) const {
 
 std::optional<Vec2> Router::viaSpot(int t, double* penalty) const {
   const MTri& T = m_.tris[t];
-  if (!T.inside || T.blocked) return std::nullopt;
+  ++viaStats_[0];
+  if (!T.inside || T.blocked) { ++viaStats_[1]; return std::nullopt; }
   Vec2 A = P(T.v[0]), B = P(T.v[1]), C = P(T.v[2]);
   double la = (C - B).len(), lb = (A - C).len(), lc = (B - A).len();
   double per = la + lb + lc;
@@ -634,9 +640,9 @@ std::optional<Vec2> Router::viaSpot(int t, double* penalty) const {
     }
     if (worst < 0) break;
     Vec2 away = (p - P(T.v[worst])).normalized();
-    if (away.len2() == 0) return std::nullopt;
+    if (away.len2() == 0) { ++viaStats_[2]; return std::nullopt; }
     p += away * (-wm + 1000);
-    if (!m_.strictlyInside(t, p)) return std::nullopt;
+    if (!m_.strictlyInside(t, p)) { ++viaStats_[2]; return std::nullopt; }
   }
   // Copper that is no vertex of t: pads, fixed vias and kept wires by the index, routed vias of the
   // neighbouring triangles by their vertices.
@@ -653,18 +659,20 @@ std::optional<Vec2> Router::viaSpot(int t, double* penalty) const {
       for (auto& s : itemShapes(b_, r))
         if (s.distance(p) < viaR_ + clr) ok = false;
     });
-    if (!ok) return std::nullopt;
+    if (!ok) { ++viaStats_[3]; return std::nullopt; }
     for (int nb : T.nb)
       if (nb >= 0)
         for (int u : m_.tris[nb].v)
           if (m_.verts[u].kind == VKind::ViaSite && s_.viaNet[u] >= 0 && s_.viaNet[u] != net_ &&
-              (P(u) - p).len() < 2 * viaR_ + std::max(viaClr_, double(b_.clearance(s_.viaNet[u], layers_[0]))))
+              (P(u) - p).len() < 2 * viaR_ + std::max(viaClr_, double(b_.clearance(s_.viaNet[u], layers_[0])))) {
+            ++viaStats_[4];
             return std::nullopt;
+          }
   }
   for (const Keepout& k : b_.keepouts)
     if (k.role == Keepout::Role::Route && k.vias)
       for (const Shape& s : k.shapes())
-        if (s.distance(p) < viaR_) return std::nullopt;
+        if (s.distance(p) < viaR_) { ++viaStats_[5]; return std::nullopt; }
   // The chords of t keep their clearance from the via: those passing between the via and vertex V
   // will cross the new edge (V, via), which must hold them.
   double pen = 0;
@@ -688,8 +696,10 @@ std::optional<Vec2> Router::viaSpot(int t, double* penalty) const {
       if (n == 0) continue;
       double need = sumW + (n - 1) * maxC + std::max(viaClr_, maxC) + (vo[i].shape ? std::max(vo[i].clr, maxC) : 0) +
                     n * kRealizeMargin;
+      // Wires in the way are pushed aside at a price, like an overflowed edge: the nets concerned
+      // are rerouted in the next pass. Only the last, hard-capped pass refuses.
       if (need - free > 1) {
-        if (!softPlanar_) return std::nullopt;
+        if (hardCap_) { ++viaStats_[6]; return std::nullopt; }
         pen += presFac_ * kUnit * (1 + (need - free) / (sumW / n + maxC));
       }
     }
@@ -1150,7 +1160,7 @@ std::optional<std::vector<SNode>> Router::search(int pad) {
     best[key] = n.g;
     nodes.push_back(n);
     int idx = int(nodes.size() - 1);
-    open.push({n.g + heuristic(n.pt), idx});
+    open.push({n.g + heuristic(n.cpt), idx});
     return idx;
   };
 
@@ -1163,7 +1173,7 @@ std::optional<std::vector<SNode>> Router::search(int pad) {
       n.li = li;
       n.atVertex = true;
       n.vtx = v;
-      n.pt = P(v);
+      n.pt = n.cpt = P(v);
       push(n, keyVertex(li, v));
     }
 
@@ -1207,8 +1217,8 @@ std::optional<std::vector<SNode>> Router::search(int pad) {
     c.narrow = narrow;
     c.chordTri = t;
     c.pt = edgePoint(e, gapFraction(n.li, e, g));
-    (void)m;
-    c.g = n.g + (c.pt - n.pt).len() + cc + gx->second * crossPenalty_;
+    c.cpt = intervalPoint(e, (g + 1.0) / (m + 2.0));
+    c.g = n.g + (c.cpt - n.cpt).len() + cc + gx->second * crossPenalty_;
     c.parent = from;
     push(c, keyEdge(c.li, t2, c.le, c.gap));
   };
@@ -1224,8 +1234,8 @@ std::optional<std::vector<SNode>> Router::search(int pad) {
     c.atVertex = true;
     c.vtx = w;
     c.chordTri = t;
-    c.pt = P(w);
-    c.g = n.g + (c.pt - n.pt).len() + crossings * crossPenalty_;
+    c.pt = c.cpt = P(w);
+    c.g = n.g + (c.cpt - n.cpt).len() + crossings * crossPenalty_;
     c.parent = from;
     if (isTarget(w, n.li)) {
       c.goal = true;
@@ -1268,7 +1278,7 @@ std::optional<std::vector<SNode>> Router::search(int pad) {
 
   // A new via inside triangle t, reached from the node's point: the path changes layer there.
   auto tryVia = [&](int from, int t) {
-    if (!o_.useVias || NL_ < 2) return;
+    if (!o_.useVias || NL_ < 2 || !kTriVia) return;
     const SNode& n = nodes[from];
     double pen = 0;
     auto spot = viaSpot(t, &pen);
@@ -1279,9 +1289,9 @@ std::optional<std::vector<SNode>> Router::search(int pad) {
     c.li = n.li;
     c.viaTri = t;
     c.chordTri = t;
-    c.pt = *spot;
+    c.pt = c.cpt = *spot;
     c.transit = true;
-    c.g = n.g + (c.pt - n.pt).len() + hits * crossPenalty_;
+    c.g = n.g + (c.cpt - n.cpt).len() + hits * crossPenalty_;
     c.parent = from;
     nodes.push_back(c);
     int tIdx = int(nodes.size() - 1);
@@ -1896,6 +1906,11 @@ RouterResult Router::run() {
     }
     res_.log.push_back(std::format("pass {}: rerouted {} nets, {} failed connections, {} overflowed edges, {} crossings",
                                    pass + 1, queue.size(), fails, over, crossings));
+    if (std::getenv("XR_VIASTATS")) {
+      res_.log.push_back(std::format("  via spots: {} asked, refused: {} blocked, {} vertex obstacles, {} copper, {} vias near, {} keepout, {} chords",
+                                     viaStats_[0], viaStats_[1], viaStats_[2], viaStats_[3], viaStats_[4], viaStats_[5], viaStats_[6]));
+      viaStats_ = {};
+    }
     if (score < bestScore) {
       bestScore = score;
       best = snapshot();
