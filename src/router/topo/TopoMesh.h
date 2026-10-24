@@ -71,6 +71,17 @@ class TopoMesh {
     return T.v[(le + 1) % 3] == edges[T.e[le]].v[0];
   }
   int locate(Vec2 p) const;  // inside triangle containing p, or -1 (linear walk)
+  // Inserts a vertex at p inside triangle t (a via placed on demand): t becomes (A, B, v) and two
+  // triangles (B, C, v), (C, A, v) are appended with the three edges (A, v), (B, v), (C, v); the old
+  // edges keep their indices. Returns the new vertex. The triangles' layer blocks are inherited.
+  int splitTriangle(int t, Vec2 p, VKind kind);
+  // Barycentric sanity: p strictly inside triangle t.
+  bool strictlyInside(int t, Vec2 p) const;
+  // Undoes splitTriangle for a vertex that still has exactly its three triangles: they merge back
+  // into the first (which keeps the old index); the other two triangles, the three edges and the
+  // vertex itself are left dead (inside = false, no triangles). Returns false when it cannot.
+  bool unsplit(int v);
+  bool dead(int t) const { return !tris[t].inside && tris[t].nb[0] == -1 && tris[t].e[0] == -1; }
 };
 
 }  // namespace xr::topo

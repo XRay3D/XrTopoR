@@ -43,20 +43,23 @@ constexpr size_t kMaxExpansions = 3'000'000;
 constexpr double kOffLayer = 10 * kUnit;
 constexpr double kNarrowCost = 0.5 * kUnit;  // a crossing at the minimum width («подрезка»)  // each edge crossed on a layer the net is not assigned to
 
-// rows x cols table with row-major storage, indexed as grid[r, c] through std::mdspan.
+// rows x cols table indexed as grid[r, c]; the columns grow with the mesh (vias split triangles).
 template <class T>
 class Grid {
  public:
   Grid() = default;
-  Grid(size_t rows, size_t cols) : data_(rows * cols), rows_(rows), cols_(cols) {}
-  T& operator[](size_t r, size_t c) { return std::mdspan(data_.data(), rows_, cols_)[r, c]; }
-  const T& operator[](size_t r, size_t c) const { return std::mdspan(data_.data(), rows_, cols_)[r, c]; }
-  size_t rows() const { return rows_; }
-  size_t cols() const { return cols_; }
+  Grid(size_t rows, size_t cols) : rows_(rows, std::vector<T>(cols)) {}
+  T& operator[](size_t r, size_t c) { return rows_[r][c]; }
+  const T& operator[](size_t r, size_t c) const { return rows_[r][c]; }
+  size_t rows() const { return rows_.size(); }
+  size_t cols() const { return rows_.empty() ? 0 : rows_[0].size(); }
+  void grow(size_t cols) {
+    for (auto& r : rows_)
+      if (r.size() < cols) r.resize(cols);
+  }
 
  private:
-  std::vector<T> data_;
-  size_t rows_ = 0, cols_ = 0;
+  std::vector<std::vector<T>> rows_;
 };
 
 struct End {
@@ -75,6 +78,7 @@ struct Crossing {
   int wire = -1;
   int edge = -1;
   double width = 0;  // the wire's width on this edge (nominal, or the minimum where that is all that fits)
+  double f = -1;     // position along the edge where known by geometry (edges made by a via); else ordinal
 };
 
 struct Wire {
@@ -116,11 +120,15 @@ struct SNode {
   int li = 0;
   bool atVertex = false;
   int tri = -1, le = -1, gap = 0;  // edge entry: entering `tri` through local edge `le` at canonical gap
+  int edge = -1;                   // that edge's global id (a split may renumber the triangle's edges)
+  int before = -1, after = -1;     // the crossings on either side of the gap: the gap index itself moves
+                                   // when the path crosses the edge again earlier in the commit
   int vtx = -1;                    // vertex nodes
   int chordTri = -1;               // triangle holding the chord leading here (-1: start / layer change)
-  bool via = false;                // layer change through a new via at vtx
+  bool via = false;                // layer change through a new via at vtx (or in viaTri)
   bool narrow = false;             // edge entry at the minimum width
   bool transit = false;            // via arrival on the old layer (not expanded)
+  int viaTri = -1;                 // a new via placed inside this triangle (at pt), on demand
   bool goal = false;
   Vec2 pt;
 };
@@ -157,6 +165,44 @@ class Router {
   bool softPlanar_ = false;
   double crossPenalty_ = 0;
   RouterResult res_;
+
+  // The mesh grows as vias split triangles: every per-vertex/edge/triangle table follows, and a
+  // snapshot of the routing state carries the mesh of its time.
+  struct Full {
+    State s;
+    TopoMesh m;
+    std::vector<Shape> vshape;
+    std::vector<std::pair<Vec2, Vec2>> interval;
+    std::vector<std::vector<int>> vertEdges;
+    Grid<double> hist;
+  };
+  Full snapshot() const { return {s_, m_, vshape_, interval_, vertEdges_, hist_}; }
+  void restore(Full f) {
+    s_ = std::move(f.s);
+    m_ = std::move(f.m);
+    vshape_ = std::move(f.vshape);
+    interval_ = std::move(f.interval);
+    vertEdges_ = std::move(f.vertEdges);
+    hist_ = std::move(f.hist);
+    treeStamp_.resize(m_.verts.size(), 0);
+  }
+  void meshGrew();
+  void computeInterval(int e);
+  // A via placed on demand inside triangle t for the current net: where it fits (nullopt: nowhere).
+  std::optional<Vec2> viaSpot(int t, double* penalty) const;
+  // Other-net chords of t (layer li) the straight chord P-Q crosses; -1 if it shares an end vertex.
+  int hitsGeom(int li, int t, Vec2 P, Vec2 Q, int qVertex = -1) const;
+  Vec2 endPoint(int li, int t, const End& e) const;
+  Vec2 crossingPoint(int li, int edge, int cid) const;  // geometric where the crossing was laid so, else ordinal
+  // Splits t at p for a new via of the current net; existing chords are re-laid through the three
+  // new triangles. Returns the vertex.
+  int placeVia(int t, Vec2 p);
+  void unsplitIfClean(int v);
+  // Lays the chord P-Q of `wire` through triangle t, which may have been split in this commit.
+  void addChordWalk(int li, int wire, int t, const End& a, Vec2 P, const End& c, Vec2 Q, int* cidAfter,
+                    std::vector<int>* partsOut = nullptr);
+  bool checkState(const char* where) const;  // XR_CHECK: wires' triangles match their crossings
+  std::flat_map<int, std::inplace_vector<int, 3>> splits_;  // old triangle -> its three parts (this commit)
 
   // Current search context.
   int net_ = kNoNet;
@@ -197,6 +243,24 @@ class Router {
     auto [a, c] = interval_[e];
     return a + (c - a) * f;
   }
+  // Positions along an edge are fractions of the whole edge (v0 -> v1); the free interval's ends
+  // in those terms.
+  std::pair<double, double> freeRange(int e) const {
+    Vec2 o = P(m_.edges[e].v[0]), w = P(m_.edges[e].v[1]);
+    double len2 = (w - o).len2();
+    if (len2 <= 0) return {0.5, 0.5};
+    auto [a, c] = interval_[e];
+    return {(a - o).dot(w - o) / len2, (c - o).dot(w - o) / len2};
+  }
+  Vec2 edgePoint(int e, double f) const { return P(m_.edges[e].v[0]) + (P(m_.edges[e].v[1]) - P(m_.edges[e].v[0])) * f; }
+  // Where a crossing put into gap g of an edge's list would lie: midway between its neighbours.
+  double gapFraction(int li, int e, int g) const {
+    const auto& list = s_.cross[li, e];
+    auto [fa, fc] = freeRange(e);
+    double lo = g > 0 ? s_.crossings[list[size_t(g - 1)]].f : fa;
+    double hi = g < int(list.size()) ? s_.crossings[list[size_t(g)]].f : fc;
+    return (lo + hi) / 2;
+  }
 
   bool inTree(int v) const { return treeStamp_[v] == stamp_; }
   bool isTarget(int v, int li) const;
@@ -208,7 +272,8 @@ class Router {
 
   std::optional<std::vector<SNode>> search(int pad);
   void commit(const std::vector<SNode>& path, std::vector<int>& joinedPads);
-  int insertCrossing(int li, int e, int gap, int wire, bool narrow);
+  int insertCrossing(int li, int e, int gap, int wire, bool narrow, double f = -1);
+  SpatialIndex copperIdx_;  // pads, fixed vias and kept wires, for placing vias
   void removeWire(int w);
   void ripup(int job);
   void routeJob(int job);
@@ -242,7 +307,8 @@ void Router::setup() {
     mo.viaDiameter = std::max(mo.viaDiameter, double(nc.viaDiameter));
     mo.clearance = std::max(mo.clearance, double(nc.clearance));
   }
-  mo.viaSites = o_.useVias && NL_ > 1;
+  // Vias are placed on demand inside triangles (XR_SITES: the old pre-seeded candidate grid).
+  mo.viaSites = o_.useVias && NL_ > 1 && std::getenv("XR_SITES");
   m_.build(b_, mo);
 
   padShape_.resize(b_.pads.size());
@@ -266,20 +332,7 @@ void Router::setup() {
   interval_.resize(m_.edges.size());
   vertEdges_.assign(m_.verts.size(), {});
   for (auto [e, me] : std::views::enumerate(m_.edges)) {
-    Vec2 a = P(me.v[0]), c = P(me.v[1]);
-    double len = (c - a).len();
-    Vec2 d = len > 0 ? (c - a) / len : Vec2{};
-    auto exitOf = [&](int v, Vec2 from, Vec2 dir) {
-      int pad = m_.verts[v].pad;
-      return pad >= 0 ? padShape_[pad].rayExit(from, dir) : 0.0;
-    };
-    double ea = exitOf(me.v[0], a, d), ec = exitOf(me.v[1], c, -d);
-    if (ea + ec >= len) {
-      double f = (ea + ec) > 0 ? ea / (ea + ec) : 0.5;
-      interval_[e] = {a + (c - a) * f, a + (c - a) * f};
-    } else {
-      interval_[e] = {a + d * ea, c - d * ec};
-    }
+    computeInterval(int(e));
     vertEdges_[me.v[0]].push_back(int(e));
     vertEdges_[me.v[1]].push_back(int(e));
   }
@@ -324,6 +377,7 @@ void Router::setup() {
   std::ranges::sort(jobs_, {}, &NetJob::estLen);
   s_.failed.assign(jobs_.size(), {});
   padCluster_ = Connectivity::compute(b_).padCluster;
+  copperIdx_.build(b_);
   for (auto& j : jobs_) res_.connections += int(j.pads.size()) - 1;
 }
 
@@ -482,6 +536,495 @@ double Router::viaPenalty(int w, bool& blocked, const std::vector<SNode>& nodes,
   return cost;
 }
 
+void Router::computeInterval(int e) {
+  const MEdge& me = m_.edges[e];
+  Vec2 a = P(me.v[0]), c = P(me.v[1]);
+  double len = (c - a).len();
+  Vec2 d = len > 0 ? (c - a) / len : Vec2{};
+  auto exitOf = [&](int v, Vec2 from, Vec2 dir) {
+    int pad = m_.verts[v].pad;
+    return pad >= 0 ? padShape_[pad].rayExit(from, dir) : 0.0;
+  };
+  double ea = exitOf(me.v[0], a, d), ec = exitOf(me.v[1], c, -d);
+  if (ea + ec >= len) {
+    double f = (ea + ec) > 0 ? ea / (ea + ec) : 0.5;
+    interval_[e] = {a + (c - a) * f, a + (c - a) * f};
+  } else {
+    interval_[e] = {a + d * ea, c - d * ec};
+  }
+}
+
+void Router::meshGrew() {
+  size_t nv = m_.verts.size(), ne = m_.edges.size(), nt = m_.tris.size();
+  for (size_t v = vshape_.size(); v < nv; ++v) vshape_.push_back(Shape::circle(P(int(v)), 0));
+  vertEdges_.resize(nv);
+  size_t e0 = interval_.size();
+  interval_.resize(ne);
+  for (size_t e = e0; e < ne; ++e) {
+    computeInterval(int(e));
+    vertEdges_[m_.edges[e].v[0]].push_back(int(e));
+    vertEdges_[m_.edges[e].v[1]].push_back(int(e));
+  }
+  s_.viaNet.resize(nv, -1);
+  treeStamp_.resize(nv, 0);
+  hist_.grow(ne);
+  s_.cross.grow(ne);
+  s_.use.grow(ne);
+  s_.chords.grow(nt);
+}
+
+Vec2 Router::endPoint(int li, int t, const End& e) const {
+  if (e.vertex) return P(m_.tris[t].v[e.local]);
+  return crossingPoint(li, m_.tris[t].e[e.local], e.cid);
+}
+
+Vec2 Router::crossingPoint(int, int edge, int cid) const { return edgePoint(edge, s_.crossings[cid].f); }
+
+int Router::hitsGeom(int li, int t, Vec2 P0, Vec2 Q, int qVertex) const {
+  int n = 0;
+  for (const Chord& ch : s_.chords[li, t]) {
+    if (ch.net == net_) continue;
+    if (qVertex >= 0 && ((ch.a.vertex && ch.a.local == qVertex) || (ch.b.vertex && ch.b.local == qVertex))) return -1;
+    Vec2 a = endPoint(li, t, ch.a), c = endPoint(li, t, ch.b);
+    double o1 = orient(P0, Q, a), o2 = orient(P0, Q, c), o3 = orient(a, c, P0), o4 = orient(a, c, Q);
+    // Proper crossings, and an end of P-Q lying on the chord (a chord along an edge, met by one that
+    // starts on that edge): topologically a crossing as well.
+    auto on = [&](Vec2 x) {
+      double len2 = (c - a).len2();
+      double tt = len2 > 0 ? (x - a).dot(c - a) / len2 : 0;
+      return tt > 1e-6 && tt < 1 - 1e-6;
+    };
+    bool crosses = (o1 * o2 < 0 && o3 * o4 < 0) || (std::abs(o3) < 1e-6 * (c - a).len2() && on(P0)) ||
+                   (std::abs(o4) < 1e-6 * (c - a).len2() && on(Q));
+    if (crosses) {
+      if (!softPlanar_) return 1;
+      ++n;
+    }
+  }
+  return n;
+}
+
+std::optional<Vec2> Router::viaSpot(int t, double* penalty) const {
+  const MTri& T = m_.tris[t];
+  if (!T.inside || T.blocked) return std::nullopt;
+  Vec2 A = P(T.v[0]), B = P(T.v[1]), C = P(T.v[2]);
+  double la = (C - B).len(), lb = (A - C).len(), lc = (B - A).len();
+  double per = la + lb + lc;
+  if (per <= 0) return std::nullopt;
+  double maxClr = double(b_.maxClearance());
+  // The incentre, pushed off the vertex obstacle that lacks room, until the via fits or it leaves.
+  Vec2 p = (A * la + B * lb + C * lc) / per;
+  struct VO {
+    const Shape* shape;
+    double clr;
+  };
+  std::inplace_vector<VO, 3> vo;
+  for (int i = 0; i < 3; ++i) {
+    std::optional<ObstInfo> o;
+    for (int li = 0; li < NL_ && !o; ++li) o = obst(T.v[i], li, kNoNet);
+    vo.push_back(o ? VO{o->shape, std::max(o->clr, viaClr_)} : VO{nullptr, 0});
+  }
+  for (int iter = 0; iter < 6; ++iter) {
+    int worst = -1;
+    double wm = 0;
+    for (int i = 0; i < 3; ++i) {
+      if (!vo[i].shape) continue;
+      double m = vo[i].shape->distance(p) - vo[i].clr - viaR_;
+      if (m < wm) { wm = m; worst = i; }
+    }
+    if (worst < 0) break;
+    Vec2 away = (p - P(T.v[worst])).normalized();
+    if (away.len2() == 0) return std::nullopt;
+    p += away * (-wm + 1000);
+    if (!m_.strictlyInside(t, p)) return std::nullopt;
+  }
+  // Copper that is no vertex of t: pads, fixed vias and kept wires by the index, routed vias of the
+  // neighbouring triangles by their vertices.
+  {
+    bool ok = true;
+    BBox q;
+    q.add(p);
+    LayerMask cu = b_.allCopperMask();
+    copperIdx_.query(q.inflated(viaR_ + maxClr + 2 * kNmPerMm), cu, [&](ItemRef r) {
+      if (!ok || r.type == ItemType::Zone) return;
+      int on = itemNet(b_, r);
+      if (on == net_ && net_ != kNoNet) return;
+      double clr = std::max(viaClr_, requiredClearance(b_, net_, on, cu));
+      for (auto& s : itemShapes(b_, r))
+        if (s.distance(p) < viaR_ + clr) ok = false;
+    });
+    if (!ok) return std::nullopt;
+    for (int nb : T.nb)
+      if (nb >= 0)
+        for (int u : m_.tris[nb].v)
+          if (m_.verts[u].kind == VKind::ViaSite && s_.viaNet[u] >= 0 && s_.viaNet[u] != net_ &&
+              (P(u) - p).len() < 2 * viaR_ + std::max(viaClr_, double(b_.clearance(s_.viaNet[u], layers_[0]))))
+            return std::nullopt;
+  }
+  for (const Keepout& k : b_.keepouts)
+    if (k.role == Keepout::Role::Route && k.vias)
+      for (const Shape& s : k.shapes())
+        if (s.distance(p) < viaR_) return std::nullopt;
+  // The chords of t keep their clearance from the via: those passing between the via and vertex V
+  // will cross the new edge (V, via), which must hold them.
+  double pen = 0;
+  Shape via = Shape::circle(p, viaR_);
+  for (int i = 0; i < 3; ++i) {
+    Vec2 V = P(T.v[i]);
+    double free = vo[i].shape ? vo[i].shape->distance(via) : (V - p).len() - viaR_;
+    for (int li = 0; li < NL_; ++li) {
+      double sumW = 0, maxC = 0;
+      int n = 0;
+      for (const Chord& ch : s_.chords[li, t]) {
+        if (ch.net == net_) continue;
+        Vec2 a = endPoint(li, t, ch.a), c = endPoint(li, t, ch.b);
+        if (segmentsIntersect(a, c, V, p)) {
+          const Wire& w = s_.wires[ch.wire];
+          sumW += double(w.width);
+          maxC = std::max(maxC, double(w.clr));
+          ++n;
+        }
+      }
+      if (n == 0) continue;
+      double need = sumW + (n - 1) * maxC + std::max(viaClr_, maxC) + (vo[i].shape ? std::max(vo[i].clr, maxC) : 0) +
+                    n * kRealizeMargin;
+      if (need - free > 1) {
+        if (!softPlanar_) return std::nullopt;
+        pen += presFac_ * kUnit * (1 + (need - free) / (sumW / n + maxC));
+      }
+    }
+  }
+  if (penalty) *penalty = pen;
+  return p;
+}
+
+int Router::placeVia(int t, Vec2 p) {
+  // Chords of the old triangle, on every layer, with their geometry, before it is split.
+  struct Old {
+    int li;
+    Chord ch;
+    Vec2 a, c;
+  };
+  std::vector<Old> olds;
+  for (int li = 0; li < NL_; ++li)
+    for (const Chord& ch : s_.chords[li, t]) olds.push_back({li, ch, endPoint(li, t, ch.a), endPoint(li, t, ch.b)});
+  // Ends as seen from any part: vertex ends by vertex id, edge ends by edge id and crossing.
+  struct GEnd {
+    bool vertex;
+    int id;  // vertex or edge
+    int cid;
+  };
+  auto gend = [&](const End& e) {
+    return e.vertex ? GEnd{true, m_.tris[t].v[e.local], -1} : GEnd{false, m_.tris[t].e[e.local], e.cid};
+  };
+  std::vector<std::pair<GEnd, GEnd>> oldEnds;
+  for (auto& o : olds) oldEnds.push_back({gend(o.ch.a), gend(o.ch.b)});
+  for (int li = 0; li < NL_; ++li) s_.chords[li, t].clear();
+
+  int v = m_.splitTriangle(t, p, VKind::ViaSite);
+  meshGrew();
+  int t2 = int(m_.tris.size()) - 2, t3 = t2 + 1;
+  splits_[t] = {t, t2, t3};
+  s_.viaNet[v] = net_;
+  vshape_[v] = Shape::circle(p, viaR_);
+
+  // The old chords again, through whichever parts they pass now.
+  // A wire may pass through t more than once: its chords here take its occurrences of t in wire
+  // order; re-laid from the last occurrence backwards, the earlier positions stay valid (the first
+  // part keeps the old triangle's index, so a search for `t` afterwards would find it instead).
+  struct Job {
+    size_t old;
+    size_t pos;
+  };
+  std::map<int, std::vector<Job>> perWire;
+  for (size_t i = 0; i < olds.size(); ++i) perWire[olds[i].ch.wire].push_back({i, 0});
+  std::vector<Job> jobs;
+  for (auto& [wi, list] : perWire) {
+    const Wire& w = s_.wires[wi];
+    // Chords in wire order: by their a-end crossing's place in the wire (a vertex start comes first).
+    auto rank = [&](const Job& j) {
+      const GEnd& ga = oldEnds[j.old].first;
+      if (ga.vertex) return -1L;
+      return long(std::ranges::find(w.cids, ga.cid) - w.cids.begin());
+    };
+    std::ranges::sort(list, {}, rank);
+    std::vector<size_t> occ;
+    for (size_t k = 0; k < w.tris.size(); ++k)
+      if (w.tris[k] == t) occ.push_back(k);
+    for (size_t k = 0; k < list.size(); ++k) list[k].pos = k < occ.size() ? occ[k] : w.tris.size();
+    for (auto& j : list | std::views::reverse) jobs.push_back(j);
+  }
+  for (const Job& j : jobs) {
+    const Old& o = olds[j.old];
+    const GEnd &ga = oldEnds[j.old].first, &gc = oldEnds[j.old].second;
+    // Ends carry global ids (vertex or edge) in `local`: the walk resolves them per part.
+    End a{ga.vertex, ga.id, ga.cid}, c{gc.vertex, gc.id, gc.cid};
+    int cidAfter = ga.vertex ? -1 : ga.cid;
+    auto& wt = s_.wires[o.ch.wire].tris;
+    size_t pos = std::min(j.pos, wt.size());
+    if (pos < wt.size() && wt[pos] == t) wt.erase(wt.begin() + long(pos));
+    std::vector<int> parts;
+    addChordWalk(o.li, o.ch.wire, t, a, o.a, c, o.c, &cidAfter, &parts);
+    auto& wt2 = s_.wires[o.ch.wire].tris;
+    wt2.erase(wt2.end() - long(parts.size()), wt2.end());
+    wt2.insert(wt2.begin() + long(std::min(pos, wt2.size())), parts.begin(), parts.end());
+  }
+  if (std::getenv("XR_CHECK")) {
+    // Straight sub-chords of the parts must not cross: dump the split when they do.
+    bool crossed = false;
+    for (int part : {t, t2, t3})
+      for (int li = 0; li < NL_ && !crossed; ++li) {
+        const auto& chs = s_.chords[li, part];
+        for (size_t i = 0; i < chs.size() && !crossed; ++i)
+          for (size_t j = i + 1; j < chs.size() && !crossed; ++j) {
+            if (chs[i].net == chs[j].net) continue;
+            Vec2 a = endPoint(li, part, chs[i].a), b = endPoint(li, part, chs[i].b), c = endPoint(li, part, chs[j].a), d = endPoint(li, part, chs[j].b);
+            crossed = orient(a, b, c) * orient(a, b, d) < 0 && orient(c, d, a) * orient(c, d, b) < 0;
+          }
+      }
+    if (crossed) {
+      std::println(stderr, "split of tri {} at ({:.3f},{:.3f}) -> {} {} {} made crossing sub-chords; old chords:", t, p.x / 1e6, -p.y / 1e6, t, t2, t3);
+      for (size_t i = 0; i < olds.size(); ++i)
+        std::println(stderr, "  L{} net {} wire {}: ({:.3f},{:.3f}) -> ({:.3f},{:.3f})  a {}{} c {}{}", olds[i].li,
+                     b_.nets[olds[i].ch.net].name, olds[i].ch.wire, olds[i].a.x / 1e6, -olds[i].a.y / 1e6, olds[i].c.x / 1e6,
+                     -olds[i].c.y / 1e6, oldEnds[i].first.vertex ? "v" : "e", oldEnds[i].first.id, oldEnds[i].second.vertex ? "v" : "e",
+                     oldEnds[i].second.id);
+      for (int part : {t, t2, t3})
+        for (int li = 0; li < NL_; ++li)
+          for (const Chord& ch : s_.chords[li, part]) {
+            Vec2 a = endPoint(li, part, ch.a), b = endPoint(li, part, ch.b);
+            std::println(stderr, "  part {} L{} net {} wire {}: ({:.3f},{:.3f}) -> ({:.3f},{:.3f})", part, li, b_.nets[ch.net].name,
+                         ch.wire, a.x / 1e6, -a.y / 1e6, b.x / 1e6, -b.y / 1e6);
+          }
+    }
+  }
+  return v;
+}
+
+void Router::addChordWalk(int li, int wire, int t, const End& a, Vec2 P0, const End& c, Vec2 Q, int* cidAfter,
+                          std::vector<int>* partsOut) {
+  // `a.local` and `c.local` are global ids (vertex or edge) here; resolve against the parts.
+  auto addChord = [&](int part, const End& x, const End& y) {
+    if ((x.local < 0 || y.local < 0) && std::getenv("XR_CHECK")) {
+      std::print(stderr, "bad chord of net {} in part {} ({},{},{}) of tri {}: a {}{} c {}{}; parts:",
+                 b_.nets[s_.wires[wire].net].name, part, m_.tris[part].v[0], m_.tris[part].v[1], m_.tris[part].v[2], t,
+                 a.vertex ? "v" : "e", a.local, c.vertex ? "v" : "e", c.local);
+      if (auto it = splits_.find(t); it != splits_.end())
+        for (int pt : it->second) std::print(stderr, " {}({},{},{})", pt, m_.tris[pt].v[0], m_.tris[pt].v[1], m_.tris[pt].v[2]);
+      std::println(stderr, "");
+    }
+    s_.chords[li, part].push_back({wire, s_.wires[wire].net, x, y});
+    s_.wires[wire].tris.push_back(part);
+    if (partsOut) partsOut->push_back(part);
+  };
+  auto local = [&](int part, const End& g) {
+    return g.vertex ? End{true, m_.localVertex(part, g.local), -1} : End{false, m_.localEdge(part, g.local), g.cid};
+  };
+  auto it = splits_.find(t);
+  if (it == splits_.end()) {
+    addChord(t, local(t, a), local(t, c));
+    return;
+  }
+  const auto& parts = it->second;
+  auto has = [&](int part, const End& g) {
+    return g.vertex ? m_.localVertex(part, g.local) >= 0 : m_.localEdge(part, g.local) >= 0;
+  };
+  // Both ends in one part (a chord along a new edge, or within the part): no walk.
+  for (int part : parts)
+    if (has(part, a) && has(part, c)) {
+      addChord(part, local(part, a), local(part, c));
+      return;
+    }
+  // The part the chord starts in: holds the start end and the first bit of the segment.
+  auto partAt = [&](Vec2 q, const End* must) {
+    for (int part : parts)
+      if ((!must || has(part, *must)) && m_.strictlyInside(part, q)) return part;
+    for (int part : parts)
+      if (!must || has(part, *must)) return part;
+    return parts[0];
+  };
+  Vec2 dir = (Q - P0).normalized();
+  int cur = partAt(P0 + dir * 10.0, &a);
+  int end = partAt(Q - dir * 10.0, &c);
+  End prev = local(cur, a);
+  double tPrev = 0;  // where along P0 -> Q the segment is now
+  for (int guard = 0; guard < 8 && cur != end; ++guard) {
+    // The internal edge of `cur` the segment leaves through, ahead of where it is.
+    int exitLe = -1;
+    double bestT = 2;
+    for (int le = 0; le < 3; ++le) {
+      int e = m_.tris[cur].e[le];
+      int nb = m_.tris[cur].nb[le];
+      if (nb < 0 || !std::ranges::contains(parts, nb)) continue;
+      Vec2 u = P(m_.edges[e].v[0]), w = P(m_.edges[e].v[1]);
+      if (!segmentsIntersect(P0, Q, u, w)) continue;
+      double den = (w - u).cross(Q - P0);
+      if (std::abs(den) < 1e-9) continue;
+      double tt = (P0 - u).cross(w - u) / den;  // along P0 -> Q
+      if (tt < bestT && tt > tPrev + 1e-9) { bestT = tt; exitLe = le; }
+    }
+    if (exitLe >= 0) tPrev = bestT;
+    double f = -1;
+    if (exitLe < 0) {
+      // Degenerate geometry (ends inside the own pad's copper fall on one point): a chord between two
+      // edges that share a vertex V hugs that corner, i.e. crosses the new edge (V, via) next to V.
+      int via = -1;
+      for (int x : m_.tris[parts[0]].v)
+        if (std::ranges::all_of(parts, [&](int pt) { return m_.localVertex(pt, x) >= 0; })) via = x;
+      int V = -1;
+      if (!a.vertex && !c.vertex)
+        for (int x : m_.edges[a.local].v)
+          if (x == m_.edges[c.local].v[0] || x == m_.edges[c.local].v[1]) V = x;
+      if (via < 0 || V < 0) {
+        if (std::getenv("XR_CHECK")) std::println(stderr, "chord walk lost in split triangle {}", t);
+        break;
+      }
+      for (int le = 0; le < 3; ++le) {
+        const MEdge& me = m_.edges[m_.tris[cur].e[le]];
+        if ((me.v[0] == V && me.v[1] == via) || (me.v[0] == via && me.v[1] == V)) exitLe = le;
+      }
+      if (exitLe < 0) break;
+      f = m_.edges[m_.tris[cur].e[exitLe]].v[0] == V ? 0.0 : 1.0;
+    }
+    int e = m_.tris[cur].e[exitLe];
+    // Gap on the internal edge by the crossing point's position among the crossings there.
+    Vec2 u = P(m_.edges[e].v[0]), w = P(m_.edges[e].v[1]);
+    if (f < 0) {
+      double den = (w - u).cross(Q - P0);
+      f = (P0 - u).cross(Q - P0) / den;  // along u -> w
+    }
+    // Among the crossings there by position.
+    const auto& list = s_.cross[li, e];
+    int g = 0;
+    for (int k = 0; k < int(list.size()); ++k)
+      if (s_.crossings[list[size_t(k)]].f <= f) g = k + 1;
+    int cid = insertCrossing(li, e, g, wire, false, f);
+    auto& cids = s_.wires[wire].cids;
+    if (cidAfter && *cidAfter >= 0) {
+      auto pos = std::ranges::find(cids, *cidAfter);
+      cids.insert(pos == cids.end() ? cids.end() : pos + 1, cid);
+    } else {
+      cids.insert(cids.begin(), cid);
+    }
+    if (cidAfter) *cidAfter = cid;
+    addChord(cur, prev, End{false, exitLe, cid});
+    int next = m_.tris[cur].nb[exitLe];
+    prev = End{false, m_.localEdge(next, e), cid};
+    cur = next;
+  }
+  addChord(cur, prev, local(cur, c));
+}
+
+bool Router::checkState(const char* where) const {
+  if (!std::getenv("XR_CHECK")) return true;
+  int bad = 0;
+  for (auto [wi, w] : std::views::enumerate(s_.wires)) {
+    if (!w.alive || w.v0 < 0 || w.v1 < 0) continue;
+    if (w.tris.size() != w.cids.size() + 1) {
+      if (bad++ < 5)
+        std::println(stderr, "{}: wire {} net {}: {} triangles for {} crossings", where, wi, b_.nets[w.net].name,
+                     w.tris.size(), w.cids.size());
+      continue;
+    }
+    for (size_t i = 0; i < w.cids.size(); ++i) {
+      int e = s_.crossings[w.cids[i]].edge;
+      if (m_.localEdge(w.tris[i], e) < 0 || m_.localEdge(w.tris[i + 1], e) < 0) {
+        if (bad++ < 2) {
+          std::print(stderr, "{}: wire {} net {} crossing {} is not between its triangles\n  tris:", where, wi,
+                     b_.nets[w.net].name, i);
+          for (int t : w.tris) std::print(stderr, " {}({},{},{})", t, m_.tris[t].v[0], m_.tris[t].v[1], m_.tris[t].v[2]);
+          std::print(stderr, "\n  cids:");
+          for (int cid : w.cids)
+            std::print(stderr, " e{}({}-{} f{:.2f})", s_.crossings[cid].edge, m_.edges[s_.crossings[cid].edge].v[0],
+                       m_.edges[s_.crossings[cid].edge].v[1], s_.crossings[cid].f);
+          std::println(stderr, "");
+        }
+        break;
+      }
+    }
+  }
+  if (bad) std::println(stderr, "{}: {} inconsistent wire(s)", where, bad);
+  // Lists sorted by position, and straight chords of a triangle that do not cross.
+  static bool reported = false;
+  bool reportedBefore = reported;
+  if (!reported)
+    for (int li = 0; li < NL_ && !reported; ++li) {
+      for (int e = 0; e < int(m_.edges.size()) && !reported; ++e) {
+        const auto& list = s_.cross[li, e];
+        for (size_t k = 1; k < list.size(); ++k)
+          if (s_.crossings[list[k - 1]].f > s_.crossings[list[k]].f + 1e-12) {
+            std::print(stderr, "{}: edge {} L{} list out of order:", where, e, li);
+            for (int cid : list) std::print(stderr, " #{} f{:.3f} net {}", cid, s_.crossings[cid].f, b_.nets[s_.wires[s_.crossings[cid].wire].net].name);
+            std::println(stderr, "");
+            reported = true;
+            break;
+          }
+      }
+      for (int t = 0; t < int(m_.tris.size()) && !reported; ++t) {
+        const auto& chs = s_.chords[li, t];
+        for (size_t i = 0; i < chs.size() && !reported; ++i)
+          for (size_t j = i + 1; j < chs.size(); ++j) {
+            if (chs[i].net == chs[j].net) continue;
+            Vec2 a = endPoint(li, t, chs[i].a), b = endPoint(li, t, chs[i].b), c = endPoint(li, t, chs[j].a), d = endPoint(li, t, chs[j].b);
+            if (orient(a, b, c) * orient(a, b, d) < 0 && orient(c, d, a) * orient(c, d, b) < 0) {
+              std::println(stderr, "{}: tri {} ({},{},{}) L{}: straight chords cross: {} ({:.3f},{:.3f})-({:.3f},{:.3f}) x {} ({:.3f},{:.3f})-({:.3f},{:.3f})",
+                           where, t, m_.tris[t].v[0], m_.tris[t].v[1], m_.tris[t].v[2], li, b_.nets[chs[i].net].name, a.x / 1e6, -a.y / 1e6,
+                           b.x / 1e6, -b.y / 1e6, b_.nets[chs[j].net].name, c.x / 1e6, -c.y / 1e6, d.x / 1e6, -d.y / 1e6);
+              reported = true;
+              break;
+            }
+          }
+      }
+    }
+  // The first pair of crossing chords, if any.
+  static int lastCrossings = 0;
+  int crossings = countCrossings(nullptr);
+  if (crossings > lastCrossings) {
+    for (int li = 0; li < NL_; ++li)
+      for (int t = 0; t < int(m_.tris.size()); ++t) {
+        const auto& chs = s_.chords[li, t];
+        for (size_t i = 0; i < chs.size(); ++i)
+          for (size_t j = i + 1; j < chs.size(); ++j) {
+            if (chs[i].net == chs[j].net) continue;
+            double a = endCoord(li, t, chs[i].a), b = endCoord(li, t, chs[i].b);
+            double c = endCoord(li, t, chs[j].a), d = endCoord(li, t, chs[j].b);
+            double lo = std::min(a, b), hi = std::max(a, b);
+            if ((lo < c && c < hi) == (lo < d && d < hi)) continue;
+            auto endText = [&](const End& e) {
+              return e.vertex ? std::format("v{}", m_.tris[t].v[e.local])
+                              : std::format("e{}#{}", m_.tris[t].e[e.local], e.cid);
+            };
+            std::println(stderr, "{}: crossings {} -> {}: tri {} ({},{},{}) L{}: {} {}-{} [{:.2f}-{:.2f}] x {} {}-{} [{:.2f}-{:.2f}]",
+                         where, lastCrossings, crossings, t, m_.tris[t].v[0], m_.tris[t].v[1], m_.tris[t].v[2], li,
+                         b_.nets[chs[i].net].name, endText(chs[i].a), endText(chs[i].b), a, b, b_.nets[chs[j].net].name,
+                         endText(chs[j].a), endText(chs[j].b), c, d);
+            for (const Chord* ch : {&chs[i], &chs[j]})
+              for (const End* e : {&ch->a, &ch->b}) {
+                Vec2 q = endPoint(li, t, *e);
+                std::print(stderr, "   end {} at ({:.3f},{:.3f})", endText(*e), q.x / 1e6, -q.y / 1e6);
+                if (!e->vertex) {
+                  int edge = m_.tris[t].e[e->local];
+                  auto [ia, ic] = interval_[edge];
+                  std::print(stderr, " edge {}-{} interval ({:.3f},{:.3f})-({:.3f},{:.3f}) f{:.2f} list {}", m_.edges[edge].v[0],
+                             m_.edges[edge].v[1], ia.x / 1e6, -ia.y / 1e6, ic.x / 1e6, -ic.y / 1e6, s_.crossings[e->cid].f,
+                             s_.cross[li, edge].size());
+                }
+                std::println(stderr, "");
+              }
+            for (int k = 0; k < 3; ++k) {
+              int vv = m_.tris[t].v[k];
+              std::println(stderr, "   vertex {} kind {} pad {} at ({:.3f},{:.3f})", vv, int(m_.verts[vv].kind), m_.verts[vv].pad,
+                           P(vv).x / 1e6, -P(vv).y / 1e6);
+            }
+            lastCrossings = crossings;
+            return false;
+          }
+      }
+  }
+  lastCrossings = crossings;
+  return bad == 0 && (reported == reportedBefore);
+}
+
 double Router::crossCoord(int li, int t, int le, int cid) const {
   const auto& list = s_.cross[li, m_.tris[t].e[le]];
   auto k = std::ranges::find(list, cid) - list.begin();
@@ -600,6 +1143,7 @@ std::optional<std::vector<SNode>> Router::search(int pad) {
     return (std::uint64_t(li) << 58) | (std::uint64_t(t) << 24) | (std::uint64_t(le) << 20) | std::uint64_t(gap & 0xFFFFF);
   };
   auto keyVertex = [](int li, int v) { return (std::uint64_t(1) << 63) | (std::uint64_t(li) << 58) | std::uint64_t(v); };
+  auto keyVia = [](int li, int t) { return (std::uint64_t(1) << 62) | (std::uint64_t(li) << 58) | std::uint64_t(t); };
   auto push = [&](SNode n, std::uint64_t key) -> int {
     auto it = best.find(key);
     if (it != best.end() && it->second <= n.g) return -1;
@@ -624,7 +1168,9 @@ std::optional<std::vector<SNode>> Router::search(int pad) {
     }
 
   size_t nNoNb = 0, nBlocked = 0, nNoGap = 0, nPushed = 0;
-  auto tryEdge = [&](int from, int t, double s, int le2) {
+  // `geom`: the chord starts at the node's point inside t (a via placed there), so crossings are told
+  // by geometry rather than by perimeter coordinates.
+  auto tryEdge = [&](int from, int t, double s, int le2, bool geom = false) {
     const SNode& n = nodes[from];
     int e = m_.tris[t].e[le2];
     int t2 = m_.tris[t].nb[le2];
@@ -632,7 +1178,17 @@ std::optional<std::vector<SNode>> Router::search(int pad) {
     bool blocked = false, narrow = false;
     double cc = crossCost(e, n.li, blocked, &narrow);
     if (blocked) { ++nBlocked; return; }
-    auto gx = exitGap(n.li, t, le2, s);
+    std::optional<std::pair<int, int>> gx;
+    if (geom) {
+      int mm = int(s_.cross[n.li, e].size());
+      for (int g = 0; g <= mm; ++g) {
+        int h = relaxed_ ? 0 : hitsGeom(n.li, t, n.pt, edgePoint(e, gapFraction(n.li, e, g)));
+        if (h == 0) { gx = std::pair{g, 0}; break; }
+        if (h > 0 && softPlanar_ && (!gx || h < gx->second)) gx = std::pair{g, h};
+      }
+    } else {
+      gx = exitGap(n.li, t, le2, s);
+    }
     if (!gx) { ++nNoGap; return; }
     ++nPushed;
     int g = gx->first;
@@ -641,20 +1197,27 @@ std::optional<std::vector<SNode>> Router::search(int pad) {
     c.li = n.li;
     c.tri = t2;
     c.le = m_.localEdge(t2, e);
+    c.edge = e;
     c.gap = g;
+    {
+      const auto& list = s_.cross[n.li, e];
+      c.before = g > 0 ? list[size_t(g - 1)] : -1;
+      c.after = g < int(list.size()) ? list[size_t(g)] : -1;
+    }
     c.narrow = narrow;
     c.chordTri = t;
-    c.pt = intervalPoint(e, (g + 1.0) / (m + 2.0));
+    c.pt = edgePoint(e, gapFraction(n.li, e, g));
+    (void)m;
     c.g = n.g + (c.pt - n.pt).len() + cc + gx->second * crossPenalty_;
     c.parent = from;
     push(c, keyEdge(c.li, t2, c.le, c.gap));
   };
 
-  auto tryVertex = [&](int from, int t, double s, int lv) {
+  auto tryVertex = [&](int from, int t, double s, int lv, bool geom = false) {
     const SNode& n = nodes[from];
     int w = m_.tris[t].v[lv];
     if (n.atVertex && w == n.vtx) return;
-    int crossings = relaxed_ ? 0 : chordCrossings(n.li, t, s, double(lv));
+    int crossings = relaxed_ ? 0 : geom ? hitsGeom(n.li, t, n.pt, P(w), lv) : chordCrossings(n.li, t, s, double(lv));
     if (crossings < 0 || (crossings > 0 && !softPlanar_)) return;
     SNode c;
     c.li = n.li;
@@ -703,12 +1266,46 @@ std::optional<std::vector<SNode>> Router::search(int pad) {
     }
   };
 
+  // A new via inside triangle t, reached from the node's point: the path changes layer there.
+  auto tryVia = [&](int from, int t) {
+    if (!o_.useVias || NL_ < 2) return;
+    const SNode& n = nodes[from];
+    double pen = 0;
+    auto spot = viaSpot(t, &pen);
+    if (!spot) return;
+    int hits = relaxed_ ? 0 : hitsGeom(n.li, t, n.pt, *spot);
+    if (hits < 0 || (hits > 0 && !softPlanar_)) return;
+    SNode c;  // arrival at the via on the old layer (not expanded)
+    c.li = n.li;
+    c.viaTri = t;
+    c.chordTri = t;
+    c.pt = *spot;
+    c.transit = true;
+    c.g = n.g + (c.pt - n.pt).len() + hits * crossPenalty_;
+    c.parent = from;
+    nodes.push_back(c);
+    int tIdx = int(nodes.size() - 1);
+    for (int li2 = 0; li2 < NL_; ++li2) {
+      if (li2 == c.li) continue;
+      SNode d = c;
+      d.transit = false;
+      d.li = li2;
+      d.chordTri = -1;
+      d.via = true;
+      d.parent = tIdx;
+      d.g = c.g + o_.viaCost * kUnit + pen;
+      push(d, keyVia(li2, t));
+    }
+  };
+
   size_t expansions = 0;
   while (!open.empty()) {
     auto [f, idx] = open.top();
     open.pop();
     SNode n = nodes[idx];
-    std::uint64_t key = n.atVertex ? keyVertex(n.li, n.vtx) : keyEdge(n.li, n.tri, n.le, n.gap);
+    std::uint64_t key = n.viaTri >= 0 ? keyVia(n.li, n.viaTri)
+                        : n.atVertex  ? keyVertex(n.li, n.vtx)
+                                      : keyEdge(n.li, n.tri, n.le, n.gap);
     if (auto it = best.find(key); it != best.end() && it->second < n.g) continue;
     if (n.goal) {
       std::vector<SNode> path;
@@ -718,18 +1315,24 @@ std::optional<std::vector<SNode>> Router::search(int pad) {
     }
     if (++expansions > kMaxExpansions || (expansions % 4096 == 0 && cancelled())) break;
     if (std::getenv("XR_DEBUG5") && expansions == 1) nodes.reserve(1024);
-    if (n.atVertex) {
+    if (n.viaTri >= 0) {
+      // From the via, anywhere in its triangle.
+      for (int le2 = 0; le2 < 3; ++le2) tryEdge(idx, n.viaTri, 0, le2, true);
+      for (int lv = 0; lv < 3; ++lv) tryVertex(idx, n.viaTri, 0, lv, true);
+    } else if (n.atVertex) {
       for (int t : m_.verts[n.vtx].tris) {
         int lv = m_.localVertex(t, n.vtx);
         tryEdge(idx, t, double(lv), lv);
         for (int lv2 = 0; lv2 < 3; ++lv2)
           if (lv2 != lv) tryVertex(idx, t, double(lv), lv2);
+        tryVia(idx, t);
       }
     } else {
       double s = gapCoord(n.li, n.tri, n.le, n.gap);
       for (int le2 = 0; le2 < 3; ++le2)
         if (le2 != n.le) tryEdge(idx, n.tri, s, le2);
       for (int lv = 0; lv < 3; ++lv) tryVertex(idx, n.tri, s, lv);
+      tryVia(idx, n.tri);
     }
   }
   if (std::getenv("XR_DEBUG5"))
@@ -738,13 +1341,15 @@ std::optional<std::vector<SNode>> Router::search(int pad) {
   return std::nullopt;
 }
 
-int Router::insertCrossing(int li, int e, int gap, int wire, bool narrow) {
+int Router::insertCrossing(int li, int e, int gap, int wire, bool narrow, double f) {
   int cid = int(s_.crossings.size());
   const Wire& w = s_.wires[wire];
   double width = narrow ? double(w.widthMin) : double(w.width);
-  s_.crossings.push_back({wire, e, width});
   auto& list = s_.cross[li, e];
   gap = std::clamp(gap, 0, int(list.size()));
+  // Every crossing has a fixed place on its edge: given, or midway between its neighbours at the time.
+  if (f < 0) f = gapFraction(li, e, gap);
+  s_.crossings.push_back({wire, e, width, f});
   list.insert(list.begin() + gap, cid);
   EdgeUse& u = s_.use[li, e];
   u.sumW += width;
@@ -765,51 +1370,71 @@ void Router::commit(const std::vector<SNode>& path, std::vector<int>& joinedPads
     s_.wires.push_back(std::move(w));
     return int(s_.wires.size() - 1);
   };
-  auto addChord = [&](int li, int t, int wire, End a, End c) {
-    s_.chords[li, t].push_back({wire, net_, a, c});
-    s_.wires[wire].tris.push_back(t);
-  };
-  struct Last {
-    bool vertex;
-    int v;
-    int cid;
-    int edge;
-  } last{true, path[0].vtx, -1, -1};
-  auto resolve = [&](int t) {
-    if (last.vertex) return End{true, m_.localVertex(t, last.v), -1};
-    return End{false, m_.localEdge(t, last.edge), last.cid};
-  };
+  // The chord's start, as a global end (vertex id, or edge id with its crossing) and its point.
+  End last{true, path[0].vtx, -1};
+  Vec2 lastPt = path[0].pt;
+  int lastCid = -1;  // the wire's latest crossing: new ones go after it
+  int viaVertex = -1;
+  std::vector<int> placed;
+  splits_.clear();
+  auto pointOfEnd = [&](int li, const End& g) { return g.vertex ? P(g.local) : crossingPoint(li, g.local, g.cid); };
 
   int wire = newWire(path[0].li, path[0].vtx);
   for (const SNode& n : path | std::views::drop(1)) {
-    if (n.chordTri < 0) {  // layer change at the same vertex
-      if (n.via) {
-        s_.viaNet[n.vtx] = net_;
-        vshape_[n.vtx] = Shape::circle(P(n.vtx), viaR_);  // occupied site now blocks like a via
+    if (n.chordTri < 0) {  // layer change at a vertex: an existing one, or the via placed just before
+      int v = n.viaTri >= 0 ? viaVertex : n.vtx;
+      if (n.via && n.viaTri < 0) {
+        s_.viaNet[v] = net_;
+        vshape_[v] = Shape::circle(P(v), viaR_);  // occupied site now blocks like a via
       }
       if (s_.wires[wire].tris.empty()) {  // reuse the empty wire opened at this vertex
         s_.wires[wire].li = n.li;
-        s_.wires[wire].v0 = n.vtx;
+        s_.wires[wire].v0 = v;
       } else {
-        wire = newWire(n.li, n.vtx);
+        wire = newWire(n.li, v);
       }
-      last = {true, n.vtx, -1, -1};
+      last = End{true, v, -1};
+      lastPt = P(v);
+      lastCid = -1;
       continue;
     }
     int t = n.chordTri;
-    End a = resolve(t);
+    if (n.viaTri >= 0) {
+      // Arrival at a new via: the triangle is split at its spot, the chord ends at the new vertex.
+      int v = placeVia(t, n.pt);
+      viaVertex = v;
+      placed.push_back(v);
+      addChordWalk(n.li, wire, t, last, lastPt, End{true, v, -1}, P(v), &lastCid);
+      s_.wires[wire].v1 = v;
+      last = End{true, v, -1};
+      lastPt = P(v);
+      continue;
+    }
     if (!n.atVertex) {
-      int e = m_.tris[n.tri].e[n.le];
-      int cid = insertCrossing(n.li, e, n.gap, wire, n.narrow);
+      int e = n.edge;
+      // The gap as it is now: right after the crossing that was before it, not past the one after.
+      const auto& list = s_.cross[n.li, e];
+      int gap = 0;
+      if (n.before >= 0)
+        if (auto it = std::ranges::find(list, n.before); it != list.end()) gap = int(it - list.begin()) + 1;
+      if (n.after >= 0)
+        if (auto it = std::ranges::find(list, n.after); it != list.end()) gap = std::min(gap, int(it - list.begin()));
+      int cid = insertCrossing(n.li, e, gap, wire, n.narrow);
       s_.wires[wire].cids.push_back(cid);
-      addChord(n.li, t, wire, a, End{false, m_.localEdge(t, e), cid});
-      last = {false, -1, cid, e};
+      End c{false, e, cid};
+      addChordWalk(n.li, wire, t, last, lastPt, c, pointOfEnd(n.li, c), &lastCid);
+      lastCid = cid;
+      last = c;
+      lastPt = pointOfEnd(n.li, c);
     } else {
-      addChord(n.li, t, wire, a, End{true, m_.localVertex(t, n.vtx), -1});
+      End c{true, n.vtx, -1};
+      addChordWalk(n.li, wire, t, last, lastPt, c, P(n.vtx), &lastCid);
       s_.wires[wire].v1 = n.vtx;
       if (m_.verts[n.vtx].pad >= 0) joinedPads.push_back(m_.verts[n.vtx].pad);
       wire = newWire(n.li, n.vtx);
-      last = {true, n.vtx, -1, -1};
+      last = c;
+      lastPt = P(n.vtx);
+      lastCid = -1;
     }
   }
   // The trailing wire started at the goal vertex is empty.
@@ -818,6 +1443,18 @@ void Router::commit(const std::vector<SNode>& path, std::vector<int>& joinedPads
   }
   for (const SNode& n : path)
     if (n.atVertex && s_.viaNet[n.vtx] == net_) addVertexToTree(n.vtx);
+  for (int v : placed) addVertexToTree(v);
+  if (!checkState(placed.empty() ? "commit" : "commit with via") || std::getenv("XR_TRACE")) {
+    if (std::getenv("XR_CHECK")) {
+      std::print(stderr, "  path of net {}:", b_.nets[net_].name);
+      for (const SNode& n : path)
+        std::print(stderr, " [{}L{} {}{}{}{}]", n.transit ? "T" : "", n.li,
+                   n.viaTri >= 0 ? std::format("via@{}", n.viaTri) : n.atVertex ? std::format("v{}", n.vtx) : std::format("t{} e{} g{}", n.tri, n.edge, n.gap),
+                   n.chordTri >= 0 ? std::format(" c{}", n.chordTri) : "", n.goal ? " goal" : "", n.via ? " via" : "");
+      std::println(stderr, "");
+    }
+  }
+  splits_.clear();
 }
 
 void Router::removeWire(int wi) {
@@ -851,8 +1488,49 @@ void Router::ripup(int job) {
     if (vn == net) {
       vn = -1;
       vshape_[v] = Shape::circle(P(int(v)), 0);
+      unsplitIfClean(int(v));
     }
   s_.failed[job].clear();
+}
+
+// A via vertex nothing uses any more merges its three triangles back, so that the mesh does not
+// fragment over the passes: no crossing on its edges on any layer, and no chord of its parts ends
+// at it.
+void Router::unsplitIfClean(int v) {
+  const MVertex& V = m_.verts[v];
+  if (V.kind != VKind::ViaSite || V.tris.size() != 3) return;
+  for (int t : V.tris)
+    for (int li = 0; li < NL_; ++li)
+      for (const Chord& ch : s_.chords[li, t])
+        if ((ch.a.vertex && m_.tris[t].v[ch.a.local] == v) || (ch.b.vertex && m_.tris[t].v[ch.b.local] == v)) return;
+  for (int e : vertEdges_[v])
+    for (int li = 0; li < NL_; ++li)
+      if (!s_.cross[li, e].empty()) return;
+  // Chords of the parts, as global ends, to be re-localised in the merged triangle.
+  struct G {
+    int li, wire, net;
+    bool av, cv;
+    int aid, acid, cid_, ccid;
+  };
+  std::vector<G> keep;
+  for (int t : V.tris)
+    for (int li = 0; li < NL_; ++li)
+      for (const Chord& ch : s_.chords[li, t])
+        keep.push_back({li, ch.wire, ch.net, ch.a.vertex, ch.b.vertex, ch.a.vertex ? m_.tris[t].v[ch.a.local] : m_.tris[t].e[ch.a.local],
+                        ch.a.cid, ch.b.vertex ? m_.tris[t].v[ch.b.local] : m_.tris[t].e[ch.b.local], ch.b.cid});
+  int t1 = V.tris[0], t2 = V.tris[1], t3 = V.tris[2];
+  if (!m_.unsplit(v)) return;
+  for (int t : {t1, t2, t3})
+    for (int li = 0; li < NL_; ++li) s_.chords[li, t].clear();
+  for (const G& g : keep) {
+    End a = g.av ? End{true, m_.localVertex(t1, g.aid), -1} : End{false, m_.localEdge(t1, g.aid), g.acid};
+    End c = g.cv ? End{true, m_.localVertex(t1, g.cid_), -1} : End{false, m_.localEdge(t1, g.cid_), g.ccid};
+    s_.chords[g.li, t1].push_back({g.wire, g.net, a, c});
+  }
+  for (Wire& w : s_.wires)
+    if (w.alive)
+      for (int& t : w.tris)
+        if (t == t2 || t == t3) t = t1;
 }
 
 void Router::routeJob(int ji) {
@@ -1003,17 +1681,16 @@ std::vector<int> Router::realizeAll() {
       return (P(T.v[0]) + P(T.v[1]) + P(T.v[2])) / 3.0;
     };
     std::vector<Vec2> pts{P(w.v0)};
-    for (size_t i = 0; i < w.cids.size(); ++i) {
-      int cid = w.cids[i];
-      int e = s_.crossings[cid].edge;
-      const auto& list = s_.cross[w.li, e];
-      auto pos = std::ranges::find(list, cid) - list.begin();
-      pts.push_back(intervalPoint(e, (double(pos) + 1) / (double(list.size()) + 1)));
-    }
+    for (int cid : w.cids) pts.push_back(crossingPoint(w.li, s_.crossings[cid].edge, cid));
     pts.push_back(P(w.v1));
+    // A waypoint per chord keeps the sketch inside its triangle: the chord's middle, nudged towards the
+    // centroid (through the centroid itself the chords of one big triangle would all meet).
     for (size_t i = 0; i + 1 < pts.size(); ++i) {
       rw.sketch.push_back(pts[i]);
-      if (i < w.tris.size()) rw.sketch.push_back(centroid(w.tris[i]));
+      if (i < w.tris.size()) {
+        Vec2 mid = (pts[i] + pts[i + 1]) * 0.5;
+        rw.sketch.push_back(mid + (centroid(w.tris[i]) - mid) * 0.05);
+      }
     }
     rw.sketch.push_back(pts.back());
     wires.push_back(std::move(rw));
@@ -1119,8 +1796,9 @@ RouterResult Router::run() {
   setup();
   res_.log.push_back(std::format("mesh: {} vertices, {} triangles, {} edges; {} layers; {} nets",
                                  m_.verts.size(), m_.tris.size(), m_.edges.size(), NL_, jobs_.size()));
+  size_t verts0 = m_.verts.size();
 
-  State best;
+  std::optional<Full> best;
   int bestScore = std::numeric_limits<int>::max();
   std::vector<int> queue(jobs_.size());
   std::ranges::iota(queue, 0);
@@ -1191,17 +1869,41 @@ RouterResult Router::run() {
     int fails = 0;
     for (auto& f : s_.failed) fails += int(f.size());
     int over = countOverflow();
-    int crossings = soft ? countCrossings(nullptr) : 0;
-    int score = fails + over + crossings;
+    int crossings = soft || std::getenv("XR_CHECK") ? countCrossings(nullptr) : 0;
+    checkState("pass");
+    int score = 3 * fails + over + crossings;  // a failed connection costs more than an overflowed edge
+    if (std::getenv("XR_OVFEDGES")) {
+      std::vector<std::pair<double, int>> worst;  // (over, edge)
+      for (int li = 0; li < NL_; ++li)
+        for (int e = 0; e < int(m_.edges.size()); ++e)
+          if (edgeOverflow(li, e)) {
+            const EdgeUse& u = s_.use[li, e];
+            double cu, cv;
+            bool ou, ov;
+            double free = freeLength(e, li, s_.wires[s_.crossings[s_.cross[li, e].front()].wire].net, cu, ou, cv, ov);
+            double need = u.sumW + (u.n - 1) * u.maxC + (ou ? std::max(cu, u.maxC) : 0) + (ov ? std::max(cv, u.maxC) : 0);
+            worst.push_back({need - free, e * NL_ + li});
+          }
+      std::ranges::sort(worst, std::greater{});
+      for (size_t i = 0; i < worst.size() && i < 8; ++i) {
+        int e = worst[i].second / NL_, li = worst[i].second % NL_;
+        const MEdge& me = m_.edges[e];
+        const EdgeUse& u = s_.use[li, e];
+        std::println(stderr, "  ovf edge {} L{} len {:.2f} over {:.2f} wires {} sumW {:.2f} ends kind {}/{} viaNet {}/{}", e, li,
+                     (P(me.v[1]) - P(me.v[0])).len() / 1e6, worst[i].first / 1e6, u.n, u.sumW / 1e6, int(m_.verts[me.v[0]].kind),
+                     int(m_.verts[me.v[1]].kind), s_.viaNet[me.v[0]], s_.viaNet[me.v[1]]);
+      }
+    }
     res_.log.push_back(std::format("pass {}: rerouted {} nets, {} failed connections, {} overflowed edges, {} crossings",
                                    pass + 1, queue.size(), fails, over, crossings));
     if (score < bestScore) {
       bestScore = score;
-      best = s_;
+      best = snapshot();
     }
     if (score == 0) break;
   }
-  if (bestScore != std::numeric_limits<int>::max()) s_ = std::move(best);
+  if (best) restore(std::move(*best));
+  res_.log.push_back(std::format("mesh after routing: {} vertices ({} added for vias)", m_.verts.size(), m_.verts.size() - verts0));
   softPlanar_ = false;
   crossPenalty_ = 0;
   for (auto [v, vn] : std::views::enumerate(s_.viaNet))
@@ -1216,7 +1918,7 @@ RouterResult Router::run() {
   std::flat_map<int, int> jobOfNet;
   for (auto [j, job] : std::views::enumerate(jobs_)) jobOfNet[job.net] = int(j);
   struct Snapshot {
-    State s;
+    Full s;
     std::vector<Track> tracks;
     std::vector<Via> vias;
     size_t conflicts;
@@ -1236,8 +1938,8 @@ RouterResult Router::run() {
     size_t score = conflicts.size() + 10 * failedNow();
     res_.log.push_back(std::format("geometry round {}: {} conflict(s), {} failed", round, conflicts.size(), failedNow()));
     if (!bestGeom || score < bestGeom->conflicts)
-      bestGeom = Snapshot{s_, {b_.tracks.begin() + tracks0, b_.tracks.end()}, {b_.vias.begin() + vias0, b_.vias.end()},
-                          score};
+      bestGeom = Snapshot{snapshot(), {b_.tracks.begin() + tracks0, b_.tracks.end()},
+                          {b_.vias.begin() + vias0, b_.vias.end()}, score};
     if (conflicts.empty() || round == o_.maxPasses || cancelled()) break;
     std::flat_set<int> reroute;
     for (auto& c : conflicts) {
@@ -1257,7 +1959,7 @@ RouterResult Router::run() {
     trackWire = realizeAll();
   }
   if (bestGeom) {
-    s_ = std::move(bestGeom->s);
+    restore(std::move(bestGeom->s));
     b_.tracks.resize(tracks0);
     b_.vias.resize(vias0);
     b_.tracks.insert(b_.tracks.end(), bestGeom->tracks.begin(), bestGeom->tracks.end());

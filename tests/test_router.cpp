@@ -248,3 +248,55 @@ TEST(Router, KeptWiresAreObstacles) {
     EXPECT_EQ(kept, others);
   }
 }
+
+// Splitting a triangle at an inner point keeps the mesh consistent: every edge knows its two
+// triangles, neighbours point back, vertices list their triangles, orientation stays positive.
+TEST(Mesh, SplitTriangle) {
+  Board b = twoPads();
+  topo::TopoMesh m;
+  topo::MeshOptions mo;
+  mo.viaSites = false;
+  m.build(b, mo);
+  auto check = [&] {
+    for (int t = 0; t < int(m.tris.size()); ++t) {
+      const auto& T = m.tris[t];
+      if (!T.inside) continue;
+      Vec2 a = m.verts[T.v[0]].p, c = m.verts[T.v[1]].p, d = m.verts[T.v[2]].p;
+      EXPECT_GT(orient(a, c, d), 0) << "triangle " << t;
+      for (int i = 0; i < 3; ++i) {
+        const auto& e = m.edges[T.e[i]];
+        EXPECT_TRUE(e.t[0] == t || e.t[1] == t) << "edge of " << t;
+        auto [lo, hi] = std::minmax(T.v[(i + 1) % 3], T.v[(i + 2) % 3]);
+        EXPECT_EQ(lo, e.v[0]);
+        EXPECT_EQ(hi, e.v[1]);
+        if (T.nb[i] >= 0) {
+          bool back = false;
+          for (int x : m.tris[T.nb[i]].nb) back |= x == t;
+          EXPECT_TRUE(back) << "neighbour of " << t;
+        }
+        bool listed = false;
+        for (int x : m.verts[T.v[i]].tris) listed |= x == t;
+        EXPECT_TRUE(listed) << "vertex list of " << t;
+      }
+    }
+  };
+  check();
+  size_t tris0 = m.tris.size(), edges0 = m.edges.size(), verts0 = m.verts.size();
+  int t = m.locate(Vec2{20 * kNmPerMm, 10 * kNmPerMm});
+  ASSERT_GE(t, 0);
+  const auto& T = m.tris[t];
+  Vec2 c = (m.verts[T.v[0]].p + m.verts[T.v[1]].p + m.verts[T.v[2]].p) / 3.0;
+  int v = m.splitTriangle(t, c, topo::VKind::ViaSite);
+  EXPECT_EQ(size_t(v), verts0);
+  EXPECT_EQ(m.tris.size(), tris0 + 2);
+  EXPECT_EQ(m.edges.size(), edges0 + 3);
+  EXPECT_EQ(m.verts[v].tris.size(), 3u);
+  check();
+  // Splitting one of the new triangles again works too.
+  int t2 = m.locate(c + Vec2{1, 1});
+  ASSERT_GE(t2, 0);
+  const auto& T2 = m.tris[t2];
+  Vec2 c2 = (m.verts[T2.v[0]].p + m.verts[T2.v[1]].p + m.verts[T2.v[2]].p) / 3.0;
+  m.splitTriangle(t2, c2, topo::VKind::ViaSite);
+  check();
+}

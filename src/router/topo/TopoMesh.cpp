@@ -366,6 +366,122 @@ void TopoMesh::build(const Board& b, const MeshOptions& opt) {
       for (int i = 0; i < 3; ++i) verts[tris[ti].v[i]].tris.push_back(ti);
 }
 
+bool TopoMesh::strictlyInside(int t, Vec2 p) const {
+  const MTri& T = tris[t];
+  Vec2 a = verts[T.v[0]].p, b = verts[T.v[1]].p, c = verts[T.v[2]].p;
+  return orient(a, b, p) > 0 && orient(b, c, p) > 0 && orient(c, a, p) > 0;
+}
+
+int TopoMesh::splitTriangle(int t, Vec2 p, VKind kind) {
+  MTri old = tris[t];
+  int A = old.v[0], B = old.v[1], C = old.v[2];
+  int e0 = old.e[0], e1 = old.e[1], e2 = old.e[2];  // opposite A (B-C), B (C-A), C (A-B)
+  MVertex nv;
+  nv.p = p;
+  nv.kind = kind;
+  int v = int(verts.size());
+  verts.push_back(nv);
+  auto addEdge = [&](int a, int c) {
+    MEdge me;
+    me.v[0] = std::min(a, c);
+    me.v[1] = std::max(a, c);
+    edges.push_back(me);
+    return int(edges.size()) - 1;
+  };
+  int eA = addEdge(A, v), eB = addEdge(B, v), eC = addEdge(C, v);
+  int t1 = t, t2 = int(tris.size()), t3 = t2 + 1;
+  MTri T1, T2, T3;
+  T1.v[0] = A; T1.v[1] = B; T1.v[2] = v;
+  T1.e[0] = eB; T1.e[1] = eA; T1.e[2] = e2;
+  T1.nb[0] = t2; T1.nb[1] = t3; T1.nb[2] = old.nb[2];
+  T2.v[0] = B; T2.v[1] = C; T2.v[2] = v;
+  T2.e[0] = eC; T2.e[1] = eB; T2.e[2] = e0;
+  T2.nb[0] = t3; T2.nb[1] = t1; T2.nb[2] = old.nb[0];
+  T3.v[0] = C; T3.v[1] = A; T3.v[2] = v;
+  T3.e[0] = eA; T3.e[1] = eC; T3.e[2] = e1;
+  T3.nb[0] = t1; T3.nb[1] = t2; T3.nb[2] = old.nb[1];
+  for (MTri* T : {&T1, &T2, &T3}) {
+    T->inside = old.inside;
+    T->blocked = old.blocked;
+  }
+  tris[t1] = T1;
+  tris.push_back(T2);
+  tris.push_back(T3);
+  // Neighbours across the old edges now face the new owners of those edges.
+  auto relink = [&](int nb, int oldT, int newT) {
+    if (nb < 0) return;
+    for (int& x : tris[nb].nb)
+      if (x == oldT) x = newT;
+  };
+  relink(old.nb[0], t, t2);
+  relink(old.nb[1], t, t3);
+  for (int e : {e0, e1}) {
+    MEdge& me = edges[e];
+    int owner = e == e0 ? t2 : t3;
+    if (me.t[0] == t) me.t[0] = owner;
+    else if (me.t[1] == t) me.t[1] = owner;
+  }
+  edges[eA].t[0] = t1; edges[eA].t[1] = t3;
+  edges[eB].t[0] = t1; edges[eB].t[1] = t2;
+  edges[eC].t[0] = t2; edges[eC].t[1] = t3;
+  // Incident triangles: A keeps t (= t1) and gains t3, B keeps t1 and gains t2, C's t becomes t2 and t3.
+  verts[A].tris.push_back(t3);
+  verts[B].tris.push_back(t2);
+  for (int& x : verts[C].tris)
+    if (x == t) x = t2;
+  verts[C].tris.push_back(t3);
+  verts[v].tris = {t1, t2, t3};
+  return v;
+}
+
+bool TopoMesh::unsplit(int v) {
+  MVertex& V = verts[v];
+  if (V.tris.size() != 3) return false;
+  // The parts in the order splitTriangle made them: t1 (A,B,v), t2 (B,C,v), t3 (C,A,v).
+  int t1 = V.tris[0], t2 = V.tris[1], t3 = V.tris[2];
+  auto& T1 = tris[t1];
+  auto& T2 = tris[t2];
+  auto& T3 = tris[t3];
+  if (T1.v[2] != v || T2.v[2] != v || T3.v[2] != v) return false;
+  int A = T1.v[0], B = T1.v[1], C = T2.v[1];
+  if (T2.v[0] != B || T3.v[0] != C || T3.v[1] != A) return false;
+  int eA = T1.e[1], eB = T1.e[0], eC = T2.e[0];
+  int e2 = T1.e[2], e0 = T2.e[2], e1 = T3.e[2];
+  int nb2 = T1.nb[2], nb0 = T2.nb[2], nb1 = T3.nb[2];
+  MTri T;
+  T.v[0] = A; T.v[1] = B; T.v[2] = C;
+  T.e[0] = e0; T.e[1] = e1; T.e[2] = e2;
+  T.nb[0] = nb0; T.nb[1] = nb1; T.nb[2] = nb2;
+  T.inside = T1.inside;
+  T.blocked = T1.blocked | T2.blocked | T3.blocked;
+  auto relink = [&](int nb, int oldT) {
+    if (nb < 0) return;
+    for (int& x : tris[nb].nb)
+      if (x == oldT) x = t1;
+  };
+  relink(nb0, t2);
+  relink(nb1, t3);
+  for (int e : {e0, e1}) {
+    MEdge& me = edges[e];
+    int old = e == e0 ? t2 : t3;
+    if (me.t[0] == old) me.t[0] = t1;
+    else if (me.t[1] == old) me.t[1] = t1;
+  }
+  tris[t1] = T;
+  for (int t : {t2, t3}) {
+    tris[t] = MTri{};
+    tris[t].inside = false;
+  }
+  for (int e : {eA, eB, eC}) edges[e] = MEdge{};
+  std::erase(verts[A].tris, t3);
+  std::erase(verts[B].tris, t2);
+  for (int& x : verts[C].tris)
+    if (x == t2) x = t1;
+  std::erase(verts[C].tris, t3);
+  V.tris.clear();
+  return true;
+}
+
 int TopoMesh::locate(Vec2 p) const {
   for (int i = 0; i < int(tris.size()); ++i) {
     const MTri& t = tris[i];
