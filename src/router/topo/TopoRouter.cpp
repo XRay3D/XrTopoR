@@ -1869,10 +1869,18 @@ RouterResult Router::run() {
         std::shuffle(queue.begin() + long(failedJobs.size()), queue.end(), rng);
       }
     }
-    for (int j : queue) ripup(j);
+    // All picked nets are ripped up first, then re-laid in a shuffled order. XR_RIPONE: PathFinder's
+    // way, one net ripped up right before it is re-laid so that it sees the others as they lie; measured
+    // worse here (Arcs 216 vs 90 violations: every net detours around all the others, the wires come out
+    // 20 % longer with more vias) — the overflow swings either way (Arcs: 327, 166, 166, 103, 285 edges
+    // over six passes), a history proportional to the overflow does not settle it either.
+    static const bool kRipOne = std::getenv("XR_RIPONE") != nullptr;
+    if (!kRipOne)
+      for (int j : queue) ripup(j);
     int done = 0;
     for (int j : queue) {
       if (cancelled()) break;
+      if (kRipOne) ripup(j);
       routeJob(j);
       if (o_.progress) o_.progress(++done, int(queue.size()), std::format("pass {}", pass + 1));
     }
@@ -1904,8 +1912,8 @@ RouterResult Router::run() {
                      int(m_.verts[me.v[1]].kind), s_.viaNet[me.v[0]], s_.viaNet[me.v[1]]);
       }
     }
-    res_.log.push_back(std::format("pass {}: rerouted {} nets, {} failed connections, {} overflowed edges, {} crossings",
-                                   pass + 1, queue.size(), fails, over, crossings));
+    res_.log.push_back(std::format("pass {}: rerouted {} nets, {} failed connections, {} overflowed edges, {} crossings (present x{})",
+                                   pass + 1, queue.size(), fails, over, crossings, presFac_));
     if (std::getenv("XR_VIASTATS")) {
       res_.log.push_back(std::format("  via spots: {} asked, refused: {} blocked, {} vertex obstacles, {} copper, {} vias near, {} keepout, {} chords",
                                      viaStats_[0], viaStats_[1], viaStats_[2], viaStats_[3], viaStats_[4], viaStats_[5], viaStats_[6]));
