@@ -15,6 +15,7 @@
 #include "io/gerber/GerberWriter.h"
 #include "io/svg/SvgWriter.h"
 #include "router/topo/Optimizer.h"
+#include "router/topo/Refine.h"
 #include "router/topo/Realizer.h"
 #include "router/topo/TopoRouter.h"
 
@@ -28,12 +29,13 @@ void usage() {
       "  info       <board>                        summary of a board\n"
       "  convert    <board> <out.kicad_pcb|.dsn|.ses>\n"
       "  drc        <board> [--max N]               design rule check\n"
-      "  route      <board> [-o out] [--passes N] [--via-cost MM] [--no-vias] [--nets a,b] [--keep] [--soft] [--no-optimize] [--no-fill] [--svg out.svg]\n"
+      "  route      <board> [-o out] [--passes N] [--via-cost MM] [--no-vias] [--nets a,b] [--keep] [--soft] [--no-optimize] [--no-refine] [--no-fill] [--svg out.svg]\n"
       "  import-ses <board> <routes.ses> -o <out>\n"
       "  gerber     <board> <outdir>\n"
       "  svg        <board> <out.svg>\n"
       "  reshape    <board> -o <out>              recompute track shapes (TopoR F5) for all tracks\n"
       "  optimize   <board> -o <out> [--iterations N] [--step MM] [--components]   move vias/parts (F7)\n"
+      "  refine     <board> -o <out> [--same-layer]   shorter wire paths around the copper as it lies (F6)\n"
       "  fill       <board> -o <out> [--no-thermals]  pour copper zones\n"
       "  report     <board> [--bom out.csv]          routing statistics per layer and net, BOM\n"
       "boards: .kicad_pcb, .dsn, P-CAD ASCII .pcb");
@@ -97,6 +99,7 @@ int cmdRoute(Board& b, const Args& a) {
   ro.ripupExisting = !a.flag("--keep");
   ro.softPlanarity = a.flag("--soft");
   if (a.flag("--no-optimize")) ro.optimizeIterations = 0;
+  ro.refine = !a.flag("--no-refine");
   ro.fillZones = !a.flag("--no-fill");
   if (auto p = a.opt("--nets"); !p.empty())
     ro.nets = p | std::views::split(',') | std::ranges::to<std::vector<std::string>>();
@@ -166,6 +169,16 @@ int main(int argc, char** argv) {
     for (auto& l : res.log) std::println("{}", l);
     std::println("moved {} via(s), {} component(s); conflicts {} -> {}; length {:.1f} -> {:.1f} mm; {:.2f} s", res.viaMoves,
                  res.componentMoves, res.conflictsBefore, res.conflictsAfter, res.lengthBefore / 1e6,
+                 res.lengthAfter / 1e6, res.seconds);
+    if (auto r = io::saveBoard(b, std::string(a.opt("-o"))); !r) return fail(r.error());
+    return 0;
+  }
+  if (cmd == "refine" && !a.opt("-o").empty()) {
+    topo::RefineOptions ro;
+    ro.changeLayers = !a.flag("--same-layer");
+    auto res = topo::refine(b, ro);
+    std::println("refined {} of {} wires ({} repaired, {} to another layer), {} via(s) removed; length {:.1f} -> {:.1f} mm; {:.2f} s",
+                 res.improved, res.wires, res.repaired, res.layerChanges, res.viasRemoved, res.lengthBefore / 1e6,
                  res.lengthAfter / 1e6, res.seconds);
     if (auto r = io::saveBoard(b, std::string(a.opt("-o"))); !r) return fail(r.error());
     return 0;

@@ -2,8 +2,9 @@
 // TopoR's «Перекладка проводников» (F6, Refine): the paths of wires are optimised. Every wire (a chain
 // of segments of one net and layer between pads, vias and branch points) looks for a shorter path
 // around the copper of other nets as it lies now; with layer changes allowed, a wire between through
-// pads or vias may also move to another layer. A new path is taken only when it is shorter and adds
-// no clearance conflict; vias left with nothing to join are removed afterwards.
+// pads or vias may also move to another layer. A new path is taken when it leaves fewer clearance
+// conflicts around, or as many and is shorter (wires in violation are re-laid around the copper they
+// conflict with, as TopoR's F6 repairs them); vias left with nothing to join are removed afterwards.
 #include <atomic>
 #include <functional>
 #include <optional>
@@ -25,6 +26,7 @@ struct RefineResult {
   int wires = 0;         // chains tried
   int improved = 0;      // got a shorter path
   int layerChanges = 0;  // of them on another layer
+  int repaired = 0;      // got a path with fewer conflicts
   int viasRemoved = 0;
   double lengthBefore = 0, lengthAfter = 0;  // nm, of the chains tried
   double seconds = 0;

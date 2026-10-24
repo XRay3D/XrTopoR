@@ -18,6 +18,7 @@ struct RouterOptions {
   bool ripupExisting = true;         // remove unlocked routing before routing
   bool softPlanarity = false;        // early passes may cross other nets' routes at a growing cost
   int optimizeIterations = 2;        // final via optimisation (TopoR F7), 0 = off
+  bool refine = true;                // final F6: wires in violation re-laid around the copper as it lies
   bool fillZones = true;             // pour the zones again when done (they are cleared for routing)
   std::vector<std::string> nets;     // empty = all nets
   std::vector<int> copperIndices;    // allowed copper layers by index (empty = all)

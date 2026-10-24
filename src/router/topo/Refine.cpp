@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <cmath>
 #include <format>
 #include <map>
@@ -339,35 +341,73 @@ RefineResult refine(Board& b, const RefineOptions& o) {
     int conflicts0 = regionConflicts(b, idx0, judge).count;
     std::optional<Board> best;
     double bestLen = c.length - std::max(0.05 * kNmPerMm, 0.01 * c.length);
+    int bestConflicts = conflicts0;
     LayerId bestLayer = c.layer;
+    static const bool kDebug = std::getenv("XR_REFINE_DEBUG") != nullptr;
     for (LayerId l : layers) {
-      auto path = findPath(b, c.a, c.b, l, c.net, c.width, region, ignore);
+      Coord width = l == c.layer ? c.width : b.trackWidth(c.net, l);
+      auto path = findPath(b, c.a, c.b, l, c.net, width, region, ignore);
+      // A wire in violation is worth a search over the whole board, and at its minimum width.
+      if (!path && conflicts0 > 0 && bb.valid()) path = findPath(b, c.a, c.b, l, c.net, width, bb.inflated(kNmPerMm), ignore);
+      if (!path && conflicts0 > 0)
+        if (Coord narrow = b.minTrackWidth(c.net, l); narrow > 0 && narrow < width) {
+          width = narrow;
+          path = findPath(b, c.a, c.b, l, c.net, width, region, ignore);
+          if (!path && bb.valid()) path = findPath(b, c.a, c.b, l, c.net, width, bb.inflated(kNmPerMm), ignore);
+        }
+      if (kDebug && conflicts0 > 0 && !path)
+        std::fprintf(stderr, "chain net %s L%d tracks %zu conflicts %d: layer %d no path\n", b.nets[c.net].name.c_str(),
+                     c.layer, c.tracks.size(), conflicts0, l);
       if (!path) continue;
-      Board trial = b;
-      edit::Fragment f;
-      f.tracks = c.tracks;
-      edit::erase(trial, f);
-      RealWire w;
-      w.net = c.net;
-      w.layer = l;
-      w.width = l == c.layer ? c.width : b.trackWidth(c.net, l);
-      w.clearance = b.clearance(c.net, l);
-      w.sketch = *path;
-      RealizeOptions ro;
-      ro.tracksAsObstacles = true;
-      ro.region = region;
-      size_t before = trial.tracks.size();
-      realize(trial, {w}, {}, ro);
-      double len = 0;
-      for (size_t i = before; i < trial.tracks.size(); ++i) len += trackLength(trial.tracks[i]);
-      if (len <= 0 || len >= bestLen) continue;
-      SpatialIndex idx1;
-      idx1.build(trial);
-      if (regionConflicts(trial, idx1, judge).count > conflicts0) continue;
-      if (Connectivity::compute(trial, idx1).ratsnest.size() > unrouted) continue;  // must join what it joined
-      bestLen = len;
-      bestLayer = l;
-      best = std::move(trial);
+      // Two candidates: the path pulled taut with arcs, and the grid path itself (the taut one can
+      // conflict again where the grid path, which keeps every clearance, did not).
+      for (int raw = 0; raw < 2; ++raw) {
+        Board trial = b;
+        edit::Fragment f;
+        f.tracks = c.tracks;
+        edit::erase(trial, f);
+        size_t before = trial.tracks.size();
+        if (raw) {
+          for (size_t i = 0; i + 1 < path->size(); ++i) {
+            Track t;
+            t.a = Point((*path)[i]);
+            t.b = Point((*path)[i + 1]);
+            t.width = width;
+            t.layer = l;
+            t.net = c.net;
+            if (t.a != t.b) trial.tracks.push_back(t);
+          }
+        } else {
+          RealWire w;
+          w.net = c.net;
+          w.layer = l;
+          w.width = width;
+          w.clearance = b.clearance(c.net, l);
+          w.sketch = *path;
+          RealizeOptions ro;
+          ro.tracksAsObstacles = true;
+          ro.region = region;
+          realize(trial, {w}, {}, ro);
+        }
+        double len = 0;
+        for (size_t i = before; i < trial.tracks.size(); ++i) len += trackLength(trial.tracks[i]);
+        if (len <= 0) continue;
+        SpatialIndex idx1;
+        idx1.build(trial);
+        int conflicts1 = regionConflicts(trial, idx1, judge).count;
+        if (kDebug && conflicts0 > 0)
+          std::fprintf(stderr, "chain net %s L%d tracks %zu conflicts %d: layer %d path %zu pts, %s %.2f mm (was %.2f), conflicts %d\n",
+                       b.nets[c.net].name.c_str(), c.layer, c.tracks.size(), conflicts0, l, path->size(), raw ? "grid" : "realised",
+                       len / 1e6, c.length / 1e6, conflicts1);
+        // Fewer conflicts first; among equals the shorter path.
+        if (conflicts1 > bestConflicts || (conflicts1 == bestConflicts && len >= bestLen)) continue;
+        if (Connectivity::compute(trial, idx1).ratsnest.size() > unrouted) continue;  // must join what it joined
+        bestLen = len;
+        bestConflicts = conflicts1;
+        bestLayer = l;
+        best = std::move(trial);
+        if (conflicts1 == 0 && !raw) break;  // the taut path is clean: no need for the angular one
+      }
     }
     if (!best) {
       r.lengthAfter += c.length;
@@ -380,6 +420,7 @@ RefineResult refine(Board& b, const RefineOptions& o) {
       for (int& ti : chains[k].tracks) ti -= int(std::ranges::lower_bound(gone, ti) - gone.begin());
     b = std::move(*best);
     ++r.improved;
+    if (bestConflicts < conflicts0) ++r.repaired;
     if (bestLayer != c.layer) ++r.layerChanges;
     r.lengthAfter += bestLen;
   }

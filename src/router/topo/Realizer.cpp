@@ -32,11 +32,15 @@ constexpr double kMargin = kRealizeMargin;
 
 // An obstacle point: pads contribute their centre (circles), segment ends (ovals) or core polygon
 // corners; vias their centre; the outline its vertices.
+constexpr int kTransparent = -3;  // a point that constrains nothing (via site, pad of another layer)
+constexpr int kBoardEdge = -2;    // belongs to no net, blocks all
+
 struct OPt {
   Vec2 p;
   double r = 0;
   double clr = 0;
   int net = kNoNet;
+  int shape = -1;  // index into LayerObstacles::shapes: the copper the point belongs to (pads)
 };
 
 struct Side {
@@ -46,18 +50,28 @@ struct Side {
 
 struct LayerObstacles {
   std::vector<OPt> pts;
+  std::vector<Shape> shapes;
   std::vector<std::pair<int, int>> constraints;
   std::vector<std::vector<Side>> adj;  // sides incident to each obstacle point (pads, outline, stubs)
 
-  int add(Vec2 p, double r, double clr, int net) {
-    pts.push_back({p, r, clr, net});
+  int add(Vec2 p, double r, double clr, int net, int shape = -1) {
+    pts.push_back({p, r, clr, net, shape});
     adj.emplace_back();
     return int(pts.size() - 1);
   }
-  void link(int a, int c, double r) {
-    constraints.push_back({a, c});
+  void side(int a, int c, double r) {
     adj[a].push_back({c, r});
     adj[c].push_back({a, r});
+  }
+  void link(int a, int c, double r) {
+    constraints.push_back({a, c});
+    side(a, c, r);
+  }
+  // How far the point's copper reaches from the point along direction d (a pad's body from its centre
+  // or corner); the radius for points without a shape.
+  double reach(const OPt& o, Vec2 d) const {
+    if (o.shape < 0) return o.r;
+    return std::max(o.r, shapes[size_t(o.shape)].rayExit(o.p, d));
   }
   int nearest(Vec2 p, double tol) const {
     int best = -1;
@@ -283,10 +297,81 @@ LayerObstacles collect(const Board& b, LayerId layer, const std::vector<RealVia>
 }
 
 
+// The router's mesh as this layer's obstacles: every mesh vertex in order (so that the triangulation
+// comes out the same), transparent where it constrains nothing on this layer.
+LayerObstacles collectFromMesh(const Board& b, LayerId layer, const TopoMesh& m, const std::vector<RealVia>& vias) {
+  LayerObstacles ob;
+  std::map<std::pair<Coord, Coord>, const RealVia*> viaAt;
+  for (const RealVia& v : vias) viaAt[{Coord(std::llround(v.pos.x)), Coord(std::llround(v.pos.y))}] = &v;
+  std::vector<int> padShape(b.pads.size(), -1);
+  for (const MVertex& v : m.verts) {
+    switch (v.kind) {
+      case VKind::PadCenter:
+      case VKind::PadCorner: {
+        const Pad& pad = b.pads[v.pad];
+        double clr = double(b.clearance(pad.net, layer));
+        if (pad.onLayer(layer)) {
+          if (padShape[v.pad] < 0) {
+            padShape[v.pad] = int(ob.shapes.size());
+            ob.shapes.push_back(pad.shapeGeom());
+          }
+          const Shape& s = ob.shapes[size_t(padShape[v.pad])];
+          ob.add(v.p, v.kind == VKind::PadCorner ? s.r : 0.0, clr, pad.net, padShape[v.pad]);
+        } else if (pad.drill > 0 && !pad.copper) {
+          ob.add(v.p, pad.drill / 2.0, clr, kNoNet);
+        } else {
+          ob.add(v.p, 0, 0, kTransparent);
+        }
+        break;
+      }
+      case VKind::FixedVia: {
+        const Via& via = b.vias[v.fixedVia];
+        if (via.onLayer(layer)) ob.add(v.p, via.diameter / 2.0, double(b.clearance(via.net, layer)), via.net);
+        else ob.add(v.p, 0, 0, kTransparent);
+        break;
+      }
+      case VKind::ViaSite: {
+        auto it = viaAt.find({Coord(std::llround(v.p.x)), Coord(std::llround(v.p.y))});
+        if (it != viaAt.end()) ob.add(v.p, it->second->diameter / 2.0, double(b.clearance(it->second->net, layer)), it->second->net);
+        else ob.add(v.p, 0, 0, kTransparent);
+        break;
+      }
+      case VKind::Outline: ob.add(v.p, 0, double(b.edgeClearance), kBoardEdge); break;
+      case VKind::Keepout: {
+        const Keepout& k = b.keepouts[v.keepout];
+        if (k.onLayer(layer) && k.wires) ob.add(v.p, 0, 0, kBoardEdge);
+        else ob.add(v.p, 0, 0, kTransparent);
+        break;
+      }
+    }
+  }
+  // Pad sides (for the intrusion check) from the pads' vertex lists: centre first, then the corners.
+  for (size_t pi = 0; pi < b.pads.size(); ++pi) {
+    if (padShape[pi] < 0 || m.padVerts[pi].size() < 3) continue;
+    const Shape& s = ob.shapes[size_t(padShape[pi])];
+    const auto& pv = m.padVerts[pi];
+    int n = int(pv.size()) - 1;
+    for (int k = 0; k < n; ++k) {
+      int a = pv[size_t(k) + 1], c = pv[size_t((k + 1) % n) + 1];
+      if (s.kind == Shape::Kind::Segment && k > 0) break;
+      if (a != c) ob.side(a, c, s.r);
+    }
+  }
+  // The same constraints as the mesh (outline, keepout boundaries of every layer); those that block
+  // this layer are sides a wire must keep its clearance from, like a pad's.
+  for (const MEdge& e : m.edges) {
+    if (!(e.constrained || e.blocked) || e.v[0] == e.v[1]) continue;
+    ob.constraints.push_back({e.v[0], e.v[1]});
+    if (ob.pts[e.v[0]].net == kBoardEdge && ob.pts[e.v[1]].net == kBoardEdge) ob.side(e.v[0], e.v[1], 0);
+  }
+  return ob;
+}
+
 // Slot of one wire on one crossed edge: the interval of centre-line positions along u -> v that keeps
 // the required spacing to the end obstacles and to the other wires crossing the same edge.
 struct Slot {
   double lo = 0, hi = 0;  // distances from u
+  double xu = 0, xv = 0;  // reach of the end obstacles' copper along the edge
   // Bend circles implied by the slot bounds: around the obstacle itself (packed stack) or around
   // the inner wire's actual crossing point when that is what pushes the bound out.
   Vec2 cu, cv;
@@ -356,7 +441,8 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
   std::map<LayerId, LayerObstacles> obstacles;
   std::map<LayerId, std::map<std::pair<int, int>, std::vector<std::pair<int, int>>>> edgeLists;
   for (auto&& [layer, ids] : byLayer) {
-    LayerObstacles& ob = obstacles.emplace(layer, collect(b, layer, vias, opt)).first->second;
+    LayerObstacles& ob = obstacles.emplace(layer, opt.mesh ? collectFromMesh(b, layer, *opt.mesh, vias)
+                                                            : collect(b, layer, vias, opt)).first->second;
     auto cdt = triangulate(ob, kNoNet);
     auto& onEdge = edgeLists[layer];  // edge -> (wire, hit index)
     for (int wi : ids) {
@@ -396,15 +482,18 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
       // The safety margin against tessellation is dropped where the wires fit exactly without it
       // (TopoR lays a wire between two pads at the bare rule distance).
       double margin = kMargin;
+      Vec2 dir = L > 0 ? (V.p - U.p) / L : Vec2{};
+      double xu = ob.reach(U, dir), xv = ob.reach(V, -dir);
       auto need = [&](const OPt& o, const RealWire& w, double width) {
-        return own(o, w) ? 0.0 : o.r + std::max(o.clr, double(w.clearance)) + margin + width / 2.0;
+        if (own(o, w) || o.net == kTransparent) return 0.0;
+        double x = &o == &U ? xu : xv;
+        return x + std::max(o.clr, double(w.clearance)) + margin + width / 2.0;
       };
       auto usedR = [&](int wi, int o, double packed) {
         auto it = bendR[wi].find(o);
         return it != bendR[wi].end() ? std::max(packed, it->second) : packed;
       };
       auto actualFromU = [&](int k) { return actual[list[k].first][list[k].second]; };
-      Vec2 dir = L > 0 ? (V.p - U.p) / L : Vec2{};
       std::vector<double> aCenter(n, 0), bCenter(n, 0);  // distance from u/v of the bend centre
       std::vector<double> aR(n, 0), bR(n, 0);
       auto pack = [&] {
@@ -466,11 +555,11 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
         }
         if (any) slack = pack();
       }
-      if (slack <= 0 && slack > -2.0 * kMargin * (n + 1)) {
+      if (slack < 0 && slack > -2.0 * kMargin * (n + 1)) {
         margin = 0;
         slack = pack();
       }
-      if (slack <= 0) {
+      if (slack < 0) {
         if (round == 0) ++st.overflowEdges;
         if (round == 0 && std::getenv("XR_OVF")) {
           std::print(stderr, "ovf L{:.3f} need{:.3f} U({:.3f},{:.3f} r{:.2f} net{}) V({:.3f},{:.3f} r{:.2f} net{}) wires:", L / 1e6,
@@ -481,7 +570,7 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
       }
       for (int k = 0; k < n; ++k) {
         Slot& sl = slots[list[k].first][list[k].second];
-        if (slack <= 0) {
+        if (slack < 0) {
           // Overflow: keep the order, share the deficit (a violation the DRC will report).
           double scale = (L > 0) ? L / (a[n - 1] + bb[n - 1]) : 1.0;
           sl.lo = sl.hi = a[k] * scale;
@@ -491,11 +580,13 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
           sl.lo = a[k];
           sl.hi = L - bb[k];
         }
+        sl.xu = xu;
+        sl.xv = xv;
         // Bend circles through the slot bounds.
         sl.cu = U.p + dir * aCenter[k];
-        sl.ru = slack <= 0 ? sl.lo - aCenter[k] : aR[k];
+        sl.ru = slack < 0 ? sl.lo - aCenter[k] : aR[k];
         sl.cv = V.p - dir * bCenter[k];
-        sl.rv = slack <= 0 ? (L - sl.hi) - bCenter[k] : bR[k];
+        sl.rv = slack < 0 ? (L - sl.hi) - bCenter[k] : bR[k];
       }
     }
   }
@@ -617,7 +708,7 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
           if (hi < 1 || hi > int(hits[wi].size())) continue;
           const EdgeHit& h = hits[wi][hi - 1];
           const Slot& sl = slots[wi][hi - 1];
-          for (auto [o, R, c] : {std::tuple{h.u, sl.ru, sl.cu}, std::tuple{h.v, sl.rv, sl.cv}}) {
+          for (auto [o, R, c, x] : {std::tuple{h.u, sl.ru, sl.cu, sl.xu}, std::tuple{h.v, sl.rv, sl.cv, sl.xv}}) {
             if (R <= 0 || dropped.contains(o) ||
                 std::ranges::any_of(cs, [&](const Circle& x) { return x.obst == o && (x.c - c).len2() < 1; }))
               continue;
@@ -626,7 +717,7 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
             double pen = R - distPointSegment(c, p, q);
             // Sides incident to the obstacle point (pad edges, outline, stub wires) with their own radius.
             if ((c - ob.pts[o].p).len2() < 1) {
-              double extra = R - ob.pts[o].r;  // clearance + half width + margin + nesting
+              double extra = R - x;  // clearance + half width + margin + nesting
               for (const Side& sd : ob.adj[o])
                 pen = std::max(pen, sd.r + extra - distSegmentSegment(p, q, c, ob.pts[sd.to].p));
             }

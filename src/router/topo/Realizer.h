@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "core/Board.h"
+#include "router/topo/TopoMesh.h"
 
 namespace xr::topo {
 
@@ -40,6 +41,10 @@ struct RealizeStats {
 };
 
 struct RealizeOptions {
+  // The router's mesh: the realiser then triangulates the very same points with the same constraints
+  // (via sites and other layers' pads as transparent points), so that a wire crosses exactly the edges
+  // the topology put it on and the slots on those edges hold what the capacity said they hold.
+  const TopoMesh* mesh = nullptr;
   // Existing board tracks of other nets act as obstacles (manual re-shaping of a few wires);
   // the autorouter realises all wires at once and leaves this off.
   bool tracksAsObstacles = false;

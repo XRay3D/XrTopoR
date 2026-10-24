@@ -29,6 +29,7 @@
 #include "drc/Drc.h"
 #include "router/topo/Optimizer.h"
 #include "router/topo/Realizer.h"
+#include "router/topo/Refine.h"
 #include "router/topo/TopoMesh.h"
 
 namespace xr::topo {
@@ -176,7 +177,8 @@ class Router {
   std::optional<ObstInfo> obst(int v, int li, int net) const;
   double freeLength(int e, int li, int net, double& cu, bool& ou, double& cv, bool& ov) const;
   double crossCost(int e, int li, bool& blocked, bool* narrow = nullptr) const;
-  double viaPenalty(int w, bool& blocked) const;
+  // `path` leads to the node placing the via: the vias already on it count as obstacles too.
+  double viaPenalty(int w, bool& blocked, const std::vector<SNode>& nodes, int from) const;
 
   double crossCoord(int li, int t, int le, int cid) const;
   double gapCoord(int li, int t, int le, int g) const;
@@ -427,8 +429,12 @@ double Router::crossCost(int e, int li, bool& blocked, bool* narrow) const {
   return cost;
 }
 
-double Router::viaPenalty(int w, bool& blocked) const {
+double Router::viaPenalty(int w, bool& blocked, const std::vector<SNode>& nodes, int from) const {
   double cost = 0;
+  // Vias this very path has placed (not committed yet): a wire between two of them is squeezed as well.
+  std::inplace_vector<int, 16> pathVias;
+  for (int i = from; i >= 0 && pathVias.size() < pathVias.capacity(); i = nodes[i].parent)
+    if (nodes[i].via && nodes[i].vtx != w) pathVias.push_back(nodes[i].vtx);
   for (int li = 0; li < NL_; ++li)
     for (int e : vertEdges_[w]) {
       const EdgeUse& u = s_.use[li, e];
@@ -436,6 +442,9 @@ double Router::viaPenalty(int w, bool& blocked) const {
       int other = m_.edges[e].v[0] == w ? m_.edges[e].v[1] : m_.edges[e].v[0];
       auto o = obst(other, li, kNoNet);
       Shape via = Shape::circle(P(w), viaR_);
+      Shape otherVia = Shape::circle(P(other), viaR_);
+      bool pathVia = std::ranges::contains(pathVias, other);
+      if (pathVia && !o) o = ObstInfo{&otherVia, viaClr_, -2 - other};
       double free = o ? o->shape->distance(via) : via.distance(P(other));
       double need = u.sumW + (u.n - 1) * u.maxC + std::max(viaClr_, u.maxC) + (o ? std::max(o->clr, u.maxC) : 0) +
                     u.n * kRealizeMargin;
@@ -651,7 +660,7 @@ std::optional<std::vector<SNode>> Router::search(int pad) {
       }
     } else if (isViaSite(w)) {
       bool blocked = false;
-      double pen = viaPenalty(w, blocked);
+      double pen = viaPenalty(w, blocked, nodes, from);
       if (blocked) return;
       c.transit = true;
       nodes.push_back(c);
@@ -1004,7 +1013,9 @@ std::vector<int> Router::realizeAll() {
     for (auto& v : vias) b_.vias.push_back(Via{Point(v.pos), v.diameter, v.drill, b_.allCopperMask(), v.net, false});
     return {};
   }
-  auto st = realize(b_, wires, vias);
+  RealizeOptions ro;
+  ro.mesh = &m_;
+  auto st = realize(b_, wires, vias, ro);
   res_.vias = int(vias.size());
   res_.length = 0;
   for (size_t i = before; i < b_.tracks.size(); ++i) {
@@ -1234,6 +1245,18 @@ RouterResult Router::run() {
     res_.log.push_back(std::format("optimised: {} via move(s), conflicts {} -> {}, length {:.1f} -> {:.1f} mm",
                                    r.viaMoves, r.conflictsBefore, r.conflictsAfter, r.lengthBefore / 1e6,
                                    r.lengthAfter / 1e6));
+  }
+  if (o_.refine && !cancelled() && !std::getenv("XR_SKETCH")) {
+    // The grid refinement: every wire still in violation looks for a path around the copper as it
+    // lies now, over the whole board if need be.
+    RefineOptions ro;
+    ro.cancel = o_.cancel;
+    ro.progress = o_.progress;
+    auto r = refine(b_, ro);
+    res_.vias = int(b_.vias.size());
+    res_.length = r.lengthAfter;
+    res_.log.push_back(std::format("refined: {} wire(s) re-laid, {} repaired, {} moved to another layer, {} via(s) removed",
+                                   r.improved, r.repaired, r.layerChanges, r.viasRemoved));
   }
   if (o_.fillZones && !b_.zones.empty() && !std::getenv("XR_SKETCH")) {
     auto zs = xr::fillZones(b_);
