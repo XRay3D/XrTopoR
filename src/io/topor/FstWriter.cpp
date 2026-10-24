@@ -1012,6 +1012,9 @@ struct Writer {
     x.textElement("Version", "1.2.0");
     x.textElement("Program", "XrTopoR");
     x.textElement("Date", date);
+    // TopoR's importer refuses a header without the origin of the design («Пропущен тег 'OriginalFile'»).
+    x.textElement("OriginalFormat", "TopoR PCB");
+    x.textElement("OriginalFile", ".\\" + b.name + ".fst");
     x.empty("Units", {{"dist", "mm"}, {"time", "ps"}});
     x.close();
     x.blank();
