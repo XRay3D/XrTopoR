@@ -6,6 +6,7 @@
 #include <CGAL/Triangulation_vertex_base_with_info_2.h>
 
 #include <list>
+#include <print>
 #include <set>
 #include <map>
 
@@ -515,6 +516,146 @@ int TopoMesh::splitTriangle(int t, Vec2 p, VKind kind) {
   verts[C].tris.push_back(t3);
   verts[v].tris = {t1, t2, t3};
   return v;
+}
+
+int TopoMesh::splitEdge(int e, Vec2 p, VKind kind, int* newEdge) {
+  int U = edges[e].v[0], W = edges[e].v[1];
+  MVertex nv;
+  nv.p = p;
+  nv.kind = kind;
+  int v = int(verts.size());
+  verts.push_back(nv);
+  auto addEdge = [&](int a, int c) {
+    MEdge me;
+    me.v[0] = a;
+    me.v[1] = c;
+    edges.push_back(me);
+    return int(edges.size()) - 1;
+  };
+  int eVW = addEdge(W, v);  // directed from W: positions measured from W
+  if (newEdge) *newEdge = eVW;
+  edges[e].v[1] = v;        // e is now (U, v), still directed from U
+  int ts[2] = {edges[e].t[0], edges[e].t[1]};
+  edges[e].t[0] = edges[e].t[1] = -1;
+  std::vector<int> made;
+  int halfE[2] = {-1, -1}, halfVW[2] = {-1, -1};
+  for (int k = 0; k < 2; ++k) {
+    int tA = ts[k];
+    if (tA < 0) continue;
+    MTri old = tris[tA];
+    int lu = localVertex(tA, U), lw = localVertex(tA, W), lx = 3 - lu - lw;
+    int X = old.v[lx];
+    // The triangle is (a, b, X) counter-clockwise with {a, b} = {U, W}: the halves (a, v, X) and
+    // (v, b, X) are counter-clockwise too.
+    bool uFirst = (lu + 1) % 3 == lw;
+    int a = uFirst ? U : W, b = uFirst ? W : U;
+    int eA = uFirst ? e : eVW, eB = uFirst ? eVW : e;  // (a, v) and (v, b)
+    int la = uFirst ? lu : lw, lb = uFirst ? lw : lu;
+    int eAX = old.e[lb], eBX = old.e[la];  // opposite b: (X, a); opposite a: (b, X)
+    int nbAX = old.nb[lb], nbBX = old.nb[la];
+    int eXv = addEdge(X, v);
+    int t1 = tA, t2 = int(tris.size());
+    MTri T1, T2;
+    T1.v[0] = a; T1.v[1] = v; T1.v[2] = X;
+    T1.e[0] = eXv; T1.e[1] = eAX; T1.e[2] = eA;
+    T1.nb[0] = t2; T1.nb[1] = nbAX; T1.nb[2] = -1;
+    T2.v[0] = v; T2.v[1] = b; T2.v[2] = X;
+    T2.e[0] = eBX; T2.e[1] = eXv; T2.e[2] = eB;
+    T2.nb[0] = nbBX; T2.nb[1] = t1; T2.nb[2] = -1;
+    for (MTri* T : {&T1, &T2}) {
+      T->inside = old.inside;
+      T->blocked = old.blocked;
+    }
+    tris[t1] = T1;
+    tris.push_back(T2);
+    if (nbBX >= 0)
+      for (int& x : tris[nbBX].nb)
+        if (x == tA) x = t2;
+    MEdge& mb = edges[eBX];
+    if (mb.t[0] == tA) mb.t[0] = t2;
+    else if (mb.t[1] == tA) mb.t[1] = t2;
+    edges[eXv].t[0] = t1;
+    edges[eXv].t[1] = t2;
+    halfE[k] = uFirst ? t1 : t2;
+    halfVW[k] = uFirst ? t2 : t1;
+    edges[e].t[k] = halfE[k];
+    edges[eVW].t[k] = halfVW[k];
+    verts[X].tris.push_back(t2);
+    for (int& x : verts[b].tris)
+      if (x == tA) x = t2;
+    made.push_back(t1);
+    made.push_back(t2);
+  }
+  // The halves face each other across the split edge (the U/W edge of every half is its e[2]).
+  if (halfE[0] >= 0 && halfE[1] >= 0) {
+    tris[halfE[0]].nb[2] = halfE[1];
+    tris[halfE[1]].nb[2] = halfE[0];
+    tris[halfVW[0]].nb[2] = halfVW[1];
+    tris[halfVW[1]].nb[2] = halfVW[0];
+  }
+  verts[v].tris = made;
+  return v;
+}
+
+bool TopoMesh::unsplitEdge(int v) {
+  MVertex& V = verts[v];
+  if (V.tris.size() != 2 && V.tris.size() != 4) return false;
+  // Parts as splitEdge made them: (a, v, X) with (a, v) as e[2], then (v, b, X) with (v, b) as e[2];
+  // the original edge is the lower index of the two halves (the other was appended by the split).
+  int e = std::min(tris[V.tris[0]].e[2], tris[V.tris[1]].e[2]), eVW = std::max(tris[V.tris[0]].e[2], tris[V.tris[1]].e[2]);
+  if (e < 0 || edges[e].v[1] != v || edges[eVW].v[1] != v) return false;
+  int U = edges[e].v[0], W = edges[eVW].v[0];
+  for (size_t k = 0; k + 1 < V.tris.size(); k += 2) {  // every side checked before anything changes
+    const MTri& T1 = tris[V.tris[k]];
+    const MTri& T2 = tris[V.tris[k + 1]];
+    bool ok = T1.v[1] == v && T2.v[0] == v && T1.v[2] == T2.v[2] && ((T1.v[0] == U && T2.v[1] == W) || (T1.v[0] == W && T2.v[1] == U)) &&
+              std::min(T1.e[2], T2.e[2]) == e && std::max(T1.e[2], T2.e[2]) == eVW;
+    if (!ok) {
+      if (std::getenv("XR_CHECK"))
+        std::println(stderr, "unsplitEdge {}: side {} does not match: ({},{},{}) e2 {} / ({},{},{}) e2 {}; U {} W {} e {} eVW {}", v, k / 2,
+                     T1.v[0], T1.v[1], T1.v[2], T1.e[2], T2.v[0], T2.v[1], T2.v[2], T2.e[2], U, W, e, eVW);
+      return false;
+    }
+  }
+  int merged[2] = {-1, -1};
+  for (size_t k = 0; k + 1 < V.tris.size(); k += 2) {
+    int t1 = V.tris[k], t2 = V.tris[k + 1];
+    MTri& T1 = tris[t1];
+    MTri& T2 = tris[t2];
+    int a = T1.v[0], b = T2.v[1], X = T1.v[2];
+    int eXv = T1.e[0], eAX = T1.e[1], eBX = T2.e[0];
+    int nbAX = T1.nb[1], nbBX = T2.nb[0];
+    MTri T;
+    T.v[0] = a; T.v[1] = b; T.v[2] = X;
+    T.e[0] = eBX; T.e[1] = eAX; T.e[2] = e;
+    T.nb[0] = nbBX; T.nb[1] = nbAX; T.nb[2] = -1;
+    T.inside = T1.inside;
+    T.blocked = T1.blocked | T2.blocked;
+    if (nbBX >= 0)
+      for (int& x : tris[nbBX].nb)
+        if (x == t2) x = t1;
+    MEdge& mb = edges[eBX];
+    if (mb.t[0] == t2) mb.t[0] = t1;
+    else if (mb.t[1] == t2) mb.t[1] = t1;
+    tris[t1] = T;
+    tris[t2] = MTri{};
+    tris[t2].inside = false;
+    edges[eXv] = MEdge{};
+    std::erase(verts[X].tris, t2);
+    for (int& x : verts[b].tris)
+      if (x == t2) x = t1;
+    merged[k / 2] = t1;
+  }
+  if (merged[0] >= 0 && merged[1] >= 0) {
+    tris[merged[0]].nb[2] = merged[1];
+    tris[merged[1]].nb[2] = merged[0];
+  }
+  edges[e].t[0] = merged[0];
+  edges[e].t[1] = merged[1];
+  edges[e].v[1] = W;
+  edges[eVW] = MEdge{};
+  V.tris.clear();
+  return true;
 }
 
 bool TopoMesh::unsplit(int v) {

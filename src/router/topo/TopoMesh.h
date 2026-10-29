@@ -83,6 +83,14 @@ class TopoMesh {
   // into the first (which keeps the old index); the other two triangles, the three edges and the
   // vertex itself are left dead (inside = false, no triangles). Returns false when it cannot.
   bool unsplit(int v);
+  // Splits edge e at p (on the edge) into (v[0], v) — keeping e's index and direction — and (v[1], v)
+  // (new, directed from v[1]); each adjacent triangle (U, W, X) becomes (U, v, X) — keeping its index —
+  // and (v, W, X) (new). Returns the vertex; its triangles are [tA, tA', tB, tB'] (tB part missing when
+  // the edge is a hull edge). `newEdge` receives the (v[1], v) edge.
+  int splitEdge(int e, Vec2 p, VKind kind, int* newEdge);
+  // Undoes splitEdge for a vertex that still has exactly the triangles splitEdge made. Returns the
+  // edge index that absorbed the (v[1], v) edge (= the original edge) or -1 when it cannot.
+  bool unsplitEdge(int v);
   bool dead(int t) const { return !tris[t].inside && tris[t].nb[0] == -1 && tris[t].e[0] == -1; }
 };
 
