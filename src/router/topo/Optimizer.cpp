@@ -268,9 +268,46 @@ OptimizeResult optimize(Board& b, const OptimizeOptions& o) {
           if (c && c->gain > std::max(best ? best->gain : 0.0, 1000.0) && keepsConnectivity(c->board)) best = std::move(c);
         };
         consider(tryMove(b, idx, chosen, current, [](Board&) { return true; }, viaBox));  // re-shape in place
-        // Away from the crowding first (TopoR's move: the resultant of the tight edges, in shrinking
-        // steps), then the compass directions.
+        // Where the wire through the via would run straight: the midpoint of the two vertices next
+        // to the via along its wires (TopoR's F7 jog repair moves a via to (vh1 + vh2) / 2; its vias
+        // end up on the straight line of their wires), the geometric median when more wires meet.
         std::vector<Vec2> deltas;
+        {
+          std::vector<Vec2> qs;
+          for (size_t i = 0; i < b.tracks.size(); ++i) {
+            if (!chosen[i]) continue;
+            const Track& t = b.tracks[i];
+            if (vs.contains(t.a.v()) == vs.contains(t.b.v())) continue;
+            qs.push_back(vs.contains(t.a.v()) ? t.b.v() : t.a.v());
+          }
+          if (qs.size() >= 2) {
+            Vec2 P = v.pos.v();
+            if (qs.size() == 2) {
+              P = (qs[0] + qs[1]) * 0.5;
+            } else {
+              for (int it = 0; it < 20; ++it) {  // Weiszfeld
+                Vec2 num{};
+                double den = 0;
+                for (Vec2 q : qs) {
+                  double d = std::max((q - P).len(), 1.0);
+                  num = num + q / d;
+                  den += 1.0 / d;
+                }
+                Vec2 P1 = num / den;
+                bool done = (P1 - P).len() < 100;
+                P = P1;
+                if (done) break;
+              }
+            }
+            Vec2 d = P - v.pos.v();
+            if (d.len() > 1000) {
+              deltas.push_back(d);
+              deltas.push_back(d * 0.5);
+            }
+          }
+        }
+        // Away from the crowding (TopoR's move: the resultant of the tight edges, in shrinking
+        // steps), then the compass directions.
         if (push.len() > 1000) {
           Vec2 away = -push.normalized() * std::clamp(push.len(), 0.25 * step, 2.5 * step);
           deltas.push_back(away);
