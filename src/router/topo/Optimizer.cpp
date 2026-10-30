@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <map>
 #include <span>
 #include <format>
 #include <optional>
@@ -125,7 +126,7 @@ OptimizeResult optimize(Board& b, const OptimizeOptions& o) {
   double step = o.step;
   for (int it = 0; it < o.iterations && !cancelled(); ++it, step /= 2) {
     Board before = b;
-    int viaMoves0 = r.viaMoves, componentMoves0 = r.componentMoves;
+    int viaMoves0 = r.viaMoves, componentMoves0 = r.componentMoves, junctionMoves0 = r.junctionMoves;
     int moves = 0;
     int total = (o.vias ? int(b.vias.size()) : 0) + (o.components ? int(b.components.size()) : 0);
     int done = 0;
@@ -176,6 +177,86 @@ OptimizeResult optimize(Board& b, const OptimizeOptions& o) {
           }
         }
       }
+
+    // Free branch points — where three or more tracks of one net and layer meet at no pad or via —
+    // move like vias: the wires from them get shorter (TopoR's F5 slides such a junction too).
+    if (o.junctions) {
+      struct Junction { Point p; LayerId layer; int net; Coord width; };
+      std::vector<Junction> js;
+      {
+        std::map<std::tuple<Coord, Coord, LayerId, int>, std::pair<int, Coord>> deg;
+        for (const Track& t : b.tracks)
+          for (Point q : {t.a, t.b}) {
+            auto& d = deg[{q.x / 1000, q.y / 1000, t.layer, t.net}];
+            ++d.first;
+            d.second = std::max(d.second, t.width);
+          }
+        SpatialIndex pidx;
+        pidx.build(b);
+        for (auto& [k, d] : deg) {
+          if (d.first < 3) continue;
+          Point q{std::get<0>(k) * 1000, std::get<1>(k) * 1000};
+          LayerId layer = std::get<2>(k);
+          int net = std::get<3>(k);
+          if (!o.nets.empty() && !std::ranges::contains(o.nets, net)) continue;
+          bool onCopper = false;
+          BBox bb;
+          bb.add(q.v());
+          pidx.query(bb.inflated(1000), LayerMask(1) << layer, [&](ItemRef r) {
+            if (onCopper || (r.type != ItemType::Pad && r.type != ItemType::Via) || itemNet(b, r) != net) return;
+            for (auto& sh : itemShapes(b, r))
+              if (sh.distance(q.v()) <= 0) onCopper = true;
+          });
+          if (!onCopper) js.push_back({q, layer, net, d.second});
+        }
+      }
+      total += int(js.size());
+      for (const Junction& j : js) {
+        if (cancelled()) break;
+        if (o.progress) o.progress(++done, total, std::format("optimise {}: junctions", it + 1));
+        Shape js0 = Shape::circle(j.p.v(), j.width / 2.0);
+        LayerMask lm = LayerMask(1) << j.layer;
+        auto chosen = attachedTo(b, js0, lm, j.net);
+        if (std::ranges::none_of(chosen, [](char c) { return c != 0; })) continue;
+        std::vector<char> grown;
+        {
+          Board probe = b;
+          reshapeTracks(probe, chosen, nullptr, &grown, true);
+        }
+        std::vector<int> current;
+        for (size_t i = 0; i < grown.size(); ++i)
+          if (grown[i]) current.push_back(int(i));
+        SpatialIndex idx;
+        idx.build(b);
+        auto noBox = [](const Board&) { return BBox{}; };
+        std::optional<Candidate> best;
+        bool moved = false;
+        auto consider = [&](std::optional<Candidate> c, bool isMove) {
+          if (c && c->gain > std::max(best ? best->gain : 0.0, 1000.0) && keepsConnectivity(c->board)) {
+            best = std::move(c);
+            moved = isMove;
+          }
+        };
+        for (Vec2 d : kDirs) {
+          Vec2 delta = d * step;
+          consider(tryMove(
+                       b, idx, chosen, current,
+                       [&](Board& c) {
+                         dragEnds(c, js0, lm, j.net, delta);
+                         return true;
+                       },
+                       noBox),
+                   true);
+        }
+        if (best) {
+          b = std::move(best->board);
+          if (moved) {
+            ++moves;
+            ++r.junctionMoves;
+          }
+        }
+      }
+    }
 
     if (o.components && o.nets.empty())
       for (int ci = 0; ci < int(b.components.size()) && !cancelled(); ++ci) {
@@ -231,6 +312,7 @@ OptimizeResult optimize(Board& b, const OptimizeOptions& o) {
       b = std::move(before);
       r.viaMoves = viaMoves0;
       r.componentMoves = componentMoves0;
+      r.junctionMoves = junctionMoves0;
       r.log.push_back(std::format("iteration {}: step {:.3f} mm, {} move(s) undone ({} -> {} conflicts)", it + 1,
                                   step / kNmPerMm, moves, conflicts, now));
       break;

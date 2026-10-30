@@ -1258,13 +1258,14 @@ void MainWindow::optimize(bool components, bool thenRefine) {
     doc_->commitEdit(before, tr("Подвижка"));
     doc_->clearLog(tr("Подвижка"));
     for (auto& l : res.log) doc_->addLog({LogMessage::Kind::Info, tr("Подвижка"), QString::fromStdString(l)});
-    showHint(tr("Подвижка: переходов %1, компонентов %2; конфликтов %3 → %4; длина %5 → %6 мм")
+    showHint(tr("Подвижка: переходов %1, ветвлений %7, компонентов %2; конфликтов %3 → %4; длина %5 → %6 мм")
                  .arg(res.viaMoves)
                  .arg(res.componentMoves)
                  .arg(res.conflictsBefore)
                  .arg(res.conflictsAfter)
                  .arg(res.lengthBefore / 1e6, 0, 'f', 1)
-                 .arg(res.lengthAfter / 1e6, 0, 'f', 1),
+                 .arg(res.lengthAfter / 1e6, 0, 'f', 1)
+                 .arg(res.junctionMoves),
              10000);
     if (thenRefine) refine(true);
   });

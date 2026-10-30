@@ -15,6 +15,7 @@ struct OptimizeOptions {
   int iterations = 3;
   double step = 0.4 * kNmPerMm;  // first trial displacement; halved every iteration
   bool vias = true;
+  bool junctions = true;    // also move the free branch points where wires of one net meet
   bool components = false;  // also move unlocked components (pads keep their relative layout)
   std::vector<int> nets;    // only vias of these nets (and no components); empty: everything unlocked
   std::function<void(int done, int total, const std::string& stage)> progress;
@@ -23,6 +24,7 @@ struct OptimizeOptions {
 
 struct OptimizeResult {
   int viaMoves = 0;
+  int junctionMoves = 0;
   int componentMoves = 0;
   int conflictsBefore = 0, conflictsAfter = 0;  // clearance/short/edge violations
   double lengthBefore = 0, lengthAfter = 0;     // nm

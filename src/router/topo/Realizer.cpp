@@ -1427,6 +1427,35 @@ RealizeStats reshapeTracks(Board& b, std::vector<char> chosen, std::vector<RealW
     split.push_back(cur);
   }
   wires = std::move(split);
+  // A chain ending inside a via or a round pad of its net connects at the centre (TopoR's
+  // connection point): the end snaps there, so the wire leaves the copper along the radius and no
+  // stub from the centre to the old vertex is left bent against it. A wire lying wholly inside one
+  // such pad or via is the copper itself and goes.
+  auto roundOwn = [&](Vec2 p, int net, LayerId layer) -> std::optional<std::pair<Vec2, double>> {
+    std::optional<std::pair<Vec2, double>> hit;
+    BBox q;
+    q.add(p);
+    idx.query(q.inflated(1000), LayerMask(1) << layer, [&](ItemRef r) {
+      if (hit || (r.type != ItemType::Pad && r.type != ItemType::Via) || itemNet(b, r) != net) return;
+      if (r.type == ItemType::Via) {
+        const Via& v = b.vias[r.index];
+        if ((v.pos.v() - p).len() <= v.diameter / 2.0) hit = {v.pos.v(), v.diameter / 2.0};
+        return;
+      }
+      Shape sh = b.pads[r.index].shapeGeom();
+      if (sh.kind == Shape::Kind::Point && sh.distance(p) <= 0) hit = {sh.a, sh.r};
+    });
+    return hit;
+  };
+  std::erase_if(wires, [&](RealWire& w) {
+    auto h0 = roundOwn(w.sketch.front(), w.net, w.layer), h1 = roundOwn(w.sketch.back(), w.net, w.layer);
+    if (h0 && h1 && (h0->first - h1->first).len2() < 1 &&
+        std::ranges::all_of(w.sketch, [&](Vec2 q) { return (q - h0->first).len() <= h0->second; }))
+      return true;  // inside one pad or via
+    if (h0) w.sketch.front() = h0->first;
+    if (h1) w.sketch.back() = h1->first;
+    return false;
+  });
   if (wiresOut) *wiresOut = wires;
   if (grownOut) *grownOut = chosen;
   if (wires.empty()) return {};

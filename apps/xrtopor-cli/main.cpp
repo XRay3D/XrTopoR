@@ -169,9 +169,9 @@ int main(int argc, char** argv) {
     oo.components = a.flag("--components");
     auto res = topo::optimize(b, oo);
     for (auto& l : res.log) std::println("{}", l);
-    std::println("moved {} via(s), {} component(s); conflicts {} -> {}; length {:.1f} -> {:.1f} mm; {:.2f} s", res.viaMoves,
-                 res.componentMoves, res.conflictsBefore, res.conflictsAfter, res.lengthBefore / 1e6,
-                 res.lengthAfter / 1e6, res.seconds);
+    std::println("moved {} via(s), {} junction(s), {} component(s); conflicts {} -> {}; length {:.1f} -> {:.1f} mm; {:.2f} s",
+                 res.viaMoves, res.junctionMoves, res.componentMoves, res.conflictsBefore, res.conflictsAfter,
+                 res.lengthBefore / 1e6, res.lengthAfter / 1e6, res.seconds);
     if (auto r = io::saveBoard(b, std::string(a.opt("-o"))); !r) return fail(r.error());
     return 0;
   }

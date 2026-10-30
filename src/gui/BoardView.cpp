@@ -1093,15 +1093,18 @@ std::vector<ItemRef> BoardView::wireOf(int track) const {
   const int net = t0.net;
   const LayerId layer = t0.layer;
   const LayerMask lm = LayerMask(1) << layer;
-  auto atPad = [&](Vec2 p) {
-    for (auto& pad : b.pads)
-      if (pad.net == net && (pad.copper & lm) && pad.shapeGeom().contains(p)) return true;
-    return false;
-  };
-  auto atVia = [&](Vec2 p) {
-    for (auto& v : b.vias)
-      if (v.net == net && v.onLayer(layer) && (v.pos.v() - p).len() <= v.diameter / 2.0) return true;
-    return false;
+  // The copper of the net the point lies in: a pad or a via (-1: none). The wire runs on inside it
+  // up to the connection point (the segments within one pad or via are part of the wire).
+  auto copperAt = [&](Vec2 p) -> std::pair<ItemType, int> {
+    for (int i = 0; i < int(b.pads.size()); ++i) {
+      const Pad& pad = b.pads[i];
+      if (pad.net == net && (pad.copper & lm) && pad.shapeGeom().contains(p)) return {ItemType::Pad, i};
+    }
+    for (int i = 0; i < int(b.vias.size()); ++i) {
+      const Via& v = b.vias[i];
+      if (v.net == net && v.onLayer(layer) && (v.pos.v() - p).len() <= v.diameter / 2.0) return {ItemType::Via, i};
+    }
+    return {ItemType::Track, -1};
   };
   auto touching = [&](Vec2 p, double tol) {
     std::vector<int> ts;
@@ -1120,15 +1123,17 @@ std::vector<ItemRef> BoardView::wireOf(int track) const {
   while (!todo.empty()) {
     auto [ti, p] = todo.back();
     todo.pop_back();
-    if (atPad(p) || atVia(p)) continue;
+    auto copper = copperAt(p);
     auto nb = touching(p, b.tracks[ti].width / 2.0);
     if (nb.size() != 2) continue;  // a free end, or a junction of several tracks
     int other = nb[0] == ti ? nb[1] : nb[0];
     if (seen[other]) continue;
+    const Track& t = b.tracks[other];
+    Vec2 far = (t.a.v() - p).len() <= (t.b.v() - p).len() ? t.b.v() : t.a.v();
+    if (copper.second >= 0 && copperAt(far) != copper) continue;  // leaves the pad or via: not this wire
     seen[other] = 1;
     out.push_back({ItemType::Track, other});
-    const Track& t = b.tracks[other];
-    todo.push_back({other, (t.a.v() - p).len() <= (t.b.v() - p).len() ? t.b.v() : t.a.v()});
+    todo.push_back({other, far});
   }
   return out;
 }
