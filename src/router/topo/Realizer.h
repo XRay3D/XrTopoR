@@ -51,6 +51,15 @@ struct RealizeOptions {
   bool tracksAsObstacles = false;
   // Only obstacles intersecting this box are considered (local re-shaping); outline always is.
   std::optional<BBox> region;
+  // Wire ends that lie on no pad or via (branch points of a manual routing): obstacles of their net
+  // for everybody else, or the taut paths of other nets run straight through the junction.
+  struct Anchor {
+    Vec2 pos;
+    LayerId layer;
+    int net;
+    double radius;
+  };
+  std::vector<Anchor> anchors;
 };
 
 // TopoR "F5": the chosen tracks (chains of one net/layer between pads, vias or branch points)

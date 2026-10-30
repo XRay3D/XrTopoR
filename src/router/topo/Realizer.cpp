@@ -247,6 +247,8 @@ LayerObstacles collect(const Board& b, LayerId layer, const std::vector<RealVia>
     if (v.onLayer(layer) && inRegion(Shape::circle(v.pos.v(), v.diameter / 2.0).bbox()))
       ob.add(v.pos.v(), v.diameter / 2.0, double(b.clearance(v.net, layer)), v.net);
   for (const RealVia& v : vias) ob.add(v.pos, v.diameter / 2.0, double(b.clearance(v.net, layer)), v.net);
+  for (const auto& a : opt.anchors)
+    if (a.layer == layer) ob.add(a.pos, a.radius, double(b.clearance(a.net, layer)), a.net);
   for (auto& loop : b.outline) {
     int first = int(ob.pts.size());
     int n = int(loop.size());
@@ -553,9 +555,13 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
             }
           }
           if (len >= 0 && len < w.width + 2.0 * double(w.clearance)) {
-            Vec2 E = M + n * (pad->r + reach);
+            // The exit point lies a clearance and half a width beyond the end: the first tangent then
+            // leaves the pad's neighbours room. (XR_EXITEDGE puts it on the copper boundary, as TopoR's
+            // wires end: measured no better — el4134 loses 3 µm at a USB-C pad, arz F5 unchanged.)
+            static const bool kBeyond = std::getenv("XR_EXITEDGE") == nullptr;
+            Vec2 E = M + n * (pad->r + (kBeyond ? reach : 0.0));
             size_t drop = 1;
-            while (drop + 1 < sk.size() && pad->distance(sk[drop]) < reach) ++drop;
+            while (drop + 1 < sk.size() && pad->distance(sk[drop]) < (kBeyond ? reach : 1.0)) ++drop;
             sk.erase(sk.begin(), sk.begin() + drop);
             // A via right in front of the end (a fanout site): the stub ends at it, no exit point beyond.
             Vec2 q = sk.front() - M;
@@ -1228,6 +1234,10 @@ RealizeStats reshapeTracks(Board& b, std::vector<char> chosen, std::vector<RealW
       if (z.layer == w.layer) { z.filled.clear(); break; }
   RealizeOptions opt;
   opt.tracksAsObstacles = true;
+  // Chain ends in free space (branch points) stay where they are and keep other nets away.
+  for (auto& w : wires)
+    for (Vec2 p : {w.sketch.front(), w.sketch.back()})
+      if (!onAnchor(Point(p), w.net, w.layer)) opt.anchors.push_back({p, w.layer, w.net, w.width / 2.0});
   if (local) {
     BBox box;
     for (auto& w : wires)
