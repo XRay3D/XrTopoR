@@ -249,11 +249,13 @@ OptimizeResult optimize(Board& b, const OptimizeOptions& o) {
         Shape vs = Shape::circle(v.pos.v(), v.diameter / 2.0);
         auto chosen = attachedTo(b, vs, v.layers, v.net);
         if (std::ranges::none_of(chosen, [](char c) { return c != 0; })) continue;
-        // Score of the current state over the same chains.
+        // Score of the current state over the same chains, and the squeeze on the via from it.
         std::vector<char> grown;
+        Vec2 push{};
         {
           Board probe = b;
-          reshapeTracks(probe, chosen, nullptr, &grown, true);
+          auto pst = reshapeTracks(probe, chosen, nullptr, &grown, true);
+          if (auto it = pst.viaPush.find(vi); it != pst.viaPush.end()) push = it->second;
         }
         std::vector<int> current;
         for (size_t i = 0; i < grown.size(); ++i)
@@ -266,8 +268,16 @@ OptimizeResult optimize(Board& b, const OptimizeOptions& o) {
           if (c && c->gain > std::max(best ? best->gain : 0.0, 1000.0) && keepsConnectivity(c->board)) best = std::move(c);
         };
         consider(tryMove(b, idx, chosen, current, [](Board&) { return true; }, viaBox));  // re-shape in place
-        for (Vec2 d : kDirs) {
-          Vec2 delta = d * step;
+        // Away from the crowding first (TopoR's move: the resultant of the tight edges, in shrinking
+        // steps), then the compass directions.
+        std::vector<Vec2> deltas;
+        if (push.len() > 1000) {
+          Vec2 away = -push.normalized() * std::clamp(push.len(), 0.25 * step, 2.5 * step);
+          deltas.push_back(away);
+          deltas.push_back(away * 0.5);
+        }
+        for (Vec2 d : kDirs) deltas.push_back(d * step);
+        for (Vec2 delta : deltas) {
           consider(tryMove(
               b, idx, chosen, current,
               [&](Board& c) {

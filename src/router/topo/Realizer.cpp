@@ -44,6 +44,7 @@ struct OPt {
   double clr = 0;
   int net = kNoNet;
   int shape = -1;  // index into LayerObstacles::shapes: the copper the point belongs to (pads)
+  int via = -1;    // the board via this point is (for the squeeze report)
 };
 
 struct Side {
@@ -253,9 +254,11 @@ LayerObstacles collect(const Board& b, LayerId layer, const std::vector<RealVia>
       }
     }
   }
-  for (const Via& v : b.vias)
+  for (size_t vi = 0; vi < b.vias.size(); ++vi) {
+    const Via& v = b.vias[vi];
     if (v.onLayer(layer) && inRegion(Shape::circle(v.pos.v(), v.diameter / 2.0).bbox()))
-      ob.add(v.pos.v(), v.diameter / 2.0, double(b.clearance(v.net, layer)), v.net);
+      ob.pts[ob.add(v.pos.v(), v.diameter / 2.0, double(b.clearance(v.net, layer)), v.net)].via = int(vi);
+  }
   for (const RealVia& v : vias) ob.add(v.pos, v.diameter / 2.0, double(b.clearance(v.net, layer)), v.net);
   for (const auto& a : opt.anchors)
     if (a.layer == layer) ob.add(a.pos, a.radius, double(b.clearance(a.net, layer)), a.net);
@@ -708,6 +711,7 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
     }
   }
   for (int round = 0; round < 6; ++round) {
+  st.viaPush.clear();
   for (auto&& [layer, ids] : byLayer) {
     const LayerObstacles& ob = obstacles.at(layer);
     for (auto& [uv, list] : edgeLists[layer]) {
@@ -805,6 +809,12 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
         margin = 0;
         slack = pack();
       }
+      // The squeeze on the vias at the ends of a tight edge: TopoR's F6/F7 push a via away from the
+      // neighbours whose edges carry more than fits (the sum of the unit vectors of the tight edges,
+      // weighted by the deficit).
+      if (slack < kMargin && L > 0)
+        for (auto [o, other] : {std::pair{&U, &V}, std::pair{&V, &U}})
+          if (o->via >= 0) st.viaPush[o->via] = st.viaPush[o->via] + (other->p - o->p) / L * (kMargin - slack);
       if (slack < 0) {
         if (round == 0) ++st.overflowEdges;
         if (round == 0 && std::getenv("XR_OVF")) {

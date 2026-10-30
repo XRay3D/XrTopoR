@@ -4,6 +4,7 @@
 // triangulation of obstacle points), then thickened into tangent segments + arcs whose
 // radii nest wires that wrap the same obstacle.
 #include <optional>
+#include <map>
 #include <vector>
 
 #include "core/Board.h"
@@ -42,6 +43,9 @@ struct RealizeStats {
   int sketchCrossings = 0;  // pairs of sketches that cross each other topologically (laid as drawn)
   std::vector<std::pair<int, int>> crossingNets;  // the nets of those pairs, each pair once
   std::vector<int> trackWire;  // wire index of every track appended, in order
+  // Per board via: the sum, over the edges from it whose wires do not fit with margin, of the unit
+  // vectors towards the other end weighted by the deficit (nm) — the direction the crowding comes from.
+  std::map<int, Vec2> viaPush;
 };
 
 struct RealizeOptions {
