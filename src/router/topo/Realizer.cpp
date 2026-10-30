@@ -681,9 +681,13 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
             int nw = list[k + 1].first;
             double spacing = wAt(k + 1) / 2.0 + std::max(double(wires[nw].clearance), double(w.clearance)) + margin +
                              wAt(k) / 2.0;
-            double packed = usedR(nw, uv.second, bb[k + 1]) + spacing;
             // Only outer wires adapt to inner ones (monotone: paths move outward only); the v side
-            // stays packed so that the two directions cannot push each other back and forth.
+            // stays packed — neither the actual crossings nor the bend radii of the inner wires feed
+            // it — so that the two directions cannot push each other back and forth. (Bend radii did
+            // feed it once: a wire crossing an edge twice around one via made the stacks from both ends
+            // grow every round until the slot overflowed and the path left its corridor — arz F5
+            // reference routing 102 violations, 38 without.)
+            double packed = bb[k + 1] + spacing;
             double act = -1;
             bb[k] = std::max({packed, act, need(V, w, wAt(k))});
             if (act > packed && act > need(V, w, wAt(k))) {
@@ -766,6 +770,35 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
     }
     portals.push_back({sk.back(), sk.back()});
     auto apexes = funnel(portals);
+    // A point portal (a slot without slack: the wire fits between the two end obstacles exactly, as
+    // TopoR lays a wire between two vias at the bare rule distance) gives the funnel no wall to hug,
+    // and it reports the right endpoint whatever the path does. Which end obstacle the path bends
+    // around there is the turn it makes: left turn, left endpoint.
+    for (size_t i = 0; i < apexes.size(); ++i) {
+      const auto& [l, r] = portals[apexes[i].portal];
+      if ((l - r).len2() >= 1) continue;
+      auto at = [&](size_t j) {
+        const FunnelApex& a = apexes[j];
+        return a.side > 0 ? portals[a.portal].first : portals[a.portal].second;
+      };
+      Vec2 prev = i == 0 ? sk.front() : at(i - 1), next = i + 1 == apexes.size() ? sk.back() : at(i + 1);
+      if (double o = orient(prev, l, next); o != 0) apexes[i].side = o > 0 ? +1 : -1;
+    }
+    if (const char* d = std::getenv("XR_DEBUG7"); d && std::atoi(d) == wi) {
+      std::println(stderr, "wire {} portals:", wi);
+      for (size_t k = 0; k < portals.size(); ++k) {
+        const auto& [l, r] = portals[k];
+        std::print(stderr, "  {}: L({:.3f},{:.3f}) R({:.3f},{:.3f})", k, l.x / 1e6, -l.y / 1e6, r.x / 1e6, -r.y / 1e6);
+        if (k >= 1 && k + 1 < portals.size()) {
+          const EdgeHit& h = hits[wi][k - 1];
+          std::print(stderr, " edge {}-{} uLeft {} lo {:.3f} hi {:.3f}", h.u, h.v, h.uLeft, slots[wi][k - 1].lo / 1e6, slots[wi][k - 1].hi / 1e6);
+        }
+        std::println(stderr, "");
+      }
+      std::print(stderr, "  apexes:");
+      for (auto& a : apexes) std::print(stderr, " [{} side {}]", a.portal, a.side);
+      std::println(stderr, "");
+    }
 
     auto L_of = [&](const EdgeHit& h) { return (ob.pts[h.v].p - ob.pts[h.u].p).len(); };
     // The ends take the width of the first and last crossing: a wire leaving a fine-pitch pad from
@@ -1097,14 +1130,48 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
 }
 
 RealizeStats reshapeTracks(Board& b, std::vector<char> chosen, std::vector<RealWire>* wiresOut,
-                           std::vector<char>* grownOut, bool local) {
+                           std::vector<char>* grownOut, bool local, double glue) {
   chosen.resize(b.tracks.size(), 0);
+  // Vertices: the ends of the tracks. Ends of one net and layer that nearly coincide (a wire drawn
+  // by hand up to the end of another misses it by a few um; the copper overlaps all the same) are
+  // one vertex: within `glue` of the width, never less than 1 um.
+  if (const char* e = std::getenv("XR_GLUE")) glue = std::atof(e);
+  double maxTol = 1000.0;
+  for (const auto& t : b.tracks) maxTol = std::max(maxTol, glue * t.width);
+  const Coord cell = Coord(maxTol) + 1;
+  struct VEnd { int track; Point p; int vertex; };
+  std::vector<VEnd> vends;
+  std::map<std::tuple<Coord, Coord, LayerId, int>, std::vector<int>> cells;  // cell -> indices in vends
+  std::vector<std::array<int, 2>> vid(b.tracks.size());
+  int nVertices = 0;
+  for (size_t i = 0; i < b.tracks.size(); ++i)
+    for (int e = 0; e < 2; ++e) {
+      const Track& t = b.tracks[i];
+      Point p = e ? t.b : t.a;
+      Coord cx = p.x / cell, cy = p.y / cell;
+      int found = -1;
+      double best = 0;
+      for (Coord dx = -1; dx <= 1 && found < 0; ++dx)
+        for (Coord dy = -1; dy <= 1; ++dy) {
+          auto it = cells.find({cx + dx, cy + dy, t.layer, t.net});
+          if (it == cells.end()) continue;
+          for (int k : it->second) {
+            const VEnd& o = vends[k];
+            double tol = std::max(1000.0, glue * std::min<double>(t.width, b.tracks[o.track].width));
+            double d = (o.p.v() - p.v()).len();
+            if (d <= tol && (found < 0 || d < best)) found = o.vertex, best = d;
+          }
+        }
+      int v = found >= 0 ? found : nVertices++;
+      vid[i][e] = v;
+      cells[{cx, cy, t.layer, t.net}].push_back(int(vends.size()));
+      vends.push_back({int(i), p, v});
+    }
   // Grow the choice to whole chains of the same net and layer.
-  auto key = [](Point p) { return std::pair{p.x / 1000, p.y / 1000}; };  // 1 um buckets
-  std::map<std::pair<Coord, Coord>, std::vector<int>> ends;
+  std::vector<std::vector<int>> ends(nVertices);
   for (size_t i = 0; i < b.tracks.size(); ++i) {
-    ends[key(b.tracks[i].a)].push_back(int(i));
-    ends[key(b.tracks[i].b)].push_back(int(i));
+    ends[vid[i][0]].push_back(int(i));
+    ends[vid[i][1]].push_back(int(i));
   }
   auto sameChain = [&](int i, int j) {
     return b.tracks[i].net == b.tracks[j].net && b.tracks[i].layer == b.tracks[j].layer && !b.tracks[j].locked;
@@ -1115,19 +1182,21 @@ RealizeStats reshapeTracks(Board& b, std::vector<char> chosen, std::vector<RealW
   while (!stack.empty()) {
     int i = stack.back();
     stack.pop_back();
-    for (Point p : {b.tracks[i].a, b.tracks[i].b})
-      for (int j : ends[key(p)])
+    for (int v : vid[i])
+      for (int j : ends[v])
         if (!chosen[j] && sameChain(i, j)) {
           chosen[j] = 1;
           stack.push_back(j);
         }
   }
-  // Degree of each end point among chosen tracks of the same net/layer; vias and pads also end chains.
-  std::map<std::pair<Coord, Coord>, int> degree;
+  // Degree of each vertex among the chosen tracks (vertices are per layer and net already: wires of
+  // other layers or nets may share a corner — TopoR lays parallel buses with coincident corners —
+  // which is no branch of this chain); vias and pads also end chains.
+  std::vector<int> degree(nVertices, 0);
   for (size_t i = 0; i < b.tracks.size(); ++i)
     if (chosen[i]) {
-      degree[key(b.tracks[i].a)]++;
-      degree[key(b.tracks[i].b)]++;
+      degree[vid[i][0]]++;
+      degree[vid[i][1]]++;
     }
   // Chains end at branch points and wherever a vertex touches a pad or via of its net: manual
   // routes often enter a pad off-centre, and the taut path must still pass through that copper.
@@ -1144,10 +1213,10 @@ RealizeStats reshapeTracks(Board& b, std::vector<char> chosen, std::vector<RealW
     });
     return hit;
   };
-  auto isEnd = [&](Point p, const Track& t) { return degree[key(p)] != 2 || onAnchor(p, t.net, t.layer); };
+  auto isEnd = [&](int v, Point p, const Track& t) { return degree[v] != 2 || onAnchor(p, t.net, t.layer); };
   std::vector<char> used(b.tracks.size(), 0);
   std::vector<RealWire> wires;
-  auto walkFrom = [&](int start, Point from) {
+  auto walkFrom = [&](int start, int fromEnd) {
     RealWire w;
     const Track& t0 = b.tracks[start];
     w.net = t0.net;
@@ -1155,36 +1224,39 @@ RealizeStats reshapeTracks(Board& b, std::vector<char> chosen, std::vector<RealW
     w.width = t0.width;
     w.widthMin = std::min(t0.width, b.minTrackWidth(t0.net, t0.layer));
     w.clearance = b.clearance(t0.net, t0.layer);
-    Point cur = from;
-    int ti = start;
-    w.sketch.push_back(cur.v());
+    int ti = start, curV = vid[start][fromEnd];
+    w.sketch.push_back((fromEnd ? t0.b : t0.a).v());
     while (true) {
       used[ti] = 1;
       const Track& t = b.tracks[ti];
-      Point next = (key(t.a) == key(cur)) ? t.b : t.a;
+      int nextEnd = (vid[ti][0] == curV) ? 1 : 0;
+      Point next = nextEnd ? t.b : t.a;
       if (t.isArc()) {
         auto pts = t.path(20000);
-        if (key(Point(pts.front())) != key(cur)) std::ranges::reverse(pts);
+        if (nextEnd == 0) std::ranges::reverse(pts);
         for (size_t k = 1; k + 1 < pts.size(); ++k) w.sketch.push_back(pts[k]);
       }
-      w.sketch.push_back(next.v());
-      cur = next;
-      if (isEnd(cur, t)) break;
+      if (w.sketch.back() != next.v()) w.sketch.push_back(next.v());
+      curV = vid[ti][nextEnd];
+      if (isEnd(curV, next, t)) break;
       int cont = -1;
-      for (int j : ends[key(cur)])
+      for (int j : ends[curV])
         if (chosen[j] && !used[j] && j != ti && sameChain(ti, j)) cont = j;
       if (cont < 0) break;
       ti = cont;
+      // The glued ends may differ by a few um: the sketch continues from the next track's own end.
+      Point from = vid[ti][0] == curV ? b.tracks[ti].a : b.tracks[ti].b;
+      if (from != next) w.sketch.push_back(from.v());
     }
     wires.push_back(std::move(w));
   };
   for (size_t i = 0; i < b.tracks.size(); ++i) {
     if (!chosen[i] || used[i]) continue;
-    if (isEnd(b.tracks[i].a, b.tracks[i])) walkFrom(int(i), b.tracks[i].a);
-    else if (isEnd(b.tracks[i].b, b.tracks[i])) walkFrom(int(i), b.tracks[i].b);
+    if (isEnd(vid[i][0], b.tracks[i].a, b.tracks[i])) walkFrom(int(i), 0);
+    else if (isEnd(vid[i][1], b.tracks[i].b, b.tracks[i])) walkFrom(int(i), 1);
   }
   for (size_t i = 0; i < b.tracks.size(); ++i)
-    if (chosen[i] && !used[i]) walkFrom(int(i), b.tracks[i].a);  // closed loops
+    if (chosen[i] && !used[i]) walkFrom(int(i), 0);  // closed loops
   // A segment running through a pad or via of its own net (not at a vertex) connects it; the taut
   // path would leave it, so the chain is split at the point nearest to that anchor.
   std::vector<RealWire> split;

@@ -66,9 +66,11 @@ struct RealizeOptions {
 // become sketches, are removed from the board and realised again with all other copper as
 // obstacles. Returns the sketches used (for diagnostics) through `wires` when given.
 // `grown` receives the final choice (whole chains) as a mask over the tracks before the call;
-// `local` limits the obstacles to the neighbourhood of the chosen chains (faster, same result).
+// `local` limits the obstacles to the neighbourhood of the chosen chains (faster, same result);
+// `glue` (fraction of the track width, env XR_GLUE) joins chain ends of one net and layer that
+// nearly coincide.
 RealizeStats reshapeTracks(Board& b, std::vector<char> chosen, std::vector<RealWire>* wires = nullptr,
-                           std::vector<char>* grown = nullptr, bool local = false);
+                           std::vector<char>* grown = nullptr, bool local = false, double glue = 0.1);
 
 // TopoR's «подрезка» by the copper as it lies: every track from `firstTrack` on that comes closer to
 // other nets' copper than its clearance is narrowed to what fits, down to the minimum width of its
