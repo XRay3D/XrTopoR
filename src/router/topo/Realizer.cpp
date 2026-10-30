@@ -31,6 +31,7 @@ using CDT = CGAL::Constrained_Delaunay_triangulation_2<K, Tds, CGAL::Exact_predi
 using CPoint = CDT::Point;
 
 constexpr double kMargin = kRealizeMargin;
+constexpr double kExitRadius = 1.0 * kNmPerMm;  // the largest exit arc out of a pad end
 
 // An obstacle point: pads contribute their centre (circles), segment ends (ovals) or core polygon
 // corners; vias their centre; the outline its vertices.
@@ -501,6 +502,7 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
   struct Stub {
     Vec2 from, mid, to;  // pad point -> middle of the end -> exit point
     bool on = false;
+    double free = 0;     // length of the stub beyond the copper (room for the exit arc)
   };
   std::vector<std::array<Stub, 2>> stubs(NW);
   std::vector<Polyline> sketches(NW);
@@ -582,7 +584,7 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
             Vec2 q = sk.front() - M;
             if (q.dot(n) < (E - M).dot(n) && std::abs(q.cross(n)) <= w.width / 2.0) E = sk.front();
             else sk.insert(sk.begin(), E);
-            stubs[wi][end] = {p, M, E, true};
+            stubs[wi][end] = {p, M, E, true, std::max(0.0, (E - M).len() - pad->r)};
             on = true;
           }
         }
@@ -1183,6 +1185,8 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
   st.droppedApexes = 0;
   }  // rounds
 
+  SpatialIndex oidx;  // the copper as it lies now (the chosen tracks are gone): exit arcs keep clear of it
+  oidx.build(b);
   for (int wi = 0; wi < NW; ++wi) {
     const RealWire& w = wires[wi];
     for (double x : hw[wi])
@@ -1199,6 +1203,67 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
       b.tracks.push_back(t);
       st.trackWire.push_back(wi);
     };
+    auto emitArc = [&](Vec2 c, Vec2 from, double sweep, double width) {
+      auto g = ArcGeom::fromCenter(c, from, sweep);
+      if (!g.valid) return;
+      Track t;
+      t.a = Point(from);
+      t.mid = Point(g.mid());
+      t.b = Point(g.end());
+      t.width = Coord(std::llround(width));
+      t.layer = w.layer;
+      t.net = w.net;
+      b.tracks.push_back(t);
+      st.trackWire.push_back(wi);
+      ++st.arcs;
+    };
+    // The exit arc: the straight stub out of a pad end turns onto its first tangent with an arc, as
+    // TopoR's wires leave their pins — a fillet tangent to both, as large as the stub's free length,
+    // the tangent and the copper around allow (it cuts the corner, towards the neighbouring pad).
+    // `dA`/`dB`: how far back along A->E and E->B the arc may start and end.
+    auto fillet = [&](Vec2 A, Vec2 E, Vec2 B, double dA, double dB, double width, Vec2& T1, Vec2& T2, Vec2& C,
+                      double& sweep) {
+      Vec2 u = A - E, v = B - E;
+      double lu = u.len(), lv = v.len();
+      if (lu < 1 || lv < 1) return false;
+      u = u / lu;
+      v = v / lv;
+      double phi = std::acos(std::clamp(u.dot(v), -1.0, 1.0));  // interior angle at E
+      double alpha = kPi - phi;                                  // the turn
+      if (alpha < 0.03 || phi < 0.2) return false;
+      // Tangent length d: radius R = d * tan(phi/2), centre on the bisector at d / cos(phi/2).
+      double d = std::min({dA, dB, kExitRadius / std::tan(phi / 2)});
+      for (int it = 0; it < 4 && d > 1000; ++it, d *= 0.5) {
+        T1 = E + u * d;
+        T2 = E + v * d;
+        C = E + (u + v).normalized() * (d / std::cos(phi / 2));
+        sweep = (orient(A, E, B) > 0 ? 1 : -1) * alpha;
+        auto g = ArcGeom::fromCenter(C, T1, sweep);
+        if (g.valid && (g.end() - T2).len() > 1000) {  // the other way round
+          sweep = -sweep;
+          g = ArcGeom::fromCenter(C, T1, sweep);
+        }
+        if (!g.valid || (g.end() - T2).len() > 1000) return false;
+        bool ok = true;
+        BBox bb;
+        bb.add(T1);
+        bb.add(T2);
+        bb.add(E);
+        double need = width / 2.0 + double(w.clearance);
+        auto pts = g.tessellate(20000);
+        oidx.query(bb.inflated(need + 1000), LayerMask(1) << w.layer, [&](ItemRef r) {
+          if (!ok || itemNet(b, r) == w.net) return;
+          for (auto& sh : itemShapes(b, r))
+            for (Vec2 q : pts)
+              if (sh.distance(q) < need) {
+                ok = false;
+                return;
+              }
+        });
+        if (ok) return true;
+      }
+      return false;
+    };
     const auto& cs = bendsOf[wi];
     const auto& ti = tinOf[wi];
     const auto& to = toutOf[wi];
@@ -1209,14 +1274,37 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
       }
     if (cs.size() < 2) continue;
     size_t n = cs.size();
+    Vec2 startAt = cs[0].c, endAt = cs[n - 1].c;
     if (stubs[wi][0].on) {
-      emitSeg(stubs[wi][0].from, stubs[wi][0].mid, cs[0].width);
-      emitSeg(stubs[wi][0].mid, stubs[wi][0].to, cs[0].width);
+      const Stub& s0 = stubs[wi][0];
+      Vec2 q = (n == 2) ? cs[1].c : ti[1];
+      Vec2 T1, T2, C;
+      double sw;
+      emitSeg(s0.from, s0.mid, cs[0].width);
+      if (fillet(s0.mid, s0.to, q, s0.free, 0.5 * (q - s0.to).len(), cs[0].width, T1, T2, C, sw)) {
+        emitSeg(s0.mid, T1, cs[0].width);
+        emitArc(C, T1, sw, cs[0].width);
+        startAt = T2;
+      } else {
+        emitSeg(s0.mid, s0.to, cs[0].width);
+      }
     }
-    Vec2 cur = cs[0].c;
+    Vec2 endT2, endC;
+    double endSweep = 0;
+    bool endArc = false;
+    if (stubs[wi][1].on) {
+      const Stub& s1 = stubs[wi][1];
+      Vec2 pl = (n == 2) ? startAt : to[n - 2];
+      Vec2 T1;
+      if (fillet(pl, s1.to, s1.mid, 0.5 * (pl - s1.to).len(), s1.free, cs[n - 1].width, T1, endT2, endC, endSweep)) {
+        endAt = T1;
+        endArc = true;
+      }
+    }
+    Vec2 cur = startAt;
     for (size_t k = 0; k + 1 < n; ++k) {
-      Vec2 p = (k == 0) ? cs[0].c : to[k];
-      Vec2 q = (k + 1 == n - 1) ? cs[n - 1].c : ti[k + 1];
+      Vec2 p = (k == 0) ? startAt : to[k];
+      Vec2 q = (k + 1 == n - 1) ? endAt : ti[k + 1];
       // The tangent runs through every portal between its bends: as narrow as the narrowest of them.
       double width = std::min(cs[k].width, cs[k + 1].width);
       for (int hi = cs[k].portal + 1; hi < cs[k + 1].portal; ++hi)
@@ -1245,8 +1333,14 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
       }
     }
     if (stubs[wi][1].on) {
-      emitSeg(stubs[wi][1].to, stubs[wi][1].mid, cs[n - 1].width);
-      emitSeg(stubs[wi][1].mid, stubs[wi][1].from, cs[n - 1].width);
+      const Stub& s1 = stubs[wi][1];
+      if (endArc) {
+        emitArc(endC, endAt, endSweep, cs[n - 1].width);
+        emitSeg(endT2, s1.mid, cs[n - 1].width);
+      } else {
+        emitSeg(s1.to, s1.mid, cs[n - 1].width);
+      }
+      emitSeg(s1.mid, s1.from, cs[n - 1].width);
     }
     ++st.wires;
   }
@@ -1470,9 +1564,16 @@ RealizeStats reshapeTracks(Board& b, std::vector<char> chosen, std::vector<RealW
   RealizeOptions opt;
   opt.tracksAsObstacles = true;
   // Chain ends in free space (branch points) stay where they are and keep other nets away.
+  // One anchor per point, as wide as the widest wire meeting there (a thin branch off a wide bus).
   for (auto& w : wires)
-    for (Vec2 p : {w.sketch.front(), w.sketch.back()})
-      if (!onAnchor(Point(p), w.net, w.layer)) opt.anchors.push_back({p, w.layer, w.net, w.width / 2.0});
+    for (Vec2 p : {w.sketch.front(), w.sketch.back()}) {
+      if (onAnchor(Point(p), w.net, w.layer)) continue;
+      auto it = std::ranges::find_if(opt.anchors, [&](const RealizeOptions::Anchor& a) {
+        return a.layer == w.layer && a.net == w.net && (a.pos - p).len2() < 1e6;
+      });
+      if (it != opt.anchors.end()) it->radius = std::max(it->radius, w.width / 2.0);
+      else opt.anchors.push_back({p, w.layer, w.net, w.width / 2.0});
+    }
   if (local) {
     BBox box;
     for (auto& w : wires)

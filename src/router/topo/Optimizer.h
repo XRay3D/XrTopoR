@@ -34,4 +34,10 @@ struct OptimizeResult {
 
 OptimizeResult optimize(Board& b, const OptimizeOptions& opt = {});
 
+// F5's second half: every free branch point (three or more tracks of one net and layer meeting at no
+// pad or via) slides towards the point that makes the wires from it shortest (the geometric median of
+// their first vertices), the wires are re-shaped around the copper as it lies, and the move stays
+// when it leaves the neighbourhood no worse. Returns the number of junctions moved.
+int settleJunctions(Board& b, const std::vector<int>& nets = {}, int rounds = 3);
+
 }  // namespace xr::topo

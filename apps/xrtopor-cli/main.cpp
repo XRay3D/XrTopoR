@@ -33,7 +33,7 @@ void usage() {
       "  import-ses <board> <routes.ses> -o <out>\n"
       "  gerber     <board> <outdir>\n"
       "  svg        <board> <out.svg>\n"
-      "  reshape    <board> -o <out> [--nets a,b]  recompute track shapes (TopoR F5); --nets: those chains only\n"
+      "  reshape    <board> -o <out> [--nets a,b] [--no-settle]  recompute track shapes (TopoR F5); --nets: those chains only\n"
       "  optimize   <board> -o <out> [--iterations N] [--step MM] [--components]   move vias/parts (F7)\n"
       "  refine     <board> -o <out> [--same-layer]   shorter wire paths around the copper as it lies (F6)\n"
       "  fill       <board> -o <out> [--no-thermals]  pour copper zones\n"
@@ -201,6 +201,13 @@ int main(int argc, char** argv) {
                  st.droppedApexes, st.arcBends, st.sketchCrossings);
     for (auto [n1, n2] : st.crossingNets)
       std::println("  topological crossing of {} and {} (laid as drawn)", b.nets[n1].name, b.nets[n2].name);
+    if (!a.flag("--no-settle")) {
+      std::vector<int> nets;
+      if (local)
+        for (size_t i = 0; i < b.nets.size(); ++i)
+          if (std::ranges::contains(a.opt("--nets") | std::views::split(',') | std::ranges::to<std::vector<std::string>>(), b.nets[i].name)) nets.push_back(int(i));
+      std::println("junctions settled: {}", topo::settleJunctions(b, nets));
+    }
     if (auto r = io::saveBoard(b, std::string(a.opt("-o"))); !r) return fail(r.error());
     return 0;
   }

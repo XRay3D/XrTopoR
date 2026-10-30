@@ -18,6 +18,7 @@
 #include "gui/Schemes.h"
 #include "gui/SmallDialogs.h"
 #include "io/BoardIO.h"
+#include "router/topo/Optimizer.h"
 #include "router/topo/Realizer.h"
 #include "router/topo/Refine.h"
 
@@ -2072,12 +2073,17 @@ void BoardView::recomputeShapes() {
   }
   if (!any)
     for (size_t i = 0; i < b.tracks.size(); ++i) chosen[i] = !b.tracks[i].locked;
+  std::vector<int> nets;  // junctions settle on the re-laid nets only (all when everything is re-laid)
+  if (local)
+    for (size_t i = 0; i < b.tracks.size(); ++i)
+      if (chosen[i] && b.tracks[i].net != kNoNet && !std::ranges::contains(nets, b.tracks[i].net)) nets.push_back(b.tracks[i].net);
   auto before = doc_->beginEdit();
   auto st = topo::reshapeTracks(b, std::move(chosen), nullptr, nullptr, local);
+  int settled = topo::settleJunctions(b, nets);
   for (auto& t : b.tracks) t.edited = false;
   doc_->clearSelection();
   doc_->commitEdit(before, tr("Расчёт формы проводников"), false);
-  QString msg = tr("Расчёт формы проводников: %1 проводник(ов), %2 дуг").arg(st.wires).arg(st.arcs);
+  QString msg = tr("Расчёт формы проводников: %1 проводник(ов), %2 дуг, ветвлений стянуто %3").arg(st.wires).arg(st.arcs).arg(settled);
   if (!st.crossingNets.empty()) {
     QStringList pairs;
     for (auto [n1, n2] : st.crossingNets)

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <limits>
 #include <map>
 #include <span>
 #include <format>
@@ -110,6 +111,115 @@ void dragEnds(Board& b, const Shape& shape, LayerMask layers, int net, Vec2 d) {
 
 }  // namespace
 
+namespace {
+
+struct Junction { Point p; LayerId layer; int net; Coord width; };
+
+// Free branch points: three or more tracks of one net and layer meet at no pad or via.
+std::vector<Junction> junctionsOf(const Board& b, const std::vector<int>& nets) {
+  std::vector<Junction> js;
+  std::map<std::tuple<Coord, Coord, LayerId, int>, std::pair<int, Coord>> deg;
+  for (const Track& t : b.tracks)
+    for (Point q : {t.a, t.b}) {
+      auto& d = deg[{q.x / 1000, q.y / 1000, t.layer, t.net}];
+      ++d.first;
+      d.second = std::max(d.second, t.width);
+    }
+  SpatialIndex pidx;
+  pidx.build(b);
+  for (auto& [k, d] : deg) {
+    if (d.first < 3) continue;
+    Point q{std::get<0>(k) * 1000, std::get<1>(k) * 1000};
+    LayerId layer = std::get<2>(k);
+    int net = std::get<3>(k);
+    if (!nets.empty() && !std::ranges::contains(nets, net)) continue;
+    bool onCopper = false;
+    BBox bb;
+    bb.add(q.v());
+    pidx.query(bb.inflated(1000), LayerMask(1) << layer, [&](ItemRef r) {
+      if (onCopper || (r.type != ItemType::Pad && r.type != ItemType::Via) || itemNet(b, r) != net) return;
+      for (auto& sh : itemShapes(b, r))
+        if (sh.distance(q.v()) <= 0) onCopper = true;
+    });
+    if (!onCopper) js.push_back({q, layer, net, d.second});
+  }
+  return js;
+}
+
+}  // namespace
+
+int settleJunctions(Board& b, const std::vector<int>& nets, int rounds) {
+  int moved = 0;
+  size_t unrouted = Connectivity::compute(b).ratsnest.size();
+  for (int round = 0; round < rounds; ++round) {
+    int movedNow = 0;
+    for (const Junction& j : junctionsOf(b, nets)) {
+      Shape js0 = Shape::circle(j.p.v(), j.width / 2.0);
+      LayerMask lm = LayerMask(1) << j.layer;
+      // The first vertex of every track leaving the junction: the target is their geometric median.
+      std::vector<Vec2> qs;
+      for (const Track& t : b.tracks) {
+        if (t.net != j.net || t.layer != j.layer) continue;
+        if (js0.contains(t.a.v())) qs.push_back(t.b.v());
+        else if (js0.contains(t.b.v())) qs.push_back(t.a.v());
+      }
+      if (qs.size() < 3) continue;
+      Vec2 P = j.p.v();
+      double nearest = std::numeric_limits<double>::max();
+      for (Vec2 q : qs) nearest = std::min(nearest, (q - P).len());
+      for (int it = 0; it < 20; ++it) {  // Weiszfeld
+        Vec2 num{};
+        double den = 0;
+        for (Vec2 q : qs) {
+          double d = std::max((q - P).len(), 1.0);
+          num = num + q / d;
+          den += 1.0 / d;
+        }
+        Vec2 P1 = num / den;
+        if ((P1 - P).len() < 100) { P = P1; break; }
+        P = P1;
+      }
+      Vec2 delta = P - j.p.v();
+      if (delta.len() > 0.8 * nearest) delta = delta * (0.8 * nearest / delta.len());
+      if (delta.len() < 1000) continue;
+      auto chosen = attachedTo(b, js0, lm, j.net);
+      std::vector<char> grown;
+      {
+        Board probe = b;
+        reshapeTracks(probe, chosen, nullptr, &grown, true);
+      }
+      std::vector<int> current;
+      for (size_t i = 0; i < grown.size(); ++i)
+        if (grown[i]) current.push_back(int(i));
+      SpatialIndex idx;
+      idx.build(b);
+      auto noBox = [](const Board&) { return BBox{}; };
+      std::optional<Candidate> best;
+      for (double f : {1.0, 0.5, 0.25}) {
+        Vec2 d = delta * f;
+        auto c = tryMove(
+            b, idx, chosen, current,
+            [&](Board& x) {
+              dragEnds(x, js0, lm, j.net, d);
+              return true;
+            },
+            noBox);
+        if (c && c->gain >= 0 && Connectivity::compute(c->board).ratsnest.size() <= unrouted) {
+          best = std::move(c);
+          break;
+        }
+      }
+      if (best) {
+        b = std::move(best->board);
+        ++movedNow;
+      }
+    }
+    moved += movedNow;
+    if (movedNow == 0) break;
+  }
+  return moved;
+}
+
 OptimizeResult optimize(Board& b, const OptimizeOptions& o) {
   auto t0 = std::chrono::steady_clock::now();
   OptimizeResult r;
@@ -181,35 +291,7 @@ OptimizeResult optimize(Board& b, const OptimizeOptions& o) {
     // Free branch points — where three or more tracks of one net and layer meet at no pad or via —
     // move like vias: the wires from them get shorter (TopoR's F5 slides such a junction too).
     if (o.junctions) {
-      struct Junction { Point p; LayerId layer; int net; Coord width; };
-      std::vector<Junction> js;
-      {
-        std::map<std::tuple<Coord, Coord, LayerId, int>, std::pair<int, Coord>> deg;
-        for (const Track& t : b.tracks)
-          for (Point q : {t.a, t.b}) {
-            auto& d = deg[{q.x / 1000, q.y / 1000, t.layer, t.net}];
-            ++d.first;
-            d.second = std::max(d.second, t.width);
-          }
-        SpatialIndex pidx;
-        pidx.build(b);
-        for (auto& [k, d] : deg) {
-          if (d.first < 3) continue;
-          Point q{std::get<0>(k) * 1000, std::get<1>(k) * 1000};
-          LayerId layer = std::get<2>(k);
-          int net = std::get<3>(k);
-          if (!o.nets.empty() && !std::ranges::contains(o.nets, net)) continue;
-          bool onCopper = false;
-          BBox bb;
-          bb.add(q.v());
-          pidx.query(bb.inflated(1000), LayerMask(1) << layer, [&](ItemRef r) {
-            if (onCopper || (r.type != ItemType::Pad && r.type != ItemType::Via) || itemNet(b, r) != net) return;
-            for (auto& sh : itemShapes(b, r))
-              if (sh.distance(q.v()) <= 0) onCopper = true;
-          });
-          if (!onCopper) js.push_back({q, layer, net, d.second});
-        }
-      }
+      std::vector<Junction> js = junctionsOf(b, o.nets);
       total += int(js.size());
       for (const Junction& j : js) {
         if (cancelled()) break;
