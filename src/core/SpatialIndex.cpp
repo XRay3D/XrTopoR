@@ -140,6 +140,57 @@ void SpatialIndex::build(const Board& b, bool withTracks, bool withZones) {
   d_->tree = bgi::rtree<Value, bgi::rstar<16>>(vals.begin(), vals.end());
 }
 
+void SpatialIndex::build(const Board& b, const BBox& region) {
+  std::vector<Value> vals;
+  // A box that surely contains the item, from its position and size alone.
+  auto coarse = [&](ItemRef r) {
+    BBox bb;
+    switch (r.type) {
+      case ItemType::Pad: {
+        const Pad& p = b.pads[r.index];
+        double h = std::max<double>(std::max(p.shape.w, p.shape.h), p.drill);
+        for (Vec2 q : p.shape.poly) h = std::max(h, 2 * std::max(std::abs(q.x), std::abs(q.y)));
+        bb.add(p.pos.v() - Vec2{h, h});
+        bb.add(p.pos.v() + Vec2{h, h});
+        break;
+      }
+      case ItemType::Track: {
+        const Track& t = b.tracks[r.index];
+        double h = double(t.width);
+        if (t.mid) h += (t.a.v() - t.b.v()).len();  // an arc bulges at most its chord's length
+        bb.add(t.a.v() - Vec2{h, h});
+        bb.add(t.a.v() + Vec2{h, h});
+        bb.add(t.b.v() - Vec2{h, h});
+        bb.add(t.b.v() + Vec2{h, h});
+        break;
+      }
+      case ItemType::Via: {
+        const Via& v = b.vias[r.index];
+        double h = double(v.diameter);
+        bb.add(v.pos.v() - Vec2{h, h});
+        bb.add(v.pos.v() + Vec2{h, h});
+        break;
+      }
+      default: return itemBBox(b, r);
+    }
+    return bb;
+  };
+  auto add = [&](ItemType t, int n) {
+    for (int i = 0; i < n; ++i) {
+      ItemRef r{t, i};
+      if (!coarse(r).intersects(region)) continue;
+      BBox bb = itemBBox(b, r);
+      if (!bb.valid()) continue;
+      vals.push_back({BBoxG(BPoint(bb.minX, bb.minY), BPoint(bb.maxX, bb.maxY)), Entry{r, itemLayers(b, r)}});
+    }
+  };
+  add(ItemType::Pad, int(b.pads.size()));
+  add(ItemType::Track, int(b.tracks.size()));
+  add(ItemType::Via, int(b.vias.size()));
+  add(ItemType::Zone, int(b.zones.size()));
+  d_->tree = bgi::rtree<Value, bgi::rstar<16>>(vals.begin(), vals.end());
+}
+
 void SpatialIndex::query(const BBox& box, LayerMask mask, const std::function<void(ItemRef)>& f) const {
   if (!box.valid()) return;
   BBoxG q(BPoint(box.minX, box.minY), BPoint(box.maxX, box.maxY));

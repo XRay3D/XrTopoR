@@ -2,15 +2,16 @@
 
 #include <algorithm>
 #include <chrono>
-#include <future>
 #include <unordered_set>
 #include <limits>
 #include <map>
 #include <span>
 #include <format>
 #include <optional>
+#include <print>
 
 #include "core/Connectivity.h"
+#include "core/Parallel.h"
 #include "core/Prof.h"
 #include "core/SpatialIndex.h"
 #include "drc/Drc.h"
@@ -87,6 +88,10 @@ struct Candidate {
   double gain = 0;  // score decrease over the move's region
 };
 
+
+
+
+
 // The moved via or pads: their box on a board, and their item refs (the same on both boards).
 struct MovedItems {
   std::function<BBox(const Board&)> box = [](const Board&) { return BBox{}; };
@@ -95,9 +100,12 @@ struct MovedItems {
 
 // Re-shapes the chosen tracks (`current` once grown to whole chains) on a copy of `b` after `move`
 // was applied to it and scores the result against `b`. `items` gives the moved via/pad boxes.
+// `base`: the score of the chains as they are (the same for every trial of one move set), computed
+// here when not given.
 template <class Move>
 std::optional<Candidate> tryMove(const Board& b, const SpatialIndex& idx, const std::vector<char>& chosen,
-                                 const std::vector<int>& current, Move&& move, const MovedItems& items) {
+                                 const std::vector<int>& current, Move&& move, const MovedItems& items,
+                                 std::optional<double> base = std::nullopt) {
   ProfScope ps("F7 tryMove");
   std::optional<Candidate> cand;
   {
@@ -113,23 +121,35 @@ std::optional<Candidate> tryMove(const Board& b, const SpatialIndex& idx, const 
   }
   std::vector<int> fresh;
   for (size_t i = c.board.tracks.size() - st.trackWire.size(); i < c.board.tracks.size(); ++i) fresh.push_back(int(i));
-  BBox region = tracksBox(b, current);
-  region.add(tracksBox(c.board, fresh));
-  region.add(items.box(b));
+  // Only the changed items are scored, so each side's region is its own changed items' box.
+  BBox region = tracksBox(c.board, fresh);
   region.add(items.box(c.board));
   region = region.inflated(double(b.maxClearance()));
   SpatialIndex cidx;
   {
     ProfScope p3("F7 tryMove: index build");
-    cidx.build(c.board);
+    cidx.build(c.board, region);
   }
   {
-    ProfScope p4("F7 tryMove: evaluate x2");
-    std::vector<char> was(b.tracks.size(), 0), now(c.board.tracks.size(), 0);
-    for (int i : current) was[i] = 1;
+    ProfScope p4("F7 tryMove: evaluate");
+    std::vector<char> now(c.board.tracks.size(), 0);
     for (int i : fresh) now[i] = 1;
     const std::vector<ItemRef>& moved = items.moved;
-    c.gain = evaluate(b, idx, region, was, moved).score() - evaluate(c.board, cidx, region, now, moved).score();
+    Local l0;
+    if (base) l0.length = *base;  // score() of a Local with no conflicts is its length: the base score goes in there
+    else {
+      std::vector<char> was(b.tracks.size(), 0);
+      for (int i : current) was[i] = 1;
+      BBox r0 = tracksBox(b, current);
+      r0.add(items.box(b));
+      l0 = evaluate(b, idx, r0.inflated(double(b.maxClearance())), was, moved);
+    }
+    Local l1 = evaluate(c.board, cidx, region, now, moved);
+    c.gain = l0.score() - l1.score();
+    if (std::getenv("XR_DEBUG_F7"))
+      std::println(stderr, "    eval: was {} tracks len {:.3f} conf {}/{:.3f}; now {} tracks len {:.3f} conf {}/{:.3f}; region {:.1f}x{:.1f}",
+                   current.size(), l0.length / 1e6, l0.conflicts.count, l0.conflicts.depth / 1e6, fresh.size(), l1.length / 1e6,
+                   l1.conflicts.count, l1.conflicts.depth / 1e6, region.width() / 1e6, region.height() / 1e6);
   }
   return cand;
 }
@@ -201,19 +221,24 @@ std::vector<Junction> junctionsOf(const Board& b, const std::vector<int>& nets) 
 int settleJunctions(Board& b, const std::vector<int>& nets, int rounds) {
   int moved = 0;
   size_t unrouted = Connectivity::compute(b).ratsnest.size();
+  MovedItems noBox;
   for (int round = 0; round < rounds; ++round) {
-    int movedNow = 0;
-    for (const Junction& j : junctionsOf(b, nets)) {
-      Shape js0 = Shape::circle(j.p.v(), j.width / 2.0);
-      LayerMask lm = LayerMask(1) << j.layer;
-      // The first vertex of every track leaving the junction: the target is their geometric median.
+    std::vector<Junction> js = junctionsOf(b, nets);
+    // The target of every junction, its chains and its best step — searched in parallel on the
+    // board as it is; the moves are then applied one by one, each re-tried on the board as the
+    // earlier ones left it.
+    struct Found { bool any = false; Vec2 delta; };
+    std::vector<Found> found(js.size());
+    SpatialIndex idx;
+    idx.build(b);
+    auto targetOf = [&](const Junction& j, const Shape& js0, Vec2& delta) {
       std::vector<Vec2> qs;
       for (const Track& t : b.tracks) {
         if (t.net != j.net || t.layer != j.layer) continue;
         if (js0.contains(t.a.v())) qs.push_back(t.b.v());
         else if (js0.contains(t.b.v())) qs.push_back(t.a.v());
       }
-      if (qs.size() < 3) continue;
+      if (qs.size() < 3) return false;
       Vec2 P = j.p.v();
       double nearest = std::numeric_limits<double>::max();
       for (Vec2 q : qs) nearest = std::min(nearest, (q - P).len());
@@ -229,22 +254,26 @@ int settleJunctions(Board& b, const std::vector<int>& nets, int rounds) {
         if ((P1 - P).len() < 100) { P = P1; break; }
         P = P1;
       }
-      Vec2 delta = P - j.p.v();
+      delta = P - j.p.v();
       if (delta.len() > 0.8 * nearest) delta = delta * (0.8 * nearest / delta.len());
-      if (delta.len() < 1000) continue;
-      auto chosen = attachedTo(b, js0, lm, j.net);
-      std::vector<char> grown;
-      {
-        Board probe = b;
-        reshapeTracks(probe, chosen, nullptr, &grown, true);
-      }
-      std::vector<int> current;
+      return delta.len() >= 1000;
+    };
+    auto chainsOf = [&](const Junction& j, const Shape& js0, std::vector<char>& chosen, std::vector<int>& current) {
+      chosen = attachedTo(b, js0, LayerMask(1) << j.layer, j.net);
+      auto grown = growChains(b, chosen);
+      current.clear();
       for (size_t i = 0; i < grown.size(); ++i)
         if (grown[i]) current.push_back(int(i));
-      SpatialIndex idx;
-      idx.build(b);
-      MovedItems noBox;
-      std::optional<Candidate> best;
+    };
+    parallelFor(js.size(), [&](size_t k) {
+      const Junction& j = js[k];
+      Shape js0 = Shape::circle(j.p.v(), j.width / 2.0);
+      LayerMask lm = LayerMask(1) << j.layer;
+      Vec2 delta;
+      if (!targetOf(j, js0, delta)) return;
+      std::vector<char> chosen;
+      std::vector<int> current;
+      chainsOf(j, js0, chosen, current);
       for (double f : {1.0, 0.5, 0.25}) {
         Vec2 d = delta * f;
         auto c = tryMove(
@@ -255,14 +284,33 @@ int settleJunctions(Board& b, const std::vector<int>& nets, int rounds) {
             },
             noBox);
         if (c && c->gain >= 0 && Connectivity::compute(c->board).ratsnest.size() <= unrouted) {
-          best = std::move(c);
+          found[k] = {true, d};
           break;
         }
       }
-      if (best) {
-        b = std::move(best->board);
-        ++movedNow;
-      }
+    });
+    int movedNow = 0;
+    for (size_t k = 0; k < js.size(); ++k) {
+      if (!found[k].any) continue;
+      const Junction& j = js[k];
+      Shape js0 = Shape::circle(j.p.v(), j.width / 2.0);
+      LayerMask lm = LayerMask(1) << j.layer;
+      std::vector<char> chosen;
+      std::vector<int> current;
+      chainsOf(j, js0, chosen, current);
+      SpatialIndex lidx;
+      lidx.build(b, tracksBox(b, current).inflated(found[k].delta.len() + 3 * double(b.maxClearance())));
+      Vec2 d = found[k].delta;
+      auto c = tryMove(
+          b, lidx, chosen, current,
+          [&](Board& x) {
+            dragEnds(x, js0, lm, j.net, d);
+            return true;
+          },
+          noBox);
+      if (!c || c->gain < 0 || Connectivity::compute(c->board).ratsnest.size() > unrouted) continue;
+      b = std::move(c->board);
+      ++movedNow;
     }
     moved += movedNow;
     if (movedNow == 0) break;
@@ -294,179 +342,297 @@ OptimizeResult optimize(Board& b, const OptimizeOptions& o) {
     int total = (o.vias ? int(b.vias.size()) : 0) + (o.components ? int(b.components.size()) : 0);
     int done = 0;
 
-    if (o.vias)
-      for (int vi = 0; vi < int(b.vias.size()) && !cancelled(); ++vi) {
-        if (o.progress) o.progress(++done, total, std::format("optimise {}: vias", it + 1));
+    if (o.vias) {
+      // The vias whose neighbourhoods are apart are searched in parallel batches: every one finds
+      // its best move on the board as it is at the batch's start, and the batch's moves are applied
+      // one after another (their regions are apart, so each re-shape comes out as it was scored).
+      // Track masks are taken afresh at every step: an applied move renumbers the tracks.
+      struct ViaJob {
+        int vi = -1;
+        Shape vs;
+        BBox region;
+        std::vector<char> chosen;
+        std::vector<int> current;
+        Vec2 push;
+      };
+      std::vector<ViaJob> jobs;
+      for (int vi = 0; vi < int(b.vias.size()); ++vi) {
         const Via& v = b.vias[vi];
         if (v.locked || (!o.nets.empty() && !std::ranges::contains(o.nets, v.net))) continue;
-        Shape vs = Shape::circle(v.pos.v(), v.diameter / 2.0);
-        auto chosen = attachedTo(b, vs, v.layers, v.net);
-        if (std::ranges::none_of(chosen, [](char c) { return c != 0; })) continue;
-        // Score of the current state over the same chains, and the squeeze on the via from it.
-        std::vector<char> grown;
-        Vec2 push{};
-        {
-          ProfScope p("F7 probe reshape");
-          Board probe = b;
-          auto pst = reshapeTracks(probe, chosen, nullptr, &grown, true);
-          if (auto it = pst.viaPush.find(vi); it != pst.viaPush.end()) push = it->second;
-        }
-        std::vector<int> current;
-        for (size_t i = 0; i < grown.size(); ++i)
-          if (grown[i]) current.push_back(int(i));
-        SpatialIndex idx;
-        {
-          ProfScope p("F7 index build (base)");
-          idx.build(b);
-        }
-        MovedItems viaBox{[vi](const Board& x) { return Shape::circle(x.vias[vi].pos.v(), x.vias[vi].diameter / 2.0).bbox(); },
-                          {ItemRef{ItemType::Via, vi}}};
-        std::optional<Candidate> best;
-        auto consider = [&](std::optional<Candidate> c) {
-          if (c && c->gain > std::max(best ? best->gain : 0.0, 1000.0) && keepsConnectivity(c->board)) best = std::move(c);
-        };
-        consider(tryMove(b, idx, chosen, current, [](Board&) { return true; }, viaBox));  // re-shape in place
-        // Where the wire through the via would run straight: the midpoint of the two vertices next
-        // to the via along its wires (TopoR's F7 jog repair moves a via to (vh1 + vh2) / 2; its vias
-        // end up on the straight line of their wires), the geometric median when more wires meet.
-        std::vector<Vec2> deltas;
-        {
-          std::vector<Vec2> qs;
-          for (size_t i = 0; i < b.tracks.size(); ++i) {
-            if (!chosen[i]) continue;
-            const Track& t = b.tracks[i];
-            if (vs.contains(t.a.v()) == vs.contains(t.b.v())) continue;
-            qs.push_back(vs.contains(t.a.v()) ? t.b.v() : t.a.v());
-          }
-          if (qs.size() >= 2) {
-            Vec2 P = v.pos.v();
-            if (qs.size() == 2) {
-              P = (qs[0] + qs[1]) * 0.5;
-            } else {
-              for (int it = 0; it < 20; ++it) {  // Weiszfeld
-                Vec2 num{};
-                double den = 0;
-                for (Vec2 q : qs) {
-                  double d = std::max((q - P).len(), 1.0);
-                  num = num + q / d;
-                  den += 1.0 / d;
+        ViaJob j;
+        j.vi = vi;
+        j.vs = Shape::circle(v.pos.v(), v.diameter / 2.0);
+        auto attached = attachedTo(b, j.vs, v.layers, v.net);
+        if (std::ranges::none_of(attached, [](char c) { return c != 0; })) continue;
+        jobs.push_back(std::move(j));
+      }
+      struct Best {
+        bool any = false;
+        Vec2 delta;
+        bool neighbours = false;
+        double gain = 0;
+      };
+      // Every via is probed and searched in parallel on the board as it is now (a snapshot); the
+      // moves found are then applied one by one, each re-tried on the board as the earlier moves
+      // left it (TopoR's pass over the vias, on all cores: a stale search costs at most a move).
+      if (o.progress) o.progress(done += int(jobs.size()), total, std::format("optimise {}: vias", it + 1));
+      {
+        ProfScope p("F7 probe reshape");
+        parallelFor(jobs.size(), [&](size_t m) {
+            ViaJob& j = jobs[m];
+            const Via& v = b.vias[j.vi];
+            j.chosen = attachedTo(b, j.vs, v.layers, v.net);
+            std::vector<char> grown;
+            Board probe = b;
+            auto pst = reshapeTracks(probe, j.chosen, nullptr, &grown, true);
+            j.push = {};
+            if (auto it2 = pst.viaPush.find(j.vi); it2 != pst.viaPush.end()) j.push = it2->second;
+            j.current.clear();
+            for (size_t i = 0; i < grown.size(); ++i)
+              if (grown[i]) j.current.push_back(int(i));
+        });
+      }
+      SpatialIndex idx;
+      {
+        ProfScope p("F7 index build (base)");
+        idx.build(b);
+      }
+      auto search = [&](const ViaJob& j) {
+          const Via& v = b.vias[j.vi];
+          MovedItems viaBox{[vi = j.vi](const Board& x) { return Shape::circle(x.vias[vi].pos.v(), x.vias[vi].diameter / 2.0).bbox(); },
+                            {ItemRef{ItemType::Via, j.vi}}};
+          // Where the wire through the via would run straight: the midpoint of the two vertices next
+          // to the via along its wires (TopoR's F7 jog repair moves a via to (vh1 + vh2) / 2; its vias
+          // end up on the straight line of their wires), the geometric median when more wires meet.
+          std::vector<Vec2> deltas{Vec2{}};  // the re-shape in place first
+          bool hasStraight = false, hasPush = false;
+          {
+            std::vector<Vec2> qs;
+            for (size_t i = 0; i < b.tracks.size(); ++i) {
+              if (!j.chosen[i]) continue;
+              const Track& t = b.tracks[i];
+              if (j.vs.contains(t.a.v()) == j.vs.contains(t.b.v())) continue;
+              qs.push_back(j.vs.contains(t.a.v()) ? t.b.v() : t.a.v());
+            }
+            if (qs.size() >= 2) {
+              Vec2 P = v.pos.v();
+              if (qs.size() == 2) {
+                P = (qs[0] + qs[1]) * 0.5;
+              } else {
+                for (int k = 0; k < 20; ++k) {  // Weiszfeld
+                  Vec2 num{};
+                  double den = 0;
+                  for (Vec2 q : qs) {
+                    double d = std::max((q - P).len(), 1.0);
+                    num = num + q / d;
+                    den += 1.0 / d;
+                  }
+                  Vec2 P1 = num / den;
+                  bool fin = (P1 - P).len() < 100;
+                  P = P1;
+                  if (fin) break;
                 }
-                Vec2 P1 = num / den;
-                bool done = (P1 - P).len() < 100;
-                P = P1;
-                if (done) break;
+              }
+              Vec2 d = P - v.pos.v();
+              if (d.len() > 1000) {
+                deltas.push_back(d);
+                deltas.push_back(d * 0.5);
+                hasStraight = true;
               }
             }
-            Vec2 d = P - v.pos.v();
-            if (d.len() > 1000) {
-              deltas.push_back(d);
-              deltas.push_back(d * 0.5);
-            }
           }
-        }
-        // Away from the crowding (TopoR's move: the resultant of the tight edges, in shrinking
-        // steps), then the compass directions.
-        if (push.len() > 1000) {
-          Vec2 away = -push.normalized() * std::clamp(push.len(), 0.25 * step, 2.5 * step);
-          deltas.push_back(away);
-          deltas.push_back(away * 0.5);
-        }
-        for (Vec2 d : kDirs) deltas.push_back(d * step);
-        // The trial moves are independent: all at once, on all cores.
-        auto moveBy = [&](Vec2 delta) {
-          return [&, delta](Board& c) {
-            Via& cv = c.vias[vi];
-            dragEnds(c, vs, cv.layers, cv.net, delta);
-            cv.pos = Point(cv.pos.v() + delta);
-            return true;
+          // Away from the crowding (TopoR's move: the resultant of the tight edges, in shrinking
+          // steps), then the compass directions: all eight in the first iteration, the four
+          // axis-aligned ones in the later, finer ones.
+          // (The push away from the crowding, TopoR's move_refine, never won a trial on the test
+          // boards against the compass sweep and is left out.)
+          (void)hasPush;
+          for (Vec2 d : std::span(kDirs, it == 0 ? 8 : 4)) deltas.push_back(d * step);
+          auto moveBy = [&](Vec2 delta) {
+            return [&, delta](Board& c) {
+              Via& cv = c.vias[j.vi];
+              dragEnds(c, j.vs, cv.layers, cv.net, delta);
+              cv.pos = Point(cv.pos.v() + delta);
+              return true;
+            };
           };
+          // A trial: the move, the chains re-laid (the via's own, or with the neighbours of other nets
+          // that block it) and their indices on the board as it is (the base side of the score).
+          struct Trial {
+            Vec2 delta;
+            bool neighbours = false;
+            std::vector<char> with;
+            std::vector<int> current;
+            double base = 0;  // score of `current` as it is
+          };
+          auto baseOf = [&](const std::vector<int>& cur) {
+            std::vector<char> was(b.tracks.size(), 0);
+            for (int i : cur) was[i] = 1;
+            BBox r0 = tracksBox(b, cur);
+            r0.add(viaBox.box(b));
+            return evaluate(b, idx, r0.inflated(double(b.maxClearance())), was, viaBox.moved).score();
+          };
+          auto run = [&](const Trial& t) {
+            auto c = tryMove(b, idx, t.with, t.current, moveBy(t.delta), viaBox, t.base);
+            if (c && c->gain > 1000.0 && !keepsConnectivity(c->board)) c.reset();
+            return c;
+          };
+          auto runWave = [&](const std::vector<Trial>& wave) {
+            std::vector<std::optional<Candidate>> out(wave.size());
+            for (size_t k = 0; k < wave.size(); ++k) out[k] = run(wave[k]);
+            return out;
+          };
+          Best best;
+          int winner = -1;
+          auto take = [&](const std::optional<Candidate>& c, const Trial& t, int k) {
+            if (c && c->gain > std::max(best.gain, 1000.0)) {
+              best = {true, t.delta, t.neighbours, c->gain};
+              winner = k;
+            }
+          };
+          std::vector<Trial> wave1;
+          double base1 = baseOf(j.current);
+          for (Vec2 delta : deltas) wave1.push_back({delta, false, j.chosen, j.current, base1});
+          auto res1 = runWave(wave1);
+          // Blocked by the wires of other nets: they come along and are re-shaped with the via's own
+          // (TopoR re-lays the wires around a moved via, so a via may slide along its wire through a bus).
+          std::vector<Trial> wave2;
+          for (size_t k = 0; k < wave1.size(); ++k) {
+            take(res1[k], wave1[k], int(k));
+            if ((res1[k] && res1[k]->gain > 1000.0) || deltas[k].len2() == 0) continue;
+            Trial t{deltas[k], true, j.chosen, {}, 0};
+            addNeighbours(b, t.with, v.pos.v(), v.pos.v() + deltas[k], v.diameter / 2.0 + double(b.maxClearance()), v.layers, o.nets);
+            if (t.with == j.chosen) continue;
+            auto grown = growChains(b, t.with);
+            for (size_t i = 0; i < grown.size(); ++i)
+              if (grown[i]) t.current.push_back(int(i));
+            t.base = baseOf(t.current);
+            wave2.push_back(std::move(t));
+          }
+          auto res2 = runWave(wave2);
+          for (size_t k = 0; k < wave2.size(); ++k) take(res2[k], wave2[k], 100 + int(k));
+          if (Prof::on() && best.any) {
+            static const char* names[] = {"win: in place", "win: straight", "win: straight/2", "win: push", "win: push/2",
+                                          "win: compass"};
+            int cls = winner >= 100 ? 5 : winner;
+            if (winner < 100) {
+              // Classify by what the k-th delta was: in place, straight (2), push (2), compass.
+              int k = winner, n = 1;
+              if (k < n) cls = 0;
+              else if (hasStraight && k < n + 2) cls = 1 + (k - n);
+              else if (hasPush && k < n + (hasStraight ? 2 : 0) + 2) cls = 3 + (k - n - (hasStraight ? 2 : 0));
+              else cls = 5;
+            }
+            Prof::get().add(winner >= 100 ? "win: with neighbours" : names[cls], 1);
+          }
+          return best;
         };
-        auto runAll = [&](const std::vector<std::pair<Vec2, std::vector<char>>>& jobs) {
-          std::vector<std::future<std::optional<Candidate>>> fs;
-          for (auto& [delta, with] : jobs)
-            fs.push_back(std::async(std::launch::async, [&, delta]() {
-              auto c = tryMove(b, idx, with, current, moveBy(delta), viaBox);
-              if (c && c->gain > 1000.0 && !keepsConnectivity(c->board)) c.reset();
-              return c;
-            }));
-          std::vector<std::optional<Candidate>> out;
-          for (auto& f : fs) out.push_back(f.get());
-          return out;
-        };
-        std::vector<std::pair<Vec2, std::vector<char>>> jobs;
-        for (Vec2 delta : deltas) jobs.push_back({delta, chosen});
-        auto results = runAll(jobs);
-        // Blocked by the wires of other nets: they come along and are re-shaped with the via's own
-        // (TopoR re-lays the wires around a moved via, so a via may slide along its wire through a bus).
-        std::vector<std::pair<Vec2, std::vector<char>>> jobs2;
-        for (size_t k = 0; k < deltas.size(); ++k) {
-          if (results[k] && results[k]->gain > 1000.0) continue;
-          std::vector<char> with = chosen;
-          addNeighbours(b, with, v.pos.v(), v.pos.v() + deltas[k], v.diameter / 2.0 + double(b.maxClearance()), v.layers, o.nets);
-          if (with != chosen) jobs2.push_back({deltas[k], std::move(with)});
-        }
-        auto results2 = runAll(jobs2);
-        for (auto& c : results) if (c && c->gain > std::max(best ? best->gain : 0.0, 1000.0)) best = std::move(c);
-        for (auto& c : results2) if (c && c->gain > std::max(best ? best->gain : 0.0, 1000.0)) best = std::move(c);
-        if (best) {
-          bool moved = best->board.vias[vi].pos != b.vias[vi].pos;
-          b = std::move(best->board);
-          if (moved) {
+      std::vector<Best> bests(jobs.size());
+      {
+        ProfScope p("F7 search (parallel over vias)");
+        parallelFor(jobs.size(), [&](size_t m) { bests[m] = search(jobs[m]); });
+      }
+      if (!cancelled()) {
+        ProfScope p("F7 apply (re-tried moves)");
+        for (size_t k = 0; k < jobs.size(); ++k) {
+          const Best& best = bests[k];
+          if (!best.any) continue;
+          const ViaJob& j = jobs[k];
+          Via& v = b.vias[j.vi];
+          std::vector<char> with = attachedTo(b, j.vs, v.layers, v.net);
+          if (best.neighbours)
+            addNeighbours(b, with, v.pos.v(), v.pos.v() + best.delta, v.diameter / 2.0 + double(b.maxClearance()), v.layers, o.nets);
+          auto grown = growChains(b, with);
+          std::vector<int> current;
+          for (size_t i = 0; i < grown.size(); ++i)
+            if (grown[i]) current.push_back(int(i));
+          MovedItems viaBox{[vi = j.vi](const Board& x) { return Shape::circle(x.vias[vi].pos.v(), x.vias[vi].diameter / 2.0).bbox(); },
+                            {ItemRef{ItemType::Via, j.vi}}};
+          BBox r0 = tracksBox(b, current);
+          r0.add(viaBox.box(b));
+          SpatialIndex lidx;
+          lidx.build(b, r0.inflated(3 * step + 3 * double(b.maxClearance())));
+          auto c = tryMove(
+              b, lidx, with, current,
+              [&](Board& x) {
+                Via& cv = x.vias[j.vi];
+                dragEnds(x, j.vs, cv.layers, cv.net, best.delta);
+                cv.pos = Point(cv.pos.v() + best.delta);
+                return true;
+              },
+              viaBox);
+          if (!c || c->gain <= 1000.0 || !keepsConnectivity(c->board)) continue;
+          b = std::move(c->board);
+          if (best.delta.len2() > 0) {
             ++moves;
             ++r.viaMoves;
           }
         }
       }
+    }
 
     // Free branch points — where three or more tracks of one net and layer meet at no pad or via —
     // move like vias: the wires from them get shorter (TopoR's F5 slides such a junction too).
     if (o.junctions) {
       std::vector<Junction> js = junctionsOf(b, o.nets);
       total += int(js.size());
-      for (const Junction& j : js) {
-        if (cancelled()) break;
-        if (o.progress) o.progress(++done, total, std::format("optimise {}: junctions", it + 1));
+      if (o.progress) o.progress(done += int(js.size()), total, std::format("optimise {}: junctions", it + 1));
+      // As the vias: searched in parallel on a snapshot, applied one by one with a re-try each.
+      struct JBest { bool any = false; Vec2 delta; };
+      std::vector<JBest> bests(js.size());
+      SpatialIndex idx;
+      idx.build(b);
+      MovedItems noBox;
+      parallelFor(js.size(), [&](size_t k) {
+        const Junction& j = js[k];
         Shape js0 = Shape::circle(j.p.v(), j.width / 2.0);
         LayerMask lm = LayerMask(1) << j.layer;
         auto chosen = attachedTo(b, js0, lm, j.net);
-        if (std::ranges::none_of(chosen, [](char c) { return c != 0; })) continue;
-        std::vector<char> grown;
-        {
-          Board probe = b;
-          reshapeTracks(probe, chosen, nullptr, &grown, true);
-        }
+        if (std::ranges::none_of(chosen, [](char c) { return c != 0; })) return;
+        auto grown = growChains(b, chosen);
         std::vector<int> current;
         for (size_t i = 0; i < grown.size(); ++i)
           if (grown[i]) current.push_back(int(i));
-        SpatialIndex idx;
-        idx.build(b);
-        MovedItems noBox;
-        std::optional<Candidate> best;
-        bool moved = false;
-        auto consider = [&](std::optional<Candidate> c, bool isMove) {
-          if (c && c->gain > std::max(best ? best->gain : 0.0, 1000.0) && keepsConnectivity(c->board)) {
-            best = std::move(c);
-            moved = isMove;
-          }
-        };
-        for (Vec2 d : kDirs) {
+        double bestGain = 1000.0;
+        for (Vec2 d : std::span(kDirs, it == 0 ? 8 : 4)) {
           Vec2 delta = d * step;
-          consider(tryMove(
-                       b, idx, chosen, current,
-                       [&](Board& c) {
-                         dragEnds(c, js0, lm, j.net, delta);
-                         return true;
-                       },
-                       noBox),
-                   true);
-        }
-        if (best) {
-          b = std::move(best->board);
-          if (moved) {
-            ++moves;
-            ++r.junctionMoves;
+          auto c = tryMove(
+              b, idx, chosen, current,
+              [&](Board& x) {
+                dragEnds(x, js0, lm, j.net, delta);
+                return true;
+              },
+              noBox);
+          if (c && c->gain > bestGain && keepsConnectivity(c->board)) {
+            bestGain = c->gain;
+            bests[k] = {true, delta};
           }
         }
+      });
+      for (size_t k = 0; k < js.size() && !cancelled(); ++k) {
+        if (!bests[k].any) continue;
+        const Junction& j = js[k];
+        Shape js0 = Shape::circle(j.p.v(), j.width / 2.0);
+        LayerMask lm = LayerMask(1) << j.layer;
+        auto chosen = attachedTo(b, js0, lm, j.net);
+        auto grown = growChains(b, chosen);
+        std::vector<int> current;
+        for (size_t i = 0; i < grown.size(); ++i)
+          if (grown[i]) current.push_back(int(i));
+        SpatialIndex lidx;
+        lidx.build(b, tracksBox(b, current).inflated(3 * step + 3 * double(b.maxClearance())));
+        Vec2 delta = bests[k].delta;
+        auto c = tryMove(
+            b, lidx, chosen, current,
+            [&](Board& x) {
+              dragEnds(x, js0, lm, j.net, delta);
+              return true;
+            },
+            noBox);
+        if (!c || c->gain <= 1000.0 || !keepsConnectivity(c->board)) continue;
+        b = std::move(c->board);
+        ++moves;
+        ++r.junctionMoves;
       }
     }
 

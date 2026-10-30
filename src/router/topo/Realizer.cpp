@@ -228,12 +228,27 @@ double sweepOf(const Circle& c, Vec2 in, Vec2 out) {
 }
 
 
-LayerObstacles collect(const Board& b, LayerId layer, const std::vector<RealVia>& vias, const RealizeOptions& opt) {
+LayerObstacles collect(const Board& b, LayerId layer, const std::vector<RealVia>& vias, const RealizeOptions& opt,
+                       const SpatialIndex& idx) {
   LayerObstacles ob;
   auto inRegion = [&](const BBox& bb) { return !opt.region || opt.region->intersects(bb); };
-  for (const Pad& pad : b.pads) {
+  // The pads, vias and tracks to look at: those near the region (from the index) or all of them.
+  std::vector<int> padIds, viaIds, trackIds;
+  if (opt.region) {
+    for (ItemRef r : idx.query(*opt.region, ~LayerMask(0))) {
+      if (r.type == ItemType::Pad) padIds.push_back(r.index);
+      else if (r.type == ItemType::Via) viaIds.push_back(r.index);
+      else if (r.type == ItemType::Track) trackIds.push_back(r.index);
+    }
+  } else {
+    for (size_t i = 0; i < b.pads.size(); ++i) padIds.push_back(int(i));
+    for (size_t i = 0; i < b.vias.size(); ++i) viaIds.push_back(int(i));
+    for (size_t i = 0; i < b.tracks.size(); ++i) trackIds.push_back(int(i));
+  }
+  for (int pi : padIds) {
+    const Pad& pad = b.pads[pi];
     double clr = double(b.clearance(pad.net, layer));
-    if (!inRegion(pad.shapeGeom().bbox())) continue;
+    if (opt.region && !inRegion(pad.shapeGeom().bbox())) continue;
     if (!pad.onLayer(layer)) {
       if (pad.drill > 0 && !pad.copper) ob.add(pad.pos.v(), pad.drill / 2.0, clr, kNoNet);
       continue;
@@ -255,7 +270,7 @@ LayerObstacles collect(const Board& b, LayerId layer, const std::vector<RealVia>
       }
     }
   }
-  for (size_t vi = 0; vi < b.vias.size(); ++vi) {
+  for (int vi : viaIds) {
     const Via& v = b.vias[vi];
     if (v.onLayer(layer) && inRegion(Shape::circle(v.pos.v(), v.diameter / 2.0).bbox()))
       ob.pts[ob.add(v.pos.v(), v.diameter / 2.0, double(b.clearance(v.net, layer)), v.net)].via = int(vi);
@@ -296,7 +311,8 @@ LayerObstacles collect(const Board& b, LayerId layer, const std::vector<RealVia>
     }
   }
   if (opt.tracksAsObstacles)
-    for (const Track& t : b.tracks) {
+    for (int ti : trackIds) {
+      const Track& t = b.tracks[ti];
       if (t.layer != layer) continue;
       if (opt.region) {
         BBox tb;
@@ -511,7 +527,8 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
   std::vector<std::array<Stub, 2>> stubs(NW);
   std::vector<Polyline> sketches(NW);
   SpatialIndex oidx;  // the copper as it lies now (the chosen tracks are gone): stubs, exit arcs
-  oidx.build(b);
+  if (opt.region) oidx.build(b, *opt.region);
+  else oidx.build(b);
   {
     const SpatialIndex& idx = oidx;
     for (int wi = 0; wi < NW; ++wi) {
@@ -610,7 +627,7 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
   phase.emplace("realize: collect+cdt+crossings");
   for (auto&& [layer, ids] : byLayer) {
     LayerObstacles& ob = obstacles.emplace(layer, opt.mesh ? collectFromMesh(b, layer, *opt.mesh, vias)
-                                                            : collect(b, layer, vias, opt)).first->second;
+                                                            : collect(b, layer, vias, opt, oidx)).first->second;
     for (int wi : ids)
       for (const Stub& st : stubs[wi])
         if (st.on) {
@@ -1371,23 +1388,24 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
   return st;
 }
 
-RealizeStats reshapeTracks(Board& b, std::vector<char> chosen, std::vector<RealWire>* wiresOut,
-                           std::vector<char>* grownOut, bool local, double glue) {
-  ProfScope pAll("reshapeTracks total");
-  std::optional<ProfScope> phase;
-  phase.emplace("reshapeTracks: chains");
-  chosen.resize(b.tracks.size(), 0);
-  // Vertices: the ends of the tracks. Ends of one net and layer that nearly coincide (a wire drawn
-  // by hand up to the end of another misses it by a few um; the copper overlaps all the same) are
-  // one vertex: within `glue` of the width, never less than 1 um.
-  if (const char* e = std::getenv("XR_GLUE")) glue = std::atof(e);
-  // Only the tracks of the chosen nets can join a chain: the rest are left out of the vertex set.
-  std::vector<char> relevant(b.tracks.size(), 0);
+// The vertices of the chains: the ends of the tracks of the chosen nets. Ends of one net and layer
+// that nearly coincide (a wire drawn by hand up to the end of another misses it by a few um; the
+// copper overlaps all the same) are one vertex: within `glue` of the width, never less than 1 um.
+struct ChainVertices {
+  std::vector<char> relevant;              // tracks of the chosen nets (the vertex set is theirs)
+  std::vector<std::array<int, 2>> vid;     // per track: vertex of a and of b (-1: not relevant)
+  std::vector<std::vector<int>> ends;      // per vertex: the tracks ending there
+  int count = 0;
+};
+
+ChainVertices chainVertices(const Board& b, const std::vector<char>& chosen, double glue) {
+  ChainVertices cv;
+  cv.relevant.assign(b.tracks.size(), 0);
   {
     std::set<int> nets;
     for (size_t i = 0; i < b.tracks.size(); ++i)
       if (chosen[i]) nets.insert(b.tracks[i].net);
-    for (size_t i = 0; i < b.tracks.size(); ++i) relevant[i] = nets.contains(b.tracks[i].net);
+    for (size_t i = 0; i < b.tracks.size(); ++i) cv.relevant[i] = nets.contains(b.tracks[i].net);
   }
   double maxTol = 1000.0;
   for (const auto& t : b.tracks) maxTol = std::max(maxTol, glue * t.width);
@@ -1395,10 +1413,9 @@ RealizeStats reshapeTracks(Board& b, std::vector<char> chosen, std::vector<RealW
   struct VEnd { int track; Point p; int vertex; };
   std::vector<VEnd> vends;
   std::map<std::tuple<Coord, Coord, LayerId, int>, std::vector<int>> cells;  // cell -> indices in vends
-  std::vector<std::array<int, 2>> vid(b.tracks.size(), {-1, -1});
-  int nVertices = 0;
+  cv.vid.assign(b.tracks.size(), {-1, -1});
   for (size_t i = 0; i < b.tracks.size(); ++i)
-    for (int e = 0; e < 2 && relevant[i]; ++e) {
+    for (int e = 0; e < 2 && cv.relevant[i]; ++e) {
       const Track& t = b.tracks[i];
       Point p = e ? t.b : t.a;
       Coord cx = p.x / cell, cy = p.y / cell;
@@ -1415,18 +1432,22 @@ RealizeStats reshapeTracks(Board& b, std::vector<char> chosen, std::vector<RealW
             if (d <= tol && (found < 0 || d < best)) found = o.vertex, best = d;
           }
         }
-      int v = found >= 0 ? found : nVertices++;
-      vid[i][e] = v;
+      int v = found >= 0 ? found : cv.count++;
+      cv.vid[i][e] = v;
       cells[{cx, cy, t.layer, t.net}].push_back(int(vends.size()));
       vends.push_back({int(i), p, v});
     }
-  // Grow the choice to whole chains of the same net and layer.
-  std::vector<std::vector<int>> ends(nVertices);
+  cv.ends.resize(cv.count);
   for (size_t i = 0; i < b.tracks.size(); ++i) {
-    if (!relevant[i]) continue;
-    ends[vid[i][0]].push_back(int(i));
-    ends[vid[i][1]].push_back(int(i));
+    if (!cv.relevant[i]) continue;
+    cv.ends[cv.vid[i][0]].push_back(int(i));
+    cv.ends[cv.vid[i][1]].push_back(int(i));
   }
+  return cv;
+}
+
+// Grows the choice to whole chains of the same net and layer.
+void growChains(const Board& b, std::vector<char>& chosen, const ChainVertices& cv) {
   auto sameChain = [&](int i, int j) {
     return b.tracks[i].net == b.tracks[j].net && b.tracks[i].layer == b.tracks[j].layer && !b.tracks[j].locked;
   };
@@ -1436,13 +1457,37 @@ RealizeStats reshapeTracks(Board& b, std::vector<char> chosen, std::vector<RealW
   while (!stack.empty()) {
     int i = stack.back();
     stack.pop_back();
-    for (int v : vid[i])
-      for (int j : ends[v])
+    for (int v : cv.vid[i])
+      for (int j : cv.ends[v])
         if (!chosen[j] && sameChain(i, j)) {
           chosen[j] = 1;
           stack.push_back(j);
         }
   }
+}
+
+std::vector<char> growChains(const Board& b, std::vector<char> chosen, double glue) {
+  chosen.resize(b.tracks.size(), 0);
+  if (const char* e = std::getenv("XR_GLUE")) glue = std::atof(e);
+  growChains(b, chosen, chainVertices(b, chosen, glue));
+  return chosen;
+}
+
+RealizeStats reshapeTracks(Board& b, std::vector<char> chosen, std::vector<RealWire>* wiresOut,
+                           std::vector<char>* grownOut, bool local, double glue) {
+  ProfScope pAll("reshapeTracks total");
+  std::optional<ProfScope> phase;
+  phase.emplace("reshapeTracks: chains");
+  chosen.resize(b.tracks.size(), 0);
+  if (const char* e = std::getenv("XR_GLUE")) glue = std::atof(e);
+  ChainVertices cv = chainVertices(b, chosen, glue);
+  growChains(b, chosen, cv);
+  const auto& vid = cv.vid;
+  const auto& ends = cv.ends;
+  const int nVertices = cv.count;
+  auto sameChain = [&](int i, int j) {
+    return b.tracks[i].net == b.tracks[j].net && b.tracks[i].layer == b.tracks[j].layer && !b.tracks[j].locked;
+  };
   // Degree of each vertex among the chosen tracks (vertices are per layer and net already: wires of
   // other layers or nets may share a corner — TopoR lays parallel buses with coincident corners —
   // which is no branch of this chain); vias and pads also end chains.

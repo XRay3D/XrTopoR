@@ -76,6 +76,10 @@ struct RealizeOptions {
 // `local` limits the obstacles to the neighbourhood of the chosen chains (faster, same result);
 // `glue` (fraction of the track width, env XR_GLUE) joins chain ends of one net and layer that
 // nearly coincide.
+// The chosen tracks grown to whole chains of one net and layer (what reshapeTracks re-lays), as a
+// mask over the tracks; no geometry is touched.
+std::vector<char> growChains(const Board& b, std::vector<char> chosen, double glue = 0.1);
+
 RealizeStats reshapeTracks(Board& b, std::vector<char> chosen, std::vector<RealWire>* wires = nullptr,
                            std::vector<char>* grown = nullptr, bool local = false, double glue = 0.1);
 

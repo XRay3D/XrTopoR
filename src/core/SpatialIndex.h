@@ -29,6 +29,9 @@ class SpatialIndex {
   SpatialIndex();
   ~SpatialIndex();
   void build(const Board& b, bool withTracks = true, bool withZones = true);
+  // Only the items that may touch `region` (a cheap bound per item decides; exact boxes are stored):
+  // a local search's index in a fraction of the time of the whole board's.
+  void build(const Board& b, const BBox& region);
   // Calls f for every item whose bbox intersects box and that is on any layer of mask.
   void query(const BBox& box, LayerMask mask, const std::function<void(ItemRef)>& f) const;
   std::vector<ItemRef> query(const BBox& box, LayerMask mask) const;
