@@ -33,7 +33,7 @@ void usage() {
       "  import-ses <board> <routes.ses> -o <out>\n"
       "  gerber     <board> <outdir>\n"
       "  svg        <board> <out.svg>\n"
-      "  reshape    <board> -o <out>              recompute track shapes (TopoR F5) for all tracks\n"
+      "  reshape    <board> -o <out> [--nets a,b]  recompute track shapes (TopoR F5); --nets: those chains only\n"
       "  optimize   <board> -o <out> [--iterations N] [--step MM] [--components]   move vias/parts (F7)\n"
       "  refine     <board> -o <out> [--same-layer]   shorter wire paths around the copper as it lies (F6)\n"
       "  fill       <board> -o <out> [--no-thermals]  pour copper zones\n"
@@ -186,8 +186,17 @@ int main(int argc, char** argv) {
     return 0;
   }
   if (cmd == "reshape" && !a.opt("-o").empty()) {
+    // --nets a,b: only the tracks of those nets, the rest of the copper as it lies (the editor's F5
+    // on the edited chains).
     std::vector<char> all(b.tracks.size(), 1);
-    auto st = topo::reshapeTracks(b, all);
+    bool local = false;
+    if (auto p = a.opt("--nets"); !p.empty()) {
+      auto names = p | std::views::split(',') | std::ranges::to<std::vector<std::string>>();
+      for (size_t i = 0; i < b.tracks.size(); ++i)
+        all[i] = b.tracks[i].net != kNoNet && std::ranges::contains(names, b.nets[b.tracks[i].net].name);
+      local = true;
+    }
+    auto st = topo::reshapeTracks(b, all, nullptr, nullptr, local);
     std::println("reshaped {} wires, {} arcs, {} apexes dropped, {} arc bends, {} sketch crossings", st.wires, st.arcs,
                  st.droppedApexes, st.arcBends, st.sketchCrossings);
     for (auto [n1, n2] : st.crossingNets)

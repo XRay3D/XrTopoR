@@ -19,6 +19,7 @@
 #include <set>
 
 #include "core/Connectivity.h"
+#include "core/Edit.h"
 #include "gui/BoardView.h"
 #include "gui/Commands.h"
 #include "gui/Document.h"
@@ -188,6 +189,63 @@ TEST(Gui, RecomputeShapesKeepsConnectivityAndClearance) {
     if (v.type != DrcViolation::Type::Unconnected) ADD_FAILURE() << v.message;
   doc.undoStack()->undo();
   EXPECT_EQ(doc.board()->tracks.size(), tracksBefore) << "after undo";
+}
+
+// A hand edit marks exactly the tracks it changed (by content: the edit renumbers the tracks), and
+// F5 without a selection re-lays those chains only, leaving the rest of the board as it was.
+TEST(Gui, RecomputeShapesEditedOnly) {
+  app();
+  Document doc;
+  auto b = io::loadBoard(data("topor/Example_04/Arcs_master.pcb"));
+  ASSERT_TRUE(b);
+  BoardView view(&doc);
+  view.resize(800, 600);
+  doc.setBoard(std::move(*b), "x");
+  view.recomputeShapes();  // everything: nothing is marked yet
+  Board& bd = *doc.board();
+  for (auto& t : bd.tracks) EXPECT_FALSE(t.edited);
+  // Move the end of the AD9 bottom track that enters the via at (186.9, 82.15), as a drag does:
+  // the segment gets a new far end, a joining track leads on to the via, degenerate tracks go.
+  int ad9 = -1;
+  for (size_t i = 0; i < bd.nets.size(); ++i)
+    if (bd.nets[i].name == "AD9") ad9 = int(i);
+  ASSERT_GE(ad9, 0);
+  Point via{Coord(186.9 * kNmPerMm), Coord(-82.15 * kNmPerMm)};
+  int moved = -1;
+  for (size_t i = 0; i < bd.tracks.size(); ++i) {
+    const Track& t = bd.tracks[i];
+    if (t.net == ad9 && !t.isArc() && (t.b == via || t.a == via) && (t.a.v() - t.b.v()).len() > 3 * kNmPerMm) moved = int(i);
+  }
+  ASSERT_GE(moved, 0);
+  auto before = doc.beginEdit();
+  Track& t = bd.tracks[moved];
+  if (t.a == via) std::swap(t.a, t.b);
+  Point far{Coord(189.47 * kNmPerMm), Coord(-85.57 * kNmPerMm)};
+  t.b = far;
+  Track join = t;
+  join.a = far;
+  join.b = via;
+  bd.tracks.insert(bd.tracks.begin(), join);  // at the front: every index shifts
+  edit::removeDegenerate(bd);
+  doc.commitEdit(before, "drag");
+  int marked = 0;
+  for (auto& x : bd.tracks) marked += x.edited;
+  EXPECT_EQ(marked, 2) << "the moved segment and the joining track only";
+  size_t n = bd.tracks.size();
+  Board unchanged = bd;
+  view.recomputeShapes();  // the AD9 chain only
+  const Board& nb = *doc.board();
+  // Tracks of other nets are exactly as they were.
+  int othersChanged = 0;
+  std::set<std::tuple<Coord, Coord, Coord, Coord>> was;
+  for (auto& x : unchanged.tracks)
+    if (x.net != ad9) was.insert({x.a.x, x.a.y, x.b.x, x.b.y});
+  for (auto& x : nb.tracks)
+    if (x.net != ad9 && !was.contains({x.a.x, x.a.y, x.b.x, x.b.y})) ++othersChanged;
+  EXPECT_EQ(othersChanged, 0);
+  EXPECT_NE(nb.tracks.size(), n);
+  for (auto& x : nb.tracks) EXPECT_FALSE(x.edited);
+  if (const char* out = std::getenv("XR_TEST_OUT")) (void)io::saveBoard(nb, std::string(out) + "/edited_only.fst");
 }
 
 // The window is laid out like TopoR: its menus in order, its docks and toolbars under TopoR's names.

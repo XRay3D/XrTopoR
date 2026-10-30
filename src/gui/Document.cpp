@@ -1,5 +1,7 @@
 #include "gui/Document.h"
 
+#include <set>
+
 #include "gui/Schemes.h"
 
 namespace xr::gui {
@@ -195,14 +197,15 @@ void Document::clearLog(const QString& group) {
 
 void Document::commitEdit(const EditSnapshot& before, const QString& title, bool markEdited) {
   if (markEdited) {
-    auto& tracks = board_->tracks;
-    for (size_t i = 0; i < tracks.size(); ++i) {
-      Track& t = tracks[i];
-      if (i >= before.tracks.size()) { t.edited = true; continue; }
-      const Track& o = before.tracks[i];
-      if (t.a != o.a || t.b != o.b || t.mid != o.mid || t.width != o.width || t.layer != o.layer || t.net != o.net)
-        t.edited = true;
-    }
+    // By content, not by index: an edit may drop degenerate tracks and renumber the rest.
+    auto key = [](const Track& t) {
+      return std::tuple{t.a.x, t.a.y, t.b.x, t.b.y, t.mid ? t.mid->x : Coord(0), t.mid ? t.mid->y : Coord(0),
+                        t.mid.has_value(), t.width, t.layer, t.net};
+    };
+    std::set<decltype(key(Track{}))> old;
+    for (const Track& t : before.tracks) old.insert(key(t));
+    for (Track& t : board_->tracks)
+      if (!old.contains(key(t))) t.edited = true;
   }
   invalidate();
   undo_.push(new SnapshotCommand(this, before, EditSnapshot::take(*board_), title));
