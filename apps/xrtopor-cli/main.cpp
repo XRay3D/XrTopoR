@@ -14,6 +14,7 @@
 #include "io/Report.h"
 #include "io/gerber/GerberWriter.h"
 #include "io/svg/SvgWriter.h"
+#include "core/Prof.h"
 #include "router/topo/Optimizer.h"
 #include "router/topo/Refine.h"
 #include "router/topo/Realizer.h"
@@ -208,6 +209,7 @@ int main(int argc, char** argv) {
           if (std::ranges::contains(a.opt("--nets") | std::views::split(',') | std::ranges::to<std::vector<std::string>>(), b.nets[i].name)) nets.push_back(int(i));
       std::println("junctions settled: {}", topo::settleJunctions(b, nets));
     }
+    xr::Prof::get().report("reshape");
     if (auto r = io::saveBoard(b, std::string(a.opt("-o"))); !r) return fail(r.error());
     return 0;
   }

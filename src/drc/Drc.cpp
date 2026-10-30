@@ -2,6 +2,7 @@
 
 #include <cstdio>
 #include <set>
+#include <unordered_map>
 
 namespace xr {
 
@@ -99,31 +100,42 @@ double shapeMargin(const Board& b, const SpatialIndex& idx, const Shape& s, Laye
   return worst;
 }
 
-ConflictSum regionConflicts(const Board& b, const SpatialIndex& idx, const BBox& region) {
+ConflictSum regionConflicts(const Board& b, const SpatialIndex& idx, const BBox& region,
+                            const std::function<bool(ItemRef)>& changed) {
   ConflictSum sum;
   double maxClr = double(b.maxClearance());
   std::set<std::pair<int, int>> seen;
   auto gid = [](ItemRef r) { return int(r.type) * 10'000'000 + r.index; };
+  // The shapes of every item once, not once per pair.
+  std::unordered_map<int, std::vector<Shape>> cache;
+  auto shapesOf = [&](ItemRef r) -> const std::vector<Shape>& {
+    auto it = cache.find(gid(r));
+    if (it == cache.end()) it = cache.emplace(gid(r), itemShapes(b, r)).first;
+    return it->second;
+  };
   for (ItemRef a : idx.query(region, ~LayerMask(0))) {
     if (a.type == ItemType::Zone) continue;
-    auto shapes = itemShapes(b, a);
+    bool aChanged = !changed || changed(a);
+    const auto& shapes = shapesOf(a);
     BBox bb;
     for (auto& s : shapes) bb.add(s.bbox());
     LayerMask lm = itemLayers(b, a);
     idx.query(bb.inflated(maxClr), lm, [&](ItemRef c) {
       if (c == a || skipPair(b, a, c)) return;
+      if (!aChanged && !changed(c)) return;
       int ka = gid(a), kc = gid(c);
       if (!seen.insert({std::min(ka, kc), std::max(ka, kc)}).second) return;
       double req = requiredClearance(b, itemNet(b, a), itemNet(b, c), lm & itemLayers(b, c));
       double best = std::numeric_limits<double>::max();
+      const auto& cshapes = shapesOf(c);
       for (auto& s1 : shapes)
-        for (auto& s2 : itemShapes(b, c)) best = std::min(best, s1.distance(s2));
+        for (auto& s2 : cshapes) best = std::min(best, s1.distance(s2));
       if (best < req - kDrcTolerance) {
         ++sum.count;
         sum.depth += req - best;
       }
     });
-    if (a.type == ItemType::Pad) continue;
+    if (a.type == ItemType::Pad || !aChanged) continue;
     double ec = double(b.edgeClearance), edge = std::numeric_limits<double>::max();
     BBox near = bb.inflated(ec);
     for (auto& loop : b.outline)

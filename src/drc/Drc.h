@@ -1,4 +1,5 @@
 #pragma once
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -42,7 +43,9 @@ struct ConflictSum {
   double depth = 0;  // sum of (required - actual) clearance, nm
 };
 // Clearance and edge conflicts, counted as runDrc counts them, of the copper item pairs with at least
-// one item touching `region`.
-ConflictSum regionConflicts(const Board& b, const SpatialIndex& idx, const BBox& region);
+// one item touching `region`. With `changed`, only the pairs with at least one changed item (the
+// others are the same before and after a local move, and cancel out of its score).
+ConflictSum regionConflicts(const Board& b, const SpatialIndex& idx, const BBox& region,
+                            const std::function<bool(ItemRef)>& changed = {});
 
 }  // namespace xr

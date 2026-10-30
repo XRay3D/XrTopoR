@@ -123,7 +123,7 @@ struct SpatialIndex::Impl {
 SpatialIndex::SpatialIndex() : d_(std::make_unique<Impl>()) {}
 SpatialIndex::~SpatialIndex() = default;
 
-void SpatialIndex::build(const Board& b) {
+void SpatialIndex::build(const Board& b, bool withTracks, bool withZones) {
   std::vector<Value> vals;
   auto add = [&](ItemType t, int n) {
     for (int i = 0; i < n; ++i) {
@@ -134,9 +134,9 @@ void SpatialIndex::build(const Board& b) {
     }
   };
   add(ItemType::Pad, int(b.pads.size()));
-  add(ItemType::Track, int(b.tracks.size()));
+  if (withTracks) add(ItemType::Track, int(b.tracks.size()));
   add(ItemType::Via, int(b.vias.size()));
-  add(ItemType::Zone, int(b.zones.size()));
+  if (withZones) add(ItemType::Zone, int(b.zones.size()));
   d_->tree = bgi::rtree<Value, bgi::rstar<16>>(vals.begin(), vals.end());
 }
 

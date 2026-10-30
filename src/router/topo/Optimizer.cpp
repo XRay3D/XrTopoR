@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <future>
+#include <unordered_set>
 #include <limits>
 #include <map>
 #include <span>
@@ -9,6 +11,7 @@
 #include <optional>
 
 #include "core/Connectivity.h"
+#include "core/Prof.h"
 #include "core/SpatialIndex.h"
 #include "drc/Drc.h"
 #include "router/topo/Realizer.h"
@@ -46,11 +49,18 @@ struct Local {
 
 // Track length and clearance conflicts around a move; the same region is scored on the board before
 // and after it, so whatever the re-shaping touched is compared like for like.
-Local evaluate(const Board& b, const SpatialIndex& idx, const BBox& region) {
+// `changed`: the tracks and items this move touched; conflicts and length are counted for those only
+// (the rest is the same on both sides of the comparison).
+Local evaluate(const Board& b, const SpatialIndex& idx, const BBox& region, const std::vector<char>& changedTracks,
+               const std::vector<ItemRef>& changedItems) {
   Local l;
-  l.conflicts = regionConflicts(b, idx, region);
+  auto changed = [&](ItemRef r) {
+    if (r.type == ItemType::Track) return r.index < int(changedTracks.size()) && changedTracks[r.index] != 0;
+    return std::ranges::contains(changedItems, r);
+  };
+  l.conflicts = regionConflicts(b, idx, region, changed);
   for (ItemRef r : idx.query(region, ~LayerMask(0)))
-    if (r.type == ItemType::Track) l.length += trackLength(b.tracks[r.index]);
+    if (r.type == ItemType::Track && changed(r)) l.length += trackLength(b.tracks[r.index]);
   return l;
 }
 
@@ -77,25 +87,51 @@ struct Candidate {
   double gain = 0;  // score decrease over the move's region
 };
 
+// The moved via or pads: their box on a board, and their item refs (the same on both boards).
+struct MovedItems {
+  std::function<BBox(const Board&)> box = [](const Board&) { return BBox{}; };
+  std::vector<ItemRef> moved;
+};
+
 // Re-shapes the chosen tracks (`current` once grown to whole chains) on a copy of `b` after `move`
 // was applied to it and scores the result against `b`. `items` gives the moved via/pad boxes.
-template <class Move, class Items>
+template <class Move>
 std::optional<Candidate> tryMove(const Board& b, const SpatialIndex& idx, const std::vector<char>& chosen,
-                                 const std::vector<int>& current, Move&& move, Items&& items) {
-  Candidate c{b, 0};
+                                 const std::vector<int>& current, Move&& move, const MovedItems& items) {
+  ProfScope ps("F7 tryMove");
+  std::optional<Candidate> cand;
+  {
+    ProfScope p1("F7 tryMove: board copy");
+    cand.emplace(Candidate{b, 0});
+  }
+  Candidate& c = *cand;
   if (!move(c.board)) return std::nullopt;
-  auto st = reshapeTracks(c.board, chosen, nullptr, nullptr, true);
+  RealizeStats st;
+  {
+    ProfScope p2("F7 tryMove: reshape");
+    st = reshapeTracks(c.board, chosen, nullptr, nullptr, true);
+  }
   std::vector<int> fresh;
   for (size_t i = c.board.tracks.size() - st.trackWire.size(); i < c.board.tracks.size(); ++i) fresh.push_back(int(i));
   BBox region = tracksBox(b, current);
   region.add(tracksBox(c.board, fresh));
-  region.add(items(b));
-  region.add(items(c.board));
+  region.add(items.box(b));
+  region.add(items.box(c.board));
   region = region.inflated(double(b.maxClearance()));
   SpatialIndex cidx;
-  cidx.build(c.board);
-  c.gain = evaluate(b, idx, region).score() - evaluate(c.board, cidx, region).score();
-  return c;
+  {
+    ProfScope p3("F7 tryMove: index build");
+    cidx.build(c.board);
+  }
+  {
+    ProfScope p4("F7 tryMove: evaluate x2");
+    std::vector<char> was(b.tracks.size(), 0), now(c.board.tracks.size(), 0);
+    for (int i : current) was[i] = 1;
+    for (int i : fresh) now[i] = 1;
+    const std::vector<ItemRef>& moved = items.moved;
+    c.gain = evaluate(b, idx, region, was, moved).score() - evaluate(c.board, cidx, region, now, moved).score();
+  }
+  return cand;
 }
 
 const Vec2 kDirs[] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}, {0.7071, 0.7071}, {-0.7071, 0.7071}, {0.7071, -0.7071}, {-0.7071, -0.7071}};
@@ -207,7 +243,7 @@ int settleJunctions(Board& b, const std::vector<int>& nets, int rounds) {
         if (grown[i]) current.push_back(int(i));
       SpatialIndex idx;
       idx.build(b);
-      auto noBox = [](const Board&) { return BBox{}; };
+      MovedItems noBox;
       std::optional<Candidate> best;
       for (double f : {1.0, 0.5, 0.25}) {
         Vec2 d = delta * f;
@@ -243,7 +279,10 @@ OptimizeResult optimize(Board& b, const OptimizeOptions& o) {
 
   // A move must never disconnect anything: candidates are checked against the current ratsnest.
   size_t unrouted = Connectivity::compute(b).ratsnest.size();
-  auto keepsConnectivity = [&](const Board& c) { return Connectivity::compute(c).ratsnest.size() <= unrouted; };
+  auto keepsConnectivity = [&](const Board& c) {
+    ProfScope p("F7 connectivity check");
+    return Connectivity::compute(c).ratsnest.size() <= unrouted;
+  };
 
   // Moves are judged locally; an iteration that still ends with more conflicts overall is undone.
   int conflicts = r.conflictsBefore;
@@ -267,6 +306,7 @@ OptimizeResult optimize(Board& b, const OptimizeOptions& o) {
         std::vector<char> grown;
         Vec2 push{};
         {
+          ProfScope p("F7 probe reshape");
           Board probe = b;
           auto pst = reshapeTracks(probe, chosen, nullptr, &grown, true);
           if (auto it = pst.viaPush.find(vi); it != pst.viaPush.end()) push = it->second;
@@ -275,8 +315,12 @@ OptimizeResult optimize(Board& b, const OptimizeOptions& o) {
         for (size_t i = 0; i < grown.size(); ++i)
           if (grown[i]) current.push_back(int(i));
         SpatialIndex idx;
-        idx.build(b);
-        auto viaBox = [vi](const Board& x) { return Shape::circle(x.vias[vi].pos.v(), x.vias[vi].diameter / 2.0).bbox(); };
+        {
+          ProfScope p("F7 index build (base)");
+          idx.build(b);
+        }
+        MovedItems viaBox{[vi](const Board& x) { return Shape::circle(x.vias[vi].pos.v(), x.vias[vi].diameter / 2.0).bbox(); },
+                          {ItemRef{ItemType::Via, vi}}};
         std::optional<Candidate> best;
         auto consider = [&](std::optional<Candidate> c) {
           if (c && c->gain > std::max(best ? best->gain : 0.0, 1000.0) && keepsConnectivity(c->board)) best = std::move(c);
@@ -328,23 +372,42 @@ OptimizeResult optimize(Board& b, const OptimizeOptions& o) {
           deltas.push_back(away * 0.5);
         }
         for (Vec2 d : kDirs) deltas.push_back(d * step);
-        for (Vec2 delta : deltas) {
-          auto move = [&](Board& c) {
+        // The trial moves are independent: all at once, on all cores.
+        auto moveBy = [&](Vec2 delta) {
+          return [&, delta](Board& c) {
             Via& cv = c.vias[vi];
             dragEnds(c, vs, cv.layers, cv.net, delta);
             cv.pos = Point(cv.pos.v() + delta);
             return true;
           };
-          auto c = tryMove(b, idx, chosen, current, move, viaBox);
-          bool ok = c && c->gain > 1000.0 && keepsConnectivity(c->board);
-          consider(std::move(c));
-          if (ok) continue;
-          // Blocked by the wires of other nets: they come along and are re-shaped with the via's own
-          // (TopoR re-lays the wires around a moved via, so a via may slide along its wire through a bus).
+        };
+        auto runAll = [&](const std::vector<std::pair<Vec2, std::vector<char>>>& jobs) {
+          std::vector<std::future<std::optional<Candidate>>> fs;
+          for (auto& [delta, with] : jobs)
+            fs.push_back(std::async(std::launch::async, [&, delta]() {
+              auto c = tryMove(b, idx, with, current, moveBy(delta), viaBox);
+              if (c && c->gain > 1000.0 && !keepsConnectivity(c->board)) c.reset();
+              return c;
+            }));
+          std::vector<std::optional<Candidate>> out;
+          for (auto& f : fs) out.push_back(f.get());
+          return out;
+        };
+        std::vector<std::pair<Vec2, std::vector<char>>> jobs;
+        for (Vec2 delta : deltas) jobs.push_back({delta, chosen});
+        auto results = runAll(jobs);
+        // Blocked by the wires of other nets: they come along and are re-shaped with the via's own
+        // (TopoR re-lays the wires around a moved via, so a via may slide along its wire through a bus).
+        std::vector<std::pair<Vec2, std::vector<char>>> jobs2;
+        for (size_t k = 0; k < deltas.size(); ++k) {
+          if (results[k] && results[k]->gain > 1000.0) continue;
           std::vector<char> with = chosen;
-          addNeighbours(b, with, v.pos.v(), v.pos.v() + delta, v.diameter / 2.0 + double(b.maxClearance()), v.layers, o.nets);
-          if (with != chosen) consider(tryMove(b, idx, with, current, move, viaBox));
+          addNeighbours(b, with, v.pos.v(), v.pos.v() + deltas[k], v.diameter / 2.0 + double(b.maxClearance()), v.layers, o.nets);
+          if (with != chosen) jobs2.push_back({deltas[k], std::move(with)});
         }
+        auto results2 = runAll(jobs2);
+        for (auto& c : results) if (c && c->gain > std::max(best ? best->gain : 0.0, 1000.0)) best = std::move(c);
+        for (auto& c : results2) if (c && c->gain > std::max(best ? best->gain : 0.0, 1000.0)) best = std::move(c);
         if (best) {
           bool moved = best->board.vias[vi].pos != b.vias[vi].pos;
           b = std::move(best->board);
@@ -377,7 +440,7 @@ OptimizeResult optimize(Board& b, const OptimizeOptions& o) {
           if (grown[i]) current.push_back(int(i));
         SpatialIndex idx;
         idx.build(b);
-        auto noBox = [](const Board&) { return BBox{}; };
+        MovedItems noBox;
         std::optional<Candidate> best;
         bool moved = false;
         auto consider = [&](std::optional<Candidate> c, bool isMove) {
@@ -427,11 +490,13 @@ OptimizeResult optimize(Board& b, const OptimizeOptions& o) {
           if (grown[i]) current.push_back(int(i));
         SpatialIndex idx;
         idx.build(b);
-        auto padsBox = [ci](const Board& x) {
+        MovedItems padsBox;
+        padsBox.box = [ci](const Board& x) {
           BBox bb;
           for (int pi : x.components[ci].pads) bb.add(x.pads[pi].shapeGeom().bbox());
           return bb;
         };
+        for (int pi : comp.pads) padsBox.moved.push_back({ItemType::Pad, pi});
         std::optional<Candidate> best;
         auto consider = [&](std::optional<Candidate> c) {
           if (c && c->gain > std::max(best ? best->gain : 0.0, 1000.0) && keepsConnectivity(c->board)) best = std::move(c);
@@ -456,7 +521,11 @@ OptimizeResult optimize(Board& b, const OptimizeOptions& o) {
           ++r.componentMoves;
         }
       }
-    int now = moves ? conflictCount(b) : conflicts;
+    int now = conflicts;
+    if (moves) {
+      ProfScope p("F7 conflictCount (full DRC)");
+      now = conflictCount(b);
+    }
     if (now > conflicts) {
       b = std::move(before);
       r.viaMoves = viaMoves0;
@@ -474,6 +543,7 @@ OptimizeResult optimize(Board& b, const OptimizeOptions& o) {
   r.lengthAfter = totalLength(b);
   r.conflictsAfter = conflicts;
   r.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  Prof::get().report("F7 optimize");
   return r;
 }
 

@@ -28,7 +28,7 @@ class SpatialIndex {
  public:
   SpatialIndex();
   ~SpatialIndex();
-  void build(const Board& b);
+  void build(const Board& b, bool withTracks = true, bool withZones = true);
   // Calls f for every item whose bbox intersects box and that is on any layer of mask.
   void query(const BBox& box, LayerMask mask, const std::function<void(ItemRef)>& f) const;
   std::vector<ItemRef> query(const BBox& box, LayerMask mask) const;

@@ -1,5 +1,6 @@
 #include "router/topo/Realizer.h"
 
+#include "core/Prof.h"
 #include "core/SpatialIndex.h"
 #include "drc/Drc.h"
 
@@ -509,9 +510,10 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
   };
   std::vector<std::array<Stub, 2>> stubs(NW);
   std::vector<Polyline> sketches(NW);
+  SpatialIndex oidx;  // the copper as it lies now (the chosen tracks are gone): stubs, exit arcs
+  oidx.build(b);
   {
-    SpatialIndex idx;
-    idx.build(b);
+    const SpatialIndex& idx = oidx;
     for (int wi = 0; wi < NW; ++wi) {
       const RealWire& w = wires[wi];
       Polyline& sk = sketches[wi];
@@ -604,6 +606,8 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
   std::map<LayerId, LayerObstacles> obstacles;
   std::map<LayerId, std::map<std::pair<int, int>, std::vector<std::pair<int, int>>>> edgeLists;
   std::map<LayerId, std::set<std::pair<int, int>>> cdtEdges;  // debug: obstacle pairs joined by an edge
+  std::optional<ProfScope> phase;
+  phase.emplace("realize: collect+cdt+crossings");
   for (auto&& [layer, ids] : byLayer) {
     LayerObstacles& ob = obstacles.emplace(layer, opt.mesh ? collectFromMesh(b, layer, *opt.mesh, vias)
                                                             : collect(b, layer, vias, opt)).first->second;
@@ -640,6 +644,7 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
   // nominal widths of the wires crossing it (TopoR's «подрезка»).
   std::vector<std::vector<double>> hw(NW);
   for (int wi = 0; wi < NW; ++wi) hw[wi].assign(hits[wi].size(), double(wires[wi].width));
+  phase.emplace("realize: order+rounds+tangents");
   // The order of the wires on every edge comes from the topology first: two wires that share an
   // edge are ordered by where their paths part — the one that leaves the triangle through the edge
   // at u (or ends at u) is nearer u. The positions of the sketch crossings decide only where the
@@ -1195,8 +1200,7 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
   st.droppedApexes = 0;
   }  // rounds
 
-  SpatialIndex oidx;  // the copper as it lies now (the chosen tracks are gone): exit arcs keep clear of it
-  oidx.build(b);
+  phase.emplace("realize: emission");
   for (int wi = 0; wi < NW; ++wi) {
     const RealWire& w = wires[wi];
     for (double x : hw[wi])
@@ -1369,21 +1373,32 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
 
 RealizeStats reshapeTracks(Board& b, std::vector<char> chosen, std::vector<RealWire>* wiresOut,
                            std::vector<char>* grownOut, bool local, double glue) {
+  ProfScope pAll("reshapeTracks total");
+  std::optional<ProfScope> phase;
+  phase.emplace("reshapeTracks: chains");
   chosen.resize(b.tracks.size(), 0);
   // Vertices: the ends of the tracks. Ends of one net and layer that nearly coincide (a wire drawn
   // by hand up to the end of another misses it by a few um; the copper overlaps all the same) are
   // one vertex: within `glue` of the width, never less than 1 um.
   if (const char* e = std::getenv("XR_GLUE")) glue = std::atof(e);
+  // Only the tracks of the chosen nets can join a chain: the rest are left out of the vertex set.
+  std::vector<char> relevant(b.tracks.size(), 0);
+  {
+    std::set<int> nets;
+    for (size_t i = 0; i < b.tracks.size(); ++i)
+      if (chosen[i]) nets.insert(b.tracks[i].net);
+    for (size_t i = 0; i < b.tracks.size(); ++i) relevant[i] = nets.contains(b.tracks[i].net);
+  }
   double maxTol = 1000.0;
   for (const auto& t : b.tracks) maxTol = std::max(maxTol, glue * t.width);
   const Coord cell = Coord(maxTol) + 1;
   struct VEnd { int track; Point p; int vertex; };
   std::vector<VEnd> vends;
   std::map<std::tuple<Coord, Coord, LayerId, int>, std::vector<int>> cells;  // cell -> indices in vends
-  std::vector<std::array<int, 2>> vid(b.tracks.size());
+  std::vector<std::array<int, 2>> vid(b.tracks.size(), {-1, -1});
   int nVertices = 0;
   for (size_t i = 0; i < b.tracks.size(); ++i)
-    for (int e = 0; e < 2; ++e) {
+    for (int e = 0; e < 2 && relevant[i]; ++e) {
       const Track& t = b.tracks[i];
       Point p = e ? t.b : t.a;
       Coord cx = p.x / cell, cy = p.y / cell;
@@ -1408,6 +1423,7 @@ RealizeStats reshapeTracks(Board& b, std::vector<char> chosen, std::vector<RealW
   // Grow the choice to whole chains of the same net and layer.
   std::vector<std::vector<int>> ends(nVertices);
   for (size_t i = 0; i < b.tracks.size(); ++i) {
+    if (!relevant[i]) continue;
     ends[vid[i][0]].push_back(int(i));
     ends[vid[i][1]].push_back(int(i));
   }
@@ -1439,7 +1455,7 @@ RealizeStats reshapeTracks(Board& b, std::vector<char> chosen, std::vector<RealW
   // Chains end at branch points and wherever a vertex touches a pad or via of its net: manual
   // routes often enter a pad off-centre, and the taut path must still pass through that copper.
   SpatialIndex idx;
-  idx.build(b);
+  idx.build(b, false, false);  // pads and vias are all the chain building asks about
   auto onAnchor = [&](Point p, int net, LayerId layer) {
     bool hit = false;
     BBox q;
@@ -1593,6 +1609,7 @@ RealizeStats reshapeTracks(Board& b, std::vector<char> chosen, std::vector<RealW
   // All wires at once: nesting around shared obstacles keeps them apart. (Sequential realisation
   // with earlier wires as obstacles was tried and loses: a later sketch may cross an earlier taut
   // path and end up on the wrong side of it.)
+  phase.emplace("reshapeTracks: realize");
   return realize(b, wires, {}, opt);
 }
 
