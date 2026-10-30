@@ -100,6 +100,20 @@ std::optional<Candidate> tryMove(const Board& b, const SpatialIndex& idx, const 
 
 const Vec2 kDirs[] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}, {0.7071, 0.7071}, {-0.7071, 0.7071}, {0.7071, -0.7071}, {-0.7071, -0.7071}};
 
+// The tracks (not locked) of any net that run closer than `r` to the segment from `a` to `b` on the
+// given layers: the neighbours a moving via has to get past — they are re-shaped with its own wires,
+// as TopoR re-lays the wires around a moved via, so a via may slide along its wire through a bus.
+// `nets` non-empty: only tracks of those nets (the wires of the other nets are kept as they are).
+void addNeighbours(const Board& b, std::vector<char>& chosen, Vec2 a, Vec2 c, double r, LayerMask layers,
+                   const std::vector<int>& nets) {
+  for (size_t i = 0; i < b.tracks.size(); ++i) {
+    const Track& t = b.tracks[i];
+    if (chosen[i] || t.locked || !((layers >> t.layer) & 1)) continue;
+    if (!nets.empty() && !std::ranges::contains(nets, t.net)) continue;
+    if (distSegmentSegment(a, c, t.a.v(), t.b.v()) < r + t.width / 2.0) chosen[i] = 1;
+  }
+}
+
 // Moves track end points lying inside `shape` (net, layers) by d.
 void dragEnds(Board& b, const Shape& shape, LayerMask layers, int net, Vec2 d) {
   for (auto& t : b.tracks) {
@@ -315,15 +329,21 @@ OptimizeResult optimize(Board& b, const OptimizeOptions& o) {
         }
         for (Vec2 d : kDirs) deltas.push_back(d * step);
         for (Vec2 delta : deltas) {
-          consider(tryMove(
-              b, idx, chosen, current,
-              [&](Board& c) {
-                Via& cv = c.vias[vi];
-                dragEnds(c, vs, cv.layers, cv.net, delta);
-                cv.pos = Point(cv.pos.v() + delta);
-                return true;
-              },
-              viaBox));
+          auto move = [&](Board& c) {
+            Via& cv = c.vias[vi];
+            dragEnds(c, vs, cv.layers, cv.net, delta);
+            cv.pos = Point(cv.pos.v() + delta);
+            return true;
+          };
+          auto c = tryMove(b, idx, chosen, current, move, viaBox);
+          bool ok = c && c->gain > 1000.0 && keepsConnectivity(c->board);
+          consider(std::move(c));
+          if (ok) continue;
+          // Blocked by the wires of other nets: they come along and are re-shaped with the via's own
+          // (TopoR re-lays the wires around a moved via, so a via may slide along its wire through a bus).
+          std::vector<char> with = chosen;
+          addNeighbours(b, with, v.pos.v(), v.pos.v() + delta, v.diameter / 2.0 + double(b.maxClearance()), v.layers, o.nets);
+          if (with != chosen) consider(tryMove(b, idx, with, current, move, viaBox));
         }
         if (best) {
           bool moved = best->board.vias[vi].pos != b.vias[vi].pos;
