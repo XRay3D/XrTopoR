@@ -548,10 +548,16 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
                 }
               }
             } else if (pad->kind == Shape::Kind::Segment && (pad->b - pad->a).len2() > 1) {
-              Vec2 e = (X - pad->a).len2() < (X - pad->b).len2() ? pad->a : pad->b;
-              M = e;
-              n = (e - (pad->a + pad->b - e)).normalized();
-              len = 2 * pad->r;
+              // Through a cap of the oval only; a wire that leaves through the long side (a QFP pad
+              // entered from the side, as P-CAD and TopoR lay them) keeps its side exit.
+              Vec2 ab = pad->b - pad->a;
+              double t = (X - pad->a).dot(ab) / ab.len2();
+              if (t <= 0 || t >= 1) {
+                Vec2 e = t <= 0 ? pad->a : pad->b;
+                M = e;
+                n = (e - (pad->a + pad->b - e)).normalized();
+                len = 2 * pad->r;
+              }
             }
           }
           if (len >= 0 && len < w.width + 2.0 * double(w.clearance)) {
@@ -578,6 +584,9 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
       }
     }
   }
+  std::vector<BBox> sketchBox(NW);
+  for (int wi = 0; wi < NW; ++wi)
+    for (Vec2 q : sketches[wi]) sketchBox[wi].add(q);
   std::map<LayerId, LayerObstacles> obstacles;
   std::map<LayerId, std::map<std::pair<int, int>, std::vector<std::pair<int, int>>>> edgeLists;
   std::map<LayerId, std::set<std::pair<int, int>>> cdtEdges;  // debug: obstacle pairs joined by an edge
@@ -864,6 +873,15 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
     std::vector<Vec2> ti, to;
     int shrinks = 0;
     std::flat_set<int> dropped;
+    // Other nets' wires of this layer whose sketches come near: their arcs are checked below.
+    std::vector<int> nearWires;
+    {
+      BBox mine;
+      for (Vec2 q : sk) mine.add(q);
+      mine = mine.inflated(5 * kNmPerMm);
+      for (int wj : byLayer.at(w.layer))
+        if (wj != wi && wires[wj].net != w.net && !bendsOf[wj].empty() && mine.intersects(sketchBox[wj])) nearWires.push_back(wj);
+    }
     for (int iter = 0; iter < 400; ++iter) {
       size_t n = cs.size();
       ti.assign(n, {});
@@ -947,6 +965,44 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
             }
           }
         }
+      }
+      if (at < 0) {
+        // Arcs of other nets' wires a straight segment runs into: the other wire bends around an
+        // obstacle this wire crosses no edge of (it passes the triangle as a chord), so no slot orders
+        // the two, and the chord cuts through the arc. The chord bends around that arc, outside it.
+        // (A chord inside the circle is the inner wire's; the slots keep it.)
+        static const bool kNoArc = std::getenv("XR_NOARC") != nullptr;
+        for (size_t k = 0; k + 1 < n && at < 0 && !kNoArc; ++k) {
+          Vec2 p = k == 0 ? cs[0].c : to[k];
+          Vec2 q = k + 1 == n - 1 ? cs[n - 1].c : ti[k + 1];
+          if ((q - p).len2() < 1) continue;
+          double width = std::min(cs[k].width, cs[k + 1].width);
+          for (int wj : nearWires) {
+            const RealWire& o = wires[wj];
+            const auto& ocs = bendsOf[wj];
+            for (size_t m = 1; m + 1 < ocs.size(); ++m) {
+              const Circle& oc = ocs[m];
+              if (oc.obst < 0) continue;
+              double R = std::abs(oc.rho);
+              double spacing = width / 2.0 + std::max(double(w.clearance), double(o.clearance)) + kMargin + oc.width / 2.0;
+              Vec2 X = closestPointOnSegment(oc.c, p, q);
+              double dc = (X - oc.c).len();
+              if (dc < R || dc >= R + spacing) continue;
+              // The closest point must face the arc itself, not the rest of the circle.
+              double sweep = sweepOf(oc, tinOf[wj][m], toutOf[wj][m]);
+              double ai = std::atan2(tinOf[wj][m].y - oc.c.y, tinOf[wj][m].x - oc.c.x);
+              double ax = std::atan2(X.y - oc.c.y, X.x - oc.c.x);
+              double rel = sweep >= 0 ? normalizeAngle(ax - ai) : normalizeAngle(ai - ax);
+              if (rel > std::abs(sweep) + 0.05) continue;
+              if (dropped.contains(oc.obst) || std::ranges::any_of(cs, [&](const Circle& x) { return x.obst == oc.obst; })) continue;
+              at = int(k) + 1;
+              ins = {oc.c, (orient(p, q, oc.c) > 0 ? 1 : -1) * (R + spacing), oc.obst, cs[k].portal, width};
+              break;
+            }
+            if (at >= 0) break;
+          }
+        }
+        if (at >= 0) ++st.arcBends;
       }
       if (at < 0) {
         // Guard by geometry: copper of other nets the straight segments run into although it is no end

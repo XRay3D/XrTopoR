@@ -188,7 +188,7 @@ int main(int argc, char** argv) {
   if (cmd == "reshape" && !a.opt("-o").empty()) {
     std::vector<char> all(b.tracks.size(), 1);
     auto st = topo::reshapeTracks(b, all);
-    std::println("reshaped {} wires, {} arcs, {} apexes dropped", st.wires, st.arcs, st.droppedApexes);
+    std::println("reshaped {} wires, {} arcs, {} apexes dropped, {} arc bends", st.wires, st.arcs, st.droppedApexes, st.arcBends);
     if (auto r = io::saveBoard(b, std::string(a.opt("-o"))); !r) return fail(r.error());
     return 0;
   }
