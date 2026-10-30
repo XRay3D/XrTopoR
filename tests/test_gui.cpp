@@ -445,14 +445,22 @@ TEST(Gui, FrameSelection) {
 TEST(Gui, CyclicSelection) {
   Fixture f("tt.kicad_pcb");
   const Board& b = f.b();
+  // A seed whose end joins exactly one other track of its net and layer, at no via or pad: the
+  // wire (the chain up to a pad, a via or a junction) then has at least two tracks.
   int seed = -1;
-  for (int i = 0; i < int(b.tracks.size()) && seed < 0; ++i)
+  for (int i = 0; i < int(b.tracks.size()) && seed < 0; ++i) {
+    const Track& ti = b.tracks[i];
+    int joined = 0;
     for (int j = 0; j < int(b.tracks.size()); ++j)
-      if (i != j && b.tracks[i].net == b.tracks[j].net && b.tracks[i].layer == b.tracks[j].layer &&
-          (b.tracks[i].b == b.tracks[j].a || b.tracks[i].b == b.tracks[j].b)) {
-        seed = i;
-        break;
-      }
+      if (i != j && b.tracks[j].net == ti.net && b.tracks[j].layer == ti.layer &&
+          (ti.b == b.tracks[j].a || ti.b == b.tracks[j].b))
+        ++joined;
+    if (joined != 1) continue;
+    bool free = true;
+    for (auto& v : b.vias) free &= v.net != ti.net || (v.pos.v() - ti.b.v()).len() > v.diameter / 2.0;
+    for (auto& pad : b.pads) free &= pad.net != ti.net || !pad.shapeGeom().contains(ti.b.v());
+    if (free) seed = i;
+  }
   ASSERT_GE(seed, 0);
   f.doc.setSelection({{ItemType::Track, seed}}, {});
   f.view.cycleSelection();

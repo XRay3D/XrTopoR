@@ -1086,41 +1086,49 @@ void BoardView::selectInFrame(QRectF screenRect, bool crossing, bool add) {
 }
 
 std::vector<ItemRef> BoardView::wireOf(int track) const {
-  // A wire: same-net tracks joined end to end (through vias), not passing through pads.
+  // A wire as TopoR selects it: same-net tracks of one layer joined end to end, up to a pad, a via
+  // or a junction where several tracks meet (none of those is part of it).
   const Board& b = *doc_->board();
-  int net = b.tracks[track].net;
-  std::vector<char> seenT(b.tracks.size(), 0), seenV(b.vias.size(), 0);
-  std::vector<ItemRef> out;
-  std::vector<std::pair<Vec2, LayerMask>> todo;
-  auto atPad = [&](Vec2 p, LayerMask lm) {
+  const Track& t0 = b.tracks[track];
+  const int net = t0.net;
+  const LayerId layer = t0.layer;
+  const LayerMask lm = LayerMask(1) << layer;
+  auto atPad = [&](Vec2 p) {
     for (auto& pad : b.pads)
       if (pad.net == net && (pad.copper & lm) && pad.shapeGeom().contains(p)) return true;
     return false;
   };
-  auto visit = [&](int ti) {
-    seenT[ti] = 1;
-    out.push_back({ItemType::Track, ti});
-    const Track& t = b.tracks[ti];
-    LayerMask lm = LayerMask(1) << t.layer;
-    for (Vec2 p : {t.a.v(), t.b.v()})
-      if (!atPad(p, lm)) todo.push_back({p, lm});
+  auto atVia = [&](Vec2 p) {
+    for (auto& v : b.vias)
+      if (v.net == net && v.onLayer(layer) && (v.pos.v() - p).len() <= v.diameter / 2.0) return true;
+    return false;
   };
-  visit(track);
-  while (!todo.empty()) {
-    auto [p, lm] = todo.back();
-    todo.pop_back();
-    for (int vi = 0; vi < int(b.vias.size()); ++vi)
-      if (!seenV[vi] && b.vias[vi].net == net && (b.vias[vi].pos.v() - p).len() <= b.vias[vi].diameter / 2.0) {
-        seenV[vi] = 1;
-        out.push_back({ItemType::Via, vi});
-        todo.push_back({b.vias[vi].pos.v(), b.vias[vi].layers});
-      }
+  auto touching = [&](Vec2 p, double tol) {
+    std::vector<int> ts;
     for (int ti = 0; ti < int(b.tracks.size()); ++ti) {
       const Track& t = b.tracks[ti];
-      if (seenT[ti] || t.net != net || !((lm >> t.layer) & 1)) continue;
-      double tol = t.width / 2.0;
-      if ((t.a.v() - p).len() <= tol || (t.b.v() - p).len() <= tol) visit(ti);
+      if (t.net != net || t.layer != layer) continue;
+      if ((t.a.v() - p).len() <= tol || (t.b.v() - p).len() <= tol) ts.push_back(ti);
     }
+    return ts;
+  };
+  std::vector<char> seen(b.tracks.size(), 0);
+  std::vector<ItemRef> out;
+  std::vector<std::pair<int, Vec2>> todo{{track, t0.a.v()}, {track, t0.b.v()}};
+  seen[track] = 1;
+  out.push_back({ItemType::Track, track});
+  while (!todo.empty()) {
+    auto [ti, p] = todo.back();
+    todo.pop_back();
+    if (atPad(p) || atVia(p)) continue;
+    auto nb = touching(p, b.tracks[ti].width / 2.0);
+    if (nb.size() != 2) continue;  // a free end, or a junction of several tracks
+    int other = nb[0] == ti ? nb[1] : nb[0];
+    if (seen[other]) continue;
+    seen[other] = 1;
+    out.push_back({ItemType::Track, other});
+    const Track& t = b.tracks[other];
+    todo.push_back({other, (t.a.v() - p).len() <= (t.b.v() - p).len() ? t.b.v() : t.a.v()});
   }
   return out;
 }

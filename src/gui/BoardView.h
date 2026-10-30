@@ -79,7 +79,7 @@ class BoardView : public QWidget {
   void toggleFix();                   // F: lock/unlock the selection
   void selectAll();
   void cycleSelection();             // X: segment → wire → net
-  void selectWire();                 // whole wires of the selected segments
+  void selectWire();                 // whole wires (chains up to pads, vias, junctions) of the selected segments
   void selectNet();                  // everything of the selected objects' nets
   void startMeasure(MeasureKind k);  // Ctrl+M: the ruler; Esc returns to the previous mode
   void prevView();                   // Alt+←
@@ -151,7 +151,7 @@ class BoardView : public QWidget {
   void pushView();             // records the view for Alt+← / Alt+→
   void selectInFrame(QRectF screenRect, bool crossing, bool add);
   void clickSelect(const Pick& pk, Qt::KeyboardModifiers mods);
-  std::vector<ItemRef> wireOf(int track) const;  // connected same-net tracks and vias, up to pads
+  std::vector<ItemRef> wireOf(int track) const;  // the chain of one layer up to a pad, a via or a junction
   void measureClick(const Pick& pk, Vec2 w);
   void drawTools(QPainter& p);  // selection frame, ruler
   void drawTrack(QPainter& p, const Track& t, const QColor& c, double extra = 0);
