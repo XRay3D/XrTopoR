@@ -261,6 +261,9 @@ Commands::Commands(QWidget* window) : QObject(window), window_(window) {
   add("Cmd_MoveCompsVias", tr("Подвижка компонентов и переходов с перекладкой проводников"),
       tr("Подвижка компонентов и переходов с перекладкой проводников"), {}, {}, "move");
   add("Cmd_Teardrops", tr("Капельки"), tr("Капельки"), {}, {}, "teardrop")->setCheckable(true);
+  add("Cmd_RecalcEdited", tr("Расчёт формы: только изменённые проводники"),
+      tr("F5 без выделения пересчитывает только проводники, изменённые с прошлого расчёта"), {}, {})
+      ->setCheckable(true);
   addGroup("Accel_RecalcWires", {"Cmd_RecalcArcs", "Cmd_RecalcAny", "Cmd_Recalc45"}, "Cmd_RecalcAny");
   addGroup("Accel_RefineWires", {"Cmd_RefineLayers", "Cmd_RefineSame"}, "Cmd_RefineLayers");
   addGroup("Accel_AutoStart", {"Cmd_MoveVias", "Cmd_MoveViasRefine", "Cmd_MoveCompsVias"}, "Cmd_MoveVias");

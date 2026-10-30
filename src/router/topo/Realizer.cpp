@@ -132,6 +132,8 @@ struct EdgeHit {
   int u, v;     // obstacle ids, u < v
   double t;     // position along u -> v
   bool uLeft;   // u lies to the left of the direction of travel
+  int wBack = -1, wFwd = -1;  // apex of the triangle left and of the triangle entered (-1: outside)
+  bool atEnd = false;         // the edge touches a sketch end point (stripped at the ends of the walk)
 };
 
 std::vector<EdgeHit> crossings(const CDT& cdt, const Polyline& sk) {
@@ -174,15 +176,22 @@ std::vector<EdgeHit> crossings(const CDT& cdt, const Polyline& sk) {
         t = 1 - t;
         uLeft = !uLeft;
       }
-      bool touchesEnd = distPointSegment(sk.front(), a, b) < 1 || distPointSegment(sk.back(), a, b) < 1;
-      if (touchesEnd) {
-      } else if (!out.empty() && out.back().u == u && out.back().v == v) out.pop_back();  // went back
-      else out.push_back({u, v, std::clamp(t, 0.0, 1.0), uLeft});
       auto n = f->neighbor(exit);
+      int wBack = cdt.is_infinite(f) ? -1 : f->vertex(exit)->info();
+      int wFwd = cdt.is_infinite(n) ? -1 : n->vertex(n->index(f))->info();
+      bool atEnd = distPointSegment(sk.front(), a, b) < 1 || distPointSegment(sk.back(), a, b) < 1;
+      if (!out.empty() && out.back().u == u && out.back().v == v) out.pop_back();  // went back
+      else out.push_back({u, v, std::clamp(t, 0.0, 1.0), uLeft, wBack, wFwd, atEnd});
       entry = n->index(f);
       f = n;
     }
   }
+  // A sketch that ends on an edge (the centre of an oval pad between its caps) or just past it: the
+  // hits touching an end point are no crossings — but only at the ends of the walk. A wire that
+  // wraps around its own via crosses the via's fan edges on the way, and those crossings order it
+  // against the other wires (they were dropped before, and the wire was laid across them).
+  while (!out.empty() && out.front().atEnd) out.erase(out.begin());
+  while (!out.empty() && out.back().atEnd) out.pop_back();
   return out;
 }
 
@@ -626,6 +635,76 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
   // nominal widths of the wires crossing it (TopoR's «подрезка»).
   std::vector<std::vector<double>> hw(NW);
   for (int wi = 0; wi < NW; ++wi) hw[wi].assign(hits[wi].size(), double(wires[wi].width));
+  // The order of the wires on every edge comes from the topology first: two wires that share an
+  // edge are ordered by where their paths part — the one that leaves the triangle through the edge
+  // at u (or ends at u) is nearer u. The positions of the sketch crossings decide only where the
+  // topology does not (both wires end inside the triangle), so a sketch drawn a little across its
+  // neighbour (an even number of crossings) is laid where it belongs. Forward and backward verdicts
+  // that disagree mean the sketches cross each other (an odd number of times): a topological
+  // crossing, laid as drawn and counted (TopoR refuses F5 with such a crossing, error 5032).
+  for (auto&& [layer, ids] : byLayer) {
+    const LayerObstacles& ob = obstacles.at(layer);
+    auto edgeOf = [&](const EdgeHit& h) { return std::pair{h.u, h.v}; };
+    auto hasVertex = [](std::pair<int, int> e, int x) { return e.first == x || e.second == x; };
+    auto crossPt = [&](const EdgeHit& h) { return ob.pts[h.u].p + (ob.pts[h.v].p - ob.pts[h.u].p) * h.t; };
+    // +1: A nearer u of the edge shared by hits (A,i) and (B,j), -1: B nearer u, 0: unknown.
+    auto side = [&](this auto&& self, int A, int i, int dA, int B, int j, int dB, int depth) -> int {
+      if (depth > 64) return 0;
+      const EdgeHit& hA = hits[A][i];
+      const EdgeHit& hB = hits[B][j];
+      int u = hA.u, v = hA.v;
+      int w = dA > 0 ? hA.wFwd : hA.wBack;
+      if (w < 0 || w != (dB > 0 ? hB.wFwd : hB.wBack)) return 0;
+      int nA = i + dA, nB = j + dB;
+      bool endA = nA < 0 || nA >= int(hits[A].size()), endB = nB < 0 || nB >= int(hits[B].size());
+      if (!endA && !endB) {
+        auto eA = edgeOf(hits[A][nA]), eB = edgeOf(hits[B][nB]);
+        if (eA == eB) {
+          int sv = hasVertex(eA, u) ? u : v;  // the vertex the run keeps
+          int r = self(A, nA, dA, B, nB, dB, depth + 1);
+          if (r == 0) return 0;
+          bool aNearS = (r > 0) == (eA.first == sv);  // r: A nearer eA.first
+          return aNearS == (sv == u) ? +1 : -1;
+        }
+        if (hasVertex(eA, u) && hasVertex(eB, v)) return +1;
+        if (hasVertex(eA, v) && hasVertex(eB, u)) return -1;
+        return 0;
+      }
+      auto endSide = [&](int X, int dX, int Y, int cY, int nY) -> int {  // X ends in the triangle, Y goes on: +1 X nearer u
+        Vec2 P = dX > 0 ? sketches[X].back() : sketches[X].front();
+        if ((P - ob.pts[u].p).len2() < 1) return +1;
+        if ((P - ob.pts[v].p).len2() < 1) return -1;
+        auto eY = edgeOf(hits[Y][nY]);
+        if ((P - ob.pts[w].p).len2() < 1) return hasVertex(eY, u) ? -1 : +1;
+        Vec2 a = crossPt(hits[Y][cY]), b = crossPt(hits[Y][nY]);
+        double o = orient(a, b, P), ou = orient(a, b, ob.pts[u].p);
+        if (o == 0 || ou == 0) return 0;
+        return (o > 0) == (ou > 0) ? +1 : -1;
+      };
+      if (endA && !endB) return endSide(A, dA, B, j, nB);
+      if (endB && !endA) return -endSide(B, dB, A, i, nA);
+      return hA.t < hB.t ? +1 : hA.t > hB.t ? -1 : 0;
+    };
+    for (auto& [uv, list] : edgeLists[layer]) {
+      auto before = [&](std::pair<int, int> a, std::pair<int, int> b) {
+        const EdgeHit& hA = hits[a.first][a.second];
+        const EdgeHit& hB = hits[b.first][b.second];
+        int dB = hA.uLeft == hB.uLeft ? +1 : -1;
+        int f = side(a.first, a.second, +1, b.first, b.second, dB, 0);
+        int bk = side(a.first, a.second, -1, b.first, b.second, -dB, 0);
+        if (f != 0 && bk != 0 && f != bk) {
+          ++st.sketchCrossings;
+          auto pr = std::minmax(wires[a.first].net, wires[b.first].net);
+          if (!std::ranges::contains(st.crossingNets, std::pair{pr.first, pr.second})) st.crossingNets.push_back({pr.first, pr.second});
+          return hA.t < hB.t;
+        }
+        int r = f != 0 ? f : bk;
+        return r != 0 ? r > 0 : hA.t < hB.t;
+      };
+      for (size_t k = 1; k < list.size(); ++k)  // insertion sort: the order is pairwise, not a key
+        for (size_t m = k; m > 0 && before(list[m], list[m - 1]); --m) std::swap(list[m], list[m - 1]);
+    }
+  }
   for (int round = 0; round < 6; ++round) {
   for (auto&& [layer, ids] : byLayer) {
     const LayerObstacles& ob = obstacles.at(layer);
@@ -633,7 +712,6 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
       const OPt& U = ob.pts[uv.first];
       const OPt& V = ob.pts[uv.second];
       double L = (V.p - U.p).len();
-      std::ranges::sort(list, {}, [&](auto wk) { return hits[wk.first][wk.second].t; });
       int n = int(list.size());
       // Stack from u: a[k] = centre-line distance of wire k from u when all inner wires are packed.
       std::vector<double> a(n), bb(n);

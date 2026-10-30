@@ -308,6 +308,8 @@ void MainWindow::bindCommands() {
   c.bind("Cmd_FmPushVias", [this] { view_->startFreestyle(topo::Push::Vias); });
   c.bind("Cmd_FmPushComps", [this] { view_->startFreestyle(topo::Push::ViasAndComponents); });
   c.bind("Cmd_RecalcArcs", [this] { view_->recomputeShapes(); });
+  c["Cmd_RecalcEdited"]->setChecked(QSettings().value("f5/editedOnly", true).toBool());
+  c.bind("Cmd_RecalcEdited", [this] { QSettings().setValue("f5/editedOnly", (*cmds_)["Cmd_RecalcEdited"]->isChecked()); }, false);
   c.bind("Cmd_MoveVias", [this] { optimize(false); });
   c.bind("Cmd_MoveViasRefine", [this] { optimize(false, true); });
   c.bind("Cmd_RefineLayers", [this] { refine(true); });
@@ -385,7 +387,7 @@ void MainWindow::buildMenus() {
                                            "-", "Cmd_Fanout", "Cmd_WiresToCopper"});
   sub(tools, tr("Области &металлизации"), {"Accel_PourAllPoly", "Accel_UnPourAllPoly", "Accel_RePourAllPoly"});
   cmds_->fill(tools, {"-", "Cmd_RemoveExcessVias", "Cmd_RemoveSinglePinNets", "-", "Cmd_Sync", "Cmd_Eco", "-",
-                      "Cmd_Settings"});
+                      "Cmd_RecalcEdited", "Cmd_Settings"});
 
   menu(tr("&Справка"), {"Accel_Help", "Cmd_Features", "Cmd_HotkeysHelp", "-", "Cmd_HomePage", "-", "Cmd_About"});
 }

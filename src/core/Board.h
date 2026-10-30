@@ -115,6 +115,7 @@ struct Track {
   LayerId layer = 0;
   int net = kNoNet;
   bool locked = false;
+  bool edited = false;  // changed by hand since the last shape computation (F5 re-lays these first)
   bool isArc() const { return mid.has_value(); }
   Polyline path(double tol = 2000) const;  // centreline points
 };

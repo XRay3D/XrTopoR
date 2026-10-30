@@ -3,6 +3,7 @@
 #include <QApplication>
 #include <QKeyEvent>
 #include <QMenu>
+#include <QSettings>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
@@ -2048,13 +2049,29 @@ void BoardView::recomputeShapes() {
   bool any = false;
   for (ItemRef r : doc_->selectedItems())
     if (r.type == ItemType::Track) { chosen[r.index] = 1; any = true; }
+  // Nothing selected: the tracks edited since the last computation only (their chains, with the
+  // rest of the copper as it lies), when the setting says so and there are any; else everything.
+  bool local = any;
+  if (!any && QSettings().value("f5/editedOnly", true).toBool()) {
+    for (size_t i = 0; i < b.tracks.size(); ++i)
+      if (b.tracks[i].edited && !b.tracks[i].locked) { chosen[i] = 1; any = true; }
+    local = any;
+  }
   if (!any)
     for (size_t i = 0; i < b.tracks.size(); ++i) chosen[i] = !b.tracks[i].locked;
   auto before = doc_->beginEdit();
-  auto st = topo::reshapeTracks(b, std::move(chosen));
+  auto st = topo::reshapeTracks(b, std::move(chosen), nullptr, nullptr, local);
+  for (auto& t : b.tracks) t.edited = false;
   doc_->clearSelection();
-  doc_->commitEdit(before, tr("Расчёт формы проводников"));
-  emit status(tr("Расчёт формы проводников: %1 проводник(ов), %2 дуг").arg(st.wires).arg(st.arcs));
+  doc_->commitEdit(before, tr("Расчёт формы проводников"), false);
+  QString msg = tr("Расчёт формы проводников: %1 проводник(ов), %2 дуг").arg(st.wires).arg(st.arcs);
+  if (!st.crossingNets.empty()) {
+    QStringList pairs;
+    for (auto [n1, n2] : st.crossingNets)
+      pairs << QString("%1/%2").arg(QString::fromStdString(b.nets[n1].name), QString::fromStdString(b.nets[n2].name));
+    msg += tr("; топологическое пересечение проводников: %1 (уложены как нарисованы)").arg(pairs.join(", "));
+  }
+  emit status(msg);
 }
 
 void BoardView::cancelTool() {

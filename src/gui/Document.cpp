@@ -193,7 +193,17 @@ void Document::clearLog(const QString& group) {
   emit logChanged();
 }
 
-void Document::commitEdit(const EditSnapshot& before, const QString& title) {
+void Document::commitEdit(const EditSnapshot& before, const QString& title, bool markEdited) {
+  if (markEdited) {
+    auto& tracks = board_->tracks;
+    for (size_t i = 0; i < tracks.size(); ++i) {
+      Track& t = tracks[i];
+      if (i >= before.tracks.size()) { t.edited = true; continue; }
+      const Track& o = before.tracks[i];
+      if (t.a != o.a || t.b != o.b || t.mid != o.mid || t.width != o.width || t.layer != o.layer || t.net != o.net)
+        t.edited = true;
+    }
+  }
   invalidate();
   undo_.push(new SnapshotCommand(this, before, EditSnapshot::take(*board_), title));
   emit boardChanged();

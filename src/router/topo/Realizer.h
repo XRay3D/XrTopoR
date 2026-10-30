@@ -39,6 +39,8 @@ struct RealizeStats {
   int droppedApexes = 0;
   int guardBends = 0;  // bends added by geometry around copper the taut path ran into
   int arcBends = 0;    // bends added around other wires' arcs a chord ran into
+  int sketchCrossings = 0;  // pairs of sketches that cross each other topologically (laid as drawn)
+  std::vector<std::pair<int, int>> crossingNets;  // the nets of those pairs, each pair once
   std::vector<int> trackWire;  // wire index of every track appended, in order
 };
 

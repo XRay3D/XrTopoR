@@ -121,7 +121,9 @@ class Document : public QObject {
 
   // Edits: snapshot-based undo. Call begin, edit the board, then commit with a title.
   EditSnapshot beginEdit() { return EditSnapshot::take(*board_); }
-  void commitEdit(const EditSnapshot& before, const QString& title);
+  // `markEdited`: tracks that are new or changed since `before` get Track::edited (F5 re-lays those
+  // first); the shape computation itself commits without it.
+  void commitEdit(const EditSnapshot& before, const QString& title, bool markEdited = true);
 
  signals:
   void boardReplaced();
