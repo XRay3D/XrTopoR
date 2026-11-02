@@ -88,6 +88,10 @@ struct Candidate {
   double gain = 0;  // score decrease over the move's region
 };
 
+// The neighbourhood every re-lay takes along (OptimizeOptions::relayAround), set per optimize() call.
+double gRelayAround = 0;
+std::vector<int> gRelayNets;
+
 
 
 
@@ -117,7 +121,7 @@ std::optional<Candidate> tryMove(const Board& b, const SpatialIndex& idx, const 
   RealizeStats st;
   {
     ProfScope p2("F7 tryMove: reshape");
-    st = reshapeTracks(c.board, chosen, nullptr, nullptr, true);
+    st = reshapeTracks(c.board, chosen, nullptr, nullptr, true, 0.1, gRelayAround, gRelayNets);
   }
   std::vector<int> fresh;
   for (size_t i = c.board.tracks.size() - st.trackWire.size(); i < c.board.tracks.size(); ++i) fresh.push_back(int(i));
@@ -318,8 +322,221 @@ int settleJunctions(Board& b, const std::vector<int>& nets, int rounds) {
   return moved;
 }
 
+// ---- TopoR's relaxation (F6/F7 cascade as reconstructed in hand/f6_refine.cpp) ----------------
+// Every movable object (via, free branch point) gets a force each iteration: towards the point where
+// the wire through it runs straight (the midpoint of its two neighbouring wire vertices, the
+// geometric median when more meet) and away from the crowding (the realiser's squeeze vector, see
+// RealizeStats::viaPush). The step is the force clipped to tol·scale, where scale grows ×1.5 while
+// the force keeps its direction and shrinks ×0.6 when it turns (Rprop, TopoR's scale_adjust); tol
+// falls ×0.8 per iteration from 1 mm to 10 µm. A move is tried against the copper around the new
+// place and, when blocked, shortened or slid along the blocker (pull_slot). The chains at the object
+// and the wires of other nets it passes are re-laid after every move; an iteration that ends with
+// more conflicts is undone.
+namespace {
+
+struct RelaxObject {
+  bool via = false;
+  int index = -1;       // via index, or junction index in the current list
+  Vec2 pos;
+  LayerMask layers = 0;
+  int net = kNoNet;
+  double radius = 0;    // via radius, or half the widest track at a junction
+  Vec2 lastForce;
+  double scale = 1.0;
+};
+
+// Copper of other nets closer to point p than the object's clearance: the closest such point.
+std::optional<Vec2> blockerAt(const Board& b, const SpatialIndex& idx, const RelaxObject& ob, Vec2 p) {
+  double maxClr = double(b.maxClearance());
+  BBox q;
+  q.add(p);
+  std::optional<Vec2> hit;
+  double best = std::numeric_limits<double>::max();
+  idx.query(q.inflated(ob.radius + maxClr + 1000), ob.layers, [&](ItemRef r) {
+    if (r.type == ItemType::Zone || itemNet(b, r) == ob.net) return;
+    double req = ob.radius + requiredClearance(b, ob.net, itemNet(b, r), ob.layers & itemLayers(b, r));
+    for (auto& sh : itemShapes(b, r)) {
+      double d = sh.distance(p);
+      if (d < req - 1000 && d < best) {
+        best = d;
+        Vec2 c = sh.center();
+        hit = c;
+      }
+    }
+  });
+  return hit;
+}
+
+}  // namespace
+
+int relax(Board& b, const OptimizeOptions& o, OptimizeResult& r, int& conflicts) {
+  auto cancelled = [&] { return o.cancel && o.cancel->load(); };
+  size_t unrouted = Connectivity::compute(b).ratsnest.size();
+  // Everything movable is re-laid as a whole after every iteration (as TopoR's cascade re-lays all
+  // wires): a wire laid alone against fixed neighbours loses its packing with them — in a channel
+  // packed at the bare rule the fixed wires' circles touch, the tangents fail and the apexes are
+  // dropped (six nets re-laid alone on Arcs: 155 violations against 33 for all of them together).
+  auto relayAll = [&] {
+    std::vector<char> all(b.tracks.size(), 0);
+    for (size_t i = 0; i < b.tracks.size(); ++i)
+      all[i] = !b.tracks[i].locked && (o.nets.empty() || std::ranges::contains(o.nets, b.tracks[i].net));
+    return reshapeTracks(b, all, nullptr, nullptr, false);
+  };
+  // The objects: vias and free branch points, with their scales kept across iterations.
+  std::vector<RelaxObject> objs;
+  auto refresh = [&] {
+    std::vector<RelaxObject> fresh;
+    for (int vi = 0; vi < int(b.vias.size()); ++vi) {
+      const Via& v = b.vias[vi];
+      if (v.locked || (!o.nets.empty() && !std::ranges::contains(o.nets, v.net))) continue;
+      fresh.push_back({true, vi, v.pos.v(), v.layers, v.net, v.diameter / 2.0});
+    }
+    if (o.junctions) {
+      auto js = junctionsOf(b, o.nets);
+      for (size_t k = 0; k < js.size(); ++k)
+        fresh.push_back({false, int(k), js[k].p.v(), LayerMask(1) << js[k].layer, js[k].net, js[k].width / 2.0});
+    }
+    for (RelaxObject& f : fresh)
+      for (const RelaxObject& ob : objs)
+        if (ob.via == f.via && (f.via ? ob.index == f.index : (ob.pos - f.pos).len() < 1000)) {
+          f.lastForce = ob.lastForce;
+          f.scale = ob.scale;
+          break;
+        }
+    objs = std::move(fresh);
+  };
+  RealizeStats st;
+  {
+    ProfScope p("relax: re-lay");
+    st = relayAll();
+    conflicts = conflictCount(b);
+  }
+  int iterations = 0;
+  for (double tol = o.relaxTol; tol >= o.relaxFloor && !cancelled(); tol *= 0.8, ++iterations) {
+    refresh();
+    if (o.progress) o.progress(iterations, 24, "relax");
+    Board before = b;
+    int conflictsBefore = conflicts;
+    int viaMoves0 = r.viaMoves, junctionMoves0 = r.junctionMoves;
+    // Forces, in parallel: towards the straight line of the wire, away from the crowding.
+    std::vector<Vec2> force(objs.size());
+    {
+      ProfScope p("relax: forces");
+      parallelFor(objs.size(), [&](size_t k) {
+        const RelaxObject& ob = objs[k];
+        Shape sh = Shape::circle(ob.pos, ob.radius);
+        auto chosen = attachedTo(b, sh, ob.layers, ob.net);
+        std::vector<Vec2> qs;
+        for (size_t i = 0; i < b.tracks.size(); ++i) {
+          if (!chosen[i]) continue;
+          const Track& t = b.tracks[i];
+          if (sh.contains(t.a.v()) == sh.contains(t.b.v())) continue;
+          qs.push_back(sh.contains(t.a.v()) ? t.b.v() : t.a.v());
+        }
+        Vec2 F{};
+        if (qs.size() >= 2) {
+          Vec2 P = ob.pos;
+          if (qs.size() == 2) {
+            P = (qs[0] + qs[1]) * 0.5;
+          } else {
+            for (int it = 0; it < 20; ++it) {  // Weiszfeld
+              Vec2 num{};
+              double den = 0;
+              for (Vec2 q : qs) {
+                double d = std::max((q - P).len(), 1.0);
+                num = num + q / d;
+                den += 1.0 / d;
+              }
+              Vec2 P1 = num / den;
+              bool fin = (P1 - P).len() < 100;
+              P = P1;
+              if (fin) break;
+            }
+          }
+          F = P - ob.pos;
+        }
+        if (ob.via)
+          if (auto it = st.viaPush.find(ob.index); it != st.viaPush.end()) F = F - it->second * 8.0;
+        force[k] = F;
+      });
+    }
+    // Steps: Rprop scale, clipped to tol·scale, each checked against the copper around (the wires
+    // as they lie now — they are re-laid afterwards, the check keeps a via off other copper).
+    SpatialIndex idx;
+    idx.build(b);
+    int moved = 0;
+    {
+      ProfScope p("relax: apply");
+      for (size_t k = 0; k < objs.size(); ++k) {
+        RelaxObject& ob = objs[k];
+        Vec2 F = force[k];
+        if (F.len() < 1000) { ob.lastForce = F; continue; }
+        if (ob.lastForce.len() > 0) ob.scale = std::clamp(ob.scale * (F.dot(ob.lastForce) > 0 ? 1.5 : 0.6), 0.1, 4.0);
+        ob.lastForce = F;
+        double limit = tol * ob.scale;
+        Vec2 delta = F.len() > limit ? F.normalized() * limit : F;
+        if (delta.len() < 500) continue;
+        std::optional<Vec2> use;
+        for (double f : {1.0, 0.5, 0.25}) {
+          Vec2 d = delta * f;
+          auto blk = blockerAt(b, idx, ob, ob.pos + d);
+          if (!blk) { use = d; break; }
+          if (f == 1.0) {
+            Vec2 n = (ob.pos + d - *blk);
+            if (n.len() > 1) {
+              n = n.normalized();
+              Vec2 t{-n.y, n.x};
+              Vec2 slide = t * (delta.dot(t)) * 0.9;
+              if (slide.len() > 500 && !blockerAt(b, idx, ob, ob.pos + slide)) { use = slide; break; }
+            }
+          }
+        }
+        if (!use) continue;
+        Vec2 d = *use;
+        Shape sh = Shape::circle(ob.pos, ob.radius);
+        auto with = attachedTo(b, sh, ob.layers, ob.net);
+        if (std::ranges::none_of(with, [](char c) { return c != 0; })) continue;
+        dragEnds(b, sh, ob.layers, ob.net, d);
+        if (ob.via) b.vias[ob.index].pos = Point(b.vias[ob.index].pos.v() + d);
+        ob.pos = ob.pos + d;
+        ++moved;
+        if (ob.via) ++r.viaMoves;
+        else ++r.junctionMoves;
+      }
+    }
+    if (!moved) {
+      r.log.push_back(std::format("relax {}: tol {:.3f} mm, nothing moved", iterations + 1, tol / kNmPerMm));
+      continue;
+    }
+    RealizeStats st1;
+    {
+      ProfScope p("relax: re-lay");
+      st1 = relayAll();
+    }
+    int now = conflictCount(b);
+    double len = totalLength(b), lenBefore = totalLength(before);
+    bool connected = Connectivity::compute(b).ratsnest.size() <= unrouted;
+    if (now > conflictsBefore || !connected || (now == conflictsBefore && len > lenBefore)) {
+      b = std::move(before);
+      r.viaMoves = viaMoves0;
+      r.junctionMoves = junctionMoves0;
+      r.log.push_back(std::format("relax {}: tol {:.3f} mm, {} move(s) undone ({} -> {} conflicts, {:.1f} -> {:.1f} mm)",
+                                  iterations + 1, tol / kNmPerMm, moved, conflictsBefore, now, lenBefore / 1e6, len / 1e6));
+      for (RelaxObject& ob : objs) ob.scale = std::max(0.1, ob.scale * 0.6);
+      continue;
+    }
+    st = std::move(st1);
+    conflicts = now;
+    r.log.push_back(std::format("relax {}: tol {:.3f} mm, {} move(s), {} conflict(s), {:.1f} mm", iterations + 1,
+                                tol / kNmPerMm, moved, conflicts, len / 1e6));
+  }
+  return iterations;
+}
+
 OptimizeResult optimize(Board& b, const OptimizeOptions& o) {
   auto t0 = std::chrono::steady_clock::now();
+  gRelayAround = o.relayAround;
+  gRelayNets = o.nets;
   OptimizeResult r;
   r.lengthBefore = totalLength(b);
   r.conflictsBefore = conflictCount(b);
@@ -335,14 +552,22 @@ OptimizeResult optimize(Board& b, const OptimizeOptions& o) {
   // Moves are judged locally; an iteration that still ends with more conflicts overall is undone.
   int conflicts = r.conflictsBefore;
   double step = o.step;
-  for (int it = 0; it < o.iterations && !cancelled(); ++it, step /= 2) {
+  OptimizeOptions oo = o;
+  if (o.relax && (o.vias || o.junctions)) {
+    r.relaxIterations = relax(b, o, r, conflicts);
+    oo.vias = false;
+    oo.junctions = false;
+    if (!o.components) oo.iterations = 0;
+  }
+  const OptimizeOptions& o2 = oo;
+  for (int it = 0; it < o2.iterations && !cancelled(); ++it, step /= 2) {
     Board before = b;
     int viaMoves0 = r.viaMoves, componentMoves0 = r.componentMoves, junctionMoves0 = r.junctionMoves;
     int moves = 0;
-    int total = (o.vias ? int(b.vias.size()) : 0) + (o.components ? int(b.components.size()) : 0);
+    int total = (o2.vias ? int(b.vias.size()) : 0) + (o2.components ? int(b.components.size()) : 0);
     int done = 0;
 
-    if (o.vias) {
+    if (o2.vias) {
       // The vias whose neighbourhoods are apart are searched in parallel batches: every one finds
       // its best move on the board as it is at the batch's start, and the batch's moves are applied
       // one after another (their regions are apart, so each re-shape comes out as it was scored).
@@ -573,7 +798,7 @@ OptimizeResult optimize(Board& b, const OptimizeOptions& o) {
 
     // Free branch points — where three or more tracks of one net and layer meet at no pad or via —
     // move like vias: the wires from them get shorter (TopoR's F5 slides such a junction too).
-    if (o.junctions) {
+    if (o2.junctions) {
       std::vector<Junction> js = junctionsOf(b, o.nets);
       total += int(js.size());
       if (o.progress) o.progress(done += int(js.size()), total, std::format("optimise {}: junctions", it + 1));
@@ -636,7 +861,7 @@ OptimizeResult optimize(Board& b, const OptimizeOptions& o) {
       }
     }
 
-    if (o.components && o.nets.empty())
+    if (o2.components && o.nets.empty())
       for (int ci = 0; ci < int(b.components.size()) && !cancelled(); ++ci) {
         if (o.progress) o.progress(++done, total, std::format("optimise {}: components", it + 1));
         const Component& comp = b.components[ci];

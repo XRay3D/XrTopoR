@@ -34,8 +34,8 @@ void usage() {
       "  import-ses <board> <routes.ses> -o <out>\n"
       "  gerber     <board> <outdir>\n"
       "  svg        <board> <out.svg>\n"
-      "  reshape    <board> -o <out> [--nets a,b] [--no-settle]  recompute track shapes (TopoR F5); --nets: those chains only\n"
-      "  optimize   <board> -o <out> [--iterations N] [--step MM] [--components]   move vias/parts (F7)\n"
+      "  reshape    <board> -o <out> [--nets a,b] [--around MM] [--no-settle]  recompute track shapes (TopoR F5); --nets: those chains only\n"
+      "  optimize   <board> -o <out> [--iterations N] [--step MM] [--components] [--relax]   move vias/parts (F7)\n"
       "  refine     <board> -o <out> [--same-layer]   shorter wire paths around the copper as it lies (F6)\n"
       "  fill       <board> -o <out> [--no-thermals]  pour copper zones\n"
       "  report     <board> [--bom out.csv]          routing statistics per layer and net, BOM\n"
@@ -168,8 +168,10 @@ int main(int argc, char** argv) {
     if (auto p = a.opt("--iterations"); !p.empty()) oo.iterations = std::stoi(std::string(p));
     if (auto p = a.opt("--step"); !p.empty()) oo.step = std::stod(std::string(p)) * kNmPerMm;
     oo.components = a.flag("--components");
+    oo.relax = a.flag("--relax");
     auto res = topo::optimize(b, oo);
     for (auto& l : res.log) std::println("{}", l);
+    if (res.relaxIterations) std::println("relaxed in {} iteration(s)", res.relaxIterations);
     std::println("moved {} via(s), {} junction(s), {} component(s); conflicts {} -> {}; length {:.1f} -> {:.1f} mm; {:.2f} s",
                  res.viaMoves, res.junctionMoves, res.componentMoves, res.conflictsBefore, res.conflictsAfter,
                  res.lengthBefore / 1e6, res.lengthAfter / 1e6, res.seconds);
@@ -197,7 +199,8 @@ int main(int argc, char** argv) {
         all[i] = b.tracks[i].net != kNoNet && std::ranges::contains(names, b.nets[b.tracks[i].net].name);
       local = true;
     }
-    auto st = topo::reshapeTracks(b, all, nullptr, nullptr, local);
+    double around = a.opt("--around").empty() ? 0.0 : std::stod(std::string(a.opt("--around"))) * kNmPerMm;
+    auto st = topo::reshapeTracks(b, all, nullptr, nullptr, local, 0.1, around);
     std::println("reshaped {} wires, {} arcs, {} apexes dropped, {} arc bends, {} sketch crossings", st.wires, st.arcs,
                  st.droppedApexes, st.arcBends, st.sketchCrossings);
     for (auto [n1, n2] : st.crossingNets)

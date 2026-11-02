@@ -33,6 +33,10 @@ using CPoint = CDT::Point;
 
 constexpr double kMargin = kRealizeMargin;
 constexpr double kExitRadius = 1.0 * kNmPerMm;  // the largest exit arc out of a pad end
+// Extra clearance to a fixed track laid against (nm). 20 um took the 5–17 um deficits out of a wire
+// re-laid alone next to fixed ones (one net of Arcs: 38 → 33 violations) but squeezed the channels of
+// the router's kept wires (tt: 0 → 3 violations at a pad), so none.
+constexpr double kTrackObstacleMargin = 0;
 
 // An obstacle point: pads contribute their centre (circles), segment ends (ovals) or core polygon
 // corners; vias their centre; the outline its vertices.
@@ -321,9 +325,12 @@ LayerObstacles collect(const Board& b, LayerId layer, const std::vector<RealVia>
         if (t.mid) tb.add(t.mid->v());
         if (!inRegion(tb.inflated(t.width))) continue;
       }
-      double r = t.width / 2.0, clr = double(b.clearance(t.net, layer));
+      double r = t.width / 2.0, clr = double(b.clearance(t.net, layer)) + kTrackObstacleMargin;
       int prev = -1;
-      for (Vec2 p : t.path(20000)) {
+      // Arcs coarsely (0.2 mm chords, sagitta under the margin): a point every 20 um made bend
+      // circles that overlapped one another, tangents failed and apexes were dropped — the wire
+      // then cut straight through the fixed one (a subset of six nets re-laid alone: 155 violations).
+      for (Vec2 p : t.path(200000)) {
         int o = ob.add(p, r, clr, t.net);
         if (prev >= 0) ob.link(prev, o, r);
         prev = o;
@@ -1449,7 +1456,10 @@ ChainVertices chainVertices(const Board& b, const std::vector<char>& chosen, dou
 // Grows the choice to whole chains of the same net and layer.
 void growChains(const Board& b, std::vector<char>& chosen, const ChainVertices& cv) {
   auto sameChain = [&](int i, int j) {
-    return b.tracks[i].net == b.tracks[j].net && b.tracks[i].layer == b.tracks[j].layer && !b.tracks[j].locked;
+    // A width change ends the chain too: a 0.8 mm bus and its 0.3 mm branch to a pad are two wires
+    // (one wire took the bus width all the way to the pad: 0.1 mm from the neighbouring pads).
+    return b.tracks[i].net == b.tracks[j].net && b.tracks[i].layer == b.tracks[j].layer && !b.tracks[j].locked &&
+           b.tracks[i].width == b.tracks[j].width;
   };
   std::vector<int> stack;
   for (size_t i = 0; i < b.tracks.size(); ++i)
@@ -1474,7 +1484,8 @@ std::vector<char> growChains(const Board& b, std::vector<char> chosen, double gl
 }
 
 RealizeStats reshapeTracks(Board& b, std::vector<char> chosen, std::vector<RealWire>* wiresOut,
-                           std::vector<char>* grownOut, bool local, double glue) {
+                           std::vector<char>* grownOut, bool local, double glue, double around,
+                           const std::vector<int>& nets) {
   ProfScope pAll("reshapeTracks total");
   std::optional<ProfScope> phase;
   phase.emplace("reshapeTracks: chains");
@@ -1482,11 +1493,39 @@ RealizeStats reshapeTracks(Board& b, std::vector<char> chosen, std::vector<RealW
   if (const char* e = std::getenv("XR_GLUE")) glue = std::atof(e);
   ChainVertices cv = chainVertices(b, chosen, glue);
   growChains(b, chosen, cv);
+  if (around > 0) {
+    // The neighbourhood: every unlocked track near a chosen one joins, with its whole chain.
+    SpatialIndex nidx;
+    nidx.build(b, false, false);
+    std::vector<char> add(b.tracks.size(), 0);
+    std::vector<Shape> shapes;
+    for (size_t i = 0; i < b.tracks.size(); ++i) {
+      if (!chosen[i]) continue;
+      const Track& t = b.tracks[i];
+      for (size_t j = 0; j < b.tracks.size(); ++j) {
+        if (chosen[j] || add[j]) continue;
+        const Track& u = b.tracks[j];
+        if (u.locked || u.layer != t.layer || u.net == t.net) continue;
+        if (!nets.empty() && !std::ranges::contains(nets, u.net)) continue;
+        if (distSegmentSegment(t.a.v(), t.b.v(), u.a.v(), u.b.v()) < around + (t.width + u.width) / 2.0) add[j] = 1;
+      }
+    }
+    bool any = false;
+    for (size_t j = 0; j < b.tracks.size(); ++j)
+      if (add[j]) { chosen[j] = 1; any = true; }
+    if (any) {
+      cv = chainVertices(b, chosen, glue);
+      growChains(b, chosen, cv);
+    }
+  }
   const auto& vid = cv.vid;
   const auto& ends = cv.ends;
   const int nVertices = cv.count;
   auto sameChain = [&](int i, int j) {
-    return b.tracks[i].net == b.tracks[j].net && b.tracks[i].layer == b.tracks[j].layer && !b.tracks[j].locked;
+    // A width change ends the chain too: a 0.8 mm bus and its 0.3 mm branch to a pad are two wires
+    // (one wire took the bus width all the way to the pad: 0.1 mm from the neighbouring pads).
+    return b.tracks[i].net == b.tracks[j].net && b.tracks[i].layer == b.tracks[j].layer && !b.tracks[j].locked &&
+           b.tracks[i].width == b.tracks[j].width;
   };
   // Degree of each vertex among the chosen tracks (vertices are per layer and net already: wires of
   // other layers or nets may share a corner — TopoR lays parallel buses with coincident corners —

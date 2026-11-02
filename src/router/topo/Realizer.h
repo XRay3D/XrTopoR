@@ -80,8 +80,13 @@ struct RealizeOptions {
 // mask over the tracks; no geometry is touched.
 std::vector<char> growChains(const Board& b, std::vector<char> chosen, double glue = 0.1);
 
+// `around` > 0: the chains of every other unlocked track that runs closer than `around` to a chosen
+// chain are re-laid too — a chain laid alone against the fixed wires next to it does not come out as
+// it does laid together with them (the nesting around shared obstacles is lost), so a local change
+// re-lays its neighbourhood as a whole. `nets` non-empty with `around`: only neighbours of those nets.
 RealizeStats reshapeTracks(Board& b, std::vector<char> chosen, std::vector<RealWire>* wires = nullptr,
-                           std::vector<char>* grown = nullptr, bool local = false, double glue = 0.1);
+                           std::vector<char>* grown = nullptr, bool local = false, double glue = 0.1,
+                           double around = 0, const std::vector<int>& nets = {});
 
 // TopoR's «подрезка» by the copper as it lies: every track from `firstTrack` on that comes closer to
 // other nets' copper than its clearance is narrowed to what fits, down to the minimum width of its
