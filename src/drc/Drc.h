@@ -40,6 +40,7 @@ double shapeMargin(const Board& b, const SpatialIndex& idx, const Shape& s, Laye
 
 struct ConflictSum {
   int count = 0;
+  int shorts = 0;    // of those, pairs whose copper touches or crosses (actual <= 0)
   double depth = 0;  // sum of (required - actual) clearance, nm
 };
 // Clearance and edge conflicts, counted as runDrc counts them, of the copper item pairs with at least

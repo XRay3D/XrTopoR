@@ -132,6 +132,7 @@ ConflictSum regionConflicts(const Board& b, const SpatialIndex& idx, const BBox&
         for (auto& s2 : cshapes) best = std::min(best, s1.distance(s2));
       if (best < req - kDrcTolerance) {
         ++sum.count;
+        if (best <= 0) ++sum.shorts;
         sum.depth += req - best;
       }
     });

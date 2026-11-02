@@ -23,7 +23,8 @@ namespace {
 
 // Clearance comes first: no length gain pays for a conflict; among equal counts shallower is better.
 constexpr double kConflictCost = 1e6 * kNmPerMm;
-constexpr double kDepthCost = 100;  // 100 mm of track per mm of overlap depth
+constexpr double kDepthCost = 1e-4;  // a tie-breaker: 100 nm of track per mm of shortfall
+constexpr double kShortCost = 1e6 * kNmPerMm;  // copper of two nets touching: a conflict on top of the clearance one
 
 double trackLength(const Track& t) {
   if (t.isArc()) return ArcGeom::fromThreePoints(t.a.v(), t.mid->v(), t.b.v()).length();
@@ -45,7 +46,9 @@ int conflictCount(const Board& b) {
 struct Local {
   double length = 0;
   ConflictSum conflicts;
-  double score() const { return length + conflicts.count * kConflictCost + conflicts.depth / kNmPerMm * kDepthCost; }
+  double score() const {
+    return length + conflicts.count * kConflictCost + conflicts.shorts * kShortCost + conflicts.depth * kDepthCost;
+  }
 };
 
 // Track length and clearance conflicts around a move; the same region is scored on the board before
@@ -777,6 +780,10 @@ OptimizeResult optimize(Board& b, const OptimizeOptions& o) {
           r0.add(viaBox.box(b));
           SpatialIndex lidx;
           lidx.build(b, r0.inflated(3 * step + 3 * double(b.maxClearance())));
+          if (std::getenv("XR_DEBUG_F7"))
+            std::println(stderr, "  apply via {} net {} at ({:.3f},{:.3f}) delta ({:.3f},{:.3f}) neighbours {} searched gain {:.3f}",
+                         j.vi, v.net >= 0 ? b.nets[v.net].name : "-", v.pos.x / 1e6, v.pos.y / 1e6, best.delta.x / 1e6,
+                         best.delta.y / 1e6, best.neighbours, best.gain / 1e6);
           auto c = tryMove(
               b, lidx, with, current,
               [&](Board& x) {
