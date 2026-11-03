@@ -225,12 +225,23 @@ std::vector<Junction> junctionsOf(const Board& b, const std::vector<int>& nets) 
 
 }  // namespace
 
-int settleJunctions(Board& b, const std::vector<int>& nets, int rounds) {
+namespace {
+
+// A junction's way: the board positions it took, for telling it again in a later try.
+struct SettledMove { Vec2 from, to; LayerId layer; int net; };
+
+int settleOnce(Board& b, const std::vector<int>& nets, int rounds, const std::vector<SettledMove>& keep,
+               std::vector<SettledMove>* done) {
   int moved = 0;
   size_t unrouted = Connectivity::compute(b).ratsnest.size();
   MovedItems noBox;
   for (int round = 0; round < rounds; ++round) {
     std::vector<Junction> js = junctionsOf(b, nets);
+    std::erase_if(js, [&](const Junction& j) {
+      return std::ranges::any_of(keep, [&](const SettledMove& m) {
+        return m.layer == j.layer && m.net == j.net && ((m.from - j.p.v()).len() < 1000 || (m.to - j.p.v()).len() < 1000);
+      });
+    });
     // The target of every junction, its chains and its best step — searched in parallel on the
     // board as it is; the moves are then applied one by one, each re-tried on the board as the
     // earlier ones left it.
@@ -318,11 +329,65 @@ int settleJunctions(Board& b, const std::vector<int>& nets, int rounds) {
       if (!c || c->gain < 0 || Connectivity::compute(c->board).ratsnest.size() > unrouted) continue;
       b = std::move(c->board);
       ++movedNow;
+      if (done) done->push_back({j.p.v(), j.p.v() + d, j.layer, j.net});
     }
     moved += movedNow;
     if (movedNow == 0) break;
   }
   return moved;
+}
+
+}  // namespace
+
+// A move is scored with the neighbours as they lie; the re-lay of the whole board around the moved
+// junction may come out worse than that (Arcs_master: 18 -> 28 violations at the next F5). So the
+// moves are checked by that re-lay: the junctions next to a violation it adds stay where they were,
+// and the result is the re-laid board, which the next F5 leaves as it is.
+int settleJunctions(Board& b, const std::vector<int>& nets, int rounds) {
+  // Part of the board (the wires edited): the rest stays as it lies, there is no whole re-lay to check by.
+  if (!nets.empty()) return settleOnce(b, nets, rounds, {}, nullptr);
+  constexpr double kBlame = 3 * kNmPerMm;
+  DrcOptions dopt;
+  dopt.unconnected = false;
+  const Board base = b;
+  auto baseViolations = runDrc(base, dopt);
+  std::vector<SettledMove> keep;
+  for (int attempt = 0; attempt < 4; ++attempt) {
+    Board t = base;
+    std::vector<SettledMove> done;
+    int moved = settleOnce(t, nets, rounds, keep, &done);
+    if (moved == 0) return 0;
+    // Twice: the first re-lay after a move has not settled yet (the chains take their shape from the
+    // moved ends; the second one starts from where those shapes lie).
+    Board probe = std::move(t);
+    for (int pass = 0; pass < 2; ++pass) {
+      std::vector<char> all(probe.tracks.size(), 0);
+      for (size_t i = 0; i < probe.tracks.size(); ++i) all[i] = !probe.tracks[i].locked;
+      reshapeTracks(probe, std::move(all));
+    }
+    auto now = runDrc(probe, dopt);
+    if (now.size() <= baseViolations.size()) {
+      b = std::move(probe);
+      return moved;
+    }
+    // The violations the moves added: no violation of the same items' nets close by on the old board.
+    auto netsOf = [](const Board& x, const DrcViolation& v) { return std::minmax(itemNet(x, v.a), v.hasB ? itemNet(x, v.b) : kNoNet); };
+    size_t before = keep.size();
+    for (const DrcViolation& v : now) {
+      bool old = std::ranges::any_of(baseViolations, [&](const DrcViolation& o) {
+        return netsOf(base, o) == netsOf(probe, v) && (o.pos - v.pos).len() < 1 * kNmPerMm;
+      });
+      if (old) continue;
+      const SettledMove* nearest = nullptr;
+      double nd = std::numeric_limits<double>::max();
+      for (const SettledMove& m : done)
+        if (double d = (m.to - v.pos).len(); d < nd) { nd = d; nearest = &m; }
+      for (const SettledMove& m : done)
+        if ((m.to - v.pos).len() < kBlame || &m == nearest) keep.push_back(m);
+    }
+    if (keep.size() == before) break;
+  }
+  return 0;  // no way found that does not cost a violation: the junctions stay
 }
 
 // ---- TopoR's relaxation (F6/F7 cascade as reconstructed in hand/f6_refine.cpp) ----------------

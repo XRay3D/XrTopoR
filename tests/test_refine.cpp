@@ -5,6 +5,7 @@
 #include "core/Connectivity.h"
 #include "drc/Drc.h"
 #include "io/BoardIO.h"
+#include "router/topo/Optimizer.h"
 #include "router/topo/Realizer.h"
 #include "router/topo/Refine.h"
 
@@ -75,5 +76,25 @@ TEST(Realizer, ReshapeIsAFixedPoint) {
       wasLength = len;
     }
     EXPECT_LE(was, 18);
+  }
+}
+
+// The same with the junctions settling, as F5 runs: their moves survive the next whole re-lay.
+TEST(Realizer, SettledReshapeIsAFixedPoint) {
+  for (const char* name : {"topor/Example_03/arz_2L.fst", "topor/Example_03/arz_4L.fst", "topor/Example_03/arz_standard_routing.fst"}) {
+    SCOPED_TRACE(name);
+    auto lb = io::loadBoard(data(name));
+    ASSERT_TRUE(lb.has_value());
+    Board& b = **lb;
+    int was = 0;
+    for (int pass = 0; pass < 3; ++pass) {
+      topo::reshapeTracks(b, std::vector<char>(b.tracks.size(), 1));
+      topo::settleJunctions(b);
+      int now = conflicts(b);
+      if (pass > 0) {
+        EXPECT_EQ(now, was) << "pass " << pass;
+      }
+      was = now;
+    }
   }
 }
