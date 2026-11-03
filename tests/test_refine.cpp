@@ -5,6 +5,7 @@
 #include "core/Connectivity.h"
 #include "drc/Drc.h"
 #include "io/BoardIO.h"
+#include "router/topo/Realizer.h"
 #include "router/topo/Refine.h"
 
 using namespace xr;
@@ -47,5 +48,32 @@ TEST(Refine, ShorterWithoutNewConflicts) {
     EXPECT_LE(length(b), l0);
     EXPECT_LE(conflicts(b), c0);
     EXPECT_LE(Connectivity::compute(b).ratsnest.size(), unrouted);
+  }
+}
+
+// A whole-board F5 of an F5 result lays the wires where they are: the realiser's own short tangents do
+// not cut the chains at the next pass, and the radii of one wire's several passes around an obstacle
+// do not mix (arz_2L: 11 -> 45 -> 108 -> 132 violations before).
+TEST(Realizer, ReshapeIsAFixedPoint) {
+  for (const char* name : {"topor/Example_03/arz_2L.fst", "topor/Example_03/arz_4L.fst",
+                           "topor/Example_03/arz_standard_routing.fst", "topor/Example_04/Arcs_master.pcb"}) {
+    SCOPED_TRACE(name);
+    auto lb = io::loadBoard(data(name));
+    ASSERT_TRUE(lb.has_value());
+    Board& b = **lb;
+    int was = 0;
+    double wasLength = 0;
+    for (int pass = 0; pass < 3; ++pass) {
+      topo::reshapeTracks(b, std::vector<char>(b.tracks.size(), 1));
+      int now = conflicts(b);
+      double len = length(b);
+      if (pass > 0) {
+        EXPECT_EQ(now, was) << "pass " << pass;
+        EXPECT_NEAR(len, wasLength, 0.5 * kNmPerMm) << "pass " << pass;
+      }
+      was = now;
+      wasLength = len;
+    }
+    EXPECT_LE(was, 18);
   }
 }

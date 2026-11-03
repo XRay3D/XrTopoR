@@ -421,6 +421,9 @@ struct Slot {
   // the inner wire's actual crossing point when that is what pushes the bound out.
   Vec2 cu, cv;
   double ru = 0, rv = 0;
+  // What a chord crossing the edge inside the slot has to keep from the end obstacles: their own
+  // rule, and the inner wires that really bend around them (from the previous round).
+  double du = 0, dv = 0;
 };
 
 struct FunnelApex {
@@ -613,7 +616,11 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
             Vec2 q = sk.front() - M;
             if (q.dot(n) < (E - M).dot(n) && std::abs(q.cross(n)) <= w.width / 2.0) E = sk.front();
             else sk.insert(sk.begin(), E);
-            stubs[wi][end] = {p, M, E, true, std::max(0.0, (E - M).len() - pad->r)};
+            double free = std::max(0.0, (E - M).len() - pad->r);
+            // The chain already ends on the way out (a stub of the previous F5, cut at the copper): the
+            // stub starts there. Back to the middle of the end and out again would add a spur every F5.
+            if ((p - M).dot(n) > 0 && std::abs((p - M).cross(n)) < 1000) M = p;
+            stubs[wi][end] = {p, M, E, true, free};
             on = true;
           }
         }
@@ -657,7 +664,12 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
   }
   // Bend radius each wire actually uses around each obstacle (merged over the fan); the stacks of
   // outer wires must build on it, so slots and bends are iterated.
-  std::vector<std::flat_map<int, double>> bendR(NW);
+  // Per crossing, not per obstacle: a wire that passes one obstacle several times (out and back, at
+  // radii from 1 to 5 mm) has one bend for each pass, and the wires stacked on an inner pass have
+  // nothing to do with the radius of the outer one (a whole-board re-lay blew up on that).
+  // bendR[wire][crossing]: radius around the edge's u and v.
+  std::vector<std::vector<std::array<double, 2>>> bendR(NW);
+  for (int wi = 0; wi < NW; ++wi) bendR[wi].assign(hits[wi].size(), {-1.0, -1.0});
   std::vector<std::vector<Circle>> bendsOf(NW);
   std::vector<std::vector<Vec2>> tinOf(NW), toutOf(NW);
   // Where each wire's realised path actually crosses each of its edges (distance from u), from the
@@ -764,10 +776,7 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
         double x = &o == &U ? xu : xv;
         return x + std::max(o.clr, double(w.clearance)) + margin + width / 2.0;
       };
-      auto usedR = [&](int wi, int o, double packed) {
-        auto it = bendR[wi].find(o);
-        return it != bendR[wi].end() ? std::max(packed, it->second) : packed;
-      };
+      auto usedR = [&](int k, int end, double packed) { return std::max(packed, bendR[list[k].first][list[k].second][end]); };
       auto actualFromU = [&](int k) { return actual[list[k].first][list[k].second]; };
       std::vector<double> aCenter(n, 0), bCenter(n, 0);  // distance from u/v of the bend centre
       std::vector<double> aR(n, 0), bR(n, 0);
@@ -783,7 +792,7 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
             // but never closer to the obstacle than the wire's own rule allows.
             double spacing = wAt(k - 1) / 2.0 + std::max(double(wires[pw].clearance), double(w.clearance)) + margin +
                              wAt(k) / 2.0;
-            double packed = usedR(pw, uv.first, a[k - 1]) + spacing;
+            double packed = usedR(k - 1, 0, a[k - 1]) + spacing;
             double act = actualFromU(k - 1) >= 0 ? actualFromU(k - 1) + spacing : -1;
             a[k] = std::max({packed, act, need(U, w, wAt(k))});
             if (act > packed && act > need(U, w, wAt(k))) {
@@ -872,6 +881,19 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
         sl.ru = slack < 0 ? sl.lo - aCenter[k] : aR[k];
         sl.cv = V.p - dir * bCenter[k];
         sl.rv = slack < 0 ? (L - sl.hi) - bCenter[k] : bR[k];
+        const RealWire& w = wires[list[k].first];
+        auto spacingTo = [&](int j) {
+          return wAt(j) / 2.0 + std::max(double(wires[list[j].first].clearance), double(w.clearance)) + margin + wAt(k) / 2.0;
+        };
+        auto bentAround = [&](int j, int end) {
+          if (wires[list[j].first].net == w.net) return -1.0;
+          double r = bendR[list[j].first][list[j].second][end];
+          return r < 0 ? -1.0 : r + spacingTo(j);
+        };
+        sl.du = need(U, w, wAt(k));
+        for (int j = 0; j < k; ++j) sl.du = std::max(sl.du, bentAround(j, 0));
+        sl.dv = need(V, w, wAt(k));
+        for (int j = k + 1; j < n; ++j) sl.dv = std::max(sl.dv, bentAround(j, 1));
       }
     }
   }
@@ -1064,7 +1086,22 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
           if (hi < 1 || hi > int(hits[wi].size())) continue;
           const EdgeHit& h = hits[wi][hi - 1];
           const Slot& sl = slots[wi][hi - 1];
-          for (auto [o, R, c, x] : {std::tuple{h.u, sl.ru, sl.cu, sl.xu}, std::tuple{h.v, sl.rv, sl.cv, sl.xv}}) {
+          // R is the stack along the edge. A chord that crosses the edge inside its slot keeps the
+          // stack whatever its angle to the edge (on a long edge crossed at a slant its distance to
+          // the end obstacle is well under the stack, and it would be bent around that obstacle for
+          // nothing: radii of 4-6 mm, alternating, across a whole bus).
+          bool inSlot = false;
+          {
+            Vec2 eU = ob.pts[h.u].p, eV = ob.pts[h.v].p;
+            double den = (eV - eU).cross(q - p);
+            if (std::abs(den) > 1e-9) {
+              double se = (p - eU).cross(q - p) / den, rq = (p - eU).cross(eV - eU) / den;
+              double along = se * (eV - eU).len();
+              inSlot = rq >= 0 && rq <= 1 && along >= sl.lo - 1000 && along <= sl.hi + 1000;
+            }
+          }
+          for (auto [o, R0, c, x, d] : {std::tuple{h.u, sl.ru, sl.cu, sl.xu, sl.du}, std::tuple{h.v, sl.rv, sl.cv, sl.xv, sl.dv}}) {
+            double R = inSlot ? std::min(R0, d) : R0;
             if (R <= 0 || dropped.contains(o) ||
                 std::ranges::any_of(cs, [&](const Circle& x) { return x.obst == o && (x.c - c).len2() < 1; }))
               continue;
@@ -1106,16 +1143,44 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
               double spacing = width / 2.0 + std::max(double(w.clearance), double(o.clearance)) + kMargin + oc.width / 2.0;
               Vec2 X = closestPointOnSegment(oc.c, p, q);
               double dc = (X - oc.c).len();
-              if (dc < R || dc >= R + spacing) continue;
-              // The closest point must face the arc itself, not the rest of the circle.
+              if (dc >= R + spacing) continue;
               double sweep = sweepOf(oc, tinOf[wj][m], toutOf[wj][m]);
               double ai = std::atan2(tinOf[wj][m].y - oc.c.y, tinOf[wj][m].x - oc.c.x);
-              double ax = std::atan2(X.y - oc.c.y, X.x - oc.c.x);
-              double rel = sweep >= 0 ? normalizeAngle(ax - ai) : normalizeAngle(ai - ax);
-              if (rel > std::abs(sweep) + 0.05) continue;
+              auto onArc = [&](Vec2 a, double slop) {
+                double ax = std::atan2(a.y - oc.c.y, a.x - oc.c.x);
+                double rel = sweep >= 0 ? normalizeAngle(ax - ai) : normalizeAngle(ai - ax);
+                return rel <= std::abs(sweep) + slop;
+              };
+              double radius = R + spacing;
+              if (dc < R) {
+                // Inside the circle: the inner wire's chord, unless it runs through the arc itself
+                // (no shared edge orders the two: the other wire comes from a free end, or lies along
+                // an edge). The sketch says on which side of the arc this wire belongs.
+                Vec2 foot = oc.c + (X - oc.c);
+                Vec2 along = (q - p).normalized();
+                double half = std::sqrt(std::max(0.0, R * R - dc * dc));
+                bool through = false;
+                for (double sgn : {-1.0, 1.0}) {
+                  Vec2 Y = foot + along * (sgn * half);
+                  double u = (Y - p).dot(along);
+                  if (u > 0 && u < (q - p).len() && onArc(Y, 0.0)) through = true;
+                }
+                if (!through) continue;
+                double bestD = std::numeric_limits<double>::max(), radial = -1;
+                for (Vec2 v : sk) {
+                  double r = (v - oc.c).len();
+                  if (!onArc(v, 0.0) || std::abs(r - R) >= bestD) continue;
+                  bestD = std::abs(r - R);
+                  radial = r;
+                }
+                if (radial >= 0 && radial < R) radius = R - spacing;
+                if (radius <= 0) continue;
+              } else if (!onArc(X, 0.05)) {
+                continue;  // the closest point must face the arc itself, not the rest of the circle
+              }
               if (dropped.contains(oc.obst) || std::ranges::any_of(cs, [&](const Circle& x) { return x.obst == oc.obst; })) continue;
               at = int(k) + 1;
-              ins = {oc.c, (orient(p, q, oc.c) > 0 ? 1 : -1) * (R + spacing), oc.obst, cs[k].portal, width};
+              ins = {oc.c, (orient(p, q, oc.c) > 0 ? 1 : -1) * radius, oc.obst, cs[k].portal, width};
               break;
             }
             if (at >= 0) break;
@@ -1163,15 +1228,24 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
                    ti[k].x / 1e6, ti[k].y / 1e6, to[k].x / 1e6, to[k].y / 1e6);
       std::println(stderr, "");
     }
-    for (const Circle& c : cs)
-      if (c.obst >= 0) {
-        double r = std::abs(c.rho);
-        auto it = bendR[wi].find(c.obst);
-        if (it == bendR[wi].end() || r > it->second + 1) {
-          bendR[wi][c.obst] = r;
+    for (const Circle& c : cs) {
+      if (c.obst < 0) continue;
+      double r = std::abs(c.rho);
+      // The crossings of this pass: the run of the wire's edges at the obstacle around the bend's portal.
+      auto mark = [&](int hi) {
+        if (hi < 0 || hi >= int(hits[wi].size())) return false;
+        const EdgeHit& h = hits[wi][hi];
+        if (h.u != c.obst && h.v != c.obst) return false;
+        double& rr = bendR[wi][hi][h.u == c.obst ? 0 : 1];
+        if (r > rr + 1) {
+          rr = r;
           radiiChanged = true;
         }
-      }
+        return true;
+      };
+      for (int hi = c.portal - 1; mark(hi); --hi) {}
+      for (int hi = c.portal; mark(hi); ++hi) {}
+    }
     bendsOf[wi] = cs;
     tinOf[wi] = ti;
     toutOf[wi] = to;
@@ -1402,6 +1476,7 @@ struct ChainVertices {
   std::vector<char> relevant;              // tracks of the chosen nets (the vertex set is theirs)
   std::vector<std::array<int, 2>> vid;     // per track: vertex of a and of b (-1: not relevant)
   std::vector<std::vector<int>> ends;      // per vertex: the tracks ending there
+  std::vector<char> tiny;                  // per track: both ends glued into one vertex
   int count = 0;
 };
 
@@ -1445,8 +1520,14 @@ ChainVertices chainVertices(const Board& b, const std::vector<char>& chosen, dou
       vends.push_back({int(i), p, v});
     }
   cv.ends.resize(cv.count);
+  cv.tiny.assign(b.tracks.size(), 0);
   for (size_t i = 0; i < b.tracks.size(); ++i) {
     if (!cv.relevant[i]) continue;
+    const Track& t = b.tracks[i];
+    // Shorter than the glue (an arc too, if it does not go round anything: a wire that closes on
+    // itself around a via is a loop, not a point).
+    cv.tiny[i] = cv.vid[i][0] == cv.vid[i][1] &&
+                 (!t.mid || (t.mid->v() - t.a.v()).len() <= std::max(1000.0, glue * t.width));
     cv.ends[cv.vid[i][0]].push_back(int(i));
     cv.ends[cv.vid[i][1]].push_back(int(i));
   }
@@ -1530,9 +1611,12 @@ RealizeStats reshapeTracks(Board& b, std::vector<char> chosen, std::vector<RealW
   // Degree of each vertex among the chosen tracks (vertices are per layer and net already: wires of
   // other layers or nets may share a corner — TopoR lays parallel buses with coincident corners —
   // which is no branch of this chain); vias and pads also end chains.
+  // A track with both ends glued into one vertex is that vertex, no branch of it: the realiser's own
+  // short tangents (a few um between two arcs) cut a chain in two at the next F5, and the two wires
+  // are no longer laid as one (F5 of an F5 result: arz 14 -> 25 violations, shorts in a via row).
   std::vector<int> degree(nVertices, 0);
   for (size_t i = 0; i < b.tracks.size(); ++i)
-    if (chosen[i]) {
+    if (chosen[i] && !cv.tiny[i]) {
       degree[vid[i][0]]++;
       degree[vid[i][1]]++;
     }
@@ -1553,6 +1637,8 @@ RealizeStats reshapeTracks(Board& b, std::vector<char> chosen, std::vector<RealW
   };
   auto isEnd = [&](int v, Point p, const Track& t) { return degree[v] != 2 || onAnchor(p, t.net, t.layer); };
   std::vector<char> used(b.tracks.size(), 0);
+  for (size_t i = 0; i < b.tracks.size(); ++i)
+    if (chosen[i] && cv.tiny[i] && degree[vid[i][0]] > 0) used[i] = 1;  // goes with the wires through its vertex
   std::vector<RealWire> wires;
   auto walkFrom = [&](int start, int fromEnd) {
     RealWire w;
