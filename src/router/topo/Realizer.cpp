@@ -1614,12 +1614,19 @@ RealizeStats reshapeTracks(Board& b, std::vector<char> chosen, std::vector<RealW
   // A track with both ends glued into one vertex is that vertex, no branch of it: the realiser's own
   // short tangents (a few um between two arcs) cut a chain in two at the next F5, and the two wires
   // are no longer laid as one (F5 of an F5 result: arz 14 -> 25 violations, shorts in a via row).
+  // Between tracks only: at the end of a chain it is the end. Dropped there, the wire would lose it
+  // at every F5 until it comes off what it connects to (Arcs_master: +5B lost 53 um per pass).
   std::vector<int> degree(nVertices, 0);
   for (size_t i = 0; i < b.tracks.size(); ++i)
     if (chosen[i] && !cv.tiny[i]) {
       degree[vid[i][0]]++;
       degree[vid[i][1]]++;
     }
+  std::vector<char> inner(b.tracks.size(), 0);  // the tiny tracks that go with the wires through their vertex
+  for (size_t i = 0; i < b.tracks.size(); ++i)
+    if (chosen[i] && cv.tiny[i]) inner[i] = degree[vid[i][0]] >= 2;
+  for (size_t i = 0; i < b.tracks.size(); ++i)
+    if (chosen[i] && cv.tiny[i] && !inner[i]) degree[vid[i][0]] += 2;
   // Chains end at branch points and wherever a vertex touches a pad or via of its net: manual
   // routes often enter a pad off-centre, and the taut path must still pass through that copper.
   SpatialIndex idx;
@@ -1638,7 +1645,7 @@ RealizeStats reshapeTracks(Board& b, std::vector<char> chosen, std::vector<RealW
   auto isEnd = [&](int v, Point p, const Track& t) { return degree[v] != 2 || onAnchor(p, t.net, t.layer); };
   std::vector<char> used(b.tracks.size(), 0);
   for (size_t i = 0; i < b.tracks.size(); ++i)
-    if (chosen[i] && cv.tiny[i] && degree[vid[i][0]] > 0) used[i] = 1;  // goes with the wires through its vertex
+    if (inner[i]) used[i] = 1;
   std::vector<RealWire> wires;
   auto walkFrom = [&](int start, int fromEnd) {
     RealWire w;

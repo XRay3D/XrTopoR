@@ -1,6 +1,7 @@
 #include "router/topo/Optimizer.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <unordered_set>
 #include <limits>
@@ -41,6 +42,21 @@ int conflictCount(const Board& b) {
   DrcOptions o;
   o.unconnected = false;
   return int(runDrc(b, o).size());
+}
+
+// The violations on `now` with none of the same nets close by on `was`: what a change added.
+std::vector<DrcViolation> addedViolations(const Board& was, const std::vector<DrcViolation>& wasV, const Board& now,
+                                          const std::vector<DrcViolation>& nowV) {
+  auto netsOf = [](const Board& x, const DrcViolation& v) { return std::minmax(itemNet(x, v.a), v.hasB ? itemNet(x, v.b) : kNoNet); };
+  std::vector<char> used(wasV.size(), 0);  // one to one: a second violation at a place is a new one
+  std::vector<DrcViolation> added;
+  for (const DrcViolation& v : nowV) {
+    bool old = false;
+    for (size_t k = 0; k < wasV.size() && !old; ++k)
+      if (!used[k] && netsOf(was, wasV[k]) == netsOf(now, v) && (wasV[k].pos - v.pos).len() < 1 * kNmPerMm) old = used[k] = 1;
+    if (!old) added.push_back(v);
+  }
+  return added;
 }
 
 struct Local {
@@ -370,14 +386,8 @@ int settleJunctions(Board& b, const std::vector<int>& nets, int rounds) {
       b = std::move(probe);
       return moved;
     }
-    // The violations the moves added: no violation of the same items' nets close by on the old board.
-    auto netsOf = [](const Board& x, const DrcViolation& v) { return std::minmax(itemNet(x, v.a), v.hasB ? itemNet(x, v.b) : kNoNet); };
     size_t before = keep.size();
-    for (const DrcViolation& v : now) {
-      bool old = std::ranges::any_of(baseViolations, [&](const DrcViolation& o) {
-        return netsOf(base, o) == netsOf(probe, v) && (o.pos - v.pos).len() < 1 * kNmPerMm;
-      });
-      if (old) continue;
+    for (const DrcViolation& v : addedViolations(base, baseViolations, probe, now)) {
       const SettledMove* nearest = nullptr;
       double nd = std::numeric_limits<double>::max();
       for (const SettledMove& m : done)
@@ -397,9 +407,8 @@ int settleJunctions(Board& b, const std::vector<int>& nets, int rounds) {
 // RealizeStats::viaPush). The step is the force clipped to tol·scale, where scale grows ×1.5 while
 // the force keeps its direction and shrinks ×0.6 when it turns (Rprop, TopoR's scale_adjust); tol
 // falls ×0.8 per iteration from 1 mm to 10 µm. A move is tried against the copper around the new
-// place and, when blocked, shortened or slid along the blocker (pull_slot). The chains at the object
-// and the wires of other nets it passes are re-laid after every move; an iteration that ends with
-// more conflicts is undone.
+// place and, when blocked, shortened or slid along the blocker (pull_slot). All wires are re-laid after
+// every iteration; the steps next to what that breaks stay out and the rest are tried again.
 namespace {
 
 struct RelaxObject {
@@ -413,42 +422,90 @@ struct RelaxObject {
   double scale = 1.0;
 };
 
-// Copper of other nets closer to point p than the object's clearance: the closest such point.
+// What stops the object at point p: copper of other nets it would be on, or pads and vias too close by
+// more in sum than at the place it comes from (a step out of a conflict is no conflict, even if it gets
+// a little nearer to the other pad of a corner). Wires give way when they are re-laid: only their
+// copper itself blocks, a via on it would be on their other side next. The worst such point.
 std::optional<Vec2> blockerAt(const Board& b, const SpatialIndex& idx, const RelaxObject& ob, Vec2 p) {
   double maxClr = double(b.maxClearance());
   BBox q;
   q.add(p);
+  q.add(ob.pos);
   std::optional<Vec2> hit;
-  double best = std::numeric_limits<double>::max();
+  double best = std::numeric_limits<double>::max(), shortThere = 0, shortHere = 0;
+  std::optional<Vec2> worst;
+  double worstShort = 0;
   idx.query(q.inflated(ob.radius + maxClr + 1000), ob.layers, [&](ItemRef r) {
     if (r.type == ItemType::Zone || itemNet(b, r) == ob.net) return;
     double req = ob.radius + requiredClearance(b, ob.net, itemNet(b, r), ob.layers & itemLayers(b, r));
     for (auto& sh : itemShapes(b, r)) {
       double d = sh.distance(p);
-      if (d < req - 1000 && d < best) {
-        best = d;
-        Vec2 c = sh.center();
-        hit = c;
+      if (r.type == ItemType::Track) {
+        if (d < -1000 && d < best) {
+          best = d;
+          hit = sh.center();
+        }
+        continue;
+      }
+      if (r.type == ItemType::Via && r.index == ob.index) continue;
+      double there = std::max(0.0, req - 1000 - d), here = std::max(0.0, req - 1000 - sh.distance(ob.pos));
+      shortThere += there;
+      shortHere += here;
+      if (there > worstShort) {
+        worstShort = there;
+        worst = sh.center();
       }
     }
   });
-  return hit;
+  if (hit) return hit;
+  if (shortThere > 0 && shortThere >= shortHere) return worst;
+  return std::nullopt;
+}
+
+// What a via has to do to get off the pads and vias it is too close to: the sum of the shortfalls along
+// the outward normals (a pad is no wire, it will not make room).
+Vec2 pushOffCopper(const Board& b, const SpatialIndex& idx, const RelaxObject& ob) {
+  double maxClr = double(b.maxClearance());
+  BBox q;
+  q.add(ob.pos);
+  Vec2 push{};
+  idx.query(q.inflated(ob.radius + maxClr + 1000), ob.layers, [&](ItemRef r) {
+    if ((r.type != ItemType::Pad && r.type != ItemType::Via) || itemNet(b, r) == ob.net) return;
+    if (r.type == ItemType::Via && r.index == ob.index) return;
+    double req = ob.radius + requiredClearance(b, ob.net, itemNet(b, r), ob.layers & itemLayers(b, r));
+    for (auto& sh : itemShapes(b, r)) {
+      constexpr double e = 2000;
+      double d = sh.distance(ob.pos);
+      if (d >= req - 1000) continue;
+      Vec2 n{sh.distance(ob.pos + Vec2{e, 0}) - sh.distance(ob.pos - Vec2{e, 0}),
+             sh.distance(ob.pos + Vec2{0, e}) - sh.distance(ob.pos - Vec2{0, e})};
+      if (n.len() < 1) n = ob.pos - sh.center();
+      if (n.len() < 1) continue;
+      // Another via moves as well: half each.
+      push = push + n.normalized() * ((req - d + 2000) * (r.type == ItemType::Via ? 0.5 : 1.0));
+    }
+  });
+  return push;
 }
 
 }  // namespace
 
 int relax(Board& b, const OptimizeOptions& o, OptimizeResult& r, int& conflicts) {
+  constexpr int kRelaxTries = 4;                     // tries per iteration at most
+  constexpr int kRelaxClearRounds = 4;
+  constexpr double kRelaxDepthCost = 100;
+  constexpr double kRelaxBlame = 0.5 * kNmPerMm;
   auto cancelled = [&] { return o.cancel && o.cancel->load(); };
   size_t unrouted = Connectivity::compute(b).ratsnest.size();
   // Everything movable is re-laid as a whole after every iteration (as TopoR's cascade re-lays all
   // wires): a wire laid alone against fixed neighbours loses its packing with them — in a channel
   // packed at the bare rule the fixed wires' circles touch, the tangents fail and the apexes are
   // dropped (six nets re-laid alone on Arcs: 155 violations against 33 for all of them together).
-  auto relayAll = [&] {
-    std::vector<char> all(b.tracks.size(), 0);
-    for (size_t i = 0; i < b.tracks.size(); ++i)
-      all[i] = !b.tracks[i].locked && (o.nets.empty() || std::ranges::contains(o.nets, b.tracks[i].net));
-    return reshapeTracks(b, all, nullptr, nullptr, false);
+  auto relayAll = [&](Board& x) {
+    std::vector<char> all(x.tracks.size(), 0);
+    for (size_t i = 0; i < x.tracks.size(); ++i)
+      all[i] = !x.tracks[i].locked && (o.nets.empty() || std::ranges::contains(o.nets, x.tracks[i].net));
+    return reshapeTracks(x, all, nullptr, nullptr, false);
   };
   // The objects: vias and free branch points, with their scales kept across iterations.
   std::vector<RelaxObject> objs;
@@ -476,22 +533,37 @@ int relax(Board& b, const OptimizeOptions& o, OptimizeResult& r, int& conflicts)
   RealizeStats st;
   {
     ProfScope p("relax: re-lay");
-    st = relayAll();
+    st = relayAll(b);
     conflicts = conflictCount(b);
   }
+  DrcOptions dopt;
+  dopt.unconnected = false;
   int iterations = 0;
-  for (double tol = o.relaxTol; tol >= o.relaxFloor && !cancelled(); tol *= 0.8, ++iterations) {
+  // First the vias on their own that are too close to pads and vias: among the steps of everything
+  // else the one that clears a conflict goes down with a neighbour's mistake.
+  int clearRounds = kRelaxClearRounds;
+  for (double tol = o.relaxTol; tol >= o.relaxFloor && !cancelled(); tol *= clearRounds > 0 ? (--clearRounds, 1.0) : 0.8, ++iterations) {
+    const bool clearing = clearRounds > 0;
     refresh();
     if (o.progress) o.progress(iterations, 24, "relax");
-    Board before = b;
     int conflictsBefore = conflicts;
-    int viaMoves0 = r.viaMoves, junctionMoves0 = r.junctionMoves;
-    // Forces, in parallel: towards the straight line of the wire, away from the crowding.
+    // Forces, in parallel: off the copper a via is too close to, or else towards the straight line
+    // of the wire and away from the crowding.
     std::vector<Vec2> force(objs.size());
+    SpatialIndex idx;
+    idx.build(b);
     {
       ProfScope p("relax: forces");
       parallelFor(objs.size(), [&](size_t k) {
         const RelaxObject& ob = objs[k];
+        if (ob.via) {
+          Vec2 off = pushOffCopper(b, idx, ob);
+          if (off.len() > 0) {
+            force[k] = off;
+            return;
+          }
+        }
+        if (clearing) return;
         Shape sh = Shape::circle(ob.pos, ob.radius);
         auto chosen = attachedTo(b, sh, ob.layers, ob.net);
         std::vector<Vec2> qs;
@@ -530,14 +602,14 @@ int relax(Board& b, const OptimizeOptions& o, OptimizeResult& r, int& conflicts)
     }
     // Steps: Rprop scale, clipped to tol·scale, each checked against the copper around (the wires
     // as they lie now — they are re-laid afterwards, the check keeps a via off other copper).
-    SpatialIndex idx;
-    idx.build(b);
-    int moved = 0;
+    struct Step { size_t k; Vec2 d; };
+    std::vector<Step> steps;
     {
-      ProfScope p("relax: apply");
+      ProfScope p("relax: steps");
       for (size_t k = 0; k < objs.size(); ++k) {
         RelaxObject& ob = objs[k];
         Vec2 F = force[k];
+        if (clearing && F.len() < 1000) continue;
         if (F.len() < 1000) { ob.lastForce = F; continue; }
         if (ob.lastForce.len() > 0) ob.scale = std::clamp(ob.scale * (F.dot(ob.lastForce) > 0 ? 1.5 : 0.6), 0.1, 4.0);
         ob.lastForce = F;
@@ -560,43 +632,138 @@ int relax(Board& b, const OptimizeOptions& o, OptimizeResult& r, int& conflicts)
           }
         }
         if (!use) continue;
-        Vec2 d = *use;
         Shape sh = Shape::circle(ob.pos, ob.radius);
         auto with = attachedTo(b, sh, ob.layers, ob.net);
         if (std::ranges::none_of(with, [](char c) { return c != 0; })) continue;
-        dragEnds(b, sh, ob.layers, ob.net, d);
-        if (ob.via) b.vias[ob.index].pos = Point(b.vias[ob.index].pos.v() + d);
-        ob.pos = ob.pos + d;
-        ++moved;
-        if (ob.via) ++r.viaMoves;
-        else ++r.junctionMoves;
+        steps.push_back({k, *use});
       }
     }
-    if (!moved) {
+    if (steps.empty()) {
       r.log.push_back(std::format("relax {}: tol {:.3f} mm, nothing moved", iterations + 1, tol / kNmPerMm));
       continue;
     }
-    RealizeStats st1;
-    {
-      ProfScope p("relax: re-lay");
-      st1 = relayAll();
+    // The steps are applied and the board re-laid. A step next to what that breaks stays out, and the
+    // rest are tried again: one bad step does not cost the whole iteration (TopoR undoes per move;
+    // on Arcs_master nearly every iteration was undone for a single conflict or a lost connection).
+    auto ratsPerNet = [](const Board& x) {
+      std::map<int, int> n;
+      for (const RatsLine& l : Connectivity::compute(x).ratsnest) ++n[l.net];
+      return n;
+    };
+    const auto ratsBefore = ratsPerNet(b);
+    auto depthOf = [](const std::vector<DrcViolation>& vs) {
+      double sum = 0;
+      for (const DrcViolation& v : vs) sum += std::max(0.0, v.required - v.actual);
+      return sum;
+    };
+    const auto violationsBefore = runDrc(b, dopt);
+    const double lenBefore = totalLength(b);
+    const double depthBefore = depthOf(violationsBefore);
+    std::vector<char> out(steps.size(), 0);
+    struct Try {
+      Board board;
+      RealizeStats stats;
+      std::vector<char> out;
+      int conflicts = 0;
+      double length = 0;
+    };
+    std::optional<Try> best;
+    int tries = 0, lastConflicts = 0;
+    double lastLen = 0;
+    for (; tries < kRelaxTries && !cancelled(); ++tries) {
+      Board t = b;
+      for (size_t m = 0; m < steps.size(); ++m) {
+        if (out[m]) continue;
+        const RelaxObject& ob = objs[steps[m].k];
+        dragEnds(t, Shape::circle(ob.pos, ob.radius), ob.layers, ob.net, steps[m].d);
+        if (ob.via) t.vias[ob.index].pos = Point(t.vias[ob.index].pos.v() + steps[m].d);
+      }
+      RealizeStats st1;
+      std::vector<DrcViolation> violations;
+      std::vector<int> brokenNets;
+      double len = 0;
+      bool fine = false;
+      // Re-laid, and once more if that looks fine: the first re-lay after a move has not settled yet,
+      // and a board taken before it has makes the next iterations look worse than they are.
+      for (int pass = 0; pass < 2; ++pass) {
+        {
+          ProfScope p("relax: re-lay");
+          st1 = relayAll(t);
+        }
+        violations = runDrc(t, dopt);
+        len = totalLength(t);
+        lastConflicts = int(violations.size());
+        lastLen = len;
+        brokenNets.clear();
+        for (auto [net, n] : ratsPerNet(t))
+          if (auto it = ratsBefore.find(net); it == ratsBefore.end() || n > it->second) brokenNets.push_back(net);
+        // No more conflicts, and among as many a lower price: a mm of shortfall costs 100 mm of wire.
+        double depth = depthOf(violations);
+        fine = brokenNets.empty() && lastConflicts <= conflictsBefore &&
+               (lastConflicts < conflictsBefore || len + depth * kRelaxDepthCost <= lenBefore + depthBefore * kRelaxDepthCost);
+        // Clearing a via off a pad: what counts is how much is short, a deep conflict for a shallow one
+        // is a gain though they count the same.
+        if (clearing) fine = brokenNets.empty() && depth < depthBefore - 1000;
+        if (!fine) break;
+      }
+      if (fine) {
+        best = Try{t, std::move(st1), out, lastConflicts, len};
+        break;  // no worse: taken as it is, with whatever it traded
+      }
+      auto added = addedViolations(b, violationsBefore, t, violations);
+      // Who stays out: the steps near an added violation or of its nets close by, the nearest if none,
+      // wider with every try (on a dense board a wide circle takes all the steps at the first go);
+      // all the steps of a net that lost a connection.
+      const double blame = kRelaxBlame * (tries + 1);
+      bool any = false;
+      auto drop = [&](size_t m) {
+        if (!out[m]) { out[m] = 1; any = true; }
+      };
+      for (const DrcViolation& v : added) {
+        std::optional<size_t> nearest;
+        double nd = std::numeric_limits<double>::max();
+        std::array<int, 2> nets{itemNet(t, v.a), v.hasB ? itemNet(t, v.b) : kNoNet};
+        bool hit = false;
+        for (size_t m = 0; m < steps.size(); ++m) {
+          if (out[m]) continue;
+          const RelaxObject& ob = objs[steps[m].k];
+          double d = (ob.pos + steps[m].d - v.pos).len();
+          if (d < nd) { nd = d; nearest = m; }
+          if (d < blame || (d < 3 * blame && std::ranges::contains(nets, ob.net))) {
+            drop(m);
+            hit = true;
+          }
+        }
+        if (!hit && nearest) drop(*nearest);
+      }
+      for (size_t m = 0; m < steps.size(); ++m)
+        if (std::ranges::contains(brokenNets, objs[steps[m].k].net)) drop(m);
+      if (!any || std::ranges::all_of(out, [](char c) { return c != 0; })) break;
     }
-    int now = conflictCount(b);
-    double len = totalLength(b), lenBefore = totalLength(before);
-    bool connected = Connectivity::compute(b).ratsnest.size() <= unrouted;
-    if (now > conflictsBefore || !connected || (now == conflictsBefore && len > lenBefore)) {
-      b = std::move(before);
-      r.viaMoves = viaMoves0;
-      r.junctionMoves = junctionMoves0;
-      r.log.push_back(std::format("relax {}: tol {:.3f} mm, {} move(s) undone ({} -> {} conflicts, {:.1f} -> {:.1f} mm)",
-                                  iterations + 1, tol / kNmPerMm, moved, conflictsBefore, now, lenBefore / 1e6, len / 1e6));
+    if (!best) {
+      r.log.push_back(std::format("relax {}: tol {:.3f} mm, {} step(s) undone after {} tries ({} -> {} conflicts, {:.1f} -> {:.1f} mm)",
+                                  iterations + 1, tol / kNmPerMm, steps.size(), tries, conflictsBefore, lastConflicts,
+                                  lenBefore / 1e6, lastLen / 1e6));
       for (RelaxObject& ob : objs) ob.scale = std::max(0.1, ob.scale * 0.6);
       continue;
     }
-    st = std::move(st1);
-    conflicts = now;
-    r.log.push_back(std::format("relax {}: tol {:.3f} mm, {} move(s), {} conflict(s), {:.1f} mm", iterations + 1,
-                                tol / kNmPerMm, moved, conflicts, len / 1e6));
+    int moved = 0;
+    for (size_t m = 0; m < steps.size(); ++m) {
+      RelaxObject& ob = objs[steps[m].k];
+      if (best->out[m]) {
+        ob.scale = std::max(0.1, ob.scale * 0.6);
+        continue;
+      }
+      ob.pos = ob.pos + steps[m].d;
+      ++moved;
+      if (ob.via) ++r.viaMoves;
+      else ++r.junctionMoves;
+    }
+    b = std::move(best->board);
+    st = std::move(best->stats);
+    conflicts = best->conflicts;
+    r.log.push_back(std::format("relax {}: tol {:.3f} mm, {} of {} step(s), {} conflict(s), {:.1f} mm", iterations + 1,
+                                tol / kNmPerMm, moved, steps.size(), conflicts, best->length / 1e6));
   }
   return iterations;
 }
