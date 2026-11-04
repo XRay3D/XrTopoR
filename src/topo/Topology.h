@@ -54,6 +54,7 @@ struct Edge {
   int v[2] = {-1, -1};  // v[0] < v[1]
   int t[2] = {-1, -1};  // triangles (-1: hull)
   bool constrained = false;  // outline, keepout boundary: never flipped, never crossed
+  bool rigid = false;        // inside one owner (a pad's centre to its end): never flipped
   int along = -1;            // the wire that runs along the edge between its two end owners, if one does
   std::vector<int> cross;    // crossing ids, in order from v[0] to v[1]
   // Capacity (Capacity.h), recomputed when the end owners move or `cross` changes.
@@ -145,6 +146,9 @@ struct Topology {
   void placeVertex(LayerMesh& m, int v) const;  // refreshes the cached position from the owner
   // The vertex of the owner on the layer nearest p.
   int nearestVertex(const LayerMesh& m, int owner, Vec2 p) const;
+  // The wires of different nets that cross each other on a layer: chords interleaving on a triangle, a
+  // wire across the edge another runs along.
+  std::vector<Violation> findCrossings(const LayerMesh& m) const;
   // Checks the invariants: the meshes (orientation, neighbours, edges, vertex lists) and the wires (every
   // consecutive pair of crossings on one triangle, the ends at their owners, the edge lists and the wires'
   // lists agreeing). Returns what is wrong.

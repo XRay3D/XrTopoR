@@ -333,6 +333,7 @@ void Topology::buildMeshes(const Board& b, BuildScratch& scratch) {
     for (Tri& t : m.tris)
       for (int i = 0; i < 3; ++i)
         if (t.nb[i] >= 0 && (!m.tris[t.nb[i]].inside || m.edges[t.e[i]].constrained)) t.nb[i] = -1;
+    for (Edge& e : m.edges) e.rigid = m.verts[e.v[0]].owner == m.verts[e.v[1]].owner;
     for (const KeepoutLoop& kl : keepoutLoops) {
       if (!kl.area || !((kl.layers >> layer) & 1)) continue;
       Polyline poly;

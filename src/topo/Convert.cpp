@@ -94,10 +94,112 @@ std::vector<Hit> walk(const LayerMesh& m, int v0, int v1, const Polyline& sk, bo
   }
   // Ends at the end vertex: the last triangle must be one of its fan.
   if (m.localVertex(f, v1) < 0) return fail(std::format("ended in triangle {} away from the end vertex after {} hits", f, out.size()));
+  // A polyline leaving its vertex along a fan edge, or arriving along one, touches that edge at the
+  // vertex: no crossing (the realiser strips the hits touching an end point too). Only at the ends of
+  // the walk: a wire that wraps around its own via crosses the via's fan edges on the way.
+  auto touches = [&](const Hit& h, int v) { return m.edges[h.edge].v[0] == v || m.edges[h.edge].v[1] == v; };
+  while (!out.empty() && touches(out.front(), v0)) out.erase(out.begin());
+  while (!out.empty() && touches(out.back(), v1)) out.pop_back();
   return out;
 }
 
 }  // namespace
+
+std::vector<Violation> Topology::findCrossings(const LayerMesh& m) const {
+  std::vector<Violation> out;
+  std::set<std::pair<int, int>> crossed;
+  auto report = [&](Violation v) {
+    if (crossed.insert(std::minmax(v.wireA, v.wireB)).second) out.push_back(v);
+  };
+  // Two chords of different nets that interleave on a triangle's perimeter cross inside it (the router's
+  // chordCrossings): a crossing the edge order alone does not show, when the two share no edge.
+  {
+    struct Chord { int wire; double s0, s1; };  // perimeter coordinates in [0, 3)
+    std::vector<std::vector<Chord>> chordsOf(m.tris.size());
+    auto coordOf = [&](int t, int cid) {  // a crossing on an edge of triangle t
+      const Tri& T = m.tris[t];
+      int e = crossings[cid].edge;
+      int i = m.localEdge(t, e);
+      int from = T.v[(i + 1) % 3];  // the edge runs from v[i+1] to v[i+2] along the perimeter
+      const Edge& E = m.edges[e];
+      int n = int(E.cross.size());
+      int k = int(std::ranges::find(E.cross, cid) - E.cross.begin());
+      double frac = (k + 1.0) / (n + 1.0);
+      if (E.v[0] != from) frac = 1 - frac;
+      return double((i + 1) % 3) + frac;
+    };
+    auto triOf = [&](int ca, int cb) {  // the triangle two consecutive crossings share
+      const Edge& A = m.edges[crossings[ca].edge];
+      const Edge& B = m.edges[crossings[cb].edge];
+      for (int ta : A.t)
+        if (ta >= 0 && (ta == B.t[0] || ta == B.t[1])) return ta;
+      return -1;
+    };
+    auto endTri = [&](int cid, int owner, double& coord) {  // the triangle of a wire's first/last crossing at its end owner
+      const Edge& E = m.edges[crossings[cid].edge];
+      for (int t : E.t) {
+        if (t < 0) continue;
+        for (int i = 0; i < 3; ++i)
+          if (m.verts[m.tris[t].v[i]].owner == owner) {
+            coord = i;
+            return t;
+          }
+      }
+      return -1;
+    };
+    for (int wi = 0; wi < int(wires.size()); ++wi) {
+      const Wire& w = wires[wi];
+      if (w.layer != m.layer || w.cross.empty()) continue;
+      for (size_t k = 0; k + 1 < w.cross.size(); ++k) {
+        int t = triOf(w.cross[k], w.cross[k + 1]);
+        if (t >= 0) chordsOf[t].push_back({wi, coordOf(t, w.cross[k]), coordOf(t, w.cross[k + 1])});
+      }
+      double c0, c1;
+      if (int t = endTri(w.cross.front(), w.end[0], c0); t >= 0) chordsOf[t].push_back({wi, c0, coordOf(t, w.cross.front())});
+      if (int t = endTri(w.cross.back(), w.end[1], c1); t >= 0) chordsOf[t].push_back({wi, coordOf(t, w.cross.back()), c1});
+    }
+    auto inside = [](double x, double a, double b) {  // x strictly between a and b along the circular perimeter
+      if (a > b) std::swap(a, b);
+      return x > a && x < b;
+    };
+    for (int t = 0; t < int(m.tris.size()); ++t) {
+      const auto& cs = chordsOf[t];
+      for (size_t i = 0; i < cs.size(); ++i)
+        for (size_t j = i + 1; j < cs.size(); ++j) {
+          const Chord& x = cs[i];
+          const Chord& y = cs[j];
+          if (wires[x.wire].net == wires[y.wire].net) continue;
+          if (inside(y.s0, x.s0, x.s1) == inside(y.s1, x.s0, x.s1)) continue;
+          Violation v;
+          v.kind = Violation::Kind::Crossing;
+          v.wireA = x.wire;
+          v.wireB = y.wire;
+          v.layer = m.layer;
+          v.tri = t;
+          v.pos = (m.verts[m.tris[t].v[0]].p + m.verts[m.tris[t].v[1]].p + m.verts[m.tris[t].v[2]].p) / 3.0;
+          report(v);
+        }
+    }
+  }
+  // A wire of another net across the edge a wire runs along: the two cross.
+  for (int e = 0; e < int(m.edges.size()); ++e) {
+    const Edge& E = m.edges[e];
+    if (E.along < 0) continue;
+    for (int cid : E.cross) {
+      int other = crossings[cid].wire;
+      if (wires[other].net == wires[E.along].net) continue;
+      Violation v;
+      v.kind = Violation::Kind::Crossing;
+      v.wireA = E.along;
+      v.wireB = other;
+      v.layer = m.layer;
+      v.edge = e;
+      v.pos = (m.verts[E.v[0]].p + m.verts[E.v[1]].p) * 0.5;
+      report(v);
+    }
+  }
+  return out;
+}
 
 void Topology::convertWires(const Board& b, BuildScratch& scratch) {
   std::vector<char> all(b.tracks.size(), 1);
@@ -381,94 +483,8 @@ void Topology::convertWires(const Board& b, BuildScratch& scratch) {
     for (size_t k = 0; k < laid.size(); ++k) wires[laid[k].wire].cross = std::move(wireCross[k]);
     for (int e = 0; e < int(m.edges.size()); ++e)
       if (!m.edges[e].cross.empty()) refreshEdge(*this, m, e);
-    // Two chords of different nets that interleave on a triangle's perimeter cross inside it (the router's
-    // chordCrossings): a crossing the edge order alone does not show, when the two share no edge.
-    {
-      struct Chord { int wire; double s0, s1; };  // perimeter coordinates in [0, 3)
-      std::vector<std::vector<Chord>> chordsOf(m.tris.size());
-      auto coordOf = [&](int t, int cid) {  // a crossing on an edge of triangle t
-        const Tri& T = m.tris[t];
-        int e = crossings[cid].edge;
-        int i = m.localEdge(t, e);
-        int from = T.v[(i + 1) % 3];  // the edge runs from v[i+1] to v[i+2] along the perimeter
-        const Edge& E = m.edges[e];
-        int n = int(E.cross.size());
-        int k = int(std::ranges::find(E.cross, cid) - E.cross.begin());
-        double frac = (k + 1.0) / (n + 1.0);
-        if (E.v[0] != from) frac = 1 - frac;
-        return double((i + 1) % 3) + frac;
-      };
-      auto triOf = [&](int ca, int cb) {  // the triangle two consecutive crossings share
-        const Edge& A = m.edges[crossings[ca].edge];
-        const Edge& B = m.edges[crossings[cb].edge];
-        for (int ta : A.t)
-          if (ta >= 0 && (ta == B.t[0] || ta == B.t[1])) return ta;
-        return -1;
-      };
-      auto endTri = [&](int cid, int owner, double& coord) {  // the triangle of a wire's first/last crossing at its end owner
-        const Edge& E = m.edges[crossings[cid].edge];
-        for (int t : E.t) {
-          if (t < 0) continue;
-          for (int i = 0; i < 3; ++i)
-            if (m.verts[m.tris[t].v[i]].owner == owner) {
-              coord = i;
-              return t;
-            }
-        }
-        return -1;
-      };
-      for (int wi = 0; wi < int(wires.size()); ++wi) {
-        const Wire& w = wires[wi];
-        if (w.layer != m.layer || w.cross.empty()) continue;
-        for (size_t k = 0; k + 1 < w.cross.size(); ++k) {
-          int t = triOf(w.cross[k], w.cross[k + 1]);
-          if (t >= 0) chordsOf[t].push_back({wi, coordOf(t, w.cross[k]), coordOf(t, w.cross[k + 1])});
-        }
-        double c0, c1;
-        if (int t = endTri(w.cross.front(), w.end[0], c0); t >= 0) chordsOf[t].push_back({wi, c0, coordOf(t, w.cross.front())});
-        if (int t = endTri(w.cross.back(), w.end[1], c1); t >= 0) chordsOf[t].push_back({wi, coordOf(t, w.cross.back()), c1});
-      }
-      auto inside = [](double x, double a, double b) {  // x strictly between a and b along the circular perimeter
-        if (a > b) std::swap(a, b);
-        return x > a && x < b;
-      };
-      for (int t = 0; t < int(m.tris.size()); ++t) {
-        const auto& cs = chordsOf[t];
-        for (size_t i = 0; i < cs.size(); ++i)
-          for (size_t j = i + 1; j < cs.size(); ++j) {
-            const Chord& x = cs[i];
-            const Chord& y = cs[j];
-            if (wires[x.wire].net == wires[y.wire].net) continue;
-            if (inside(y.s0, x.s0, x.s1) == inside(y.s1, x.s0, x.s1)) continue;
-            if (!crossed.insert(std::minmax(x.wire, y.wire)).second) continue;
-            Violation v;
-            v.kind = Violation::Kind::Crossing;
-            v.wireA = x.wire;
-            v.wireB = y.wire;
-            v.layer = m.layer;
-            v.tri = t;
-            v.pos = (m.verts[m.tris[t].v[0]].p + m.verts[m.tris[t].v[1]].p + m.verts[m.tris[t].v[2]].p) / 3.0;
-            violations.push_back(v);
-          }
-      }
-    }
-    // A wire of another net across the edge a wire runs along: the two cross.
-    for (int e = 0; e < int(m.edges.size()); ++e) {
-      const Edge& E = m.edges[e];
-      if (E.along < 0) continue;
-      for (int cid : E.cross) {
-        int other = crossings[cid].wire;
-        if (wires[other].net == wires[E.along].net || !crossed.insert(std::minmax(other, E.along)).second) continue;
-        Violation v;
-        v.kind = Violation::Kind::Crossing;
-        v.wireA = E.along;
-        v.wireB = other;
-        v.layer = m.layer;
-        v.edge = e;
-        v.pos = crossPt(laidOn[li][0].hits.empty() ? Hit{e, 0.5, true} : Hit{e, 0.5, true});
-        violations.push_back(v);
-      }
-    }
+    for (Violation v : findCrossings(m))
+      if (crossed.insert(std::minmax(v.wireA, v.wireB)).second) violations.push_back(v);
     // A crossing of an edge with no room at all, at another net's copper: the wire runs through it.
     for (int e = 0; e < int(m.edges.size()); ++e) {
       const Edge& E = m.edges[e];

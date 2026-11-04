@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <format>
 #include <print>
 #include <set>
 #include <string>
@@ -126,13 +127,13 @@ TEST(Topo, LawsonIsDelaunay) {
   int scrambled = 0;
   for (int k = 0; k < 20000; ++k) {
     x = x * 1664525u + 1013904223u;
-    scrambled += topo::flip(m, int((x >> 8) % m.edges.size()));
+    scrambled += topo::flip(t, m, int((x >> 8) % m.edges.size()));
   }
   EXPECT_GT(scrambled, 1000);
   EXPECT_EQ(t.check(), std::vector<std::string>{});
   int notDelaunay = 0;
   for (int e = 0; e < int(m.edges.size()); ++e) {
-    if (!topo::flippable(m, e)) continue;
+    if (!topo::flippable(t, m, e)) continue;
     const topo::Edge& E = m.edges[e];
     const topo::Tri& T1 = m.tris[E.t[0]];
     int i = m.localEdge(E.t[0], e);
@@ -141,12 +142,12 @@ TEST(Topo, LawsonIsDelaunay) {
                                   m.verts[T2.v[m.localEdge(E.t[1], e)]].p);
   }
   EXPECT_GT(notDelaunay, 0);
-  int flips = topo::flipLoop(m);
+  int flips = topo::flipLoop(t, m);
   EXPECT_GT(flips, 0);
   EXPECT_EQ(t.check(), std::vector<std::string>{});
   // Locally Delaunay everywhere, which for a triangulation means Delaunay.
   for (int e = 0; e < int(m.edges.size()); ++e) {
-    if (!topo::flippable(m, e)) continue;
+    if (!topo::flippable(t, m, e)) continue;
     const topo::Edge& E = m.edges[e];
     const topo::Tri& T1 = m.tris[E.t[0]];
     int i = m.localEdge(E.t[0], e);
@@ -154,7 +155,7 @@ TEST(Topo, LawsonIsDelaunay) {
     EXPECT_FALSE(topo::inCircle(m.verts[T1.v[i]].p, m.verts[T1.v[(i + 1) % 3]].p, m.verts[T1.v[(i + 2) % 3]].p,
                                 m.verts[T2.v[m.localEdge(E.t[1], e)]].p)) << "edge " << e;
   }
-  EXPECT_EQ(topo::flipLoop(m), 0);
+  EXPECT_EQ(topo::flipLoop(t, m), 0);
 }
 
 namespace {
@@ -415,5 +416,94 @@ TEST(Topo, ThroughForeignPad) {
     EXPECT_EQ(t.check(), std::vector<std::string>{});
     ASSERT_EQ(t.wires.size(), 1u);
     EXPECT_GT(t.wires[0].cross.size(), 0u);
+  }
+}
+
+
+namespace {
+
+// Every wire as the sequence of its crossed edges' end positions (the ids change with flips).
+std::vector<std::vector<std::pair<Vec2, Vec2>>> wirePaths(const topo::Topology& t) {
+  std::vector<std::vector<std::pair<Vec2, Vec2>>> out(t.wires.size());
+  for (size_t wi = 0; wi < t.wires.size(); ++wi) {
+    const topo::LayerMesh& m = *t.mesh(t.wires[wi].layer);
+    for (int cid : t.wires[wi].cross) {
+      const topo::Edge& e = m.edges[t.crossings[cid].edge];
+      out[wi].push_back({m.verts[e.v[0]].p, m.verts[e.v[1]].p});
+    }
+  }
+  return out;
+}
+
+}  // namespace
+
+TEST(Topo, FlipKeepsWires) {
+  auto lb = io::loadBoard(data("topor/Example_03/arz_2L.fst"));
+  ASSERT_TRUE(lb.has_value());
+  topo::Topology t;
+  t.build(**lb);
+  ASSERT_EQ(t.check(), std::vector<std::string>{});
+  auto before = wirePaths(t);
+  int flipped = 0, carried = 0;
+  for (topo::LayerMesh& m : t.layers) {
+    for (int e = 0; e < int(m.edges.size()); ++e) {
+      topo::FlipPlan plan;
+      if (!topo::planFlip(t, m, e, plan)) continue;
+      // Only where the way back is open too: the old diagonal may run through the copper of a new end.
+      auto clear = [&](int v, int x, int y) {
+        const topo::Vertex& X = m.verts[v];
+        if (X.owner == m.verts[x].owner || X.owner == m.verts[y].owner) return true;
+        return distPointSegment(X.p, m.verts[x].p, m.verts[y].p) > t.owners[X.owner].halfWidth;
+      };
+      if (!clear(plan.a, plan.p, plan.q) || !clear(plan.b, plan.p, plan.q)) continue;
+      size_t had = m.edges[e].cross.size();
+      int wasAlong = m.edges[e].along;
+      ASSERT_TRUE(topo::flip(t, m, e)) << "edge " << e;
+      carried += int(m.edges[e].cross.size());
+      if (flipped % 200 == 0) ASSERT_EQ(t.check(), std::vector<std::string>{}) << "after flipping edge " << e;
+      ASSERT_TRUE(topo::flip(t, m, e)) << "edge " << e << " back";
+      EXPECT_EQ(m.edges[e].cross.size(), had) << "edge " << e;
+      EXPECT_EQ(m.edges[e].along, wasAlong) << "edge " << e;
+      ++flipped;
+    }
+    EXPECT_TRUE(t.findCrossings(m).empty());
+  }
+  EXPECT_GT(flipped, 1000);
+  EXPECT_GT(carried, 1000);
+  EXPECT_EQ(t.check(), std::vector<std::string>{});
+  auto after = wirePaths(t);
+  ASSERT_EQ(after.size(), before.size());
+  int differ = 0;
+  for (size_t wi = 0; wi < before.size(); ++wi) differ += before[wi] != after[wi];
+  EXPECT_EQ(differ, 0);
+}
+
+TEST(Topo, WeightedLawsonKeepsWires) {
+  for (const char* name : {"topor/Example_04/Arcs_master.pcb", "topor/Example_03/arz_standard_routing.fst", "topor/Example_03/arz_2L.fst"}) {
+    auto lb = io::loadBoard(data(name));
+    ASSERT_TRUE(lb.has_value()) << name;
+    topo::Topology t;
+    t.build(**lb);
+    auto crossingsBefore = t.crossings.size();
+    double loadBefore = 0;
+    for (const topo::LayerMesh& m : t.layers)
+      for (int e = 0; e < int(m.edges.size()); ++e) loadBefore += topo::load(topo::edgeCapacity(t, m, e));
+    int flips = 0;
+    for (topo::LayerMesh& m : t.layers) flips += topo::flipLoop(t, m);
+    EXPECT_GT(flips, 0) << name;
+    EXPECT_EQ(t.check(), std::vector<std::string>{}) << name;
+    double loadAfter = 0;
+    int overflow = 0;
+    for (topo::LayerMesh& m : t.layers) {
+      EXPECT_TRUE(t.findCrossings(m).empty()) << name;
+      for (int e = 0; e < int(m.edges.size()); ++e) {
+        auto c = topo::edgeCapacity(t, m, e);
+        loadAfter += topo::load(c);
+        overflow += c.cls == 2;
+      }
+    }
+    std::println("{}: {} flips, crossings {} -> {}, load {:.1f} -> {:.1f}, {} overflowing edges", name, flips, crossingsBefore,
+                 t.crossings.size(), loadBefore, loadAfter, overflow);
+    EXPECT_LE(loadAfter, loadBefore + 1e-6) << name;
   }
 }
