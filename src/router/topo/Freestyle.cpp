@@ -6,7 +6,7 @@
 #include "core/Edit.h"
 #include "core/SpatialIndex.h"
 #include "drc/Drc.h"
-#include "router/topo/Realizer.h"
+#include "router/topo/Wires.h"
 
 namespace xr::topo {
 
@@ -161,7 +161,7 @@ bool step(Board& b, FreestyleTarget& t, const edit::Motion& m, Push push) {
   }
   if (push != Push::None) pushAround(b, movers, t.fragment, push, chosen, region);
   region.add(chosenBox(b, chosen));
-  auto st = reshapeTracks(b, chosen, nullptr, nullptr, true);
+  auto st = reshapeTracks(b, chosen, {.local = true});
   for (size_t i = b.tracks.size() - st.trackWire.size(); i < b.tracks.size(); ++i)
     for (auto& s : itemShapes(b, {ItemType::Track, int(i)})) region.add(s.bbox());
   if (before) {

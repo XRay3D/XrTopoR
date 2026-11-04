@@ -6,7 +6,7 @@
 #include "drc/Drc.h"
 #include "io/BoardIO.h"
 #include "router/topo/Optimizer.h"
-#include "router/topo/Realizer.h"
+#include "router/topo/Wires.h"
 #include "router/topo/Refine.h"
 
 using namespace xr;

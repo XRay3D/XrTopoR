@@ -45,6 +45,7 @@ add_library(xrrouter STATIC
   router/topo/TopoMesh.cpp
   router/topo/TopoRouter.cpp
   router/topo/Realizer.cpp
+  router/topo/Wires.cpp
   router/topo/Optimizer.cpp
   router/topo/Freestyle.cpp
   router/topo/Refine.cpp

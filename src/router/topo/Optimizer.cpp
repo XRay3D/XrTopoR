@@ -17,7 +17,7 @@
 #include "core/Edit.h"
 #include "core/SpatialIndex.h"
 #include "drc/Drc.h"
-#include "router/topo/Realizer.h"
+#include "router/topo/Wires.h"
 
 namespace xr::topo {
 
@@ -128,7 +128,7 @@ std::optional<Candidate> tryMove(const Board& b, const SpatialIndex& idx, const 
   RealizeStats st;
   {
     ProfScope p2("F7 tryMove: reshape");
-    st = reshapeTracks(c.board, chosen, nullptr, nullptr, true);
+    st = reshapeTracks(c.board, chosen, {.local = true});
   }
   std::vector<int> fresh;
   for (size_t i = c.board.tracks.size() - st.trackWire.size(); i < c.board.tracks.size(); ++i) fresh.push_back(int(i));
@@ -478,7 +478,7 @@ int relax(Board& b, const OptimizeOptions& o, OptimizeResult& r, int& conflicts)
     std::vector<char> all(x.tracks.size(), 0);
     for (size_t i = 0; i < x.tracks.size(); ++i)
       all[i] = !x.tracks[i].locked && (o.nets.empty() || std::ranges::contains(o.nets, x.tracks[i].net));
-    return reshapeTracks(x, all, nullptr, nullptr, false);
+    return reshapeTracks(x, all);
   };
   // The objects: vias and free branch points, with their scales kept across iterations.
   std::vector<RelaxObject> objs;

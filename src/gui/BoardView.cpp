@@ -19,7 +19,7 @@
 #include "gui/SmallDialogs.h"
 #include "io/BoardIO.h"
 #include "router/topo/Optimizer.h"
-#include "router/topo/Realizer.h"
+#include "router/topo/Wires.h"
 #include "router/topo/Refine.h"
 
 namespace xr::gui {
@@ -2097,7 +2097,7 @@ void BoardView::recomputeShapes() {
     for (size_t i = 0; i < b.tracks.size(); ++i)
       if (chosen[i] && b.tracks[i].net != kNoNet && !std::ranges::contains(nets, b.tracks[i].net)) nets.push_back(b.tracks[i].net);
   auto before = doc_->beginEdit();
-  auto st = topo::reshapeTracks(b, std::move(chosen), nullptr, nullptr, local);
+  auto st = topo::reshapeTracks(b, std::move(chosen), {.local = local});
   int settled = topo::settleJunctions(b, nets);
   for (auto& t : b.tracks) t.edited = false;
   doc_->clearSelection();

@@ -17,7 +17,7 @@
 #include "core/Prof.h"
 #include "router/topo/Optimizer.h"
 #include "router/topo/Refine.h"
-#include "router/topo/Realizer.h"
+#include "router/topo/Wires.h"
 #include "router/topo/TopoRouter.h"
 
 using namespace xr;
@@ -209,7 +209,7 @@ int main(int argc, char** argv) {
       local = true;
     }
     double around = a.opt("--around").empty() ? 0.0 : std::stod(std::string(a.opt("--around"))) * kNmPerMm;
-    auto st = topo::reshapeTracks(b, all, nullptr, nullptr, local, 0.1, around);
+    auto st = topo::reshapeTracks(b, all, {.local = local, .around = around});
     std::println("reshaped {} wires, {} arcs, {} apexes dropped, {} arc bends, {} sketch crossings", st.wires, st.arcs,
                  st.droppedApexes, st.arcBends, st.sketchCrossings);
     for (auto [n1, n2] : st.crossingNets)
