@@ -1172,3 +1172,28 @@ TEST(Topo, SidecarRoundTrip) {
   EXPECT_FALSE(stale2.has_value());
   std::filesystem::remove(path);
 }
+
+// A wire the mesh does not hold (here: a track to nowhere, its end on no copper and no vertex the walk
+// can reach) stays as drawn and does not stop F5: only crossings and wires through copper do.
+TEST(Topo, LostWireDoesNotStopF5) {
+  Board b = crossBoard(false);
+  LayerId top = b.tracks.front().layer;
+  Track t;
+  t.a = Point(Vec2{5 * kNmPerMm, 15 * kNmPerMm});
+  t.b = Point(Vec2{200 * kNmPerMm, 15 * kNmPerMm});  // far outside the 30 x 30 mm board
+  t.width = mmToNm(0.3);
+  t.layer = top;
+  t.net = 0;
+  b.tracks.push_back(t);
+  topo::Topology::assignIds(b);
+  topo::Topology m;
+  m.build(b);
+  bool lost = false;
+  for (const topo::Violation& v : m.violations) lost |= v.kind == topo::Violation::Kind::OutsideBoard;
+  ASSERT_TRUE(lost);
+  auto res = topo::runF5Model(b, m);
+  EXPECT_TRUE(res.drawn);
+  bool reported = false;
+  for (const topo::Violation& v : res.violations) reported |= v.kind == topo::Violation::Kind::OutsideBoard;
+  EXPECT_TRUE(reported);
+}

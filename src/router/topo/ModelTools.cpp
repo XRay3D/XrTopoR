@@ -319,10 +319,12 @@ RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int
 
 namespace {
 
-// Stops before anything is drawn when the model holds a violation; else the flips and the capacities.
+// Stops before anything is drawn when wires cross or a wire runs through another net's copper (TopoR's
+// 5032 and the like); else the flips and the capacities. A wire the mesh does not hold stays as drawn,
+// locked, and is no bar (as an unrouted connection, TopoR's 5007, is none) — it is reported with the result.
 bool prepareModel(Topology& t, bool flips, bool weighted, int& nFlips, std::vector<Violation>& stopping) {
   for (const Violation& v : t.violations)
-    if (v.kind != Violation::Kind::Overflow) stopping.push_back(v);
+    if (v.kind == Violation::Kind::Crossing || v.kind == Violation::Kind::ThroughPad) stopping.push_back(v);
   if (!stopping.empty()) return false;
   if (flips) {
     ProfScope p("F5 model: flips");
@@ -426,7 +428,7 @@ F5ModelResult runF5Model(Board& b, Topology& t, const F5ModelOptions& o) {
   drawModel(b, t, o.direct, r.stats, r.wires);
   r.drawn = true;
   for (const Violation& v : t.violations)
-    if (v.kind == Violation::Kind::Overflow) r.violations.push_back(v);
+    if (v.kind == Violation::Kind::Overflow || v.kind == Violation::Kind::OutsideBoard) r.violations.push_back(v);
   return r;
 }
 
@@ -1084,7 +1086,7 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
     }
   }
   for (const Violation& v : t.violations)
-    if (v.kind == Violation::Kind::Overflow) r.violations.push_back(v);
+    if (v.kind == Violation::Kind::Overflow || v.kind == Violation::Kind::OutsideBoard) r.violations.push_back(v);
   return r;
 }
 
