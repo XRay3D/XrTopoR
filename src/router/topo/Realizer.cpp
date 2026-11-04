@@ -1,3 +1,4 @@
+#include "router/topo/RealizerInput.h"
 #include "router/topo/Realizer.h"
 
 #include "core/Prof.h"
@@ -38,63 +39,7 @@ constexpr double kExitRadius = 1.0 * kNmPerMm;  // the largest exit arc out of a
 // the router's kept wires (tt: 0 → 3 violations at a pad), so none.
 constexpr double kTrackObstacleMargin = 0;
 
-// An obstacle point: pads contribute their centre (circles), segment ends (ovals) or core polygon
-// corners; vias their centre; the outline its vertices.
-constexpr int kTransparent = -3;  // a point that constrains nothing (via site, pad of another layer)
-constexpr int kBoardEdge = -2;    // belongs to no net, blocks all
 
-struct OPt {
-  Vec2 p;
-  double r = 0;
-  double clr = 0;
-  int net = kNoNet;
-  int shape = -1;  // index into LayerObstacles::shapes: the copper the point belongs to (pads)
-  int via = -1;    // the board via this point is (for the squeeze report)
-};
-
-struct Side {
-  int to;      // neighbouring obstacle point
-  double r;    // half width of the side (pad edge: corner radius, stub wire: width / 2)
-};
-
-struct LayerObstacles {
-  std::vector<OPt> pts;
-  std::vector<Shape> shapes;
-  // A wire never bends around the centre of a pad that has corners: the nearest corner takes the bend.
-  std::map<int, std::vector<int>> cornersOf;  // centre point -> corner points
-  std::vector<std::pair<int, int>> constraints;
-  std::vector<std::vector<Side>> adj;  // sides incident to each obstacle point (pads, outline, stubs)
-
-  int add(Vec2 p, double r, double clr, int net, int shape = -1) {
-    pts.push_back({p, r, clr, net, shape});
-    adj.emplace_back();
-    return int(pts.size() - 1);
-  }
-  void side(int a, int c, double r) {
-    adj[a].push_back({c, r});
-    adj[c].push_back({a, r});
-  }
-  void link(int a, int c, double r) {
-    constraints.push_back({a, c});
-    side(a, c, r);
-  }
-  // How far the point's copper reaches from the point along direction d (a pad's body from its centre
-  // or corner); the radius for points without a shape.
-  double reach(const OPt& o, Vec2 d) const {
-    if (o.shape < 0) return o.r;
-    return std::max(o.r, shapes[size_t(o.shape)].rayExit(o.p, d));
-  }
-  int nearest(Vec2 p, double tol) const {
-    int best = -1;
-    double bd = tol * tol;
-    for (int i = 0; i < int(pts.size()); ++i)
-      if ((pts[i].p - p).len2() <= bd) { bd = (pts[i].p - p).len2(); best = i; }
-    return best;
-  }
-};
-
-// Constrained Delaunay triangulation of the obstacle points of one layer, optionally without
-// the points of one net. Vertex info = obstacle id.
 std::unique_ptr<CDT> triangulate(const LayerObstacles& ob, int skipNet) {
   auto cdt = std::make_unique<CDT>();
   std::vector<CDT::Vertex_handle> vh(ob.pts.size());
@@ -125,14 +70,6 @@ std::unique_ptr<CDT> triangulate(const LayerObstacles& ob, int skipNet) {
 }
 
 // Where a sketch crosses the edges of a triangulation (cancelled back-and-forth crossings removed).
-struct EdgeHit {
-  int u, v;     // obstacle ids, u < v
-  double t;     // position along u -> v
-  bool uLeft;   // u lies to the left of the direction of travel
-  int wBack = -1, wFwd = -1;  // apex of the triangle left and of the triangle entered (-1: outside)
-  bool atEnd = false;         // the edge touches a sketch end point (stripped at the ends of the walk)
-};
-
 std::vector<EdgeHit> crossings(const CDT& cdt, const Polyline& sk) {
   std::vector<EdgeHit> out;
   if (sk.size() < 2) return out;
@@ -505,28 +442,13 @@ int narrowToFit(Board& b, size_t firstTrack) {
   return n;
 }
 
-RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::vector<RealVia>& vias,
-                     const RealizeOptions& opt) {
-  RealizeStats st;
+void prepareStubs(const Board& b, const std::vector<RealWire>& wires, const RealizeOptions& opt, RealizeInput& in) {
   const int NW = int(wires.size());
-  std::flat_map<LayerId, std::vector<int>> byLayer;
-  for (int wi = 0; wi < NW; ++wi) byLayer[wires[wi].layer].push_back(wi);
-
-  // Each wire's crossings of the common triangulation of all obstacles of its layer, then the
-  // slot of every crossing from the ordered crossings of that edge.
-  std::vector<std::vector<EdgeHit>> hits(NW);
-  std::vector<std::vector<Slot>> slots(NW);
-  // A wire leaves a narrow pad straight through its end (TopoR does): the taut path from the pad
-  // centre would cut the pad's own corner and brush the neighbouring pad. Such a wire is realised
-  // from an exit point in front of the end; a stub joins it to the pad and keeps the other wires out.
-  struct Stub {
-    Vec2 from, mid, to;  // pad point -> middle of the end -> exit point
-    bool on = false;
-    double free = 0;     // length of the stub beyond the copper (room for the exit arc)
-  };
-  std::vector<std::array<Stub, 2>> stubs(NW);
-  std::vector<Polyline> sketches(NW);
-  SpatialIndex oidx;  // the copper as it lies now (the chosen tracks are gone): stubs, exit arcs
+  std::vector<std::array<Stub, 2>>& stubs = in.stubs;
+  stubs.assign(NW, {});
+  std::vector<Polyline>& sketches = in.sketches;
+  sketches.resize(NW);
+  SpatialIndex& oidx = in.oidx;
   if (opt.region) oidx.build(b, *opt.region);
   else oidx.build(b);
   {
@@ -621,12 +543,30 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
       }
     }
   }
+}
+
+RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::vector<RealVia>& vias,
+                     const RealizeOptions& opt) {
+  RealizeStats st;
+  const int NW = int(wires.size());
+  std::flat_map<LayerId, std::vector<int>> byLayer;
+  for (int wi = 0; wi < NW; ++wi) byLayer[wires[wi].layer].push_back(wi);
+
+  // Each wire's crossings of the common triangulation of all obstacles of its layer, then the
+  // slot of every crossing from the ordered crossings of that edge.
+  RealizeInput in;
+  prepareStubs(b, wires, opt, in);
+  std::vector<Polyline>& sketches = in.sketches;
+  SpatialIndex& oidx = in.oidx;
+  std::vector<std::array<Stub, 2>>& stubs = in.stubs;
+  std::map<LayerId, LayerObstacles>& obstacles = in.obstacles;
+  auto& edgeLists = in.edgeLists;
+  auto& cdtEdges = in.cdtEdges;
+  std::vector<std::vector<EdgeHit>>& hits = in.hits;
+  hits.assign(NW, {});
   std::vector<BBox> sketchBox(NW);
   for (int wi = 0; wi < NW; ++wi)
     for (Vec2 q : sketches[wi]) sketchBox[wi].add(q);
-  std::map<LayerId, LayerObstacles> obstacles;
-  std::map<LayerId, std::map<std::pair<int, int>, std::vector<std::pair<int, int>>>> edgeLists;
-  std::map<LayerId, std::set<std::pair<int, int>>> cdtEdges;  // debug: obstacle pairs joined by an edge
   std::optional<ProfScope> phase;
   phase.emplace("realize: collect+cdt+crossings");
   for (auto&& [layer, ids] : byLayer) {
@@ -648,29 +588,9 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
     auto& onEdge = edgeLists[layer];  // edge -> (wire, hit index)
     for (int wi : ids) {
       if (cdt->number_of_vertices() >= 3) hits[wi] = crossings(*cdt, sketches[wi]);
-      slots[wi].resize(hits[wi].size());
       for (int k = 0; k < int(hits[wi].size()); ++k) onEdge[{hits[wi][k].u, hits[wi][k].v}].push_back({wi, k});
     }
   }
-  // Bend radius each wire actually uses around each obstacle (merged over the fan); the stacks of
-  // outer wires must build on it, so slots and bends are iterated.
-  // Per crossing, not per obstacle: a wire that passes one obstacle several times (out and back, at
-  // radii from 1 to 5 mm) has one bend for each pass, and the wires stacked on an inner pass have
-  // nothing to do with the radius of the outer one (a whole-board re-lay blew up on that).
-  // bendR[wire][crossing]: radius around the edge's u and v.
-  std::vector<std::vector<std::array<double, 2>>> bendR(NW);
-  for (int wi = 0; wi < NW; ++wi) bendR[wi].assign(hits[wi].size(), {-1.0, -1.0});
-  std::vector<std::vector<Circle>> bendsOf(NW);
-  std::vector<std::vector<Vec2>> tinOf(NW), toutOf(NW);
-  // Where each wire's realised path actually crosses each of its edges (distance from u), from the
-  // previous round: outer wires stack on these rather than on the packed minimum.
-  std::vector<std::vector<double>> actual(NW);
-  for (int wi = 0; wi < NW; ++wi) actual[wi].assign(hits[wi].size(), -1.0);
-  // Width of every wire at every crossing: nominal, or the minimum where an edge cannot take the
-  // nominal widths of the wires crossing it (TopoR's «подрезка»).
-  std::vector<std::vector<double>> hw(NW);
-  for (int wi = 0; wi < NW; ++wi) hw[wi].assign(hits[wi].size(), double(wires[wi].width));
-  phase.emplace("realize: order+rounds+tangents");
   // The order of the wires on every edge comes from the topology first: two wires that share an
   // edge are ordered by where their paths part — the one that leaves the triangle through the edge
   // at u (or ends at u) is nearer u. The positions of the sketch crossings decide only where the
@@ -741,6 +661,47 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
         for (size_t m = k; m > 0 && before(list[m], list[m - 1]); --m) std::swap(list[m], list[m - 1]);
     }
   }
+  return drawRealized(b, wires, vias, opt, in, st);
+}
+
+RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const std::vector<RealVia>& vias,
+                          const RealizeOptions& opt, RealizeInput& in, RealizeStats st) {
+  const int NW = int(wires.size());
+  std::flat_map<LayerId, std::vector<int>> byLayer;
+  for (int wi = 0; wi < NW; ++wi) byLayer[wires[wi].layer].push_back(wi);
+  std::vector<std::vector<EdgeHit>>& hits = in.hits;
+  std::vector<std::vector<Slot>> slots(NW);
+  for (int wi = 0; wi < NW; ++wi) slots[wi].resize(hits[wi].size());
+  std::vector<Polyline>& sketches = in.sketches;
+  std::vector<BBox> sketchBox(NW);
+  for (int wi = 0; wi < NW; ++wi)
+    for (Vec2 q : sketches[wi]) sketchBox[wi].add(q);
+  std::map<LayerId, LayerObstacles>& obstacles = in.obstacles;
+  auto& edgeLists = in.edgeLists;
+  auto& cdtEdges = in.cdtEdges;
+  std::vector<std::array<Stub, 2>>& stubs = in.stubs;
+  SpatialIndex& oidx = in.oidx;
+  std::optional<ProfScope> phase;
+  (void)opt;
+  // Bend radius each wire actually uses around each obstacle (merged over the fan); the stacks of
+  // outer wires must build on it, so slots and bends are iterated.
+  // Per crossing, not per obstacle: a wire that passes one obstacle several times (out and back, at
+  // radii from 1 to 5 mm) has one bend for each pass, and the wires stacked on an inner pass have
+  // nothing to do with the radius of the outer one (a whole-board re-lay blew up on that).
+  // bendR[wire][crossing]: radius around the edge's u and v.
+  std::vector<std::vector<std::array<double, 2>>> bendR(NW);
+  for (int wi = 0; wi < NW; ++wi) bendR[wi].assign(hits[wi].size(), {-1.0, -1.0});
+  std::vector<std::vector<Circle>> bendsOf(NW);
+  std::vector<std::vector<Vec2>> tinOf(NW), toutOf(NW);
+  // Where each wire's realised path actually crosses each of its edges (distance from u), from the
+  // previous round: outer wires stack on these rather than on the packed minimum.
+  std::vector<std::vector<double>> actual(NW);
+  for (int wi = 0; wi < NW; ++wi) actual[wi].assign(hits[wi].size(), -1.0);
+  // Width of every wire at every crossing: nominal, or the minimum where an edge cannot take the
+  // nominal widths of the wires crossing it (TopoR's «подрезка»).
+  std::vector<std::vector<double>> hw(NW);
+  for (int wi = 0; wi < NW; ++wi) hw[wi].assign(hits[wi].size(), double(wires[wi].width));
+  phase.emplace("realize: rounds+tangents");
   for (int round = 0; round < 6; ++round) {
   st.viaPush.clear();
   for (auto&& [layer, ids] : byLayer) {
