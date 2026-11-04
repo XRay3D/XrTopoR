@@ -6,6 +6,8 @@
 #include <cmath>
 #include <format>
 #include <print>
+#include <numbers>
+#include <random>
 #include <set>
 #include <string>
 
@@ -16,6 +18,7 @@
 #include "topo/Capacity.h"
 #include "topo/Chains.h"
 #include "topo/Flip.h"
+#include "topo/Move.h"
 #include "router/topo/ModelTools.h"
 #include "topo/Topology.h"
 
@@ -955,5 +958,143 @@ TEST(Topo, DirectDrawingOfTheSimplestBoard) {
     EXPECT_TRUE(v.empty()) << "direct " << direct;
     EXPECT_EQ(Connectivity::compute(copy).ratsnest.size(), 0u) << "direct " << direct;
     std::println("direct {}: {} tracks, {:.2f} mm", direct, copy.tracks.size(), copy.tracksLength() / 1e6);
+  }
+}
+
+// Every edge's cached capacity equals a fresh computation.
+static std::vector<std::string> staleCapacities(const topo::Topology& t) {
+  std::vector<std::string> bad;
+  for (const topo::LayerMesh& m : t.layers)
+    for (int e = 0; e < int(m.edges.size()); ++e) {
+      const topo::Edge& E = m.edges[e];
+      if (E.v[0] < 0 || E.cross.empty()) continue;
+      auto c = topo::edgeCapacity(t, m, e);
+      if (std::abs(c.freeLen - E.freeLen) > 1 || std::abs(c.need - E.need) > 1 || c.cls != E.cls)
+        if (bad.size() < 10) bad.push_back(std::format("layer {} edge {}: cached {:.0f}/{:.0f}/{} fresh {:.0f}/{:.0f}/{}", m.layer, e, E.freeLen, E.need, E.cls, c.freeLen, c.need, c.cls));
+    }
+  return bad;
+}
+
+// Vias moved at random (200 shifts of up to 0.3 mm on Arcs_master): the meshes stay sound, no wire crosses
+// another, the cached capacities are the fresh ones, and most of the moves go the whole way.
+TEST(Topo, MoveViaKeepsInvariants) {
+  auto lb = io::loadBoard(data("topor/Example_04/Arcs_master.pcb"));
+  ASSERT_TRUE(lb.has_value());
+  topo::Topology t;
+  t.build(**lb);
+  ASSERT_EQ(t.check(), std::vector<std::string>{});
+  std::vector<int> vias;
+  for (int oi = 0; oi < int(t.owners.size()); ++oi)
+    if (t.owners[oi].kind == topo::Owner::Kind::Via) vias.push_back(oi);
+  ASSERT_GT(vias.size(), 50u);
+  std::mt19937 rng(7);
+  std::uniform_real_distribution<double> ang(0, 2 * std::numbers::pi), len(0, 0.3 * kNmPerMm);
+  double asked = 0, went = 0;
+  int whole = 0;
+  for (int k = 0; k < 200; ++k) {
+    int oi = vias[rng() % vias.size()];
+    double a = ang(rng), l = len(rng);
+    Vec2 d{l * std::cos(a), l * std::sin(a)};
+    double f = topo::moveOwner(t, oi, d);
+    asked += l;
+    went += f * l;
+    whole += f > 0.999;
+    if (k % 20 == 19) ASSERT_EQ(t.check(), std::vector<std::string>{}) << "after move " << k;
+  }
+  EXPECT_EQ(t.check(), std::vector<std::string>{});
+  EXPECT_EQ(staleCapacities(t), std::vector<std::string>{});
+  for (const topo::LayerMesh& m : t.layers) EXPECT_TRUE(t.findCrossings(m).empty());
+  std::println("Arcs_master: 200 via moves, {:.1f} of {:.1f} mm went, {} whole", went / 1e6, asked / 1e6, whole);
+  EXPECT_GT(whole, 150);
+  // Long moves (up to 2 mm) take a via across edges, the flips carrying the wires.
+  std::uniform_real_distribution<double> far(0.5 * kNmPerMm, 2 * kNmPerMm);
+  int crossed = 0;
+  for (int k = 0; k < 60; ++k) {
+    int oi = vias[rng() % vias.size()];
+    double a = ang(rng), l = far(rng);
+    const topo::LayerMesh& m0 = t.layers[0];
+    size_t starBefore = 0;
+    for (int v : m0.ownerVerts[oi]) starBefore += m0.verts[v].tris.size();
+    topo::moveOwner(t, oi, {l * std::cos(a), l * std::sin(a)});
+    size_t starAfter = 0;
+    for (int v : m0.ownerVerts[oi]) starAfter += m0.verts[v].tris.size();
+    crossed += starAfter != starBefore;
+    if (k % 10 == 9) ASSERT_EQ(t.check(), std::vector<std::string>{}) << "after long move " << k;
+  }
+  EXPECT_EQ(t.check(), std::vector<std::string>{});
+  EXPECT_EQ(staleCapacities(t), std::vector<std::string>{});
+  for (const topo::LayerMesh& m : t.layers) EXPECT_TRUE(t.findCrossings(m).empty());
+  std::println("Arcs_master: 60 long via moves, {} changed the via's star", crossed);
+  EXPECT_GT(crossed, 10);
+  // The vertices are where their owners are.
+  for (const topo::LayerMesh& m : t.layers)
+    for (const topo::Vertex& x : m.verts)
+      if (x.owner >= 0) EXPECT_LT((x.p - (t.owners[x.owner].c + t.owners[x.owner].axis * x.t + x.off)).len(), 1.0);
+}
+
+// A vertex put into a triangle and taken out again, the mesh left as split (no Lawson's loop): the mesh
+// and the wires' paths are exactly what they were. With the loop: the meshes stay sound and the wires
+// clear of each other.
+TEST(Topo, InsertAndRemoveVertexRoundTrip) {
+  auto lb = io::loadBoard(data("topor/Example_03/arz_2L.fst"));
+  ASSERT_TRUE(lb.has_value());
+  topo::Topology t;
+  t.build(**lb);
+  ASSERT_EQ(t.check(), std::vector<std::string>{});
+  std::mt19937 rng(11);
+  std::uniform_real_distribution<double> u01(0.05, 0.95);
+  auto randomPoint = [&](const topo::LayerMesh& m) {
+    while (true) {
+      int ti = int(rng() % m.tris.size());
+      const topo::Tri& T = m.tris[ti];
+      if (!T.inside || T.blocked) continue;
+      double a = u01(rng), b = u01(rng);
+      if (a + b > 0.95) continue;
+      Vec2 p0 = m.verts[T.v[0]].p, p1 = m.verts[T.v[1]].p, p2 = m.verts[T.v[2]].p;
+      return p0 + (p1 - p0) * a + (p2 - p0) * b;
+    }
+  };
+  for (bool lawson : {false, true}) {
+    int inserted = 0, chords = 0;
+    for (int k = 0; k < 150; ++k) {
+      topo::LayerMesh& m = t.layers[rng() % t.layers.size()];
+      auto before = wirePaths(t);
+      size_t edges = m.edges.size(), tris = m.tris.size(), crossings = t.crossings.size();
+      topo::Owner o;
+      o.kind = topo::Owner::Kind::Via;
+      o.c = randomPoint(m);
+      o.halfWidth = 0.3 * kNmPerMm;
+      o.shape = Shape::circle(o.c, o.halfWidth);
+      o.net = kNoNet;
+      o.layers = LayerMask(1) << m.layer;
+      int oi = topo::insertOwner(t, o, lawson);
+      ASSERT_GE(oi, 0) << "insert " << k;
+      ++inserted;
+      int v = m.ownerVerts[oi].front();
+      for (int ti : m.verts[v].tris)
+        for (int e : m.tris[ti].e)
+          if (m.edges[e].v[0] == v || m.edges[e].v[1] == v) chords += int(m.edges[e].cross.size());
+      if (k % 10 == 0) {
+        ASSERT_EQ(t.check(), std::vector<std::string>{}) << "after insert " << k;
+        EXPECT_TRUE(t.findCrossings(m).empty()) << "after insert " << k;
+      }
+      ASSERT_TRUE(topo::removeOwner(t, oi, lawson)) << "remove " << k;
+      if (k % 10 == 0) ASSERT_EQ(t.check(), std::vector<std::string>{}) << "after remove " << k;
+      if (!lawson) {
+        EXPECT_EQ(wirePaths(t), before) << "round trip " << k;
+        // The dead slots stay; nothing else grew.
+        EXPECT_EQ(m.edges.size(), edges + 3);
+        EXPECT_EQ(m.tris.size(), tris + 2);
+        for (size_t c = crossings; c < t.crossings.size(); ++c) EXPECT_LT(t.crossings[c].wire, 0);
+      }
+      // The owner's slot stays, with no layers and no vertices.
+      EXPECT_EQ(t.owners[oi].layers, 0u);
+      EXPECT_TRUE(m.ownerVerts[oi].empty());
+    }
+    EXPECT_EQ(t.check(), std::vector<std::string>{});
+    for (const topo::LayerMesh& m : t.layers) EXPECT_TRUE(t.findCrossings(m).empty());
+    EXPECT_EQ(staleCapacities(t), std::vector<std::string>{});
+    std::println("arz_2L: {} vertices inserted and removed ({}), {} crossings of the spokes", inserted, lawson ? "Lawson's loop on" : "no loop", chords);
+    EXPECT_GT(chords, 100);
   }
 }

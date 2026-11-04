@@ -47,6 +47,7 @@ add_library(xrtopo STATIC
   topo/Chains.cpp
   topo/Convert.cpp
   topo/Flip.cpp
+  topo/Move.cpp
   topo/Topology.cpp
 )
 target_link_libraries(xrtopo PUBLIC xrcore CGAL::CGAL)

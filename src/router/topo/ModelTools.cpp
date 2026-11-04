@@ -148,6 +148,7 @@ RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int
     std::map<int, int> centreOf;  // owner -> its centre point
     for (int v = 0; v < int(m.verts.size()); ++v) {
       const Vertex& x = m.verts[v];
+      if (x.owner < 0) continue;  // removed
       const Owner& o = t.owners[x.owner];
       double clr = m.ownerClr[x.owner];
       int id;
