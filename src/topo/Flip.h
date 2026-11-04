@@ -44,9 +44,10 @@ bool inCircle(Vec2 a, Vec2 p, Vec2 q, Vec2 b);
 // How full an edge is: what its wires need over what it has (0 with no wires).
 double load(const EdgeCapacity& c);
 
-// Lawson's loop from the seed edges (all of them when empty): an edge is flipped when the new diagonal
-// would be less loaded than it, or, as loaded, when it is not locally Delaunay; the quad's sides are queued
-// after a flip. Returns the number of flips.
-int flipLoop(Topology& t, LayerMesh& m, std::vector<int> seed = {}, const FlipGate& gate = {});
+// Lawson's loop from the seed edges (all of them when empty): an edge is flipped when it is not locally
+// Delaunay — or, `weighted`, when the new diagonal would be less loaded than it (need over free length),
+// the in-circle test deciding among equals; the quad's sides are queued after a flip. Returns the number
+// of flips.
+int flipLoop(Topology& t, LayerMesh& m, std::vector<int> seed = {}, const FlipGate& gate = {}, bool weighted = false);
 
 }  // namespace xr::topo

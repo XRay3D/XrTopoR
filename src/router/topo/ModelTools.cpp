@@ -9,6 +9,7 @@
 #include <set>
 
 #include "core/Prof.h"
+#include "router/topo/RealizerInput.h"
 #include "topo/Capacity.h"
 #include "topo/Flip.h"
 
@@ -110,6 +111,151 @@ RealWire sketchOf(const Board& b, const Topology& t, int wi) {
   return r;
 }
 
+RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int>& chosen, const RealizeOptions& opt,
+                              std::vector<RealWire>* wiresOut) {
+  ProfScope pAll("realizeFromModel");
+  std::vector<RealWire> wires;
+  for (int wi : chosen) wires.push_back(sketchOf(b, t, wi));
+  if (wiresOut) *wiresOut = wires;
+  RealizeInput in;
+  if (std::getenv("XR_TOPO_STUBS")) {
+    prepareStubs(b, wires, opt, in);
+  } else {
+    // No stubs for now: the crossings start at the vertex, a stub's exit point past the first fan edge
+    // would put the funnel's first portal behind its second.
+    in.sketches.clear();
+    for (const RealWire& w : wires) in.sketches.push_back(w.sketch);
+    in.stubs.assign(wires.size(), {});
+    if (opt.region) in.oidx.build(b, *opt.region);
+    else in.oidx.build(b);
+  }
+  const int NW = int(wires.size());
+  in.hits.assign(NW, {});
+  std::map<int, int> localOf;  // model wire -> index in `wires`
+  for (int k = 0; k < NW; ++k) localOf[chosen[k]] = k;
+  // The obstacles of every layer drawn on: the mesh's vertices as the realiser's points, the owners' copper
+  // as their shapes, the pads' corners and the outline's pieces as sides.
+  std::set<LayerId> layersUsed;
+  for (const RealWire& w : wires) layersUsed.insert(w.layer);
+  for (LayerId layer : layersUsed) {
+    const LayerMesh& m = *t.mesh(layer);
+    LayerObstacles& ob = in.obstacles[layer];
+    std::map<int, int> shapeOf;  // owner -> shape index
+    std::map<int, int> centreOf;  // owner -> its centre point
+    for (int v = 0; v < int(m.verts.size()); ++v) {
+      const Vertex& x = m.verts[v];
+      const Owner& o = t.owners[x.owner];
+      double clr = m.ownerClr[x.owner];
+      int id;
+      switch (o.kind) {
+        case Owner::Kind::Pad:
+          if (o.net == kNoNet && o.shape.kind == Shape::Kind::Point) {  // a hole without copper
+            id = ob.add(x.p, o.halfWidth, clr, kNoNet);
+            break;
+          }
+          if (!shapeOf.contains(x.owner)) {
+            shapeOf[x.owner] = int(ob.shapes.size());
+            ob.shapes.push_back(o.shape);
+          }
+          id = ob.add(x.p, x.t == 0 && x.off.len2() < 1 ? 0.0 : o.shape.r, clr, o.net, shapeOf[x.owner]);
+          if (x.t == 0 && x.off.len2() < 1) centreOf[x.owner] = id;
+          break;
+        case Owner::Kind::Via:
+          id = ob.add(x.p, o.halfWidth, clr, o.net);
+          ob.pts[id].via = o.via;
+          break;
+        case Owner::Kind::Junction: id = ob.add(x.p, o.halfWidth, clr, o.net); break;
+        case Owner::Kind::Outline: id = ob.add(x.p, 0, clr, kBoardEdge); break;
+        case Owner::Kind::Keepout: id = ob.add(x.p, 0, 0, kBoardEdge); break;
+      }
+      (void)id;
+    }
+    // The sides: a pad's perimeter between its corners (or its two ends), the outline and keepout pieces.
+    for (const Edge& E : m.edges) {
+      const Vertex& a = m.verts[E.v[0]];
+      const Vertex& c = m.verts[E.v[1]];
+      const Owner& oa = t.owners[a.owner];
+      if (a.owner == c.owner) {
+        if (oa.kind != Owner::Kind::Pad) continue;
+        bool aCentre = a.t == 0 && a.off.len2() < 1, cCentre = c.t == 0 && c.off.len2() < 1;
+        if (aCentre || cCentre) continue;  // a spoke, not a side
+        ob.side(E.v[0], E.v[1], oa.shape.r);
+      } else if (E.constrained && (oa.kind == Owner::Kind::Outline || oa.kind == Owner::Kind::Keepout)) {
+        ob.side(E.v[0], E.v[1], 0);
+      }
+    }
+    for (auto [owner, centre] : centreOf)
+      for (int v : m.ownerVerts[owner])
+        if (v != centre && !(m.verts[v].t == 0 && m.verts[v].off.len2() < 1)) ob.cornersOf[centre].push_back(v);
+    // The stubs' copper, as the realiser adds it.
+    for (int k = 0; k < NW; ++k)
+      if (wires[k].layer == layer)
+        for (const Stub& st : in.stubs[k])
+          if (st.on) {
+            double r = wires[k].width / 2.0, clr = double(wires[k].clearance);
+            int i = ob.add(st.mid, r, clr, wires[k].net), j = ob.add(st.to, r, clr, wires[k].net);
+            ob.link(i, j, r);
+          }
+    // The crossings, in the wires' order and in the edges' order.
+    auto& onEdge = in.edgeLists[layer];
+    for (int e = 0; e < int(m.edges.size()); ++e) {
+      const Edge& E = m.edges[e];
+      if (E.cross.empty()) continue;
+      EdgeCapacity cap = edgeCapacity(t, m, e);
+      for (int k = 0; k < int(E.cross.size()); ++k) {
+        const Crossing& c = t.crossings[E.cross[k]];
+        auto it = localOf.find(c.wire);
+        if (it == localOf.end()) continue;  // a wire that stays as it lies: its copper is in the obstacles
+        int li = it->second;
+        std::vector<EdgeHit>& hs = in.hits[li];
+        if (hs.size() <= size_t(c.idx)) hs.resize(c.idx + 1);
+        Slot s = slotOf(cap, k);
+        hs[c.idx] = {E.v[0], E.v[1], cap.L > 0 ? s.mid() / cap.L : 0.5, false, -1, -1, false};
+      }
+    }
+    for (int k = 0; k < NW; ++k) {
+      if (wires[k].layer != layer) continue;
+      const Wire& w = t.wires[chosen[k]];
+      std::vector<EdgeHit>& hs = in.hits[k];
+      // Which side the edge's u lies on: the wire crosses the edge into the triangle it shares with the
+      // next crossing (or the one holding the end vertex); that triangle, counter-clockwise, runs the edge
+      // from u to v exactly when u is on the wire's left (by the sketch's points it was wrong where a wire
+      // wraps round u, the chord between its neighbours passing through u).
+      for (size_t i = 0; i < hs.size(); ++i) {
+        const Edge& E = m.edges[t.crossings[w.cross[i]].edge];
+        int into = -1;
+        if (i + 1 < hs.size()) {
+          const Edge& N = m.edges[t.crossings[w.cross[i + 1]].edge];
+          for (int ta : E.t)
+            if (ta >= 0 && (ta == N.t[0] || ta == N.t[1])) into = ta;
+        } else {
+          for (int ta : E.t)
+            if (ta >= 0 && m.localVertex(ta, w.endVertex[1]) >= 0) into = ta;
+        }
+        if (into < 0) continue;
+        int j = m.localVertex(into, hs[i].u);
+        hs[i].uLeft = j >= 0 && m.tris[into].v[(j + 1) % 3] == hs[i].v;
+      }
+      for (size_t i = 0; i < hs.size(); ++i) onEdge[{hs[i].u, hs[i].v}].push_back({k, int(i)});
+    }
+    // Along every edge the list runs from u to v, as Edge::cross does, but by hit indices of the wires
+    // in that order (the wires not drawn left out).
+    for (auto& [uv, list] : onEdge) {
+      const Edge* E = nullptr;
+      for (int e = 0; e < int(m.edges.size()) && !E; ++e)
+        if (m.edges[e].v[0] == uv.first && m.edges[e].v[1] == uv.second) E = &m.edges[e];
+      if (!E) continue;
+      std::vector<std::pair<int, int>> ordered;
+      for (int cid : E->cross) {
+        auto it = localOf.find(t.crossings[cid].wire);
+        if (it != localOf.end()) ordered.push_back({it->second, t.crossings[cid].idx});
+      }
+      list = std::move(ordered);
+    }
+  }
+  return drawRealized(b, wires, {}, opt, in, RealizeStats{});
+}
+
 F5ModelResult runF5Model(Board& b, Topology& t, const F5ModelOptions& o) {
   ProfScope pAll("F5 model total");
   F5ModelResult r;
@@ -118,7 +264,15 @@ F5ModelResult runF5Model(Board& b, Topology& t, const F5ModelOptions& o) {
   if (!r.violations.empty()) return r;
   if (o.flips) {
     ProfScope p("F5 model: flips");
-    for (LayerMesh& m : t.layers) r.flips += flipLoop(t, m);
+    if (const char* n = std::getenv("XR_TOPO_SCRAMBLE")) {  // a check of the transfer: random flips, then back to Delaunay
+      unsigned x = 5;
+      for (LayerMesh& m : t.layers)
+        for (int k = 0; k < std::atoi(n); ++k) {
+          x = x * 1664525u + 1013904223u;
+          r.flips += flip(t, m, int((x >> 8) % m.edges.size()));
+        }
+    }
+    for (LayerMesh& m : t.layers) r.flips += flipLoop(t, m, {}, {}, o.weighted);
   }
   {
     ProfScope p("F5 model: capacity");
@@ -179,7 +333,7 @@ F5ModelResult runF5Model(Board& b, Topology& t, const F5ModelOptions& o) {
   const size_t before = b.tracks.size();
   {
     ProfScope p("F5 model: realize");
-    r.stats = realize(b, wires, {}, opt);
+    r.stats = o.direct ? realizeFromModel(b, t, chosen, opt) : realize(b, wires, {}, opt);
   }
   Topology::assignIds(b);
   for (int wi : chosen) t.wires[wi].tracks.clear();

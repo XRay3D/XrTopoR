@@ -9,7 +9,9 @@
 #include <set>
 #include <string>
 
+#include "core/Connectivity.h"
 #include "core/SpatialIndex.h"
+#include "drc/Drc.h"
 #include "io/BoardIO.h"
 #include "topo/Capacity.h"
 #include "topo/Chains.h"
@@ -58,8 +60,11 @@ TEST(Topo, PerLayerMeshBuild) {
         bool here = (o.layers >> m.layer) & 1;
         EXPECT_EQ(!m.ownerVerts[oi].empty(), here) << name << " owner " << oi;
         if (!here || o.kind != topo::Owner::Kind::Pad) continue;
-        // An elongated pad has its centre and its two ends.
-        EXPECT_EQ(m.ownerVerts[oi].size(), o.axis.len2() > 0 ? 3u : 1u) << name << " pad " << o.pad;
+        // An oval has its two ends; a polygon its centre and its corners; a round pad its centre.
+        const Pad& pad = b.pads[o.pad];
+        Shape ps = pad.shapeGeom();
+        size_t want = ps.kind == Shape::Kind::Polygon ? ps.poly.size() + 1 : ps.kind == Shape::Kind::Segment ? 2u : 1u;
+        EXPECT_EQ(m.ownerVerts[oi].size(), want) << name << " pad " << o.pad;
         for (int v : m.ownerVerts[oi]) EXPECT_TRUE(o.shape.contains(m.verts[v].p)) << name << " pad " << o.pad;
       }
     }
@@ -490,7 +495,7 @@ TEST(Topo, WeightedLawsonKeepsWires) {
     for (const topo::LayerMesh& m : t.layers)
       for (int e = 0; e < int(m.edges.size()); ++e) loadBefore += topo::load(topo::edgeCapacity(t, m, e));
     int flips = 0;
-    for (topo::LayerMesh& m : t.layers) flips += topo::flipLoop(t, m);
+    for (topo::LayerMesh& m : t.layers) flips += topo::flipLoop(t, m, {}, {}, true);
     EXPECT_GT(flips, 0) << name;
     EXPECT_EQ(t.check(), std::vector<std::string>{}) << name;
     double loadAfter = 0;
@@ -522,7 +527,7 @@ TEST(Topo, SketchesFollowTheModel) {
     t.build(b);
     for (int round = 0; round < 2; ++round) {
       if (round == 1)
-        for (topo::LayerMesh& m : t.layers) topo::flipLoop(t, m);
+        for (topo::LayerMesh& m : t.layers) topo::flipLoop(t, m, {}, {}, true);
       int off = 0, lost = 0;
       for (int wi = 0; wi < int(t.wires.size()); ++wi) {
         const topo::Wire& w = t.wires[wi];
@@ -580,7 +585,7 @@ TEST(Topo, FlipsKeepTheWiresWhereTheyWere) {
       return len;
     };
     auto before = draw(t);
-    for (topo::LayerMesh& m : t.layers) topo::flipLoop(t, m);
+    for (topo::LayerMesh& m : t.layers) topo::flipLoop(t, m, {}, {}, true);
     auto after = draw(t);
     int moved = 0;
     for (size_t wi = 0; wi < before.size(); ++wi)
@@ -751,7 +756,7 @@ TEST(Topo, FlipsAgreeWithTheWalk) {
       return sk;
     };
     int flips = 0;
-    for (topo::LayerMesh& m : t.layers) flips += topo::flipLoop(t, m);
+    for (topo::LayerMesh& m : t.layers) flips += topo::flipLoop(t, m, {}, {}, true);
     int off = 0, lost = 0;
     for (int wi = 0; wi < int(t.wires.size()); ++wi) {
       const topo::Wire& w = t.wires[wi];
@@ -863,5 +868,30 @@ TEST(Topo, CompareTwoModels) {
           for (int cid : E.cross) std::print(" {}", (**la).nets[t->wires[t->crossings[cid].wire].net].name);
           std::println("");
         }
+  }
+}
+
+// The realiser fed from the model draws the simplest board right: B round A's pad, no violation.
+TEST(Topo, DirectDrawingOfTheSimplestBoard) {
+  Board b = crossBoard(false);
+  topo::Topology::assignIds(b);
+  topo::Topology t;
+  t.build(b);
+  ASSERT_TRUE(t.violations.empty());
+  for (int direct = 0; direct < 2; ++direct) {
+    Board copy = b;
+    topo::Topology tc = t;
+    topo::F5ModelOptions o;
+    o.flips = false;
+    o.direct = direct;
+    auto res = topo::runF5Model(copy, tc, o);
+    ASSERT_TRUE(res.drawn);
+    DrcOptions d;
+    d.unconnected = false;
+    auto v = runDrc(copy, d);
+    for (const DrcViolation& x : v) std::println("direct {}: {}", direct, x.message);
+    EXPECT_TRUE(v.empty()) << "direct " << direct;
+    EXPECT_EQ(Connectivity::compute(copy).ratsnest.size(), 0u) << "direct " << direct;
+    std::println("direct {}: {} tracks, {:.2f} mm", direct, copy.tracks.size(), copy.tracksLength() / 1e6);
   }
 }

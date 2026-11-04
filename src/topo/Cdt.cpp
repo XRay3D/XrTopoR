@@ -87,18 +87,22 @@ CdtResult triangulate(const CdtInput& in) {
     v->info() = int(in.points.size() + out.extra.size());
     out.extra.push_back({v->point().x(), v->point().y()});
   }
-  // The border pieces: constrained edges lying on a border constraint.
-  std::vector<std::pair<Vec2, Vec2>> contour;
-  for (size_t k = 0; k < in.constraints.size(); ++k)
-    if (k < in.border.size() && in.border[k]) contour.push_back({in.points[in.constraints[k].first], in.points[in.constraints[k].second]});
+  // The border pieces: constrained edges lying on a border constraint; the rigid ones likewise.
+  std::vector<std::pair<Vec2, Vec2>> contour, rigidLines;
+  for (size_t k = 0; k < in.constraints.size(); ++k) {
+    char kind = k < in.border.size() ? in.border[k] : 1;
+    auto seg = std::pair{in.points[in.constraints[k].first], in.points[in.constraints[k].second]};
+    if (kind == 1) contour.push_back(seg);
+    else if (kind == 2) rigidLines.push_back(seg);
+  }
   const bool allBorder = contour.size() == in.constraints.size();
-  auto onBorder = [&](Vec2 p, Vec2 q) {
-    if (allBorder) return true;
+  auto onLines = [&](const std::vector<std::pair<Vec2, Vec2>>& lines, Vec2 p, Vec2 q) {
     Vec2 m = (p + q) * 0.5;
-    for (auto& [a, c] : contour)
+    for (auto& [a, c] : lines)
       if (distPointSegment(m, a, c) < 10 && distPointSegment(p, a, c) < 10 && distPointSegment(q, a, c) < 10) return true;
     return false;
   };
+  auto onBorder = [&](Vec2 p, Vec2 q) { return allBorder || onLines(contour, p, q); };
   auto edgePts = [&](const CDT::Edge& e) {
     auto pa = e.first->vertex(CDT::cw(e.second))->point(), pc = e.first->vertex(CDT::ccw(e.second))->point();
     return std::pair{Vec2{pa.x(), pa.y()}, Vec2{pc.x(), pc.y()}};
@@ -128,7 +132,16 @@ CdtResult triangulate(const CdtInput& in) {
       int e;
       if (it == edgeIdx.end()) {
         e = int(out.edges.size());
-        out.edges.push_back({{key.first, key.second}, cdt.is_constrained(CDT::Edge(f, i))});
+        bool constrained = cdt.is_constrained(CDT::Edge(f, i));
+        bool rigid = false;
+        if (constrained && !rigidLines.empty()) {
+          auto [p, q] = edgePts(CDT::Edge(f, i));
+          if (!onBorder(p, q) && onLines(rigidLines, p, q)) {
+            rigid = true;
+            constrained = false;
+          }
+        }
+        out.edges.push_back({{key.first, key.second}, constrained, rigid});
         edgeIdx[key] = e;
       } else {
         e = it->second;

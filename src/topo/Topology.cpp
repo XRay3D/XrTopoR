@@ -53,15 +53,11 @@ void padGeometry(const Shape& s, Owner& o, std::vector<Vec2>& corners) {
         bool rect = std::abs((s.poly[3] - s.poly[2]).len() - l0) < 10 && std::abs((s.poly[0] - s.poly[3]).len() - l1) < 10 &&
                     std::abs(d0.dot(d1)) < 1e-3 * l0 * l1;
         if (rect) {
-          if (std::abs(l0 - l1) >= 1000) {
-            o.axis = (l0 > l1 ? d0 : d1) * 0.5;
-            o.halfWidth = std::min(l0, l1) / 2 + s.r;
-          } else {
-            o.halfWidth = l0 / 2 + s.r;
-          }
-          return;
+          if (std::abs(l0 - l1) >= 1000) o.axis = (l0 > l1 ? d0 : d1) * 0.5;
+          o.halfWidth = std::min(l0, l1) / 2 + s.r;
         }
       }
+      // The corners are vertices (the realiser bends round them); the axis says which way the pad lies.
       for (Vec2 p : s.poly) corners.push_back(p - o.c);
       break;
     }
@@ -252,13 +248,25 @@ void Topology::buildMeshes(const Board& b, BuildScratch& scratch) {
     for (int oi = 0; oi < int(owners.size()); ++oi) {
       const Owner& o = owners[oi];
       if (!((o.layers >> layer) & 1)) continue;
-      vertex(oi, 0, {});
-      if (o.axis.len2() > 0) {
-        vertex(oi, -1, {});
-        vertex(oi, 1, {});
+      const bool hasCorners = oi < int(corners.size()) && !corners[oi].empty();
+      // An oval has its two ends (the realiser's points; from a centre, an edge leaving at a slant would
+      // put the slot nearer the side than the rule), a polygon its centre and its corners, the rest their
+      // centre.
+      if (o.kind == Owner::Kind::Pad && o.axis.len2() > 0 && !hasCorners && o.shape.kind == Shape::Kind::Segment) {
+        int a = vertex(oi, -1, {}), c = vertex(oi, 1, {});
+        in.constraints.push_back({a, c});
+        in.border.push_back(2);
+        continue;
       }
-      if (oi < int(corners.size()))
-        for (Vec2 c : corners[oi]) vertex(oi, 0, c);
+      vertex(oi, 0, {});
+      if (hasCorners) {
+        std::vector<int> ring;
+        for (Vec2 c : corners[oi]) ring.push_back(vertex(oi, 0, c));
+        for (size_t k = 0; k < ring.size(); ++k) {
+          in.constraints.push_back({ring[k], ring[(k + 1) % ring.size()]});
+          in.border.push_back(2);
+        }
+      }
     }
     auto only = [&](int owner) { return m.ownerVerts[owner].front(); };
     for (auto [a, c] : outlineLinks) {
@@ -316,6 +324,7 @@ void Topology::buildMeshes(const Board& b, BuildScratch& scratch) {
       e.v[0] = ce.v[0];
       e.v[1] = ce.v[1];
       e.constrained = ce.constrained;
+      e.rigid = ce.rigid;
       m.edges.push_back(e);
     }
     for (int ti = 0; ti < int(m.tris.size()); ++ti) {
@@ -333,7 +342,7 @@ void Topology::buildMeshes(const Board& b, BuildScratch& scratch) {
     for (Tri& t : m.tris)
       for (int i = 0; i < 3; ++i)
         if (t.nb[i] >= 0 && (!m.tris[t.nb[i]].inside || m.edges[t.e[i]].constrained)) t.nb[i] = -1;
-    for (Edge& e : m.edges) e.rigid = m.verts[e.v[0]].owner == m.verts[e.v[1]].owner;
+    for (Edge& e : m.edges) e.rigid |= m.verts[e.v[0]].owner == m.verts[e.v[1]].owner;
     for (const KeepoutLoop& kl : keepoutLoops) {
       if (!kl.area || !((kl.layers >> layer) & 1)) continue;
       Polyline poly;

@@ -207,6 +207,8 @@ int main(int argc, char** argv) {
     t.build(b);
     topo::F5ModelOptions fo;
     fo.flips = !a.flag("--no-flips");
+    fo.direct = !a.flag("--sketch");
+    fo.weighted = a.flag("--weighted");
     auto res = topo::runF5Model(b, t, fo);
     for (const topo::Violation& v : res.violations) {
       using K = topo::Violation::Kind;

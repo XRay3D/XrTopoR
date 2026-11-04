@@ -12,7 +12,9 @@
 namespace xr::topo {
 
 struct F5ModelOptions {
-  bool flips = true;  // the weighted Lawson loop before drawing
+  bool flips = true;      // Lawson's loop before drawing (the mesh is Delaunay after a conversion already)
+  bool weighted = false;  // ... weighted by the edges' loads
+  bool direct = true;  // the realiser fed from the model (else from the sketches alone)
 };
 
 struct F5ModelResult {
@@ -29,5 +31,15 @@ RealWire sketchOf(const Board& b, const Topology& t, int wire);
 
 // Re-draws every unlocked wire of the model on the board: their tracks are replaced by the realiser's.
 F5ModelResult runF5Model(Board& b, Topology& t, const F5ModelOptions& o = {});
+
+}  // namespace xr::topo
+
+namespace xr::topo {
+
+// Draws the given wires of the model with the realiser fed from the model itself: the obstacles are the
+// mesh's vertices, every wire's crossings and the wires' order on every edge come from the model, nothing
+// is derived from the sketches again. Appends the tracks to the board; `wires` receives the sketches used.
+RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int>& chosen, const RealizeOptions& opt,
+                              std::vector<RealWire>* wires = nullptr);
 
 }  // namespace xr::topo

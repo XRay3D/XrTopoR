@@ -11,8 +11,8 @@ namespace xr::topo {
 struct CdtInput {
   std::vector<Vec2> points;
   std::vector<std::pair<int, int>> constraints;  // point indices
-  // Constraints that separate the inside of the domain from the outside (the board outline); the
-  // others are walls inside it. Indices into `constraints`.
+  // Per constraint: 1 separates the inside of the domain from the outside (the board outline), 0 is a
+  // wall inside it (a keepout), 2 is a rigid edge of the triangulation that may be crossed (a pad's side).
   std::vector<char> border;
 };
 
@@ -24,7 +24,8 @@ struct CdtTri {
 
 struct CdtEdge {
   int v[2];  // v[0] < v[1]
-  bool constrained;
+  bool constrained;  // a border or a wall
+  bool rigid;        // a pad's side: kept in the triangulation, crossed by its own net
 };
 
 struct CdtResult {

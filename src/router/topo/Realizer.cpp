@@ -924,9 +924,12 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
           if (double d = (ob.pts[q].p - at).len2(); d < bd) { bd = d; best = q; }
         if (best >= 0) {
           const OPt& cp = ob.pts[best];
+          // The stack this wire sits on round the centre goes with it round the corner (the model's meshes
+          // have the pads' centres; the slots there stack the wires from the centre's reach).
+          double surplus = std::max(0.0, R - ((atU ? sl.xu : sl.xv) + std::max(ob.pts[o].clr, double(w.clearance)) + kMargin + width / 2.0));
           o = best;
           c = cp.p;
-          R = cp.r + std::max(cp.clr, double(w.clearance)) + kMargin + width / 2.0;
+          R = cp.r + std::max(cp.clr, double(w.clearance)) + kMargin + width / 2.0 + surplus;
         }
       }
       if (!cs.empty() && cs.back().obst == o && (cs.back().c - c).len2() < 1 && (cs.back().rho > 0) == (ap.side > 0)) {
@@ -951,9 +954,9 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
       std::print(stderr, "\n  hits:");
       for (int k = 0; k < int(hits[wi].size()); ++k) {
         const EdgeHit& h = hits[wi][k];
-        std::print(stderr, " [{}-{} t{:.2f} lo{:.3f} hi{:.3f} U({:.2f},{:.2f}) V({:.2f},{:.2f})]", h.u, h.v, h.t,
+        std::print(stderr, " [{}-{} t{:.2f} lo{:.3f} hi{:.3f} U({:.2f},{:.2f}) V({:.2f},{:.2f}) uL{}]", h.u, h.v, h.t,
                    slots[wi][k].lo / 1e6, slots[wi][k].hi / 1e6, ob.pts[h.u].p.x / 1e6, ob.pts[h.u].p.y / 1e6,
-                   ob.pts[h.v].p.x / 1e6, ob.pts[h.v].p.y / 1e6);
+                   ob.pts[h.v].p.x / 1e6, ob.pts[h.v].p.y / 1e6, int(h.uLeft));
       }
       std::println(stderr, "");
     }

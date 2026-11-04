@@ -253,7 +253,7 @@ double load(const EdgeCapacity& c) {
   return c.need / std::max(c.freeLen, 1.0);
 }
 
-int flipLoop(Topology& t, LayerMesh& m, std::vector<int> seed, const FlipGate& gate) {
+int flipLoop(Topology& t, LayerMesh& m, std::vector<int> seed, const FlipGate& gate, bool weighted) {
   std::deque<int> queue;
   std::vector<char> queued(m.edges.size(), 0);
   auto push = [&](int e) {
@@ -275,11 +275,15 @@ int flipLoop(Topology& t, LayerMesh& m, std::vector<int> seed, const FlipGate& g
     queued[e] = 0;
     FlipPlan plan;
     if (!planFlip(t, m, e, plan, gate)) continue;
-    double now = load(edgeCapacity(t, m, e));
-    double then = load(capacityOf(t, m, plan.a, plan.b, plan.wires, plan.along));
-    bool go = then < now - kEps;
-    if (!go && std::abs(then - now) <= kEps)
+    bool go = false;
+    if (weighted) {
+      double now = load(edgeCapacity(t, m, e));
+      double then = load(capacityOf(t, m, plan.a, plan.b, plan.wires, plan.along));
+      go = then < now - kEps;
+      if (!go && std::abs(then - now) <= kEps) go = inCircle(m.verts[plan.a].p, m.verts[plan.p].p, m.verts[plan.q].p, m.verts[plan.b].p);
+    } else {
       go = inCircle(m.verts[plan.a].p, m.verts[plan.p].p, m.verts[plan.q].p, m.verts[plan.b].p);
+    }
     if (!go) continue;
     int t1 = m.edges[e].t[0], t2 = m.edges[e].t[1];
     if (!flip(t, m, e, gate)) continue;
