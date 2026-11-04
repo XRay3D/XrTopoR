@@ -89,6 +89,15 @@ int cmdDrc(const Board& b, size_t maxShow) {
   std::print("DRC: {} violation(s):", v.size());
   for (auto&& [t, n] : counts) std::print(" {}={}", drcTypeName(t), n);
   std::println("");
+  // How deep they are: most of a dense board's count may be rounding noise.
+  double shortfall = 0;
+  int deep = 0;
+  for (auto& x : v)
+    if (x.type != DrcViolation::Type::Unconnected && x.required > x.actual) {
+      shortfall += x.required - x.actual;
+      deep += x.required - x.actual > 0.05 * kNmPerMm;
+    }
+  std::println("shortfall {:.3f} mm, {} deeper than 0.05 mm", shortfall / kNmPerMm, deep);
   return v.empty() ? 0 : 2;
 }
 
