@@ -8,6 +8,7 @@
 
 #include "topo/Build.h"
 #include "topo/Cdt.h"
+#include "topo/Sidecar.h"
 
 namespace xr::topo {
 
@@ -114,6 +115,7 @@ void Topology::build(const Board& b) {
   BuildScratch scratch;
   buildOwners(b, scratch);
   convertWires(b, scratch);  // adds the junction owners, builds the meshes, lays the wires on them
+  boardHash = boardHashOf(b);
 }
 
 void Topology::buildOwners(const Board& b, BuildScratch& scratch) {

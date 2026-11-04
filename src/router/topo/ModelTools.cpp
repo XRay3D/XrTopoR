@@ -802,8 +802,11 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
     ProfScope p("F7 model: checkpoint");
     Checkpoint c{t, t, b};
     for (const RelaxObj& ob : objs) c.pos.push_back(t.owners[ob.owner].c);
+    // The vias on the 0.1 um grid the board's files keep (a position between two of its points would be
+    // written either way, and the model next to the board would not hash the same).
     for (const Owner& ow : t.owners)
-      if (ow.kind == Owner::Kind::Via && ow.via >= 0 && ow.via < int(c.drawn.vias.size())) c.drawn.vias[ow.via].pos = Point(ow.c);
+      if (ow.kind == Owner::Kind::Via && ow.via >= 0 && ow.via < int(c.drawn.vias.size()))
+        c.drawn.vias[ow.via].pos = Point(Vec2{std::round(ow.c.x / 100) * 100, std::round(ow.c.y / 100) * 100});
     RealizeStats st;
     int nw = 0;
     drawModel(c.drawn, c.tDrawn, true, st, nw);
@@ -1071,9 +1074,10 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
     r.wires = int(t.wires.size());
     r.drawn = true;
   } else {
-    // The board's vias follow their owners.
+    // The board's vias follow their owners (on the files' 0.1 um grid).
     for (const Owner& ow : t.owners)
-      if (ow.kind == Owner::Kind::Via && ow.via >= 0 && ow.via < int(b.vias.size())) b.vias[ow.via].pos = Point(ow.c);
+      if (ow.kind == Owner::Kind::Via && ow.via >= 0 && ow.via < int(b.vias.size()))
+        b.vias[ow.via].pos = Point(Vec2{std::round(ow.c.x / 100) * 100, std::round(ow.c.y / 100) * 100});
     if (o.draw) {
       drawModel(b, t, true, r.stats, r.wires);
       r.drawn = true;

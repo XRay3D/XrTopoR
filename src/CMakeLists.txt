@@ -48,9 +48,10 @@ add_library(xrtopo STATIC
   topo/Convert.cpp
   topo/Flip.cpp
   topo/Move.cpp
+  topo/Sidecar.cpp
   topo/Topology.cpp
 )
-target_link_libraries(xrtopo PUBLIC xrcore CGAL::CGAL)
+target_link_libraries(xrtopo PUBLIC xrcore CGAL::CGAL Boost::json)
 
 add_library(xrrouter STATIC
   router/topo/TopoMesh.cpp

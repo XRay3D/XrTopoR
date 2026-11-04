@@ -16,6 +16,7 @@
 #include "io/svg/SvgWriter.h"
 #include "core/Prof.h"
 #include "router/topo/ModelTools.h"
+#include "topo/Sidecar.h"
 #include "router/topo/Optimizer.h"
 #include "router/topo/Refine.h"
 #include "router/topo/Wires.h"
@@ -141,6 +142,19 @@ int cmdRoute(Board& b, const Args& a) {
 
 }  // namespace
 
+// The model next to the board when it is fresh, else built from the tracks.
+static xr::topo::Topology loadModel(const xr::Board& b, const std::string& boardPath) {
+  if (auto t = xr::topo::loadTopology(b, xr::topo::sidecarPath(boardPath))) {
+    std::println("model: loaded from {}", xr::topo::sidecarPath(boardPath));
+    return std::move(*t);
+  } else {
+    std::println("model: built from the tracks ({})", t.error());
+  }
+  xr::topo::Topology t;
+  t.build(b);
+  return t;
+}
+
 int main(int argc, char** argv) {
   if (argc < 3) {
     usage();
@@ -179,8 +193,7 @@ int main(int argc, char** argv) {
     // F7 on the topological model: the vias and branch points relax under the model's forces, the
     // realiser draws once at the end.
     topo::Topology::assignIds(b);
-    topo::Topology t;
-    t.build(b);
+    topo::Topology t = loadModel(b, std::string(a.v[0]));
     topo::OptimizeModelOptions mo;
     mo.flips = !a.flag("--no-flips");
     auto res = topo::optimizeModel(b, t, mo);
@@ -201,6 +214,7 @@ int main(int argc, char** argv) {
                  res.deficitBefore / 1e6, res.deficitAfter / 1e6, res.checkpoints, res.rollbacks, res.conflictsBefore, res.conflictsAfter);
     xr::Prof::get().report("optimize --model");
     if (auto r = io::saveBoard(b, std::string(a.opt("-o"))); !r) return fail(r.error());
+    if (auto r = topo::saveTopology(t, b, topo::sidecarPath(std::string(a.opt("-o")))); !r) return fail(r.error());
     return 0;
   }
   if (cmd == "optimize" && !a.opt("-o").empty()) {
@@ -230,10 +244,10 @@ int main(int argc, char** argv) {
   }
   if (cmd == "reshape" && !a.opt("-o").empty() && a.flag("--model")) {
     // F5 on the topological model: the tracks become wires on the meshes, the meshes relax, the realiser
-    // draws the wires from their slots.
+    // draws the wires from their slots. The model comes from the file next to the board when that is
+    // fresh, else from the tracks; it is saved next to the output.
     topo::Topology::assignIds(b);
-    topo::Topology t;
-    t.build(b);
+    topo::Topology t = loadModel(b, std::string(a.v[0]));
     topo::F5ModelOptions fo;
     fo.flips = !a.flag("--no-flips");
     fo.direct = !a.flag("--sketch");
@@ -251,9 +265,11 @@ int main(int argc, char** argv) {
     std::println("model: {} wires, {} flips; realised {} wires, {} arcs, {} apexes dropped, {} overflowed edges, {} sketch crossings",
                  t.wires.size(), res.flips, res.stats.wires, res.stats.arcs, res.stats.droppedApexes, res.stats.overflowEdges,
                  res.stats.sketchCrossings);
-    if (!a.flag("--no-settle")) std::println("junctions settled: {}", topo::settleJunctions(b, {}));
+    // No legacy settling of the junctions here: F7 on the model moves them, and the settle re-lays the
+    // whole board on the tracks for minutes.
     xr::Prof::get().report("reshape --model");
     if (auto r = io::saveBoard(b, std::string(a.opt("-o"))); !r) return fail(r.error());
+    if (auto r = topo::saveTopology(t, b, topo::sidecarPath(std::string(a.opt("-o")))); !r) return fail(r.error());
     return 0;
   }
   if (cmd == "reshape" && !a.opt("-o").empty()) {

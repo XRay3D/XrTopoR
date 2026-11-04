@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <filesystem>
 #include <format>
 #include <print>
 #include <numbers>
@@ -19,6 +20,7 @@
 #include "topo/Chains.h"
 #include "topo/Flip.h"
 #include "topo/Move.h"
+#include "topo/Sidecar.h"
 #include "router/topo/ModelTools.h"
 #include "topo/Topology.h"
 
@@ -1097,4 +1099,72 @@ TEST(Topo, InsertAndRemoveVertexRoundTrip) {
     std::println("arz_2L: {} vertices inserted and removed ({}), {} crossings of the spokes", inserted, lawson ? "Lawson's loop on" : "no loop", chords);
     EXPECT_GT(chords, 100);
   }
+}
+
+// The model saved next to the board and read back: the same meshes, wires, crossings, capacities and
+// tracks; a board edited since is refused as stale.
+TEST(Topo, SidecarRoundTrip) {
+  auto lb = io::loadBoard(data("topor/Example_03/arz_2L.fst"));
+  ASSERT_TRUE(lb.has_value());
+  Board& b = **lb;
+  topo::Topology::assignIds(b);
+  topo::Topology t;
+  t.build(b);
+  const std::string path = (std::filesystem::temp_directory_path() / "xrtopor_sidecar_test.xrtopo").string();
+  ASSERT_TRUE(topo::saveTopology(t, b, path).has_value());
+  auto loaded = topo::loadTopology(b, path);
+  ASSERT_TRUE(loaded.has_value()) << loaded.error();
+  const topo::Topology& u = *loaded;
+  EXPECT_EQ(u.check(), std::vector<std::string>{});
+  EXPECT_EQ(u.boardHash, t.boardHash);
+  ASSERT_EQ(u.owners.size(), t.owners.size());
+  ASSERT_EQ(u.wires.size(), t.wires.size());
+  EXPECT_EQ(u.crossings.size(), t.crossings.size());
+  EXPECT_EQ(u.junctions.size(), t.junctions.size());
+  EXPECT_EQ(u.ownerTracks, t.ownerTracks);
+  {
+    auto pu = wirePaths(u), pt = wirePaths(t);
+    int differ = 0;
+    auto same = [](const auto& a, const auto& c) {  // within a nanometre: the file carries fractional nanometres loosely
+      if (a.size() != c.size()) return false;
+      for (size_t k = 0; k < a.size(); ++k)
+        if ((a[k].first - c[k].first).len() > 1 || (a[k].second - c[k].second).len() > 1) return false;
+      return true;
+    };
+    for (size_t wi = 0; wi < pt.size(); ++wi) {
+      if (same(pu[wi], pt[wi])) continue;
+      if (differ++ == 0) {
+        std::print("wire {} differs: {} vs {} crossings\n  saved:", wi, pt[wi].size(), pu[wi].size());
+        for (auto [a, c] : pt[wi]) std::print(" ({:.3f},{:.3f})-({:.3f},{:.3f})", a.x / 1e6, a.y / 1e6, c.x / 1e6, c.y / 1e6);
+        std::print("\n  loaded:");
+        for (auto [a, c] : pu[wi]) std::print(" ({:.3f},{:.3f})-({:.3f},{:.3f})", a.x / 1e6, a.y / 1e6, c.x / 1e6, c.y / 1e6);
+        std::println("");
+      }
+    }
+    EXPECT_EQ(differ, 0);
+  }
+  for (size_t wi = 0; wi < t.wires.size(); ++wi) {
+    EXPECT_EQ(u.wires[wi].tracks, t.wires[wi].tracks) << "wire " << wi;
+    EXPECT_EQ(u.wires[wi].end[0], t.wires[wi].end[0]) << "wire " << wi;
+    EXPECT_EQ(u.wires[wi].hasExit[0], t.wires[wi].hasExit[0]) << "wire " << wi;
+  }
+  ASSERT_EQ(u.layers.size(), t.layers.size());
+  for (size_t li = 0; li < t.layers.size(); ++li) {
+    const topo::LayerMesh& a = t.layers[li];
+    const topo::LayerMesh& c = u.layers[li];
+    ASSERT_EQ(c.edges.size(), a.edges.size());
+    for (size_t e = 0; e < a.edges.size(); ++e) {
+      EXPECT_EQ(c.edges[e].cross, a.edges[e].cross) << "edge " << e;
+      EXPECT_NEAR(c.edges[e].freeLen, a.edges[e].freeLen, 1) << "edge " << e;
+      EXPECT_NEAR(c.edges[e].need, a.edges[e].need, 1) << "edge " << e;
+      EXPECT_EQ(c.edges[e].cls, a.edges[e].cls) << "edge " << e;
+    }
+    for (size_t v = 0; v < a.verts.size(); ++v) EXPECT_LT((c.verts[v].p - a.verts[v].p).len(), 1) << "vertex " << v;
+  }
+  // Stale: a track changed.
+  Board edited = b;
+  edited.tracks.front().width += 1000;
+  auto stale = topo::loadTopology(edited, path);
+  EXPECT_FALSE(stale.has_value());
+  std::filesystem::remove(path);
 }
