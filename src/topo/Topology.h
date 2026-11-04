@@ -138,6 +138,9 @@ struct Topology {
   std::vector<Violation> violations;
   uint64_t boardHash = 0;
   std::vector<int> padOwner, viaOwner;  // board index -> owner (-1: none)
+  // The tracks lying wholly inside an owner's copper (a hand-drawn track's run from the pad's centre to its
+  // edge): that copper, not wires. F5 draws a wire to the pad's connection point and drops them.
+  std::vector<std::pair<int, uint32_t>> ownerTracks;  // (owner, track id)
 
   // The model from the board: the owners (pads, vias, the outline's and the keepouts' points, the
   // branch points and free ends of the tracks), the meshes, and the tracks as wires on them.

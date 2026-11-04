@@ -24,6 +24,7 @@ struct OPt {
   int net = kNoNet;
   int shape = -1;  // index into LayerObstacles::shapes: the copper the point belongs to (pads)
   int via = -1;    // the board via this point is (for the squeeze report)
+  int owner = -1;  // the model's owner the point belongs to (the model's input only)
 };
 
 struct Side {
@@ -76,6 +77,7 @@ struct EdgeHit {
   bool uLeft;   // u lies to the left of the direction of travel
   int wBack = -1, wFwd = -1;  // apex of the triangle left and of the triangle entered (-1: outside)
   bool atEnd = false;         // the edge touches a sketch end point (stripped at the ends of the walk)
+  double pin = -1;            // >= 0: the crossing is fixed at this position along u -> v (the model's input)
 };
 
 

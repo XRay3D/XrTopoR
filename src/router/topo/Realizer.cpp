@@ -832,6 +832,13 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
         sl.ru = slack < 0 ? sl.lo - aCenter[k] : aR[k];
         sl.cv = V.p - dir * bCenter[k];
         sl.rv = slack < 0 ? (L - sl.hi) - bCenter[k] : bR[k];
+        // A pinned crossing (the model's: where a wire enters its own pad, as drawn) is that point: the
+        // path goes through it, a corner there, no bend round the end obstacles.
+        if (double pin = hits[list[k].first][list[k].second].pin; pin >= 0) {
+          sl.lo = sl.hi = pin * L;
+          sl.cu = sl.cv = U.p + dir * sl.lo;
+          sl.ru = sl.rv = 0;
+        }
         const RealWire& w = wires[list[k].first];
         auto spacingTo = [&](int j) {
           return wAt(j) / 2.0 + std::max(double(wires[list[j].first].clearance), double(w.clearance)) + margin + wAt(k) / 2.0;

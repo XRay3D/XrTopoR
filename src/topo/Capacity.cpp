@@ -47,8 +47,12 @@ EdgeCapacity capacityOf(const Topology& t, const LayerMesh& m, int va, int vb, c
   // The stack from each end: the k-th wire sits on the (k-1)-th, never nearer the owner than its own
   // rule allows.
   auto pack = [&](double margin) {
+    // Own copper is no obstacle; on an edge inside the own pad (its perimeter, a spoke) the wire still keeps
+    // half its width off the corners: at the corner itself the track would leave the copper, and a track
+    // through a vertex sends the next conversion's walk astray (arz_4L: into the neighbouring pad).
+    const bool inside = U.owner == V.owner;
     auto need = [&](const Owner& o, double reach, double clrO, const Wire& w, double width) {
-      if (!foreign(o, w)) return 0.0;
+      if (!foreign(o, w)) return inside ? width / 2.0 : 0.0;
       return reach + std::max(clrO, double(w.clr)) + margin + width / 2.0;
     };
     for (int k = 0; k < n; ++k) {

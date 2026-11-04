@@ -175,7 +175,7 @@ RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int
         case Owner::Kind::Outline: id = ob.add(x.p, 0, clr, kBoardEdge); break;
         case Owner::Kind::Keepout: id = ob.add(x.p, 0, 0, kBoardEdge); break;
       }
-      (void)id;
+      if (id >= 0) ob.pts[id].owner = x.owner;
     }
     // The sides: a pad's perimeter between its corners (or its two ends), the outline and keepout pieces.
     for (const Edge& E : m.edges) {
@@ -252,6 +252,24 @@ RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int
         else
           while (!hs.empty() && covered(hs.back())) hs.pop_back();
       }
+      // Where the wire crosses the side of its own end pad it is pinned at the exit point (where the tracks
+      // had it; the realiser's slot on an own side spans the side, and the taut path went to the corner
+      // itself, out of the copper — and a track through a vertex sent the next conversion's walk astray).
+      for (int end = 0; end < 2; ++end) {
+        if (!w.hasExit[end] || hs.empty()) continue;
+        const Owner& o = t.owners[w.end[end]];
+        if (o.shape.kind != Shape::Kind::Polygon) continue;
+        const Vec2 c = m.verts[w.endVertex[end]].p;
+        for (int step = 0; step < int(hs.size()); ++step) {
+          EdgeHit& h = hs[end ? int(hs.size()) - 1 - step : step];
+          if (ob.pts[h.u].owner != w.end[end] || ob.pts[h.v].owner != w.end[end]) break;
+          Vec2 a = ob.pts[h.u].p, d = ob.pts[h.v].p - a, e = w.exit[end] - c;
+          double den = d.cross(e);
+          if (std::abs(den) < 1e-9) continue;
+          double s = (c - a).cross(e) / den;  // along u -> v
+          if (s >= 0 && s <= 1) h.pin = s;
+        }
+      }
       // Which side the edge's u lies on: the wire crosses the edge into the triangle it shares with the
       // next crossing (or the one holding the end vertex); that triangle, counter-clockwise, runs the edge
       // from u to v exactly when u is on the wire's left (by the sketch's points it was wrong where a wire
@@ -317,15 +335,21 @@ F5ModelResult runF5Model(Board& b, Topology& t, const F5ModelOptions& o) {
       for (int e = 0; e < int(m.edges.size()); ++e)
         if (!m.edges[e].cross.empty()) refreshEdge(t, m, e);
   }
-  // The wires to draw: every unlocked one. Their tracks go; the locked ones stay as obstacles.
+  // The wires to draw: every unlocked one. Their tracks go, and the hand-drawn runs inside the pads they
+  // end at (the wire is drawn to the pad's connection point); the locked ones stay as obstacles.
   std::vector<int> chosen;
   std::set<uint32_t> gone;
+  std::set<int> redrawnAt;
   for (int wi = 0; wi < int(t.wires.size()); ++wi) {
     const Wire& w = t.wires[wi];
     if (w.locked) continue;
     chosen.push_back(wi);
     for (uint32_t id : w.tracks) gone.insert(id);
+    redrawnAt.insert(w.end[0]);
+    redrawnAt.insert(w.end[1]);
   }
+  for (auto [owner, id] : t.ownerTracks)
+    if (redrawnAt.contains(owner)) gone.insert(id);
   std::vector<RealWire> wires;
   for (int wi : chosen) wires.push_back(sketchOf(b, t, wi));
   if (const char* dbg = std::getenv("XR_TOPO_NEAR")) {

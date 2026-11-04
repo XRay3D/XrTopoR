@@ -258,6 +258,7 @@ void Topology::convertWires(const Board& b, BuildScratch& scratch) {
   const double kJoin = 1000;
   wires.clear();
   crossings.clear();
+  ownerTracks.clear();
   struct Laid {
     int wire;
     std::vector<Hit> hits;
@@ -286,9 +287,20 @@ void Topology::convertWires(const Board& b, BuildScratch& scratch) {
       ++noEnd;
       continue;
     }
-    // The sketch: from the nearest vertex of the end owner, through the path's points outside the own
-    // copper, to the nearest vertex of the other.
-    int v0 = nearestVertex(m, w.end[0], c.a()), v1 = nearestVertex(m, w.end[1], c.b());
+    // The sketch: from the end owner's vertex, through the path's points outside the own copper, to the
+    // other's. A polygon connects at its centre (TopoR's connection point; the realiser draws the wire
+    // from there, inside the copper): drawn to the corner nearest the path's end, the track's round end
+    // stuck out of the pad into the gap beside it (arz_2L: 13 violations at one connector). An oval is
+    // drawn to the end nearer the path's end (from the centre a wire ran the pad's length and out the other
+    // end, 470 mm over arz_2L), the rest have one vertex.
+    auto endVertexOf = [&](int owner, Vec2 at) {
+      const Owner& o = owners[owner];
+      if (o.shape.kind == Shape::Kind::Polygon)
+        for (int v : m.ownerVerts[owner])
+          if (m.verts[v].t == 0 && m.verts[v].off.len2() < 1) return v;
+      return nearestVertex(m, owner, at);
+    };
+    int v0 = endVertexOf(w.end[0], c.a()), v1 = endVertexOf(w.end[1], c.b());
     w.endVertex[0] = v0;
     w.endVertex[1] = v1;
     Polyline sk{m.verts[v0].p};
@@ -313,12 +325,19 @@ void Topology::convertWires(const Board& b, BuildScratch& scratch) {
         break;
       }
     }
+    // Through the exits: from the pad's centre straight to the first point outside, the walk cut across the
+    // neighbouring pad where the tracks left near a corner.
+    auto push = [&](Vec2 p) {
+      if ((p - sk.back()).len2() >= 1) sk.push_back(p);
+    };
+    if (w.hasExit[0]) push(w.exit[0]);
     for (size_t k = 0; k < c.path.size(); ++k) {
       Vec2 p = c.path[k];
       if (o0.shape.contains(p) || o1.shape.contains(p)) continue;
-      if ((p - sk.back()).len2() >= 1) sk.push_back(p);
+      push(p);
     }
-    if ((m.verts[v1].p - sk.back()).len2() >= 1) sk.push_back(m.verts[v1].p);
+    if (w.hasExit[1]) push(w.exit[1]);
+    push(m.verts[v1].p);
     // Through another net's copper: the sketch is bent out of it, at the point nearest that copper's
     // centre, unless the wire is locked where it lies.
     std::optional<ItemRef> through;
@@ -366,6 +385,7 @@ void Topology::convertWires(const Board& b, BuildScratch& scratch) {
     // A chain lying wholly inside the copper it starts and ends on is that copper, not a wire.
     if (w.end[0] == w.end[1] && sk.size() <= 2 && (sk.front() - sk.back()).len2() < 1) {
       ++insideOwn;
+      for (int ti : c.tracks) ownerTracks.push_back({w.end[0], b.tracks[ti].id});
       continue;
     }
     bool ok = true;
