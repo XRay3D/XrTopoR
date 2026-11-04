@@ -1,10 +1,12 @@
 // The topological model: owners, the mesh of every layer, and what the tools do with them.
 #include <gtest/gtest.h>
 
+#include <cmath>
 #include <set>
 #include <string>
 
 #include "io/BoardIO.h"
+#include "topo/Flip.h"
 #include "topo/Topology.h"
 
 using namespace xr;
@@ -74,4 +76,77 @@ TEST(Topo, AssignsIdsOnce) {
   topo::Topology::assignIds(b);
   EXPECT_EQ(b.tracks[0].id, first);
   EXPECT_FALSE(ids.contains(b.tracks.back().id));
+}
+
+namespace {
+
+// One copper layer 50 x 50 mm with `n` round pads scattered on a jittered grid.
+Board scatteredPads(int n, unsigned seed) {
+  Board b;
+  LayerId top = b.addLayer("Top", LayerKind::Copper, Side::Top);
+  b.layers[top].copperIndex = 0;
+  auto mm = [](double x, double y) { return Vec2{x * kNmPerMm, y * kNmPerMm}; };
+  b.outline.push_back({mm(0, 0), mm(50, 0), mm(50, 50), mm(0, 50)});
+  Component c;
+  c.ref = "U1";
+  b.components.push_back(c);
+  int side = int(std::ceil(std::sqrt(double(n))));
+  unsigned x = seed;
+  auto rnd = [&] { x = x * 1664525u + 1013904223u; return (x >> 8) / double(1u << 24); };
+  for (int i = 0; i < n; ++i) {
+    double cell = 46.0 / side;
+    Pad p;
+    p.number = std::to_string(i);
+    p.component = 0;
+    p.pos = Point(mm(2 + cell * (i % side + 0.1 + 0.8 * rnd()), 2 + cell * (i / side + 0.1 + 0.8 * rnd())));
+    p.shape.w = p.shape.h = mmToNm(0.3);
+    p.copper = LayerMask(1) << top;
+    b.pads.push_back(p);
+  }
+  return b;
+}
+
+}  // namespace
+
+TEST(Topo, LawsonIsDelaunay) {
+  Board b = scatteredPads(2000, 7);
+  topo::Topology t;
+  t.build(b);
+  ASSERT_EQ(t.layers.size(), 1u);
+  topo::LayerMesh& m = t.layers[0];
+  ASSERT_EQ(t.check(), std::vector<std::string>{});
+  // Scrambled by random flips of convex quads (a valid triangulation, but no longer Delaunay).
+  unsigned x = 11;
+  int scrambled = 0;
+  for (int k = 0; k < 20000; ++k) {
+    x = x * 1664525u + 1013904223u;
+    scrambled += topo::flip(m, int((x >> 8) % m.edges.size()));
+  }
+  EXPECT_GT(scrambled, 1000);
+  EXPECT_EQ(t.check(), std::vector<std::string>{});
+  int notDelaunay = 0;
+  for (int e = 0; e < int(m.edges.size()); ++e) {
+    if (!topo::flippable(m, e)) continue;
+    const topo::Edge& E = m.edges[e];
+    const topo::Tri& T1 = m.tris[E.t[0]];
+    int i = m.localEdge(E.t[0], e);
+    const topo::Tri& T2 = m.tris[E.t[1]];
+    notDelaunay += topo::inCircle(m.verts[T1.v[i]].p, m.verts[T1.v[(i + 1) % 3]].p, m.verts[T1.v[(i + 2) % 3]].p,
+                                  m.verts[T2.v[m.localEdge(E.t[1], e)]].p);
+  }
+  EXPECT_GT(notDelaunay, 0);
+  int flips = topo::flipLoop(m);
+  EXPECT_GT(flips, 0);
+  EXPECT_EQ(t.check(), std::vector<std::string>{});
+  // Locally Delaunay everywhere, which for a triangulation means Delaunay.
+  for (int e = 0; e < int(m.edges.size()); ++e) {
+    if (!topo::flippable(m, e)) continue;
+    const topo::Edge& E = m.edges[e];
+    const topo::Tri& T1 = m.tris[E.t[0]];
+    int i = m.localEdge(E.t[0], e);
+    const topo::Tri& T2 = m.tris[E.t[1]];
+    EXPECT_FALSE(topo::inCircle(m.verts[T1.v[i]].p, m.verts[T1.v[(i + 1) % 3]].p, m.verts[T1.v[(i + 2) % 3]].p,
+                                m.verts[T2.v[m.localEdge(E.t[1], e)]].p)) << "edge " << e;
+  }
+  EXPECT_EQ(topo::flipLoop(m), 0);
 }
