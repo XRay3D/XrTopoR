@@ -146,6 +146,14 @@ uint64_t boardHashOf(const Board& b) {
       f.i(q(double(r.width)));
       f.i(q(double(r.clearance)));
     });
+  for (const ClearancePair& p : b.pairRules)
+    item([&](Fnv& f) {
+      for (int n : p.netsA) f.s(netName(b, n));
+      f.i(-1);
+      for (int n : p.netsB) f.s(netName(b, n));
+      for (const std::string& l : maskNames(b, p.layers)) f.s(l);
+      f.i(q(double(p.clearance)));
+    });
   report("rules");
   for (const Pad& p : b.pads)
     item([&](Fnv& f) {
@@ -534,6 +542,7 @@ std::expected<Topology, std::string> loadTopology(const Board& b, const std::str
       if (!id) return std::unexpected("model file " + path + " is stale (a pad's track is gone)");
       t.ownerTracks.push_back({a[0].to_number<int>(), *id});
     }
+    t.takeRules(b);
     for (LayerMesh& m : t.layers)
       for (int e = 0; e < int(m.edges.size()); ++e)
         if (m.edges[e].v[0] >= 0 && !m.edges[e].cross.empty()) refreshEdge(t, m, e);

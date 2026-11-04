@@ -533,7 +533,7 @@ ModelState modelState(const Topology& t, bool chords = true) {
     auto corner = [&](Vec2 a, Vec2 c, int x, double& deficit) {
       const Owner& o = t.owners[m.verts[x].owner];
       if (o.net == w.net) return;
-      double req = w.width / 2.0 + (o.kind == Owner::Kind::Outline ? double(m.ownerClr[m.verts[x].owner]) : o.kind == Owner::Kind::Keepout ? 0.0 : std::max(double(w.clr), m.ownerClr[m.verts[x].owner]));
+      double req = w.width / 2.0 + (o.kind == Owner::Kind::Outline ? double(m.ownerClr[m.verts[x].owner]) : o.kind == Owner::Kind::Keepout ? 0.0 : t.clearance(o.net, w.net, m.layer));
       double d = o.shape.distanceToSegment(a, c);
       if (d < req) deficit += req - d;
     };
@@ -643,7 +643,7 @@ void segmentPush(const Board& b, const Topology& t, int oi, Vec2 at, CopperPush&
           req = ob.halfWidth + (fa.kind == Owner::Kind::Outline ? double(b.edgeClearance) : 0.0);
         } else if (F.along >= 0 && t.wires[F.along].net != ob.net) {
           const Wire& w = t.wires[F.along];
-          req = ob.halfWidth + std::max(m.ownerClr[oi], double(w.clr)) + w.width / 2.0;
+          req = ob.halfWidth + t.clearance(ob.net, w.net, m.layer) + w.width / 2.0;
         }
         if (req < 0) continue;
         Vec2 A = m.verts[F.v[0]].p, B = m.verts[F.v[1]].p;

@@ -13,7 +13,9 @@
 #include <string>
 
 #include "core/Connectivity.h"
+#include "core/Rules.h"
 #include "core/SpatialIndex.h"
+#include "core/ZoneFill.h"
 #include "drc/Drc.h"
 #include "io/BoardIO.h"
 #include "topo/Capacity.h"
@@ -22,6 +24,7 @@
 #include "topo/Move.h"
 #include "topo/Sidecar.h"
 #include "router/topo/ModelTools.h"
+#include "router/topo/Wires.h"
 #include "topo/Topology.h"
 
 using namespace xr;
@@ -1196,4 +1199,190 @@ TEST(Topo, LostWireDoesNotStopF5) {
   bool reported = false;
   for (const topo::Violation& v : res.violations) reported |= v.kind == topo::Violation::Kind::OutsideBoard;
   EXPECT_TRUE(reported);
+}
+
+// A clearance rule between two sets of nets: the board answers it for the pair and the nets' own clearance
+// otherwise, later rules take priority, the DRC asks for it, the capacity packs the two wires that far apart.
+TEST(Topo, PairClearanceRule) {
+  Board b = crossBoard(false);
+  const int A = 0, B = 1;
+  const LayerId top = b.tracks.front().layer;
+  const Coord own = b.clearance(A, top);
+  EXPECT_EQ(b.clearance(A, B, top), own);
+  b.pairRules.push_back({{A}, {B}, 0, mmToNm(0.5)});
+  EXPECT_EQ(b.clearance(A, B, top), mmToNm(0.5));
+  EXPECT_EQ(b.clearance(B, A, top), mmToNm(0.5));
+  EXPECT_EQ(b.clearance(A, kNoNet, top), own);
+  EXPECT_EQ(b.clearance(A, top), own);
+  EXPECT_EQ(b.clearanceUpper(A, top), mmToNm(0.5));
+  EXPECT_EQ(requiredClearance(b, A, B, LayerMask(1) << top), double(mmToNm(0.5)));
+  // The capacity: 0.3 mm more between the two wires on an edge, the rule 0.5 against their own 0.2.
+  topo::Topology::assignIds(b);
+  topo::Topology t;
+  t.build(b);
+  ASSERT_EQ(t.pairRules.size(), 1u);
+  const topo::LayerMesh& m = t.layers.front();
+  int wa = -1, wb = -1;
+  for (int wi = 0; wi < int(t.wires.size()); ++wi) (t.wires[wi].net == A ? wa : wb) = wi;
+  ASSERT_GE(wa, 0);
+  ASSERT_GE(wb, 0);
+  int va = -1, vb = -1;  // two outline points far apart: a long edge, where the margin stays
+  double far = 0;
+  for (int v = 0; v < int(m.verts.size()); ++v) {
+    if (m.verts[v].owner < 0 || t.owners[m.verts[v].owner].kind != topo::Owner::Kind::Outline) continue;
+    if (va < 0) va = v;
+    else if (double d = (m.verts[v].p - m.verts[va].p).len(); d > far) far = d, vb = v;
+  }
+  ASSERT_GE(vb, 0);
+  auto with = topo::capacityOf(t, m, va, vb, {wa, wb}, -1);
+  t.pairRules.clear();
+  auto without = topo::capacityOf(t, m, va, vb, {wa, wb}, -1);
+  EXPECT_NEAR(with.need - without.need, double(mmToNm(0.5) - own), 1);
+  // The design rules as a .fst carries them.
+  Board c = crossBoard(false);
+  DesignRules r;
+  r.netGroups = {{"GA", {"A"}}, {"GB", {"B"}}, {"NONE", {}}};
+  ClearanceRule all{true, {}, {}, {}, mmToNm(0.2), mmToNm(0.2)};
+  ClearanceRule pair{true, {}, {RuleNets::Kind::Group, "GA"}, {RuleNets::Kind::Group, "GB"}, mmToNm(0.4), mmToNm(0.4)};
+  ClearanceRule emptyGroup{true, {}, {RuleNets::Kind::Group, "NONE"}, {RuleNets::Kind::Group, "GB"}, mmToNm(0.9), mmToNm(0.9)};
+  r.clearances = {all, pair, emptyGroup};
+  c.rules = r;
+  compileRules(c);
+  ASSERT_EQ(c.pairRules.size(), 1u) << "a group without nets is no rule for all nets";
+  EXPECT_EQ(c.clearance(A, B, top), mmToNm(0.4));
+  EXPECT_EQ(c.clearance(A, top), mmToNm(0.2)) << "the nets' own clearance stays";
+  // A rule for all nets after the pair rule overrides it; before it, it does not.
+  r.clearances = {pair, all};
+  c.rules = r;
+  compileRules(c);
+  EXPECT_EQ(c.clearance(A, B, top), mmToNm(0.2));
+}
+
+// The tools keep the pair's rule: two wires stacked round a pad of a third net, F5 on the model and on the
+// tracks. Between the two nets 0.5 mm, the rule; from the third net the inner wire stays at its own clearance
+// (a rule between two sets is no clearance of those nets against everybody).
+TEST(Topo, ToolsKeepThePairRule) {
+  auto mm = [](double x, double y) { return Vec2{x * kNmPerMm, y * kNmPerMm}; };
+  const int A = 0, B = 1, C = 2;
+  auto board = [&] {
+    Board b;
+    LayerId top = b.addLayer("Top", LayerKind::Copper, Side::Top);
+    b.layers[top].copperIndex = 0;
+    b.outline.push_back({mm(0, 0), mm(40, 0), mm(40, 20), mm(0, 20)});
+    b.addNet("A"), b.addNet("B"), b.addNet("C");
+    Component c;
+    c.ref = "U1";
+    b.components.push_back(c);
+    auto pad = [&](Vec2 at, int net) {
+      Pad p;
+      p.number = std::to_string(b.pads.size());
+      p.component = 0;
+      p.net = net;
+      p.pos = Point(at);
+      p.shape.w = p.shape.h = mmToNm(0.6);
+      p.copper = LayerMask(1) << top;
+      b.pads.push_back(p);
+    };
+    auto track = [&](Vec2 p, Vec2 q, int net) {
+      Track t;
+      t.a = Point(p);
+      t.b = Point(q);
+      t.width = mmToNm(0.2);
+      t.layer = top;
+      t.net = net;
+      b.tracks.push_back(t);
+    };
+    pad(mm(8, 5), A), pad(mm(32, 5), A), pad(mm(5, 5), B), pad(mm(35, 5), B), pad(mm(20, 10), C);
+    track(mm(8, 5), mm(20, 11), A), track(mm(20, 11), mm(32, 5), A);
+    track(mm(5, 5), mm(20, 13), B), track(mm(20, 13), mm(35, 5), B);
+    b.pairRules.push_back({{A}, {B}, 0, mmToNm(0.5)});
+    return b;
+  };
+  auto gapBetween = [](const Board& b, int netX, int netY) {
+    double best = 1e18;
+    for (const Track& x : b.tracks) {
+      if (x.net != netX) continue;
+      Polyline px = x.path(500);
+      for (const Track& y : b.tracks) {
+        if (y.net != netY) continue;
+        Polyline py = y.path(500);
+        for (size_t i = 0; i + 1 < px.size(); ++i)
+          for (size_t j = 0; j + 1 < py.size(); ++j)
+            for (Vec2 q : {py[j], py[j + 1]}) best = std::min(best, distPointSegment(q, px[i], px[i + 1]));
+        for (size_t i = 0; i + 1 < py.size(); ++i)
+          for (Vec2 q : px) best = std::min(best, distPointSegment(q, py[i], py[i + 1]));
+      }
+    }
+    return best - double(mmToNm(0.2));  // centre lines to copper: two half widths
+  };
+  auto wireToPad = [](const Board& b, int net) {
+    double best = 1e18;
+    const Shape pad = b.pads[4].shapeGeom();
+    for (const Track& x : b.tracks)
+      if (x.net == net)
+        for (Vec2 p : x.path(500)) best = std::min(best, pad.distance(p));
+    return best - double(mmToNm(0.2)) / 2;
+  };
+  auto judge = [&](const Board& b, const char* what) {
+    std::println("{}: A-B {:.3f} mm, A-C pad {:.3f} mm, length {:.2f} mm", what, gapBetween(b, A, B) / 1e6, wireToPad(b, A) / 1e6, b.tracksLength() / 1e6);
+    EXPECT_GE(gapBetween(b, A, B), 0.495 * kNmPerMm) << what;
+    EXPECT_LT(wireToPad(b, A), 0.3 * kNmPerMm) << what << ": the third net stays at its own clearance";
+    DrcOptions d;
+    d.unconnected = false;
+    d.widths = false;  // the stand's tracks are narrower than the default rule
+    for (const DrcViolation& v : runDrc(b, d)) ADD_FAILURE() << what << ": " << v.message;
+  };
+  {
+    Board b = board();
+    topo::Topology::assignIds(b);
+    topo::Topology t;
+    t.build(b);
+    auto res = topo::runF5Model(b, t);
+    ASSERT_TRUE(res.drawn);
+    judge(b, "F5 on the model");
+  }
+  {
+    Board b = board();
+    topo::reshapeTracks(b, std::vector<char>(b.tracks.size(), 1));
+    judge(b, "F5 on the tracks");
+  }
+  {
+    Board b = board();
+    topo::Topology::assignIds(b);
+    topo::Topology t;
+    t.build(b);
+    auto res = topo::optimizeModel(b, t);
+    ASSERT_TRUE(res.drawn);
+    judge(b, "F7 on the model");
+  }
+}
+
+// The pour keeps the pair's rule from the copper of the other net, and its own clearance from the rest.
+TEST(Topo, PourKeepsThePairRule) {
+  auto lb = io::loadBoard(data("astable.kicad_pcb"));
+  ASSERT_TRUE(lb.has_value());
+  Board& b = **lb;
+  ASSERT_FALSE(b.zones.empty());
+  const Zone& z = b.zones.front();
+  int other = kNoNet;
+  for (const Track& t : b.tracks)
+    if (t.layer == z.layer && t.net != z.net && t.net != kNoNet) { other = t.net; break; }
+  ASSERT_NE(other, kNoNet);
+  auto gapToOther = [&] {
+    double best = 1e18;
+    for (const Polyline& f : b.zones.front().filled)
+      for (const Track& t : b.tracks)
+        if (t.layer == z.layer && t.net == other) {
+          Shape poly = Shape::polygon(f);
+          for (Vec2 p : t.path(1000)) best = std::min(best, poly.distance(p) - t.width / 2.0);
+        }
+    return best;
+  };
+  fillZones(b);
+  const double before = gapToOther();
+  const Coord rule = b.clearance(z.net, other, z.layer) + mmToNm(0.5);
+  b.pairRules.push_back({{z.net}, {other}, 0, rule});
+  fillZones(b);
+  EXPECT_GT(gapToOther(), before + 0.3 * kNmPerMm);
+  EXPECT_GE(gapToOther(), double(rule) - 1000);
 }

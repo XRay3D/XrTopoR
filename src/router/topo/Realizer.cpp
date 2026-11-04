@@ -697,6 +697,18 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
   // previous round: outer wires stack on these rather than on the packed minimum.
   std::vector<std::vector<double>> actual(NW);
   for (int wi = 0; wi < NW; ++wi) actual[wi].assign(hits[wi].size(), -1.0);
+  // The clearance between a wire and an obstacle, between two wires: the pair's rule when the board has
+  // such rules (clearances between net groups), else the larger of their own.
+  auto clrTo = [&](const OPt& o, const RealWire& w) {
+    if (o.net >= 0 && w.net >= 0 && !b.pairRules.empty())
+      if (Coord c = pairClearance(b.pairRules, o.net, w.net, w.layer); c > 0) return double(c);
+    return std::max(o.clr, double(w.clearance));
+  };
+  auto clrBetween = [&](const RealWire& x, const RealWire& y) {
+    if (x.net >= 0 && y.net >= 0 && !b.pairRules.empty())
+      if (Coord c = pairClearance(b.pairRules, x.net, y.net, x.layer); c > 0) return double(c);
+    return std::max(double(x.clearance), double(y.clearance));
+  };
   // Width of every wire at every crossing: nominal, or the minimum where an edge cannot take the
   // nominal widths of the wires crossing it (TopoR's «подрезка»).
   std::vector<std::vector<double>> hw(NW);
@@ -725,7 +737,7 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
       auto need = [&](const OPt& o, const RealWire& w, double width) {
         if (own(o, w) || o.net == kTransparent) return 0.0;
         double x = &o == &U ? xu : xv;
-        return x + std::max(o.clr, double(w.clearance)) + margin + width / 2.0;
+        return x + clrTo(o, w) + margin + width / 2.0;
       };
       auto usedR = [&](int k, int end, double packed) { return std::max(packed, bendR[list[k].first][list[k].second][end]); };
       auto actualFromU = [&](int k) { return actual[list[k].first][list[k].second]; };
@@ -741,8 +753,7 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
             int pw = list[k - 1].first;
             // Stack on the inner wire (packed radius, or its actual crossing from the previous round),
             // but never closer to the obstacle than the wire's own rule allows.
-            double spacing = wAt(k - 1) / 2.0 + std::max(double(wires[pw].clearance), double(w.clearance)) + margin +
-                             wAt(k) / 2.0;
+            double spacing = wAt(k - 1) / 2.0 + clrBetween(wires[pw], w) + margin + wAt(k) / 2.0;
             double packed = usedR(k - 1, 0, a[k - 1]) + spacing;
             double act = actualFromU(k - 1) >= 0 ? actualFromU(k - 1) + spacing : -1;
             a[k] = std::max({packed, act, need(U, w, wAt(k))});
@@ -761,8 +772,7 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
             bR[k] = bb[k];
           } else {
             int nw = list[k + 1].first;
-            double spacing = wAt(k + 1) / 2.0 + std::max(double(wires[nw].clearance), double(w.clearance)) + margin +
-                             wAt(k) / 2.0;
+            double spacing = wAt(k + 1) / 2.0 + clrBetween(wires[nw], w) + margin + wAt(k) / 2.0;
             // Only outer wires adapt to inner ones (monotone: paths move outward only); the v side
             // stays packed — neither the actual crossings nor the bend radii of the inner wires feed
             // it — so that the two directions cannot push each other back and forth. (Bend radii did
@@ -841,7 +851,7 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
         }
         const RealWire& w = wires[list[k].first];
         auto spacingTo = [&](int j) {
-          return wAt(j) / 2.0 + std::max(double(wires[list[j].first].clearance), double(w.clearance)) + margin + wAt(k) / 2.0;
+          return wAt(j) / 2.0 + clrBetween(wires[list[j].first], w) + margin + wAt(k) / 2.0;
         };
         auto bentAround = [&](int j, int end) {
           if (wires[list[j].first].net == w.net) return -1.0;
@@ -933,10 +943,10 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
           const OPt& cp = ob.pts[best];
           // The stack this wire sits on round the centre goes with it round the corner (the model's meshes
           // have the pads' centres; the slots there stack the wires from the centre's reach).
-          double surplus = std::max(0.0, R - ((atU ? sl.xu : sl.xv) + std::max(ob.pts[o].clr, double(w.clearance)) + kMargin + width / 2.0));
+          double surplus = std::max(0.0, R - ((atU ? sl.xu : sl.xv) + clrTo(ob.pts[o], w) + kMargin + width / 2.0));
           o = best;
           c = cp.p;
-          R = cp.r + std::max(cp.clr, double(w.clearance)) + kMargin + width / 2.0 + surplus;
+          R = cp.r + clrTo(cp, w) + kMargin + width / 2.0 + surplus;
         }
       }
       if (!cs.empty() && cs.back().obst == o && (cs.back().c - c).len2() < 1 && (cs.back().rho > 0) == (ap.side > 0)) {
@@ -1101,7 +1111,7 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
               const Circle& oc = ocs[m];
               if (oc.obst < 0) continue;
               double R = std::abs(oc.rho);
-              double spacing = width / 2.0 + std::max(double(w.clearance), double(o.clearance)) + kMargin + oc.width / 2.0;
+              double spacing = width / 2.0 + clrBetween(w, o) + kMargin + oc.width / 2.0;
               Vec2 X = closestPointOnSegment(oc.c, p, q);
               double dc = (X - oc.c).len();
               if (dc >= R + spacing) continue;
@@ -1169,7 +1179,7 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
             Vec2 on = closestPointOnSegment(op.p, p, q);
             double t = (on - p).dot(q - p) / (q - p).len2();
             if (t <= 0 || t >= 1) continue;
-            double R = ob.reach(op, (on - op.p).normalized()) + std::max(op.clr, double(w.clearance)) + kMargin + width / 2.0;
+            double R = ob.reach(op, (on - op.p).normalized()) + clrTo(op, w) + kMargin + width / 2.0;
             if ((on - op.p).len() < R - 1000) {
               at = int(k) + 1;
               ins = {op.p, (orient(p, q, op.p) > 0 ? 1 : -1) * R, o, cs[k].portal, width};
@@ -1322,10 +1332,11 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
         bb.add(T1);
         bb.add(T2);
         bb.add(E);
-        double need = width / 2.0 + double(w.clearance);
+        const double reachOut = width / 2.0 + double(b.clearanceUpper(w.net, w.layer));
         auto pts = g.tessellate(20000);
-        oidx.query(bb.inflated(need + 1000), LayerMask(1) << w.layer, [&](ItemRef r) {
+        oidx.query(bb.inflated(reachOut + 1000), LayerMask(1) << w.layer, [&](ItemRef r) {
           if (!ok || itemNet(b, r) == w.net) return;
+          const double need = width / 2.0 + double(b.clearance(w.net, itemNet(b, r), w.layer));
           for (auto& sh : itemShapes(b, r))
             for (Vec2 q : pts)
               if (sh.distance(q) < need) {

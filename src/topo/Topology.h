@@ -141,6 +141,13 @@ struct Topology {
   // The tracks lying wholly inside an owner's copper (a hand-drawn track's run from the pad's centre to its
   // edge): that copper, not wires. F5 draws a wire to the pad's connection point and drops them.
   std::vector<std::pair<int, uint32_t>> ownerTracks;  // (owner, track id)
+  // The board's clearance rules (a copy: the capacity answers for a pair of nets without the board).
+  std::vector<Coord> classClr;  // per net
+  std::vector<LayerRule> layerRules;
+  std::vector<ClearancePair> pairRules;
+  void takeRules(const Board& b);
+  // The clearance two nets keep on a layer: the pair's rule, else the larger of their own.
+  double clearance(int netA, int netB, LayerId layer) const { return double(clearanceBetween(classClr, layerRules, pairRules, netA, netB, layer)); }
 
   // The model from the board: the owners (pads, vias, the outline's and the keepouts' points, the
   // branch points and free ends of the tracks), the meshes, and the tracks as wires on them.

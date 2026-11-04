@@ -57,6 +57,21 @@ struct LayerRule {
   Coord clearance = 0;   // 0 = keep
 };
 
+// The clearance between two sets of nets (TopoR's «зазор между группами цепей»), applied in order after
+// the nets' own clearances: a later rule for the pair takes priority.
+struct ClearancePair {
+  std::vector<int> netsA, netsB;  // empty = all nets
+  LayerMask layers = 0;           // 0 = all copper layers
+  Coord clearance = 0;
+};
+
+// The last pair rule naming both nets on the layer (-1: only a rule of all layers counts), or 0.
+Coord pairClearance(const std::vector<ClearancePair>& pairs, int netA, int netB, LayerId layer);
+// The clearance two nets keep on a layer: the larger of their own (class and layer rules), unless a pair
+// rule names them both. For a copy of the rules, without the board.
+Coord clearanceBetween(const std::vector<Coord>& byNet, const std::vector<LayerRule>& layerRules, const std::vector<ClearancePair>& pairs, int netA,
+                       int netB, LayerId layer);
+
 enum class PadShapeKind { Circle, Rect, Oval, RoundRect, Polygon };
 
 struct PadShape {
@@ -194,6 +209,7 @@ struct Board {
   std::vector<Layer> layers;
   std::vector<NetClass> netClasses{NetClass{}};
   std::vector<LayerRule> layerRules;
+  std::vector<ClearancePair> pairRules;
   std::vector<Net> nets;
   std::vector<Component> components;
   std::vector<Pad> pads;
@@ -229,6 +245,12 @@ struct Board {
   // Effective rules of a net on a copper layer (net class + layer rules); layer < 0 = class only.
   Coord trackWidth(int net, LayerId layer) const;
   Coord clearance(int net, LayerId layer) const;
+  // Between two nets (-1: all layers): their own clearances, or the pair rule naming them both.
+  Coord clearance(int netA, int netB, LayerId layer) const;
+  // The most a net keeps from any other on a layer (its own, or a pair rule naming it): for estimates that
+  // do not know the other net, as the router's capacity of an edge.
+  Coord clearanceUpper(int net, LayerId layer) const;
+  std::vector<Coord> classClearances() const;  // per net
   Coord maxClearance() const;  // over all classes and layer rules
   // The narrowest a wire may be: «Мин.» of the last width rule that applies (Rules.cpp); the class
   // width for designs without rules.

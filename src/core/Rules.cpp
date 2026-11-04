@@ -112,21 +112,24 @@ void compileRules(Board& b) {
     }
     apply(nets, [&] { d.trackWidth = width; }, [&](PerNet& p, bool reset) { p.width = reset ? 0 : width; });
   }
+  std::vector<ClearancePair> pairRules;
   for (auto& c : r.clearances) {
     // TopoR uses the nominal clearance where there is room and the minimum in tight spots; the
     // single value our rules carry is the one every spot must satisfy: the minimum.
     Coord clr = c.min > 0 ? c.min : c.nom;
     if (!c.enabled || clr <= 0) continue;
-    // Net-to-net pairs map onto per-net clearances (a pair takes the larger one): a rule between two
-    // specific sets is applied to both of them, which is conservative.
+    // A rule between two specific sets is a pair rule (Board::clearance(netA, netB, layer) answers it);
+    // one with a set against all nets is that set's own clearance.
     auto a = netsOf(b, r, c.a), bn = netsOf(b, r, c.b);
-    std::optional<std::vector<int>> nets;
+    if ((a && a->empty()) || (bn && bn->empty())) continue;  // a group without nets (empty in a pair rule means all)
     if (a && bn) {
-      nets = *a;
-      nets->insert(nets->end(), bn->begin(), bn->end());
-    } else if (a || bn) {
-      nets = a ? *a : *bn;
+      pairRules.push_back({*a, *bn, layersOf(b, c.layers), clr});
+      continue;
     }
+    // Later rules take priority: one for all nets or a set of them, after a pair rule, overrides it too.
+    if (!pairRules.empty()) pairRules.push_back({a.value_or(std::vector<int>{}), bn.value_or(std::vector<int>{}), layersOf(b, c.layers), clr});
+    std::optional<std::vector<int>> nets;
+    if (a || bn) nets = a ? *a : *bn;
     if (LayerMask lm = layersOf(b, c.layers)) {
       layerRules.push_back({nets.value_or(std::vector<int>{}), lm, 0, clr});
       continue;
@@ -164,6 +167,7 @@ void compileRules(Board& b) {
     b.nets[n].netClass = it->second;
   }
   b.layerRules = std::move(layerRules);
+  b.pairRules = std::move(pairRules);
 
   for (auto& L : b.layers) L.planeNet = kNoNet;
   for (auto& p : r.planes)

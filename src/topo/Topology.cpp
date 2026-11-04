@@ -115,7 +115,14 @@ void Topology::build(const Board& b) {
   BuildScratch scratch;
   buildOwners(b, scratch);
   convertWires(b, scratch);  // adds the junction owners, builds the meshes, lays the wires on them
+  takeRules(b);
   boardHash = boardHashOf(b);
+}
+
+void Topology::takeRules(const Board& b) {
+  classClr = b.classClearances();
+  layerRules = b.layerRules;
+  pairRules = b.pairRules;
 }
 
 void Topology::buildOwners(const Board& b, BuildScratch& scratch) {

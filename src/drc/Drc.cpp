@@ -23,10 +23,10 @@ const char* drcTypeName(DrcViolation::Type t) {
 constexpr double kDrcTolerance = 2000;
 
 double requiredClearance(const Board& b, int netA, int netB, LayerMask layers) {
-  if (!layers) return double(std::max(b.clearance(netA, -1), b.clearance(netB, -1)));
+  if (!layers) return double(b.clearance(netA, netB, -1));
   Coord req = 0;
   for (LayerId l = 0; l < 64; ++l)
-    if ((layers >> l) & 1) req = std::max({req, b.clearance(netA, l), b.clearance(netB, l)});
+    if ((layers >> l) & 1) req = std::max(req, b.clearance(netA, netB, l));
   return double(req);
 }
 

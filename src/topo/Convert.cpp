@@ -351,7 +351,6 @@ void Topology::convertWires(const Board& b, BuildScratch& scratch) {
     // Through another net's copper: the sketch is bent out of it, at the point nearest that copper's
     // centre, unless the wire is locked where it lies.
     std::optional<ItemRef> through;
-    const double want = double(w.clr) + w.width / 2.0;
     for (int round = 0; round < 60 && !through; ++round) {
       bool bent = false;
       for (size_t k = 1; k < sk.size() && !bent && !through; ++k) {
@@ -373,6 +372,7 @@ void Topology::convertWires(const Board& b, BuildScratch& scratch) {
             if (n.len() < 1) n = {1, 0};
             n = n.normalized();
             Vec2 x = at;
+            const double want = double(b.clearance(c.net, itemNet(b, r), c.layer)) + w.width / 2.0;
             for (int it = 0; it < 40 && s.distance(x) < want; ++it) x = x + n * (want - s.distance(x) + 100);
             sk.insert(sk.begin() + long(k), x);
             bent = true;

@@ -148,7 +148,7 @@ ZoneFillStats fillZones(Board& b, const ZoneFillOptions& opt) {
         if (!(r.type == ItemType::Pad && z.padConnection == PadConnection::None)) return;
       }
       // Outlines are inscribed polygons: grow by the chord error so the true clearance holds.
-      double clr = std::max(zoneClr, double(b.clearance(net, z.layer))) + opt.arcTolerance;
+      double clr = std::max(double(z.clearance), double(b.clearance(z.net, net, z.layer))) + opt.arcTolerance;
       for (auto& s : itemShapes(b, r)) holes.push_back(toMulti(s.inflated(clr).outline(opt.arcTolerance)));
     });
     // Already poured zones (higher priority) of other nets on this layer.
@@ -156,7 +156,7 @@ ZoneFillStats fillZones(Board& b, const ZoneFillOptions& opt) {
       if (oz == zi) break;
       const Zone& o = b.zones[oz];
       if (o.layer != z.layer || o.net == z.net) continue;
-      double clr = std::max(zoneClr, double(b.clearance(o.net, z.layer))) + opt.arcTolerance;
+      double clr = std::max(double(z.clearance), double(b.clearance(z.net, o.net, z.layer))) + opt.arcTolerance;
       for (auto& f : o.filled) holes.push_back(toMulti(Shape::polygon(f, clr).outline(opt.arcTolerance)));
     }
     // Non-plated holes without copper are keep-outs on every layer.

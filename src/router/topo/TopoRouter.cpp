@@ -601,7 +601,9 @@ void Router::setNet(int net) {
   for (int li = 0; li < NL_; ++li) {
     widthL_[li] = double(b_.trackWidth(net, layers_[li]));
     widthMinL_[li] = std::min(widthL_[li], double(b_.minTrackWidth(net, layers_[li])));
-    clrL_[li] = double(b_.clearance(net, layers_[li]));
+    // The capacity of an edge does not know its neighbours' nets exactly: the most this net may have to
+    // keep (the realiser lays the pair's own rule).
+    clrL_[li] = double(b_.clearanceUpper(net, layers_[li]));
   }
   assigned_ = b_.assignedLayers(net);
   viaDia_ = nc.viaDiameter;
@@ -612,23 +614,28 @@ void Router::setNet(int net) {
 
 std::optional<ObstInfo> Router::obst(int v, int li, int net) const {
   const MVertex& mv = m_.verts[v];
+  // The obstacle's clearance to the routed net: the pair's rule when the board has such rules.
+  auto clr = [&](int obstNet) {
+    if (Coord c = pairClearance(b_.pairRules, net, obstNet, layers_[li]); c > 0) return double(c);
+    return double(b_.clearance(obstNet, layers_[li]));
+  };
   switch (mv.kind) {
     case VKind::PadCenter:
     case VKind::PadCorner: {
       const Pad& p = b_.pads[mv.pad];
       bool on = p.onLayer(layers_[li]) || (p.drill > 0 && !p.copper);
       if (!on || (net != kNoNet && p.net == net)) return std::nullopt;
-      return ObstInfo{&padShape_[mv.pad], double(b_.clearance(p.net, layers_[li])), mv.pad};
+      return ObstInfo{&padShape_[mv.pad], clr(p.net), mv.pad};
     }
     case VKind::ViaSite: {
       int vn = s_.viaNet[v];
       if (vn < 0 || vn == net) return std::nullopt;
-      return ObstInfo{&vshape_[v], double(b_.clearance(vn, layers_[li])), -2 - v};
+      return ObstInfo{&vshape_[v], clr(vn), -2 - v};
     }
     case VKind::FixedVia: {
       const Via& bv = b_.vias[mv.fixedVia];
       if ((net != kNoNet && bv.net == net) || !bv.onLayer(layers_[li])) return std::nullopt;
-      return ObstInfo{&vshape_[v], double(b_.clearance(bv.net, layers_[li])), -2 - v};
+      return ObstInfo{&vshape_[v], clr(bv.net), -2 - v};
     }
     case VKind::Outline: return ObstInfo{&vshape_[v], double(b_.edgeClearance), -1};
     case VKind::Keepout: {
@@ -640,7 +647,7 @@ std::optional<ObstInfo> Router::obst(int v, int li, int net) const {
     case VKind::Track: {
       const Track& t = b_.tracks[mv.track];
       if (t.layer != layers_[li] || (net != kNoNet && t.net == net)) return std::nullopt;
-      return ObstInfo{&vshape_[v], double(b_.clearance(t.net, layers_[li])), -2 - v};
+      return ObstInfo{&vshape_[v], clr(t.net), -2 - v};
     }
   }
   return std::nullopt;

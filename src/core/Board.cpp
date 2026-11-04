@@ -139,10 +139,55 @@ Coord Board::clearance(int net, LayerId layer) const {
   return c;
 }
 
+Coord pairClearance(const std::vector<ClearancePair>& pairs, int netA, int netB, LayerId layer) {
+  if (netA < 0 || netB < 0) return 0;
+  auto in = [](const std::vector<int>& nets, int net) { return nets.empty() || std::ranges::contains(nets, net); };
+  for (auto p = pairs.rbegin(); p != pairs.rend(); ++p) {
+    if (p->clearance <= 0) continue;
+    if (p->layers && (layer < 0 || !((p->layers >> layer) & 1))) continue;
+    if ((in(p->netsA, netA) && in(p->netsB, netB)) || (in(p->netsA, netB) && in(p->netsB, netA))) return p->clearance;
+  }
+  return 0;
+}
+
+Coord clearanceBetween(const std::vector<Coord>& byNet, const std::vector<LayerRule>& layerRules, const std::vector<ClearancePair>& pairs, int netA,
+                       int netB, LayerId layer) {
+  if (Coord c = pairClearance(pairs, netA, netB, layer); c > 0) return c;
+  auto own = [&](int net) {
+    Coord c = net >= 0 && net < int(byNet.size()) ? byNet[size_t(net)] : byNet.empty() ? 0 : byNet.front();
+    if (layer >= 0)
+      for (auto& r : layerRules)
+        if (r.clearance > 0 && (!r.layers || ((r.layers >> layer) & 1)) && (r.nets.empty() || std::ranges::contains(r.nets, net))) c = r.clearance;
+    return c;
+  };
+  return std::max(own(netA), own(netB));
+}
+
+std::vector<Coord> Board::classClearances() const {
+  std::vector<Coord> out;
+  for (int n = 0; n < int(nets.size()); ++n) out.push_back(classOf(n).clearance);
+  if (out.empty()) out.push_back(netClasses.front().clearance);
+  return out;
+}
+
+Coord Board::clearance(int netA, int netB, LayerId layer) const {
+  if (Coord c = pairClearance(pairRules, netA, netB, layer); c > 0) return c;
+  return std::max(clearance(netA, layer), clearance(netB, layer));
+}
+
+Coord Board::clearanceUpper(int net, LayerId layer) const {
+  Coord c = clearance(net, layer);
+  auto in = [](const std::vector<int>& nets, int n) { return nets.empty() || std::ranges::contains(nets, n); };
+  for (const ClearancePair& p : pairRules)
+    if ((!p.layers || (layer >= 0 && ((p.layers >> layer) & 1))) && (in(p.netsA, net) || in(p.netsB, net))) c = std::max(c, p.clearance);
+  return c;
+}
+
 Coord Board::maxClearance() const {
   Coord m = 0;
   for (auto& nc : netClasses) m = std::max(m, nc.clearance);
   for (auto& r : layerRules) m = std::max(m, r.clearance);
+  for (auto& p : pairRules) m = std::max(m, p.clearance);
   return m;
 }
 
