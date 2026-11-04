@@ -1195,3 +1195,47 @@ TEST(Gui, SelectAllFollowsTheFilter) {
   view.selectAll();
   EXPECT_GE(doc.selectedItems().size(), bd.tracks.size() + bd.vias.size());
 }
+
+// Copper areas: a poured one is not moved (TopoR: only an unpoured outline is edited), and the pour
+// commands work on the selected area and on all of them — pour, re-pour, unpour, re-pour all.
+TEST(Gui, PouredCopperIsNotMovedAndRepours) {
+  app();
+  MainWindow w;
+  ASSERT_TRUE(w.openFile(QString::fromStdString(data("astable.kicad_pcb"))));
+  Document& doc = *w.document();
+  Board& b = *doc.board();
+  ASSERT_FALSE(b.zones.empty());
+  Commands& c = *w.commands();
+  c["Accel_UnPourAllPoly"]->trigger();
+  ASSERT_TRUE(b.zones[0].filled.empty());
+  doc.setSelection({ItemRef{ItemType::Zone, 0}}, {});
+  ASSERT_TRUE(c["Accel_Pour"]->isEnabled());
+  c["Accel_Pour"]->trigger();  // Z: pours an empty area
+  ASSERT_FALSE(b.zones[0].filled.empty()) << "poured";
+  const size_t polys = b.zones[0].filled.size();
+  const Vec2 corner = b.zones[0].outline.front();
+  // Moving a poured area is refused: nothing changes, no edit on the undo stack.
+  const int edits = doc.undoStack()->count();
+  doc.setSelection({ItemRef{ItemType::Zone, 0}}, {});
+  w.view()->rotateSelection(90);
+  EXPECT_EQ(doc.undoStack()->count(), edits);
+  EXPECT_EQ(b.zones[0].outline.front(), corner);
+  EXPECT_EQ(b.zones[0].filled.size(), polys);
+  c["Cmd_RePour"]->trigger();
+  EXPECT_EQ(b.zones[0].filled.size(), polys) << "re-poured the same";
+  c["Accel_UnPourWithRestore"]->trigger();
+  EXPECT_TRUE(b.zones[0].filled.empty()) << "unpoured";
+  // Unpoured: the outline moves.
+  const int beforeRotate = doc.undoStack()->count();
+  doc.setSelection({ItemRef{ItemType::Zone, 0}}, {});
+  w.view()->rotateSelection(90);
+  EXPECT_EQ(doc.undoStack()->count(), beforeRotate + 1);
+  EXPECT_NE(b.zones[0].outline.front(), corner);
+  doc.undoStack()->undo();
+  c["Accel_RePourAllPoly"]->trigger();
+  EXPECT_EQ(b.zones[0].filled.size(), polys) << "re-poured all";
+  c["Accel_UnPourAllPoly"]->trigger();
+  EXPECT_TRUE(b.zones[0].filled.empty());
+  c["Accel_PourAllPoly"]->trigger();
+  EXPECT_EQ(b.zones[0].filled.size(), polys);
+}

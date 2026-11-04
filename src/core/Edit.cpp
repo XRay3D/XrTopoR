@@ -142,6 +142,10 @@ Vec2 pivotOf(const Board& b, const Fragment& f) {
   return bb.valid() ? bb.center() : Vec2{};
 }
 
+bool hasPoured(const Board& b, const Fragment& f) {
+  return std::ranges::any_of(f.zones, [&](int zi) { return !b.zones[zi].filled.empty(); });
+}
+
 bool hasLocked(const Board& b, const Fragment& f) {
   // Keepouts, texts and drawings have no fixation in the model.
   return std::ranges::any_of(f.components, [&](int i) { return b.components[i].locked; }) ||

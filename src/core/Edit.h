@@ -44,6 +44,8 @@ LayerMask mirrorMask(const Board& b, LayerMask m);
 Vec2 pivotOf(const Board& b, const Fragment& f);
 BBox bboxOf(const Board& b, const Fragment& f);
 bool hasLocked(const Board& b, const Fragment& f);
+// A poured copper area among the fragment: it is not moved (TopoR: only an unpoured outline is edited).
+bool hasPoured(const Board& b, const Fragment& f);
 
 // Track ends lying at `p` on `layer` (one vertex of a wire): (track, end) with end 0 = a, 1 = b.
 std::vector<std::pair<int, int>> endsAt(const Board& b, Vec2 p, LayerId layer, int net);

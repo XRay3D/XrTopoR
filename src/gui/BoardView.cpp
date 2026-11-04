@@ -1309,6 +1309,12 @@ void BoardView::mouseMoveEvent(QMouseEvent* e) {
         cancelDrag();
         return;
       }
+      // TopoR: a poured copper area is not moved, only an unpoured outline is.
+      if ((drag_ == Drag::Fragment || drag_ == Drag::Segment) && edit::hasPoured(b, dragFragment_)) {
+        emit status(tr("Залитую область металлизации нельзя перемещать: снимите заливку"));
+        cancelDrag();
+        return;
+      }
       dragMoved_ = true;
       pendingClick_.reset();
       dragBefore_ = doc_->beginEdit();
@@ -1558,6 +1564,10 @@ void BoardView::transformSelection(double rotate, bool mirror, const QString& ti
   Board& b = *doc_->board();
   if (edit::hasLocked(b, f)) {
     emit status(tr("Среди выделенных объектов есть зафиксированные: перемещение запрещено"));
+    return;
+  }
+  if (edit::hasPoured(b, f)) {
+    emit status(tr("Залитую область металлизации нельзя перемещать: снимите заливку"));
     return;
   }
   auto before = doc_->beginEdit();
