@@ -188,7 +188,16 @@ std::vector<WireChain> wireChains(const Board& b, const WireGraph& g, const std:
     if (chosen[i] && g.tiny[i]) inner[i] = degree[vid[i][0]] >= 2;
   for (size_t i = 0; i < b.tracks.size(); ++i)
     if (chosen[i] && g.tiny[i] && !inner[i]) degree[vid[i][0]] += 2;
-  auto isEnd = [&](int v, Point p, const Track& t) { return degree[v] != 2 || copper.touches(p, t.net, t.layer); };
+  // A vertex of degree 2 whose other track is no continuation (a width change, a locked track) ends the
+  // chain too; else a piece between two such vertices has no end to start from and is filed as a loop,
+  // and dropped with it (a bus narrowed over a tight spot: its three pieces, two of them lost).
+  auto isEnd = [&](int v, Point p, int ti) {
+    const Track& t = b.tracks[ti];
+    if (degree[v] != 2 || copper.touches(p, t.net, t.layer)) return true;
+    for (int j : ends[v])
+      if (chosen[j] && !g.tiny[j] && j != ti && !sameChain(b, ti, j)) return true;
+    return false;
+  };
   std::vector<char> used(b.tracks.size(), 0);
   for (size_t i = 0; i < b.tracks.size(); ++i)
     if (inner[i]) used[i] = 1;
@@ -215,7 +224,7 @@ std::vector<WireChain> wireChains(const Board& b, const WireGraph& g, const std:
       }
       if (w.path.back() != next.v()) w.path.push_back(next.v());
       curV = vid[ti][nextEnd];
-      if (isEnd(curV, next, t)) break;
+      if (isEnd(curV, next, ti)) break;
       int cont = -1;
       for (int j : ends[curV])
         if (chosen[j] && !used[j] && j != ti && sameChain(b, ti, j)) cont = j;
@@ -231,8 +240,8 @@ std::vector<WireChain> wireChains(const Board& b, const WireGraph& g, const std:
   };
   for (size_t i = 0; i < b.tracks.size(); ++i) {
     if (!chosen[i] || used[i]) continue;
-    if (isEnd(vid[i][0], b.tracks[i].a, b.tracks[i])) walkFrom(int(i), 0, false);
-    else if (isEnd(vid[i][1], b.tracks[i].b, b.tracks[i])) walkFrom(int(i), 1, false);
+    if (isEnd(vid[i][0], b.tracks[i].a, int(i))) walkFrom(int(i), 0, false);
+    else if (isEnd(vid[i][1], b.tracks[i].b, int(i))) walkFrom(int(i), 1, false);
   }
   for (size_t i = 0; i < b.tracks.size(); ++i)
     if (chosen[i] && !used[i]) walkFrom(int(i), 0, true);

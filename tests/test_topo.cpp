@@ -796,10 +796,11 @@ TEST(Topo, CompareTwoModels) {
   C.build(**lc);
   std::println("A: {} wires, {} junctions, {} crossings; C: {} wires, {} junctions, {} crossings", A.wires.size(), A.junctions.size(),
                A.crossings.size(), C.wires.size(), C.junctions.size(), C.crossings.size());
-  auto key = [](const topo::Topology& t, const topo::Wire& w) {
+  auto key = [](const Board& b, const topo::Topology& t, const topo::Wire& w) {  // the nets by name: a saved board may number them anew
     Vec2 p = t.owners[w.end[0]].c, q = t.owners[w.end[1]].c;
     if (std::tie(p.x, p.y) > std::tie(q.x, q.y)) std::swap(p, q);
-    return std::tuple{w.net, w.layer, std::llround(p.x / 1000), std::llround(p.y / 1000), std::llround(q.x / 1000), std::llround(q.y / 1000)};
+    // (not the layer: a saved board numbers its layers anew)
+    return std::tuple{b.nets[w.net].name, std::llround(p.x / 1000), std::llround(p.y / 1000), std::llround(q.x / 1000), std::llround(q.y / 1000)};
   };
   auto edges = [](const topo::Topology& t, const topo::Wire& w) {
     const topo::LayerMesh& m = *t.mesh(w.layer);
@@ -812,11 +813,11 @@ TEST(Topo, CompareTwoModels) {
     }
     return out;
   };
-  std::map<decltype(key(A, A.wires[0])), int> inC;
-  for (int wi = 0; wi < int(C.wires.size()); ++wi) inC[key(C, C.wires[wi])] = wi;
+  std::map<decltype(key(**la, A, A.wires[0])), int> inC;
+  for (int wi = 0; wi < int(C.wires.size()); ++wi) inC[key(**lc, C, C.wires[wi])] = wi;
   int matched = 0, unmatched = 0, differ = 0, differRank = 0;
   for (int wi = 0; wi < int(A.wires.size()); ++wi) {
-    auto it = inC.find(key(A, A.wires[wi]));
+    auto it = inC.find(key(**la, A, A.wires[wi]));
     if (it == inC.end()) { ++unmatched; continue; }
     ++matched;
     auto ea = edges(A, A.wires[wi]), ec = edges(C, C.wires[it->second]);
@@ -828,19 +829,60 @@ TEST(Topo, CompareTwoModels) {
       if (const char* near = std::getenv("XR_TOPO_NEAR")) {
         double nx = 0, ny = 0;
         std::sscanf(near, "%lf,%lf", &nx, &ny);
+        const char* netName = std::getenv("XR_TOPO_NET");  // this net's wires in full
+        bool full = netName && (**la).nets[A.wires[wi].net].name == netName;
         auto show = [&](const char* what, const auto& es) {
           std::print("  {}:", what);
           for (auto& e : es)
-            if (std::hypot(std::get<0>(e) / 1e3 - nx, std::get<1>(e) / 1e3 - ny) < 3)
+            if (full || std::hypot(std::get<0>(e) / 1e3 - nx, std::get<1>(e) / 1e3 - ny) < 3)
               std::print(" ({:.2f},{:.2f})-({:.2f},{:.2f}) {}/{}", std::get<0>(e) / 1e3, std::get<1>(e) / 1e3, std::get<2>(e) / 1e3, std::get<3>(e) / 1e3, std::get<4>(e), std::get<5>(e));
           std::println("");
         };
         bool nearby = false;
         for (auto& e : ea) nearby |= std::hypot(std::get<0>(e) / 1e3 - nx, std::get<1>(e) / 1e3 - ny) < 3;
         if (nearby) {
-          std::println("near: wire net {} L{}", (**la).nets[A.wires[wi].net].name, int(A.wires[wi].layer));
+          auto ends = [](const topo::Topology& t, const topo::Wire& w) {
+            std::string out;
+            for (int end = 0; end < 2; ++end) {
+              const topo::Owner& o = t.owners[w.end[end]];
+              out += std::format(" {}({:.3f},{:.3f})", int(o.kind), o.c.x / 1e6, o.c.y / 1e6);
+            }
+            return out;
+          };
+          auto endVerts = [](const topo::Topology& t, const topo::Wire& w) {
+            const topo::LayerMesh& m = *t.mesh(w.layer);
+            return std::format(" v({:.3f},{:.3f})-v({:.3f},{:.3f})", m.verts[w.endVertex[0]].p.x / 1e6, m.verts[w.endVertex[0]].p.y / 1e6, m.verts[w.endVertex[1]].p.x / 1e6,
+                               m.verts[w.endVertex[1]].p.y / 1e6);
+          };
+          std::println("near: wire net {} L{}: ends A{}{} C{}{}", (**la).nets[A.wires[wi].net].name, int(A.wires[wi].layer), ends(A, A.wires[wi]), endVerts(A, A.wires[wi]),
+                       ends(C, C.wires[it->second]), endVerts(C, C.wires[it->second]));
+          if (full)
+            for (auto [tag, bp] : {std::pair{"A", &**la}, std::pair{"C", &**lc}})
+              for (const Track& tr : bp->tracks) {
+                if (tr.net < 0 || bp->nets[tr.net].name != netName) continue;
+                bool close = false;
+                for (Vec2 q : tr.path()) close |= std::hypot(q.x / 1e6 - nx, q.y / 1e6 - ny) < 4;
+                if (!close) continue;
+                std::print("  {} track L{} w{:.3f}:", tag, int(tr.layer), tr.width / 1e6);
+                for (Point q : {tr.a, tr.b}) std::print(" ({:.3f},{:.3f}){}", q.x / 1e6, q.y / 1e6, tr.mid ? "~" : "");
+                std::println("");
+              }
           show("A", ea);
           show("C", ec);
+          for (auto [tag, T] : {std::pair{"A", &A}, std::pair{"C", &C}})
+            for (const topo::Junction& j : T->junctions)
+              if (std::hypot(j.pos.x / 1e6 - nx, j.pos.y / 1e6 - ny) < 3)
+              {
+                std::println("  {} junction ({:.3f},{:.3f}) net {} degree {} r {:.3f}", tag, j.pos.x / 1e6, j.pos.y / 1e6, (tag[0] == 'A' ? **la : **lc).nets[j.net].name, j.degree,
+                             T->owners[j.owner].halfWidth / 1e6);
+                for (const topo::Wire& w : T->wires)
+                  if (w.end[0] == j.owner || w.end[1] == j.owner)
+                    std::println("    wire w{:.3f} {} crossings, locked {}, {} tracks", w.width / 1e6, w.cross.size(), w.locked, w.tracks.size());
+              }
+          for (auto [tag, T] : {std::pair{"A", &A}, std::pair{"C", &C}})
+            for (const topo::Owner& o : T->owners)
+              if (o.kind != topo::Owner::Kind::Junction && std::hypot(o.c.x / 1e6 - nx, o.c.y / 1e6 - ny) < 3)
+                std::println("  {} owner kind {} ({:.3f},{:.3f}) net {}", tag, int(o.kind), o.c.x / 1e6, o.c.y / 1e6, o.net >= 0 ? (tag[0] == 'A' ? **la : **lc).nets[o.net].name : "-");
         }
       }
       ++differ;
@@ -854,6 +896,26 @@ TEST(Topo, CompareTwoModels) {
       ++differRank;
     }
   }
+  if (const char* netName = std::getenv("XR_TOPO_WIRES"))  // every wire of this net in both models
+    for (auto [tag, T, bp] : {std::tuple{"A", &A, &**la}, std::tuple{"C", &C, &**lc}}) {
+      std::vector<char> all(bp->tracks.size(), 1);
+      topo::WireGraph g = topo::wireGraph(*bp, all);
+      topo::OwnCopper copper(*bp);
+      for (const topo::WireChain& c : topo::wireChains(*bp, g, all, copper)) {
+        if (bp->nets[c.net].name != netName) continue;
+        std::println("  {} chain L{} w{:.3f} {} tracks, {} points, closed {}: ({:.4f},{:.4f})-({:.4f},{:.4f})", tag, int(c.layer), c.width / 1e6, c.tracks.size(), c.path.size(), c.closed,
+                     c.a().x / 1e6, c.a().y / 1e6, c.b().x / 1e6, c.b().y / 1e6);
+      }
+      for (const topo::Wire& w : T->wires) {
+        if (bp->nets[w.net].name != netName) continue;
+        std::print("  {} wire L{} w{:.3f} {} crossings:", tag, int(w.layer), w.width / 1e6, w.cross.size());
+        for (int end = 0; end < 2; ++end) {
+          const topo::Owner& o = T->owners[w.end[end]];
+          std::print(" {}({:.4f},{:.4f})", int(o.kind), o.c.x / 1e6, o.c.y / 1e6);
+        }
+        std::println("");
+      }
+    }
   std::println("{} matched ({} unmatched): {} with other crossings, {} with another rank on an edge", matched, unmatched, differ, differRank);
   if (const char* ed = std::getenv("XR_TOPO_EDGE")) {  // the wires across one edge, given by its ends in mm
     double x1, y1, x2, y2;

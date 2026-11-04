@@ -118,18 +118,23 @@ RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int
   for (int wi : chosen) wires.push_back(sketchOf(b, t, wi));
   if (wiresOut) *wiresOut = wires;
   RealizeInput in;
+  // No stubs out of narrow pads yet (XR_TOPO_STUBS=1 tries them): which of the model's crossings a stub
+  // covers is not settled, and the wires of a fine-pitch row came out weaving (Arcs_master: 1500
+  // violations against 25 without).
   if (std::getenv("XR_TOPO_STUBS")) {
     prepareStubs(b, wires, opt, in);
   } else {
-    // No stubs for now: the crossings start at the vertex, a stub's exit point past the first fan edge
-    // would put the funnel's first portal behind its second.
-    in.sketches.clear();
     for (const RealWire& w : wires) in.sketches.push_back(w.sketch);
     in.stubs.assign(wires.size(), {});
     if (opt.region) in.oidx.build(b, *opt.region);
     else in.oidx.build(b);
   }
   const int NW = int(wires.size());
+  if (std::getenv("XR_TOPO_DEBUG")) {
+    int on = 0;
+    for (auto& st : in.stubs) on += st[0].on + st[1].on;
+    std::println(stderr, "realizeFromModel: {} wires, {} stubs", NW, on);
+  }
   in.hits.assign(NW, {});
   std::map<int, int> localOf;  // model wire -> index in `wires`
   for (int k = 0; k < NW; ++k) localOf[chosen[k]] = k;
@@ -140,7 +145,6 @@ RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int
   for (LayerId layer : layersUsed) {
     const LayerMesh& m = *t.mesh(layer);
     LayerObstacles& ob = in.obstacles[layer];
-    std::map<int, int> shapeOf;  // owner -> shape index
     std::map<int, int> centreOf;  // owner -> its centre point
     for (int v = 0; v < int(m.verts.size()); ++v) {
       const Vertex& x = m.verts[v];
@@ -153,12 +157,15 @@ RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int
             id = ob.add(x.p, o.halfWidth, clr, kNoNet);
             break;
           }
-          if (!shapeOf.contains(x.owner)) {
-            shapeOf[x.owner] = int(ob.shapes.size());
-            ob.shapes.push_back(o.shape);
+          // A corner or an end is a point with the copper's rounding, as the realiser has it (its reach by
+          // the shape would differ from edge to edge round one vertex, and the stacks with it).
+          {
+            const bool centre = x.t == 0 && x.off.len2() < 1;
+            // A round pad is its radius; a polygon's centre is enclosed by its corners, a bare point.
+            double r = o.shape.kind == Shape::Kind::Point ? o.halfWidth : centre ? 0.0 : o.shape.r;
+            id = ob.add(x.p, r, clr, o.net);
+            if (centre && o.shape.kind != Shape::Kind::Point) centreOf[x.owner] = id;
           }
-          id = ob.add(x.p, x.t == 0 && x.off.len2() < 1 ? 0.0 : o.shape.r, clr, o.net, shapeOf[x.owner]);
-          if (x.t == 0 && x.off.len2() < 1) centreOf[x.owner] = id;
           break;
         case Owner::Kind::Via:
           id = ob.add(x.p, o.halfWidth, clr, o.net);
@@ -213,10 +220,38 @@ RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int
         hs[c.idx] = {E.v[0], E.v[1], cap.L > 0 ? s.mid() / cap.L : 0.5, false, -1, -1, false};
       }
     }
+    std::vector<int> dropFront(NW, 0);  // crossings a stub covers at the start of a wire
     for (int k = 0; k < NW; ++k) {
       if (wires[k].layer != layer) continue;
       const Wire& w = t.wires[chosen[k]];
       std::vector<EdgeHit>& hs = in.hits[k];
+      // A stub out of a narrow pad covers the crossings next to the pad: the wire starts at the stub's
+      // exit, past them (as the sketch's points within the envelope go).
+      for (int end = 0; end < 2; ++end) {
+        const Stub& st = in.stubs[k][end];
+        if (!st.on) continue;
+        // Covered: the edges the stub itself crosses on its way from the end vertex to its exit (the wire
+        // starts at the exit and crosses what lies beyond).
+        const Vec2 from = m.verts[w.endVertex[end]].p;
+        auto covered = [&](const EdgeHit& h) {
+          // The stub's segment crosses the edge inside it: an edge the stub only touches at one of its
+          // ends (the fan of the pad's end, which the wire crosses beyond the exit) is not covered.
+          Vec2 a = ob.pts[h.u].p, c = ob.pts[h.v].p;
+          double den = (c - a).cross(st.to - from);
+          if (std::abs(den) < 1e-9) return false;
+          double s = (from - a).cross(st.to - from) / den;    // along a -> c
+          double r = (from - a).cross(c - a) / den;           // along from -> to
+          double L = (c - a).len();
+          return r >= 0 && r <= 1 && s * L > 1000 && (1 - s) * L > 1000;
+        };
+        if (end == 0)
+          while (!hs.empty() && covered(hs.front())) {
+            hs.erase(hs.begin());
+            ++dropFront[k];
+          }
+        else
+          while (!hs.empty() && covered(hs.back())) hs.pop_back();
+      }
       // Which side the edge's u lies on: the wire crosses the edge into the triangle it shares with the
       // next crossing (or the one holding the end vertex); that triangle, counter-clockwise, runs the edge
       // from u to v exactly when u is on the wire's left (by the sketch's points it was wrong where a wire
@@ -248,7 +283,9 @@ RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int
       std::vector<std::pair<int, int>> ordered;
       for (int cid : E->cross) {
         auto it = localOf.find(t.crossings[cid].wire);
-        if (it != localOf.end()) ordered.push_back({it->second, t.crossings[cid].idx});
+        if (it == localOf.end()) continue;
+        int hi = t.crossings[cid].idx - dropFront[it->second];
+        if (hi >= 0 && hi < int(in.hits[it->second].size())) ordered.push_back({it->second, hi});
       }
       list = std::move(ordered);
     }

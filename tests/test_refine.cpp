@@ -118,11 +118,11 @@ TEST(Optimizer, RelaxationClearsViasOffPads) {
 
 // F5 on the model, the realiser fed from the model: a fixed point — a board re-laid from its own result
 // comes out the same (the same violations, the length within half a millimetre). The violations are those
-// of F5 on the tracks and a few more (arz_2L 22 against 9, arz_4L 26 against 10, Arcs_master 31 against
+// of F5 on the tracks and a few more (arz_2L 22 against 9, arz_4L 20 against 10, Arcs_master 30 against
 // 18), local stacking defects still to be found.
 TEST(Realizer, ModelReshapeIsAFixedPoint) {
   struct Expect { const char* file; int conflicts; };
-  for (Expect x : {Expect{"topor/Example_03/arz_2L.fst", 22}, Expect{"topor/Example_03/arz_4L.fst", 26}, Expect{"topor/Example_04/Arcs_master.pcb", 31}}) {
+  for (Expect x : {Expect{"topor/Example_03/arz_2L.fst", 22}, Expect{"topor/Example_03/arz_4L.fst", 20}, Expect{"topor/Example_04/Arcs_master.pcb", 30}}) {
     const char* name = x.file;
     auto lb = io::loadBoard(data(name));
     ASSERT_TRUE(lb.has_value()) << name;
@@ -134,6 +134,10 @@ TEST(Realizer, ModelReshapeIsAFixedPoint) {
       topo::Topology t;
       t.build(b);
       auto res = topo::runF5Model(b, t);
+      for (const topo::Violation& v : res.violations)
+        if (v.kind != topo::Violation::Kind::Overflow)
+          std::println("{} pass {}: violation kind {} at ({:.3f},{:.3f}) wire {} net {}", name, pass, int(v.kind), v.pos.x / 1e6, v.pos.y / 1e6, v.wireA,
+                       v.wireA >= 0 ? b.nets[t.wires[v.wireA].net].name : "-");
       ASSERT_TRUE(res.drawn) << name << " pass " << pass;
       conflictsAt.push_back(conflicts(b));
       lengthAt.push_back(length(b));
