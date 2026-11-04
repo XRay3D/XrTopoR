@@ -1,5 +1,7 @@
 // GUI smoke test: drives the board view with synthetic mouse/key events on the offscreen platform.
 #include <QApplication>
+#include <format>
+#include <print>
 #include <QDir>
 #include <QDockWidget>
 #include <QPushButton>
@@ -33,6 +35,7 @@
 #include "gui/Schemes.h"
 #include "gui/ToporConfig.h"
 #include "io/BoardIO.h"
+#include "topo/Chains.h"
 #include "topo/Sidecar.h"
 
 using namespace xr;
@@ -1238,4 +1241,125 @@ TEST(Gui, PouredCopperIsNotMovedAndRepours) {
   EXPECT_TRUE(b.zones[0].filled.empty());
   c["Accel_PourAllPoly"]->trigger();
   EXPECT_EQ(b.zones[0].filled.size(), polys);
+}
+
+// «Выделить весь проводник»: from any track of a chain the whole chain, on a board as TopoR drew it and after
+// F5 (short tangents between arcs).
+TEST(Gui, SelectWireTakesTheWholeChain) {
+  app();
+  QSettings().setValue("topo/model", true);
+  for (const char* name : {"topor/Example_03/arz_2L.fst", "topor/Example_04/Arcs_master.pcb"}) {
+    Document doc;
+    BoardView view(&doc);
+    view.resize(800, 600);
+    auto lb = io::loadBoard(data(name));
+    ASSERT_TRUE(lb);
+    doc.setBoard(std::move(*lb), "x");
+    for (int pass = 0; pass < 2; ++pass) {
+      if (pass == 1) view.recomputeShapes();
+      const Board& b = *doc.board();
+      std::vector<char> all(b.tracks.size(), 1);
+      auto g = topo::wireGraph(b, all);
+      topo::OwnCopper copper(b);
+      int chains = 0, partial = 0, wider = 0, widthChange = 0, throughCopper = 0, unexplained = 0;
+      std::string first, firstExtra;
+      for (const topo::WireChain& c : topo::wireChains(b, g, all, copper)) {
+        if (c.tracks.size() < 2) continue;
+        ++chains;
+        doc.setSelection({ItemRef{ItemType::Track, c.tracks.front()}}, {});
+        view.selectWire();
+        auto got = doc.selectedItems();
+        int missing = 0;
+        for (int ti : c.tracks) missing += !std::ranges::contains(got, ItemRef{ItemType::Track, ti});
+        // More than the chain: the wire goes on through a change of width or inside a pad or via it touches
+        // (chains end there), no further.
+        if (got.size() > c.tracks.size()) {
+          ++wider;
+          bool width = false, inCopper = false;
+          inCopper = true;  // every track beyond the chain lies inside copper with both its ends
+          for (ItemRef r : got) {
+            const Track& t = b.tracks[r.index];
+            width |= t.width != b.tracks[c.tracks.front()].width;
+            if (!std::ranges::contains(c.tracks, r.index)) inCopper &= copper.touches(t.a, t.net, t.layer) && copper.touches(t.b, t.net, t.layer);
+          }
+          widthChange += width;
+          throughCopper += inCopper;
+          if (!width && !inCopper) {
+            if (!unexplained) firstExtra = std::format("net {} from ({:.3f},{:.3f}): {} against {}", b.nets[c.net].name, c.a().x / 1e6, c.a().y / 1e6, got.size(), c.tracks.size());
+            ++unexplained;
+          }
+        }
+        if (missing) {
+          if (!partial) first = std::format("net {}, {} of {} tracks missing, from ({:.3f},{:.3f})", b.nets[c.net].name, missing, c.tracks.size(), c.a().x / 1e6, c.a().y / 1e6);
+          ++partial;
+        }
+      }
+      std::println("{} pass {}: {} chains, {} selected only in part; {} wider ({} past a width change, {} only inside copper, {} unexplained) {}", name, pass, chains, partial, wider, widthChange,
+                   throughCopper, unexplained, firstExtra);
+      EXPECT_EQ(partial, 0) << name << " pass " << pass << ": " << first;
+      EXPECT_EQ(unexplained, 0) << name << " pass " << pass << ": " << firstExtra;
+    }
+  }
+}
+
+// A serpentine of pieces shorter than half the width is one wire (they all meet within half a width of each
+// other, no junction); a real branch stops the selection, and so does a wire leaving the same pad.
+TEST(Gui, SelectWireThroughASerpentine) {
+  app();
+  auto mm = [](double x, double y) { return Point(Vec2{x * kNmPerMm, y * kNmPerMm}); };
+  auto b = std::make_unique<Board>();
+  LayerId top = b->addLayer("Top", LayerKind::Copper, Side::Top);
+  b->layers[top].copperIndex = 0;
+  b->outline.push_back({mm(0, 0).v(), mm(60, 0).v(), mm(60, 30).v(), mm(0, 30).v()});
+  int A = b->addNet("A");
+  Component c;
+  c.ref = "U1";
+  b->components.push_back(c);
+  Pad pad;
+  pad.number = "1";
+  pad.component = 0;
+  pad.net = A;
+  pad.pos = mm(5, 10);
+  pad.shape.w = pad.shape.h = mmToNm(1.0);
+  pad.copper = LayerMask(1) << top;
+  b->pads.push_back(pad);
+  auto track = [&](Point p, Point q, Coord w = mmToNm(0.5)) {
+    Track t;
+    t.a = p;
+    t.b = q;
+    t.width = w;
+    t.layer = top;
+    t.net = A;
+    b->tracks.push_back(t);
+    return int(b->tracks.size() - 1);
+  };
+  std::vector<int> wire;
+  wire.push_back(track(mm(5, 10), mm(10, 10)));
+  // The serpentine: pieces of 0.1 mm at a width of 0.5 mm.
+  Point at = mm(10, 10);
+  for (int k = 0; k < 40; ++k) {
+    Point next = mm(10 + 0.1 * (k + 1), 10 + (k % 8 < 4 ? 0.1 * (k % 8 + 1) : 0.1 * (8 - k % 8 - 1)));
+    wire.push_back(track(at, next));
+    at = next;
+  }
+  wire.push_back(track(at, mm(25, 10)));
+  // A junction at the far end: both branches are other wires.
+  int branch1 = track(mm(25, 10), mm(30, 15)), branch2 = track(mm(25, 10), mm(30, 5));
+  // Another wire out of the same pad.
+  int otherOut = track(mm(5, 10), mm(5, 20));
+  Document doc;
+  BoardView view(&doc);
+  view.resize(800, 600);
+  doc.setBoard(std::move(b), "x");
+  for (int from : {wire.front(), wire[20], wire.back()}) {
+    doc.setSelection({ItemRef{ItemType::Track, from}}, {});
+    view.selectWire();
+    auto got = doc.selectedItems();
+    EXPECT_EQ(got.size(), wire.size()) << "from track " << from;
+    for (int ti : wire) EXPECT_TRUE(std::ranges::contains(got, ItemRef{ItemType::Track, ti})) << "from " << from << ", track " << ti;
+    for (int ti : {branch1, branch2, otherOut}) EXPECT_FALSE(std::ranges::contains(got, ItemRef{ItemType::Track, ti})) << "from " << from << ", track " << ti;
+  }
+  doc.setSelection({ItemRef{ItemType::Track, branch1}}, {});
+  view.selectWire();
+  EXPECT_EQ(doc.selectedItems().size(), 1u) << "a branch alone, up to the junction";
 }

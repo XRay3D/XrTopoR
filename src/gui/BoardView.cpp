@@ -20,6 +20,7 @@
 #include "io/BoardIO.h"
 #include "router/topo/Optimizer.h"
 #include "router/topo/ModelTools.h"
+#include "topo/Chains.h"
 #include "router/topo/Wires.h"
 #include "router/topo/Refine.h"
 
@@ -1127,6 +1128,14 @@ std::vector<ItemRef> BoardView::wireOf(int track) const {
     }
     return {ItemType::Track, -1};
   };
+  // The vertices of the track graph: ends glued within 10 % of the width. Tracks shorter than that are the
+  // vertex itself and no branch of it; by a tolerance of half a width the short pieces of a serpentine and the
+  // tangents between arcs all met in one point, and the wire stopped there as at a junction.
+  std::vector<char> mine(b.tracks.size(), 0);
+  mine[track] = 1;
+  const topo::WireGraph g = topo::wireGraph(b, mine);
+  auto endOf = [&](const Track& t, int e) { return e ? t.b.v() : t.a.v(); };
+  // Ends that meet by no more than half a width: a free end of the graph, with one other track there.
   auto touching = [&](Vec2 p, double tol) {
     std::vector<int> ts;
     for (int ti = 0; ti < int(b.tracks.size()); ++ti) {
@@ -1138,23 +1147,42 @@ std::vector<ItemRef> BoardView::wireOf(int track) const {
   };
   std::vector<char> seen(b.tracks.size(), 0);
   std::vector<ItemRef> out;
-  std::vector<std::pair<int, Vec2>> todo{{track, t0.a.v()}, {track, t0.b.v()}};
-  seen[track] = 1;
-  out.push_back({ItemType::Track, track});
+  auto take = [&](int ti) {
+    seen[ti] = 1;
+    out.push_back({ItemType::Track, ti});
+  };
+  std::vector<std::pair<int, int>> todo{{track, 0}, {track, 1}};  // (track, the end to go on from)
+  take(track);
   while (!todo.empty()) {
-    auto [ti, p] = todo.back();
+    auto [ti, e] = todo.back();
     todo.pop_back();
-    auto copper = copperAt(p);
-    auto nb = touching(p, b.tracks[ti].width / 2.0);
-    if (nb.size() != 2) continue;  // a free end, or a junction of several tracks
-    int other = nb[0] == ti ? nb[1] : nb[0];
-    if (seen[other]) continue;
-    const Track& t = b.tracks[other];
-    Vec2 far = (t.a.v() - p).len() <= (t.b.v() - p).len() ? t.b.v() : t.a.v();
-    if (copper.second >= 0 && copperAt(far) != copper) continue;  // leaves the pad or via: not this wire
-    seen[other] = 1;
-    out.push_back({ItemType::Track, other});
-    todo.push_back({other, far});
+    const Vec2 p = endOf(b.tracks[ti], e);
+    const int v = g.vid[ti][e];
+    int degree = 0;  // of the tracks that are more than the vertex (a loop round a via counts twice)
+    std::vector<int> others;
+    for (int o : g.ends[v])
+      if (!g.tiny[o]) {
+        ++degree;
+        if (o != ti && !std::ranges::contains(others, o)) others.push_back(o);
+      }
+    if (degree > 2) continue;  // a junction
+    if (degree <= 2)
+      for (int o : g.ends[v])
+        if (g.tiny[o] && !seen[o]) take(o);
+    if (!g.tiny[ti] && degree == 1) {
+      auto nb = touching(p, b.tracks[ti].width / 2.0);
+      if (nb.size() == 2) others.push_back(nb[0] == ti ? nb[1] : nb[0]);
+    }
+    const auto copper = copperAt(p);
+    for (int o : others) {
+      if (seen[o]) continue;
+      const Track& t = b.tracks[o];
+      const int nearEnd = g.vid[o][0] == v ? 0 : g.vid[o][1] == v ? 1 : (t.a.v() - p).len() <= (t.b.v() - p).len() ? 0 : 1;
+      const int farEnd = 1 - nearEnd;
+      if (copper.second >= 0 && copperAt(endOf(t, farEnd)) != copper) continue;  // leaves the pad or via: not this wire
+      take(o);
+      todo.push_back({o, farEnd});
+    }
   }
   return out;
 }
