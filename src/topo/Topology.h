@@ -105,6 +105,11 @@ struct Wire {
   LayerId layer = 0;
   Coord width = 0, widthMin = 0, clr = 0;
   int end[2] = {-1, -1};    // owners
+  int endVertex[2] = {-1, -1};  // their vertices the wire starts and ends at (on its layer's mesh)
+  // Where the wire leaves the end owner's copper, on its boundary (the realiser decides from that point
+  // whether the wire needs a stub out of a narrow pad; kept from the tracks as drawn, flips do not move it).
+  Vec2 exit[2];
+  bool hasExit[2] = {false, false};
   std::vector<int> cross;   // crossing ids from end[0] to end[1]; consecutive ones share a triangle
   std::vector<uint32_t> tracks;  // the board tracks it is drawn as (empty: not drawn yet)
   bool locked = false;
@@ -146,6 +151,9 @@ struct Topology {
   void placeVertex(LayerMesh& m, int v) const;  // refreshes the cached position from the owner
   // The vertex of the owner on the layer nearest p.
   int nearestVertex(const LayerMesh& m, int owner, Vec2 p) const;
+  // The edges a polyline from vertex v0 to vertex v1 crosses on the layer's mesh, in order (the walk the
+  // conversion uses); `ok` false when the walk loses the mesh.
+  std::vector<int> walkEdges(const LayerMesh& m, int v0, int v1, const Polyline& sk, bool& ok) const;
   // The wires of different nets that cross each other on a layer: chords interleaving on a triangle, a
   // wire across the edge another runs along.
   std::vector<Violation> findCrossings(const LayerMesh& m) const;

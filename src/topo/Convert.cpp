@@ -201,6 +201,12 @@ std::vector<Violation> Topology::findCrossings(const LayerMesh& m) const {
   return out;
 }
 
+std::vector<int> Topology::walkEdges(const LayerMesh& m, int v0, int v1, const Polyline& sk, bool& ok) const {
+  std::vector<int> out;
+  for (const Hit& h : walk(m, v0, v1, sk, ok, nullptr)) out.push_back(h.edge);
+  return out;
+}
+
 void Topology::convertWires(const Board& b, BuildScratch& scratch) {
   std::vector<char> all(b.tracks.size(), 1);
   WireGraph g = wireGraph(b, all);
@@ -283,9 +289,30 @@ void Topology::convertWires(const Board& b, BuildScratch& scratch) {
     // The sketch: from the nearest vertex of the end owner, through the path's points outside the own
     // copper, to the nearest vertex of the other.
     int v0 = nearestVertex(m, w.end[0], c.a()), v1 = nearestVertex(m, w.end[1], c.b());
+    w.endVertex[0] = v0;
+    w.endVertex[1] = v1;
     Polyline sk{m.verts[v0].p};
     const Owner& o0 = owners[w.end[0]];
     const Owner& o1 = owners[w.end[1]];
+    // Where the path leaves each end's copper: the boundary point between the last point inside and the
+    // first outside.
+    for (int end = 0; end < 2; ++end) {
+      const Owner& o = end ? o1 : o0;
+      const Polyline& path = c.path;
+      size_t n = path.size();
+      for (size_t k = 1; k < n; ++k) {
+        Vec2 in = end ? path[n - k] : path[k - 1], out = end ? path[n - 1 - k] : path[k];
+        if (o.shape.contains(out)) continue;
+        if (!o.shape.contains(in)) break;  // starts outside: no exit to speak of
+        for (int it = 0; it < 30; ++it) {
+          Vec2 mid = (in + out) * 0.5;
+          (o.shape.contains(mid) ? in : out) = mid;
+        }
+        w.exit[end] = out;
+        w.hasExit[end] = true;
+        break;
+      }
+    }
     for (size_t k = 0; k < c.path.size(); ++k) {
       Vec2 p = c.path[k];
       if (o0.shape.contains(p) || o1.shape.contains(p)) continue;
@@ -465,6 +492,13 @@ void Topology::convertWires(const Board& b, BuildScratch& scratch) {
           return hA.t < hB.t;
         }
         int r = f != 0 ? f : bk;
+        if (r != 0 && (r > 0) != (hA.t < hB.t) && std::getenv("XR_TOPO_DEBUG")) {
+          const Edge& E = m.edges[e];
+          std::println(stderr, "order against geometry on layer {} edge {} ({:.3f},{:.3f})-({:.3f},{:.3f}): {} (t {:.3f}, {}/{}) vs {} (t {:.3f}, {}/{}): fwd {} back {}",
+                       int(m.layer), e, m.verts[E.v[0]].p.x / 1e6, m.verts[E.v[0]].p.y / 1e6, m.verts[E.v[1]].p.x / 1e6, m.verts[E.v[1]].p.y / 1e6,
+                       b.nets[wires[laid[a.first].wire].net].name, hA.t, a.second, laid[a.first].hits.size(),
+                       b.nets[wires[laid[c.first].wire].net].name, hB.t, c.second, laid[c.first].hits.size(), f, bk);
+        }
         return r != 0 ? r > 0 : hA.t < hB.t;
       };
       for (size_t k = 1; k < list.size(); ++k)  // insertion sort: the order is pairwise, not a key

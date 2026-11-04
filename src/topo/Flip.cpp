@@ -105,13 +105,12 @@ bool planFlip(const Topology& t, const LayerMesh& m, int e, FlipPlan& plan, cons
     else if (s == eQA || s == eBQ) ev = {Cls::Q, posQ[cid]};
     return ev;
   };
-  // The end of a wire at an owner, as the quad vertex of that owner in triangle tx (or either).
-  auto endEv = [&](int owner, int tx) {
-    auto has = [&](int v) { return m.verts[v].owner == owner && (tx < 0 || m.localVertex(tx, v) >= 0); };
-    if (has(Q.a)) return Ev{Cls::A, 0};
-    if (has(Q.b)) return Ev{Cls::B, 0};
-    if (has(Q.p)) return Ev{Cls::P, atP};
-    if (has(Q.q)) return Ev{Cls::Q, atQ};
+  // The end of a wire, at the quad vertex it ends at.
+  auto endEv = [&](int vertex) {
+    if (vertex == Q.a) return Ev{Cls::A, 0};
+    if (vertex == Q.b) return Ev{Cls::B, 0};
+    if (vertex == Q.p) return Ev{Cls::P, atP};
+    if (vertex == Q.q) return Ev{Cls::Q, atQ};
     return Ev{};
   };
   auto triOfSide = [&](int s) { return s == eAP || s == eQA ? Q.t1 : s == ePB || s == eBQ ? Q.t2 : -1; };
@@ -132,20 +131,8 @@ bool planFlip(const Topology& t, const LayerMesh& m, int e, FlipPlan& plan, cons
     const Crossing& c = t.crossings[cid];
     const Wire& w = t.wires[c.wire];
     int i = c.idx;
-    // The event before, in the triangle on the other side from the event after.
-    Ev before, after;
-    int tAfter = -1;
-    if (i + 1 < int(w.cross.size())) {
-      after = crossingEv(w.cross[i + 1]);
-      tAfter = triOfSide(t.crossings[w.cross[i + 1]].edge);
-    }
-    int tBefore = -1;
-    if (i > 0) {
-      before = crossingEv(w.cross[i - 1]);
-      tBefore = triOfSide(t.crossings[w.cross[i - 1]].edge);
-    }
-    if (i == 0) before = endEv(w.end[0], tAfter == Q.t1 ? Q.t2 : tAfter == Q.t2 ? Q.t1 : -1);
-    if (i + 1 >= int(w.cross.size())) after = endEv(w.end[1], tBefore == Q.t1 ? Q.t2 : tBefore == Q.t2 ? Q.t1 : -1);
+    Ev before = i > 0 ? crossingEv(w.cross[i - 1]) : endEv(w.endVertex[0]);
+    Ev after = i + 1 < int(w.cross.size()) ? crossingEv(w.cross[i + 1]) : endEv(w.endVertex[1]);
     consider(c.wire, before, after, cid, i);
   }
   // Chords inside one of the two triangles, from a side crossing forward (or from an end backward).
@@ -164,15 +151,11 @@ bool planFlip(const Topology& t, const LayerMesh& m, int e, FlipPlan& plan, cons
           // Both on sides of tx: the chord is inside tx only if the two edges share tx (they do by I1).
           consider(c.wire, here, crossingEv(nc), -1, i + 1);
         }
-      } else {
-        Ev end = endEv(w.end[1], tx);
-        consider(c.wire, here, end, -1, i + 1);
+      } else if (m.localVertex(tx, w.endVertex[1]) >= 0) {
+        consider(c.wire, here, endEv(w.endVertex[1]), -1, i + 1);
       }
       // Backward only from an end: a crossing before is found from its own side.
-      if (i == 0) {
-        Ev end = endEv(w.end[0], tx);
-        consider(c.wire, end, here, -1, 0);
-      }
+      if (i == 0 && m.localVertex(tx, w.endVertex[0]) >= 0) consider(c.wire, endEv(w.endVertex[0]), here, -1, 0);
     }
   }
   // The wire along e, from p to q, now crosses the diagonal.

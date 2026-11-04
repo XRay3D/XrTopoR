@@ -1,10 +1,12 @@
 #include <gtest/gtest.h>
 
 #include <cstdio>
+#include <print>
 
 #include "core/Connectivity.h"
 #include "drc/Drc.h"
 #include "io/BoardIO.h"
+#include "router/topo/ModelTools.h"
 #include "router/topo/Optimizer.h"
 #include "router/topo/Wires.h"
 #include "router/topo/Refine.h"
@@ -112,4 +114,32 @@ TEST(Optimizer, RelaxationClearsViasOffPads) {
   DrcOptions d;
   d.unconnected = false;
   for (const DrcViolation& v : runDrc(b, d)) EXPECT_LT(v.required - v.actual, 50000.0) << v.message;
+}
+
+// F5 on the model draws the reference boards no worse than F5 on the tracks (arz_2L apart). Not a fixed
+// point yet: the realiser reads the order of the wires and their exits from the pads out of the sketch
+// again, and a board re-laid from its own result gathers a few violations per pass (arz_2L 16, 21, 42) —
+// what passing the model's crossings to the realiser directly is for.
+TEST(Realizer, ModelReshapeDrawsTheReferenceBoards) {
+  struct Expect { const char* file; int conflicts; };
+  for (Expect x : {Expect{"topor/Example_03/arz_2L.fst", 16}, Expect{"topor/Example_03/arz_4L.fst", 10}, Expect{"topor/Example_04/Arcs_master.pcb", 18}}) {
+    const char* name = x.file;
+    auto lb = io::loadBoard(data(name));
+    ASSERT_TRUE(lb.has_value()) << name;
+    Board& b = **lb;
+    std::vector<int> conflictsAt;
+    std::vector<double> lengthAt;
+    for (int pass = 0; pass < 3; ++pass) {
+      topo::Topology::assignIds(b);
+      topo::Topology t;
+      t.build(b);
+      auto res = topo::runF5Model(b, t);
+      ASSERT_TRUE(res.drawn) << name << " pass " << pass;
+      conflictsAt.push_back(conflicts(b));
+      lengthAt.push_back(length(b));
+    }
+    std::println("{}: conflicts {} {} {}, length {:.1f} {:.1f} {:.1f} mm", name, conflictsAt[0], conflictsAt[1], conflictsAt[2], lengthAt[0] / 1e6,
+                 lengthAt[1] / 1e6, lengthAt[2] / 1e6);
+    EXPECT_LE(conflictsAt[0], x.conflicts) << name;
+  }
 }
