@@ -44,6 +44,8 @@ target_link_libraries(xrdrc PUBLIC xrcore)
 add_library(xrtopo STATIC
   topo/Capacity.cpp
   topo/Cdt.cpp
+  topo/Chains.cpp
+  topo/Convert.cpp
   topo/Flip.cpp
   topo/Topology.cpp
 )

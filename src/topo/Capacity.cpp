@@ -24,6 +24,8 @@ EdgeCapacity edgeCapacity(const Topology& t, const LayerMesh& m, int e) {
   c.reachU = std::max(0.0, ou.shape.rayExit(U.p, dir));
   c.reachV = std::max(0.0, ov.shape.rayExit(V.p, dir * -1.0));
   if (U.owner == V.owner) c.reachU = c.reachV = c.L / 2;  // inside one owner: no room for anybody else
+  if (E.along >= 0 && !E.cross.empty() && t.wires[t.crossings[E.cross[0]].wire].net != t.wires[E.along].net)
+    c.reachU = c.reachV = c.L / 2;  // a wire runs along it: no room for another net across
   c.freeLen = c.L - c.reachU - c.reachV;
   const int n = int(E.cross.size());
   c.a.assign(n, 0);

@@ -1,12 +1,17 @@
 // The topological model: owners, the mesh of every layer, and what the tools do with them.
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <print>
 #include <set>
 #include <string>
 
+#include "core/SpatialIndex.h"
 #include "io/BoardIO.h"
 #include "topo/Capacity.h"
+#include "topo/Chains.h"
 #include "topo/Flip.h"
 #include "topo/Topology.h"
 
@@ -245,5 +250,170 @@ TEST(Topo, CapacityIsTheRealisersPacking) {
     auto c = topo::edgeCapacity(t, t.layers[0], 0);
     EXPECT_EQ(c.cls, 0);
     EXPECT_EQ(c.need, 0);
+  }
+}
+
+namespace {
+
+struct Counts {
+  int crossing = 0, throughPad = 0, outside = 0, overflow = 0;
+};
+Counts countViolations(const topo::Topology& t) {
+  Counts c;
+  for (const topo::Violation& v : t.violations) {
+    using K = topo::Violation::Kind;
+    (v.kind == K::Crossing ? c.crossing : v.kind == K::ThroughPad ? c.throughPad : v.kind == K::OutsideBoard ? c.outside : c.overflow)++;
+  }
+  return c;
+}
+
+}  // namespace
+
+TEST(Topo, ConvertsReferenceBoards) {
+  struct Expect { const char* file; int crossing, throughPad, outside; };
+  for (Expect x : {Expect{"topor/Example_04/Arcs_master.pcb", 0, 0, 0}, Expect{"topor/Example_03/arz_standard_routing.fst", 0, 0, 0},
+                   Expect{"topor/Example_03/arz_2L.fst", 0, 0, 0}, Expect{"topor/Example_03/arz_4L.fst", 0, 0, 0}}) {
+    auto lb = io::loadBoard(data(x.file));
+    ASSERT_TRUE(lb.has_value()) << x.file;
+    Board& b = **lb;
+    topo::Topology::assignIds(b);
+    topo::Topology t;
+    auto t0 = std::chrono::steady_clock::now();
+    t.build(b);
+    double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    EXPECT_EQ(t.check(), std::vector<std::string>{}) << x.file;
+    std::vector<char> all(b.tracks.size(), 1);
+    auto g = topo::wireGraph(b, all);
+    auto chains = topo::wireChains(b, g, all, topo::OwnCopper(b));
+    std::erase_if(chains, [](const topo::WireChain& c) { return c.closed; });
+    // Chains lying inside the copper they start and end on are that copper, not wires.
+    topo::OwnCopper own(b);
+    size_t real = 0;
+    for (const topo::WireChain& c : chains) {
+      auto r0 = own.at(c.a(), c.net, c.layer), r1 = own.at(c.b(), c.net, c.layer);
+      bool inside = r0 && r1 && *r0 == *r1;
+      for (size_t k = 0; inside && k < c.path.size(); ++k)
+        inside = std::ranges::any_of(itemShapes(b, *r0), [&](const Shape& s) { return s.contains(c.path[k]); });
+      real += !inside;
+    }
+    EXPECT_EQ(t.wires.size(), real) << x.file;
+    Counts c = countViolations(t);
+    std::println("{}: {} of {} chains are wires, {} crossings, {} junctions, {:.0f} ms; violations: crossing {}, through pad {}, outside {}, overflow {}",
+                 x.file, t.wires.size(), chains.size(), t.crossings.size(), t.junctions.size(), ms, c.crossing, c.throughPad, c.outside, c.overflow);
+    EXPECT_EQ(c.crossing, x.crossing) << x.file;
+    EXPECT_EQ(c.throughPad, x.throughPad) << x.file;
+    EXPECT_EQ(c.outside, x.outside) << x.file;
+    for (const topo::Wire& w : t.wires) EXPECT_FALSE(w.cross.empty() && w.end[0] == w.end[1]) << x.file;
+  }
+}
+
+namespace {
+
+// Two nets, two pads each, on one layer 30 x 30 mm.
+Board crossBoard(bool crossing) {
+  Board b;
+  LayerId top = b.addLayer("Top", LayerKind::Copper, Side::Top);
+  b.layers[top].copperIndex = 0;
+  auto mm = [](double x, double y) { return Vec2{x * kNmPerMm, y * kNmPerMm}; };
+  b.outline.push_back({mm(0, 0), mm(30, 0), mm(30, 30), mm(0, 30)});
+  int A = b.addNet("A"), B = b.addNet("B");
+  Component c;
+  c.ref = "U1";
+  b.components.push_back(c);
+  auto pad = [&](Vec2 at, int net) {
+    Pad p;
+    p.number = std::to_string(b.pads.size());
+    p.component = 0;
+    p.net = net;
+    p.pos = Point(at);
+    p.shape.w = p.shape.h = mmToNm(1.0);
+    p.copper = LayerMask(1) << top;
+    b.pads.push_back(p);
+  };
+  auto track = [&](Vec2 p, Vec2 q, int net) {
+    Track t;
+    t.a = Point(p);
+    t.b = Point(q);
+    t.width = mmToNm(0.3);
+    t.layer = top;
+    t.net = net;
+    b.tracks.push_back(t);
+  };
+  pad(mm(5, 15), A);
+  pad(mm(25, 15), A);
+  pad(mm(15, 5), B);
+  pad(mm(15, 25), B);
+  track(mm(5, 15), mm(25, 15), A);
+  if (crossing) track(mm(15, 5), mm(15, 25), B);
+  else track(mm(15, 5), mm(15, 12), B), track(mm(15, 12), mm(3, 12), B), track(mm(3, 12), mm(3, 18), B), track(mm(3, 18), mm(15, 18), B), track(mm(15, 18), mm(15, 25), B);
+  return b;
+}
+
+}  // namespace
+
+TEST(Topo, DetectsCrossing) {
+  {
+    Board b = crossBoard(true);
+    topo::Topology t;
+    t.build(b);
+    Counts c = countViolations(t);
+    EXPECT_EQ(c.crossing, 1);
+    ASSERT_FALSE(t.violations.empty());
+    const topo::Violation& v = t.violations.front();
+    EXPECT_EQ(v.kind, topo::Violation::Kind::Crossing);
+    EXPECT_NE(t.wires[v.wireA].net, t.wires[v.wireB].net);
+    EXPECT_NEAR(v.pos.x, 15 * kNmPerMm, 0.5 * kNmPerMm);
+    EXPECT_NEAR(v.pos.y, 15 * kNmPerMm, 0.5 * kNmPerMm);
+  }
+  {
+    Board b = crossBoard(false);  // B goes round A's pad: no crossing, one wire each
+    topo::Topology t;
+    t.build(b);
+    EXPECT_EQ(countViolations(t).crossing, 0);
+    EXPECT_EQ(t.check(), std::vector<std::string>{});
+    EXPECT_EQ(t.wires.size(), 2u);
+  }
+}
+
+TEST(Topo, ThroughForeignPad) {
+  // A wire of net A drawn straight through an oval pad of net C lying across its way.
+  auto board = [](bool locked) {
+    Board b = crossBoard(false);
+    b.tracks.clear();
+    Pad p;
+    p.number = "c";
+    p.component = 0;
+    p.net = b.addNet("C");
+    p.pos = Point(Vec2{15 * kNmPerMm, 15 * kNmPerMm});
+    p.shape.kind = PadShapeKind::Oval;
+    p.shape.w = mmToNm(0.8);
+    p.shape.h = mmToNm(3.0);
+    p.copper = 1;
+    b.pads.push_back(p);
+    Track t;
+    t.a = Point(Vec2{5 * kNmPerMm, 15 * kNmPerMm});
+    t.b = Point(Vec2{25 * kNmPerMm, 15 * kNmPerMm});
+    t.width = mmToNm(0.3);
+    t.layer = 0;
+    t.net = 0;
+    t.locked = locked;
+    b.tracks.push_back(t);
+    return b;
+  };
+  {
+    topo::Topology t;
+    t.build(board(true));  // locked where it lies: through the pad, a violation
+    Counts c = countViolations(t);
+    EXPECT_GE(c.throughPad, 1);
+    EXPECT_EQ(c.crossing, 0);
+  }
+  {
+    topo::Topology t;
+    t.build(board(false));  // pushed out of the pad: laid round it
+    Counts c = countViolations(t);
+    EXPECT_EQ(c.throughPad, 0);
+    EXPECT_EQ(t.check(), std::vector<std::string>{});
+    ASSERT_EQ(t.wires.size(), 1u);
+    EXPECT_GT(t.wires[0].cross.size(), 0u);
   }
 }

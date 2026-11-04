@@ -54,6 +54,7 @@ struct Edge {
   int v[2] = {-1, -1};  // v[0] < v[1]
   int t[2] = {-1, -1};  // triangles (-1: hull)
   bool constrained = false;  // outline, keepout boundary: never flipped, never crossed
+  int along = -1;            // the wire that runs along the edge between its two end owners, if one does
   std::vector<int> cross;    // crossing ids, in order from v[0] to v[1]
   // Capacity (Capacity.h), recomputed when the end owners move or `cross` changes.
   double freeLen = 0;
@@ -120,6 +121,8 @@ struct Violation {
   double deficit = 0;
 };
 
+struct BuildScratch;  // what buildOwners hands to buildMeshes (Topology.cpp)
+
 struct Topology {
   std::vector<Owner> owners;
   std::vector<Junction> junctions;
@@ -128,8 +131,10 @@ struct Topology {
   std::vector<Crossing> crossings;
   std::vector<Violation> violations;
   uint64_t boardHash = 0;
+  std::vector<int> padOwner, viaOwner;  // board index -> owner (-1: none)
 
-  // The owners and the meshes from the board: pads, vias, outline and keepouts; no wires yet.
+  // The model from the board: the owners (pads, vias, the outline's and the keepouts' points, the
+  // branch points and free ends of the tracks), the meshes, and the tracks as wires on them.
   void build(const Board& b);
   // Gives every track and via without an id one.
   static void assignIds(Board& b);
@@ -138,8 +143,17 @@ struct Topology {
   LayerMesh* mesh(LayerId layer);
   Vec2 vertexPos(const LayerMesh& m, int v) const { return m.verts[v].p; }
   void placeVertex(LayerMesh& m, int v) const;  // refreshes the cached position from the owner
-  // Checks the mesh invariants (orientation, neighbours, edges, vertex lists). Returns what is wrong.
+  // The vertex of the owner on the layer nearest p.
+  int nearestVertex(const LayerMesh& m, int owner, Vec2 p) const;
+  // Checks the invariants: the meshes (orientation, neighbours, edges, vertex lists) and the wires (every
+  // consecutive pair of crossings on one triangle, the ends at their owners, the edge lists and the wires'
+  // lists agreeing). Returns what is wrong.
   std::vector<std::string> check() const;
+
+ private:
+  void buildOwners(const Board& b, BuildScratch& s);
+  void buildMeshes(const Board& b, BuildScratch& s);
+  void convertWires(const Board& b, BuildScratch& s);
 };
 
 }  // namespace xr::topo

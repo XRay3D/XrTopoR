@@ -3,8 +3,10 @@
 #include <algorithm>
 #include <cmath>
 #include <format>
+#include <limits>
 #include <map>
 
+#include "topo/Build.h"
 #include "topo/Cdt.h"
 
 namespace xr::topo {
@@ -113,9 +115,16 @@ void Topology::build(const Board& b) {
   wires.clear();
   crossings.clear();
   violations.clear();
+  BuildScratch scratch;
+  buildOwners(b, scratch);
+  convertWires(b, scratch);  // adds the junction owners, builds the meshes, lays the wires on them
+}
+
+void Topology::buildOwners(const Board& b, BuildScratch& scratch) {
   const LayerMask cuMask = b.allCopperMask();
-  // Per owner: the fixed corners of a custom pad (empty for the others).
-  std::vector<std::vector<Vec2>> corners;
+  std::vector<std::vector<Vec2>>& corners = scratch.corners;
+  padOwner.assign(b.pads.size(), -1);
+  viaOwner.assign(b.vias.size(), -1);
   auto add = [&](Owner o) {
     owners.push_back(std::move(o));
     corners.emplace_back();
@@ -135,7 +144,7 @@ void Topology::build(const Board& b) {
       o.halfWidth = p.drill / 2.0;
       o.shape = Shape::circle(o.c, o.halfWidth);
       o.layers = cuMask;
-      add(std::move(o));
+      padOwner[pi] = add(std::move(o));
       continue;
     }
     o.shape = p.shapeGeom();
@@ -144,6 +153,7 @@ void Topology::build(const Board& b) {
     padGeometry(o.shape, o, cs);
     int id = add(std::move(o));
     corners[id] = std::move(cs);
+    padOwner[pi] = id;
   }
   for (int vi = 0; vi < int(b.vias.size()); ++vi) {
     const Via& v = b.vias[vi];
@@ -157,13 +167,13 @@ void Topology::build(const Board& b) {
     o.shape = Shape::circle(o.c, o.halfWidth);
     o.layers = v.layers & cuMask;
     o.locked = v.locked;
-    add(std::move(o));
+    viaOwner[vi] = add(std::move(o));
   }
   // The outline, subdivided so that the edge clearance is sampled densely enough, and the keepouts.
   double viaDia = 0;
   for (const NetClass& nc : b.netClasses) viaDia = std::max(viaDia, double(nc.viaDiameter));
   const double pitch = std::max(1.2 * (viaDia + double(b.maxClearance())), 1.0 * kNmPerMm);
-  std::vector<std::pair<int, int>> outlineLinks;  // owner pairs
+  std::vector<std::pair<int, int>>& outlineLinks = scratch.outlineLinks;
   auto outlineLoop = [&](const Polyline& loop) {
     int first = -1, prev = -1;
     for (Vec2 p : subdivide(loop, true, pitch)) {
@@ -188,12 +198,7 @@ void Topology::build(const Board& b) {
       outlineLoop({{ob.minX, ob.minY}, {ob.maxX, ob.minY}, {ob.maxX, ob.maxY}, {ob.minX, ob.maxY}});
     }
   }
-  struct KeepoutLoop {
-    LayerMask layers;
-    std::vector<int> owners;
-    bool area;
-  };
-  std::vector<KeepoutLoop> keepoutLoops;
+  std::vector<KeepoutLoop>& keepoutLoops = scratch.keepoutLoops;
   for (const Keepout& k : b.keepouts) {
     if (k.role != Keepout::Role::Route || !k.wires) continue;
     LayerMask layers = (k.layers ? k.layers : cuMask) & cuMask;
@@ -214,7 +219,18 @@ void Topology::build(const Board& b) {
       keepoutLoops.push_back(std::move(kl));
     }
   }
+}
 
+void Topology::buildMeshes(const Board& b, BuildScratch& scratch) {
+  const std::vector<std::vector<Vec2>>& corners = scratch.corners;
+  const std::vector<std::pair<int, int>>& outlineLinks = scratch.outlineLinks;
+  const std::vector<KeepoutLoop>& keepoutLoops = scratch.keepoutLoops;
+  auto add = [&](Owner o) {
+    owners.push_back(std::move(o));
+    scratch.corners.emplace_back();
+    return int(owners.size() - 1);
+  };
+  layers.clear();
   // One mesh per copper layer, of the owners on it.
   for (LayerId layer : b.copperLayers()) {
     LayerMesh m;
@@ -241,7 +257,8 @@ void Topology::build(const Board& b) {
         vertex(oi, -1, {});
         vertex(oi, 1, {});
       }
-      for (Vec2 c : corners[oi]) vertex(oi, 0, c);
+      if (oi < int(corners.size()))
+        for (Vec2 c : corners[oi]) vertex(oi, 0, c);
     }
     auto only = [&](int owner) { return m.ownerVerts[owner].front(); };
     for (auto [a, c] : outlineLinks) {
@@ -337,6 +354,17 @@ void Topology::build(const Board& b) {
   }
 }
 
+int Topology::nearestVertex(const LayerMesh& m, int owner, Vec2 p) const {
+  int best = -1;
+  double bd = std::numeric_limits<double>::max();
+  for (int v : m.ownerVerts[owner])
+    if (double d = (m.verts[v].p - p).len2(); d < bd) {
+      bd = d;
+      best = v;
+    }
+  return best;
+}
+
 std::vector<std::string> Topology::check() const {
   std::vector<std::string> bad;
   auto fail = [&](const LayerMesh& m, std::string what) {
@@ -370,6 +398,42 @@ std::vector<std::string> Topology::check() const {
     for (int v = 0; v < int(m.verts.size()); ++v)
       for (int ti : m.verts[v].tris)
         if (m.localVertex(ti, v) < 0 || !m.tris[ti].inside) fail(m, std::format("vertex {} lists triangle {} it is not in", v, ti));
+    // The edges' crossing lists agree with the crossings.
+    for (int e = 0; e < int(m.edges.size()); ++e)
+      for (int cid : m.edges[e].cross) {
+        if (cid < 0 || cid >= int(crossings.size()) || crossings[cid].edge != e) { fail(m, std::format("edge {} lists crossing {} of another edge", e, cid)); continue; }
+        const Wire& w = wires[crossings[cid].wire];
+        if (w.layer != m.layer) fail(m, std::format("edge {} carries wire {} of another layer", e, crossings[cid].wire));
+        if (crossings[cid].idx < 0 || crossings[cid].idx >= int(w.cross.size()) || w.cross[crossings[cid].idx] != cid)
+          fail(m, std::format("crossing {} is not where wire {} says", cid, crossings[cid].wire));
+      }
+  }
+  // The wires: every consecutive pair of crossings on one triangle, the first and the last next to the
+  // end owners' vertices.
+  for (int wi = 0; wi < int(wires.size()); ++wi) {
+    const Wire& w = wires[wi];
+    const LayerMesh* mp = mesh(w.layer);
+    if (!mp) { bad.push_back(std::format("wire {} on no layer", wi)); continue; }
+    const LayerMesh& m = *mp;
+    auto triOwner = [&](int t, int owner) {
+      if (t < 0) return false;
+      for (int i = 0; i < 3; ++i)
+        if (m.verts[m.tris[t].v[i]].owner == owner) return true;
+      return false;
+    };
+    for (size_t k = 0; k < w.cross.size(); ++k) {
+      int cid = w.cross[k];
+      if (cid < 0 || cid >= int(crossings.size()) || crossings[cid].wire != wi) { bad.push_back(std::format("wire {} lists crossing {} that is not its", wi, cid)); break; }
+      const Edge& E = m.edges[crossings[cid].edge];
+      if (!std::ranges::contains(E.cross, cid)) bad.push_back(std::format("edge {} does not list crossing {} of wire {}", crossings[cid].edge, cid, wi));
+      if (k + 1 < w.cross.size()) {
+        const Edge& N = m.edges[crossings[w.cross[k + 1]].edge];
+        bool share = (E.t[0] >= 0 && (E.t[0] == N.t[0] || E.t[0] == N.t[1])) || (E.t[1] >= 0 && (E.t[1] == N.t[0] || E.t[1] == N.t[1]));
+        if (!share) bad.push_back(std::format("wire {}: crossings {} and {} share no triangle", wi, k, k + 1));
+      }
+      if (k == 0 && !triOwner(E.t[0], w.end[0]) && !triOwner(E.t[1], w.end[0])) bad.push_back(std::format("wire {} does not start at its end owner", wi));
+      if (k + 1 == w.cross.size() && !triOwner(E.t[0], w.end[1]) && !triOwner(E.t[1], w.end[1])) bad.push_back(std::format("wire {} does not end at its end owner", wi));
+    }
   }
   return bad;
 }
