@@ -11,6 +11,8 @@
 
 namespace xr::edit {
 
+constexpr double kJoinTol = 1000;  // 1 µm: track ends closer than this meet in one vertex
+
 struct Fragment {
   std::vector<int> components, tracks, vias, zones;
   std::vector<int> keepouts, texts, details;  // details: board drawings (Board::graphics), the outline among them
@@ -47,6 +49,8 @@ bool hasLocked(const Board& b, const Fragment& f);
 std::vector<std::pair<int, int>> endsAt(const Board& b, Vec2 p, LayerId layer, int net);
 // A pad or via of the net that a track end at `p` on `layer` is attached to.
 bool anchoredAt(const Board& b, Vec2 p, LayerId layer, int net);
+// The unlocked tracks of `net` on the given layers with an end inside `shape`, as a mask over the tracks.
+std::vector<char> attachedTo(const Board& b, const Shape& shape, LayerMask layers, int net);
 
 // Moves the fragment; fragments with locked objects are not moved (false). Wires stay connected:
 //  - an end of an unmoved track lying on a moved pad, via or track end goes along (the track

@@ -22,12 +22,7 @@ int conflicts(const Board& b) {
   return int(runDrc(b, o).size());
 }
 
-double length(const Board& b) {
-  double l = 0;
-  for (auto& t : b.tracks)
-    l += t.isArc() ? ArcGeom::fromThreePoints(t.a.v(), t.mid->v(), t.b.v()).length() : (t.b.v() - t.a.v()).len();
-  return l;
-}
+double length(const Board& b) { return b.tracksLength(); }
 
 }  // namespace
 

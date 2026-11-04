@@ -209,4 +209,22 @@ Polyline ArcGeom::tessellate(double tol) const {
   return out;
 }
 
+
+Vec2 geometricMedian(const Polyline& pts, Vec2 start) {
+  Vec2 p = start;
+  for (int it = 0; it < 20; ++it) {
+    Vec2 num{};
+    double den = 0;
+    for (Vec2 q : pts) {
+      double d = std::max((q - p).len(), 1.0);
+      num = num + q / d;
+      den += 1.0 / d;
+    }
+    Vec2 next = num / den;
+    bool settled = (next - p).len() < 100;
+    p = next;
+    if (settled) break;
+  }
+  return p;
+}
 }  // namespace xr

@@ -62,13 +62,6 @@ const QString kBoardFilter = QObject::tr(
 const QString kSaveFilter = QObject::tr(
     "TopoR PCB (*.fst);;KiCad (*.kicad_pcb);;P-CAD ASCII (*.pcb);;Specctra DSN (*.dsn);;Specctra SES (*.ses)");
 
-double totalLength(const Board& b) {
-  double l = 0;
-  for (auto& t : b.tracks)
-    l += t.isArc() ? ArcGeom::fromThreePoints(t.a.v(), t.mid->v(), t.b.v()).length() : (t.b.v() - t.a.v()).len();
-  return l;
-}
-
 }  // namespace
 
 MainWindow::MainWindow()
@@ -621,7 +614,7 @@ void MainWindow::updateStatus() {
   const Board& b = *doc_->board();
   Unit u = doc_->unit();
   stMain_->setText(tr("Редактор топологии: %1 %2, переходов: %3, нарушений: %4")
-                       .arg(formatLength(totalLength(b), u, 1))
+                       .arg(formatLength(b.tracksLength(), u, 1))
                        .arg(unitName(u))
                        .arg(b.vias.size())
                        .arg(doc_->drc().size()));
@@ -1130,7 +1123,7 @@ void MainWindow::describeSelection() {
         // TopoR's Status_Wire: «%1 Сегмент: dx:%2, dy:%3. Длина сегмента: %4 [%5]».
         const Track& t = b.tracks[r.index];
         Vec2 d = t.b.v() - t.a.v();
-        double l = t.isArc() ? ArcGeom::fromThreePoints(t.a.v(), t.mid->v(), t.b.v()).length() : d.len();
+        double l = t.length();
         text = tr("%1 Сегмент: dx:%2, dy:%3. Длина сегмента: %4 [%5]")
                    .arg(netName(t.net), len(std::abs(d.x)), len(std::abs(d.y)), len(l), unitName(u));
         break;

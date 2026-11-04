@@ -53,8 +53,7 @@ struct RealizeOptions {
   // (via sites and other layers' pads as transparent points), so that a wire crosses exactly the edges
   // the topology put it on and the slots on those edges hold what the capacity said they hold.
   const TopoMesh* mesh = nullptr;
-  // Existing board tracks of other nets act as obstacles (manual re-shaping of a few wires);
-  // the autorouter realises all wires at once and leaves this off.
+  // Existing board tracks of other nets act as obstacles.
   bool tracksAsObstacles = false;
   // Only obstacles intersecting this box are considered (local re-shaping); outline always is.
   std::optional<BBox> region;

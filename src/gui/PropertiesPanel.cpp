@@ -19,10 +19,6 @@ namespace xr::gui {
 
 namespace {
 
-double trackLength(const Track& t) {
-  return t.isArc() ? ArcGeom::fromThreePoints(t.a.v(), t.mid->v(), t.b.v()).length() : (t.b.v() - t.a.v()).len();
-}
-
 // The value all objects share, if any.
 template <class T, class F>
 std::optional<T> common(const std::vector<int>& idx, F&& get) {
@@ -371,7 +367,7 @@ QWidget* PropertiesPanel::wirePage(const std::vector<int>& tracks) {
   auto net = common<int>(tracks, [&](int t) { return b.tracks[t].net; });
   f->addRow(tr("Цепь:"), new QLabel(net && *net >= 0 ? QString::fromStdString(b.nets[*net].name) : QString()));
   double total = 0;
-  for (int t : tracks) total += trackLength(b.tracks[t]);
+  for (int t : tracks) total += b.tracks[t].length();
   f->addRow(tr("Длина:"), new QLabel(formatLength(total, u, 3) + " " + unitName(u)));
   auto* layer = new QComboBox;
   auto cu = b.copperLayers();

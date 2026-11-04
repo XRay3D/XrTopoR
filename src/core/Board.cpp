@@ -37,6 +37,16 @@ Polyline Track::path(double tol) const {
   return g.tessellate(tol);
 }
 
+double Track::length() const {
+  return mid ? ArcGeom::fromThreePoints(a.v(), mid->v(), b.v()).length() : (b.v() - a.v()).len();
+}
+
+double Board::tracksLength() const {
+  double l = 0;
+  for (const Track& t : tracks) l += t.length();
+  return l;
+}
+
 LayerList Board::copperLayers() const {
   LayerList out;
   for (LayerId i = 0; i < LayerId(layers.size()); ++i)

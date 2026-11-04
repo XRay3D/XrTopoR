@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 
+#include "core/Edit.h"
 #include "core/SpatialIndex.h"
 #include "drc/Drc.h"
 #include "router/topo/Realizer.h"
@@ -30,11 +31,8 @@ struct Mover {
 
 void markAttached(const Board& b, const Shape& s, LayerMask layers, int net, std::vector<char>& chosen) {
   chosen.resize(b.tracks.size(), 0);
-  for (size_t i = 0; i < b.tracks.size(); ++i) {
-    const Track& t = b.tracks[i];
-    if (t.net == net && ((layers >> t.layer) & 1) && !t.locked && (s.contains(t.a.v()) || s.contains(t.b.v())))
-      chosen[i] = 1;
-  }
+  auto m = edit::attachedTo(b, s, layers, net);
+  for (size_t i = 0; i < m.size(); ++i) chosen[i] |= m[i];
 }
 
 std::vector<Mover> moversOf(const Board& b, const std::vector<int>& comps, const std::vector<int>& vias) {

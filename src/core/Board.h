@@ -118,6 +118,7 @@ struct Track {
   bool edited = false;  // changed by hand since the last shape computation (F5 re-lays these first)
   bool isArc() const { return mid.has_value(); }
   Polyline path(double tol = 2000) const;  // centreline points
+  double length() const;                   // along the centreline, nm
 };
 
 struct Via {
@@ -209,6 +210,7 @@ struct Board {
   std::optional<DesignRules> rules;        // TopoR-style rules the classes are compiled from, if any
 
   // Layers
+  double tracksLength() const;     // of all tracks, nm
   LayerList copperLayers() const;  // top to bottom
   int copperCount() const;
   LayerId findLayer(const std::string& name) const;

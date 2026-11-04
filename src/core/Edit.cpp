@@ -12,8 +12,6 @@ namespace xr::edit {
 
 namespace {
 
-constexpr double kJoinTol = 1000;  // 1 µm: track ends closer than this meet in one vertex
-
 double normDeg(double a) {
   a = std::fmod(a, 360.0);
   return a < 0 ? a + 360.0 : a;
@@ -165,6 +163,16 @@ std::vector<std::pair<int, int>> endsAt(const Board& b, Vec2 p, LayerId layer, i
 bool anchoredAt(const Board& b, Vec2 p, LayerId layer, int net) {
   return std::ranges::any_of(b.pads, [&](const Pad& pad) { return onPad(pad, p, layer, net); }) ||
          std::ranges::any_of(b.vias, [&](const Via& v) { return onVia(v, p, layer, net); });
+}
+
+std::vector<char> attachedTo(const Board& b, const Shape& shape, LayerMask layers, int net) {
+  std::vector<char> m(b.tracks.size(), 0);
+  for (size_t i = 0; i < b.tracks.size(); ++i) {
+    const Track& t = b.tracks[i];
+    if (t.net != net || !((layers >> t.layer) & 1) || t.locked) continue;
+    if (shape.contains(t.a.v()) || shape.contains(t.b.v())) m[i] = 1;
+  }
+  return m;
 }
 
 bool move(Board& b, const Fragment& f, const Motion& m) {

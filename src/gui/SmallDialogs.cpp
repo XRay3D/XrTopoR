@@ -210,7 +210,7 @@ void showCopperArea(QWidget* parent, Document* doc) {
         for (auto& f : z.filled) zones += std::abs(polygonArea(f));
     for (auto& tr : b.tracks)
       if (tr.layer == l) {
-        double len = tr.isArc() ? ArcGeom::fromThreePoints(tr.a.v(), tr.mid->v(), tr.b.v()).length() : (tr.b.v() - tr.a.v()).len();
+        double len = tr.length();
         wires += len * double(tr.width) + kPi * tr.width * tr.width / 4;
       }
     for (auto& p : b.pads)

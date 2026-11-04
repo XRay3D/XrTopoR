@@ -13,11 +13,6 @@ namespace xr::io {
 
 namespace {
 
-double trackLength(const Track& t) {
-  if (t.isArc()) return ArcGeom::fromThreePoints(t.a.v(), t.mid->v(), t.b.v()).length();
-  return (t.b.v() - t.a.v()).len();
-}
-
 // Natural order for reference designators: R2 before R10.
 bool refLess(const std::string& a, const std::string& b) {
   auto split = [](const std::string& s) {
@@ -38,7 +33,7 @@ std::string routingReport(const Board& b) {
   std::string out;
   BBox bb = b.bbox();
   double total = 0;
-  for (auto& t : b.tracks) total += trackLength(t);
+  for (auto& t : b.tracks) total += t.length();
   int arcs = int(std::ranges::count_if(b.tracks, [](const Track& t) { return t.isArc(); }));
   out += std::format("Board: {}\n", b.name);
   out += std::format("Size: {:.2f} x {:.2f} mm, {} copper layer(s)\n", bb.width() / kNmPerMm, bb.height() / kNmPerMm,
@@ -54,7 +49,7 @@ std::string routingReport(const Board& b) {
     int n = 0;
     for (auto& t : b.tracks)
       if (t.layer == l) {
-        len += trackLength(t);
+        len += t.length();
         ++n;
       }
     out += std::format("{:<20}{:>8}{:>13.1f}{}\n", b.layers[l].name, n, len / 1e6, b.layers[l].plane ? "  (plane)" : "");
@@ -66,7 +61,7 @@ std::string routingReport(const Board& b) {
   };
   std::vector<NetStat> nets(b.nets.size());
   for (auto& t : b.tracks)
-    if (t.net >= 0) nets[t.net].length += trackLength(t);
+    if (t.net >= 0) nets[t.net].length += t.length();
   for (auto& v : b.vias)
     if (v.net >= 0) nets[v.net].vias++;
   for (auto& p : b.pads)

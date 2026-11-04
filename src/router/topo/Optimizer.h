@@ -25,9 +25,6 @@ struct OptimizeOptions {
   bool relax = false;
   double relaxTol = 1.0 * kNmPerMm;    // first step limit
   double relaxFloor = 0.01 * kNmPerMm;  // the loop ends below this
-  // Every re-lay after a move takes the chains of the other nets' wires this close along: a chain
-  // laid alone against fixed neighbours loses its nesting with them (0: the moved chains only).
-  double relayAround = 0;  // (measured worse: see Realizer.h on `around`)
   int iterations = 3;
   double step = 0.4 * kNmPerMm;  // first trial displacement; halved every iteration
   bool vias = true;

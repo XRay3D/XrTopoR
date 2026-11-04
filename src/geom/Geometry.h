@@ -95,6 +95,9 @@ double distPointPolygon(Vec2 p, const Polyline& poly);
 double distSegmentPolygon(Vec2 a, Vec2 b, const Polyline& poly);
 double distPolygonPolygon(const Polyline& a, const Polyline& b);
 
+// The point with the least sum of distances to `pts` (Weiszfeld's iteration from `start`).
+Vec2 geometricMedian(const Polyline& pts, Vec2 start);
+
 // Circular arc defined by start, mid and end points.
 struct ArcGeom {
   Vec2 center;

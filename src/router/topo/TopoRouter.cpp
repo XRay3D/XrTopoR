@@ -2272,11 +2272,7 @@ std::vector<int> Router::realizeAll() {
   int narrowed = narrowToFit(b_, before);
   res_.vias = int(vias.size());
   res_.length = 0;
-  for (size_t i = before; i < b_.tracks.size(); ++i) {
-    const Track& t = b_.tracks[i];
-    if (t.isArc()) res_.length += ArcGeom::fromThreePoints(t.a.v(), t.mid->v(), t.b.v()).length();
-    else res_.length += (t.b.v() - t.a.v()).len();
-  }
+  for (size_t i = before; i < b_.tracks.size(); ++i) res_.length += b_.tracks[i].length();
   res_.log.push_back(std::format("realised {} wires ({} alive of {} total), {} arcs, {} narrowed crossings, {} tracks narrowed to fit, {} overflowed edges, {} apexes dropped, {} guard bends",
                                  st.wires, wires.size(), s_.wires.size(), st.arcs, st.narrowed, narrowed, st.overflowEdges, st.droppedApexes, st.guardBends));
   return st.trackWire;

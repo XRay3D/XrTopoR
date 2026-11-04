@@ -124,16 +124,6 @@ std::unique_ptr<CDT> triangulate(const LayerObstacles& ob, int skipNet) {
   return cdt;
 }
 
-struct Portal {
-  int l, r;  // obstacle ids (or kStart/kEnd)
-};
-
-struct Apex {
-  int id;      // obstacle id
-  int side;    // +1 obstacle on the left (path turns counter-clockwise), -1 on the right
-  int portal;  // index in the full portal list (start = 0)
-};
-
 // Where a sketch crosses the edges of a triangulation (cancelled back-and-forth crossings removed).
 struct EdgeHit {
   int u, v;     // obstacle ids, u < v
@@ -1534,14 +1524,16 @@ ChainVertices chainVertices(const Board& b, const std::vector<char>& chosen, dou
   return cv;
 }
 
+// Track j goes on the chain of track i. A width change ends the chain too: a 0.8 mm bus and its 0.3 mm
+// branch to a pad are two wires (one wire took the bus width all the way to the pad: 0.1 mm from the
+// neighbouring pads).
+bool sameChain(const Board& b, int i, int j) {
+  return b.tracks[i].net == b.tracks[j].net && b.tracks[i].layer == b.tracks[j].layer && !b.tracks[j].locked &&
+         b.tracks[i].width == b.tracks[j].width;
+}
+
 // Grows the choice to whole chains of the same net and layer.
 void growChains(const Board& b, std::vector<char>& chosen, const ChainVertices& cv) {
-  auto sameChain = [&](int i, int j) {
-    // A width change ends the chain too: a 0.8 mm bus and its 0.3 mm branch to a pad are two wires
-    // (one wire took the bus width all the way to the pad: 0.1 mm from the neighbouring pads).
-    return b.tracks[i].net == b.tracks[j].net && b.tracks[i].layer == b.tracks[j].layer && !b.tracks[j].locked &&
-           b.tracks[i].width == b.tracks[j].width;
-  };
   std::vector<int> stack;
   for (size_t i = 0; i < b.tracks.size(); ++i)
     if (chosen[i]) stack.push_back(int(i));
@@ -1550,7 +1542,7 @@ void growChains(const Board& b, std::vector<char>& chosen, const ChainVertices& 
     stack.pop_back();
     for (int v : cv.vid[i])
       for (int j : cv.ends[v])
-        if (!chosen[j] && sameChain(i, j)) {
+        if (!chosen[j] && sameChain(b, i, j)) {
           chosen[j] = 1;
           stack.push_back(j);
         }
@@ -1576,10 +1568,7 @@ RealizeStats reshapeTracks(Board& b, std::vector<char> chosen, std::vector<RealW
   growChains(b, chosen, cv);
   if (around > 0) {
     // The neighbourhood: every unlocked track near a chosen one joins, with its whole chain.
-    SpatialIndex nidx;
-    nidx.build(b, false, false);
     std::vector<char> add(b.tracks.size(), 0);
-    std::vector<Shape> shapes;
     for (size_t i = 0; i < b.tracks.size(); ++i) {
       if (!chosen[i]) continue;
       const Track& t = b.tracks[i];
@@ -1602,12 +1591,6 @@ RealizeStats reshapeTracks(Board& b, std::vector<char> chosen, std::vector<RealW
   const auto& vid = cv.vid;
   const auto& ends = cv.ends;
   const int nVertices = cv.count;
-  auto sameChain = [&](int i, int j) {
-    // A width change ends the chain too: a 0.8 mm bus and its 0.3 mm branch to a pad are two wires
-    // (one wire took the bus width all the way to the pad: 0.1 mm from the neighbouring pads).
-    return b.tracks[i].net == b.tracks[j].net && b.tracks[i].layer == b.tracks[j].layer && !b.tracks[j].locked &&
-           b.tracks[i].width == b.tracks[j].width;
-  };
   // Degree of each vertex among the chosen tracks (vertices are per layer and net already: wires of
   // other layers or nets may share a corner — TopoR lays parallel buses with coincident corners —
   // which is no branch of this chain); vias and pads also end chains.
@@ -1672,7 +1655,7 @@ RealizeStats reshapeTracks(Board& b, std::vector<char> chosen, std::vector<RealW
       if (isEnd(curV, next, t)) break;
       int cont = -1;
       for (int j : ends[curV])
-        if (chosen[j] && !used[j] && j != ti && sameChain(ti, j)) cont = j;
+        if (chosen[j] && !used[j] && j != ti && sameChain(b, ti, j)) cont = j;
       if (cont < 0) break;
       ti = cont;
       // The glued ends may differ by a few um: the sketch continues from the next track's own end.

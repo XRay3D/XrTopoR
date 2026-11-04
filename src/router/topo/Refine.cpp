@@ -19,13 +19,8 @@ namespace xr::topo {
 
 namespace {
 
-constexpr double kJoinTol = 1000;   // track ends closer than this meet (as in core/Edit)
+using edit::kJoinTol;
 constexpr size_t kMaxCells = 1'500'000;
-
-double trackLength(const Track& t) {
-  if (t.isArc()) return ArcGeom::fromThreePoints(t.a.v(), t.mid->v(), t.b.v()).length();
-  return (t.b.v() - t.a.v()).len();
-}
 
 // Blocked cells of a layer around a wire's search region.
 struct Grid {
@@ -129,7 +124,7 @@ std::vector<Chain> chainsOf(const Board& b, const std::vector<char>& chosen) {
       }
       used[cur] = 1;
       c.tracks.push_back(cur);
-      c.length += trackLength(t);
+      c.length += t.length();
       p = (t.a.v() - p).len() <= kJoinTol ? t.b.v() : t.a.v();
       if (isEnd(t, p)) break;
       const auto& list = at(t, p);
@@ -139,14 +134,6 @@ std::vector<Chain> chainsOf(const Board& b, const std::vector<char>& chosen) {
     if (ok && (c.b - c.a).len() > kJoinTol) out.push_back(std::move(c));
   }
   return out;
-}
-
-bool reaches(const Board& b, Vec2 p, LayerId l, int net) {
-  for (const Pad& pad : b.pads)
-    if (pad.net == net && pad.onLayer(l) && pad.shapeGeom().contains(p)) return true;
-  for (const Via& v : b.vias)
-    if (v.net == net && v.onLayer(l) && (v.pos.v() - p).len() <= v.diameter / 2.0) return true;
-  return false;
 }
 
 // Drops collinear cell centres: the realiser pulls the path taut anyway.
@@ -352,7 +339,7 @@ RefineResult refine(Board& b, const RefineOptions& o) {
     LayerMask assigned = b.assignedLayers(c.net);
     if (o.changeLayers)
       for (LayerId l : signal)
-        if (l != c.layer && (!assigned || ((assigned >> l) & 1)) && reaches(b, c.a, l, c.net) && reaches(b, c.b, l, c.net))
+        if (l != c.layer && (!assigned || ((assigned >> l) & 1)) && edit::anchoredAt(b, c.a, l, c.net) && edit::anchoredAt(b, c.b, l, c.net))
           layers.push_back(l);
 
     BBox judge = region.inflated(double(b.maxClearance()));
@@ -413,7 +400,7 @@ RefineResult refine(Board& b, const RefineOptions& o) {
         double len = 0;
         BBox judge1 = judge;  // the new path may lie far from the old one: judge both, before and after
         for (size_t i = before; i < trial.tracks.size(); ++i) {
-          len += trackLength(trial.tracks[i]);
+          len += trial.tracks[i].length();
           for (auto& s : itemShapes(trial, {ItemType::Track, int(i)})) judge1.add(s.bbox().inflated(double(b.maxClearance())));
         }
         if (len <= 0) continue;
