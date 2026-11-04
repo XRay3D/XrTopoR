@@ -75,6 +75,9 @@ class MainWindow : public QMainWindow {
   void runDrc();
   void autoroute();
   void optimize(bool components, bool thenRefine = false);  // F7 sub-modes
+  void optimizeModel(bool thenRefine);                      // F7 on the topological model
+  void showTopologyViolations(const Board& b, const topo::Topology& t, const std::vector<topo::Violation>& vs, const QString& what);
+  void saveTopologyFile(const QString& boardPath);
   void refine(bool changeLayers);  // F6 sub-modes
   void pour(bool fill, bool clear, const QString& title);
   void pourSelected(int how);  // 0 toggle (Z), 1 remove fill, 2 re-pour

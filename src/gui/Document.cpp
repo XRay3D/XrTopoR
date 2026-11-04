@@ -3,6 +3,7 @@
 #include <set>
 
 #include "gui/Schemes.h"
+#include "topo/Sidecar.h"
 
 namespace xr::gui {
 
@@ -41,6 +42,7 @@ Document::Document(QObject* parent) : QObject(parent) {}
 void Document::setBoard(std::unique_ptr<Board> b, const QString& path) {
   board_ = std::move(b);
   path_ = path;
+  topo_.reset();
   undo_.clear();
   selection_.clear();
   selComponents_.clear();
@@ -100,6 +102,34 @@ const Connectivity& Document::connectivity() {
 void Document::invalidate() {
   index_.reset();
   conn_.reset();
+}
+
+topo::Topology& Document::topology() {
+  topo::Topology::assignIds(*board_);
+  const uint64_t hash = topo::boardHashOf(*board_);
+  if (topo_ && topo_->boardHash == hash) return *topo_;
+  if (!path_.isEmpty())
+    if (auto t = topo::loadTopology(*board_, topo::sidecarPath(path_.toStdString()))) {
+      topo_ = std::make_unique<topo::Topology>(std::move(*t));
+      return *topo_;
+    }
+  topo_ = std::make_unique<topo::Topology>();
+  topo_->build(*board_);
+  return *topo_;
+}
+
+void Document::setTopology(std::unique_ptr<topo::Topology> t) {
+  topo_ = std::move(t);
+  markTopologyFresh();
+}
+
+void Document::markTopologyFresh() {
+  if (topo_ && board_) topo_->boardHash = topo::boardHashOf(*board_);
+}
+
+std::expected<void, std::string> Document::saveTopologyFile(const QString& boardPath) {
+  if (!board_) return {};
+  return topo::saveTopology(topology(), *board_, topo::sidecarPath(boardPath.toStdString()));
 }
 
 void Document::setSelection(std::vector<ItemRef> items, std::vector<int> comps) {

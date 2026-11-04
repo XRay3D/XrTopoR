@@ -1088,4 +1088,41 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
   return r;
 }
 
+std::vector<DrcViolation> topologyViolations(const Board& b, const Topology& t, const std::vector<Violation>& vs) {
+  std::map<uint32_t, int> trackOfId;
+  for (int i = 0; i < int(b.tracks.size()); ++i)
+    if (b.tracks[i].id) trackOfId[b.tracks[i].id] = i;
+  auto trackOf = [&](int wire) -> std::optional<ItemRef> {
+    if (wire < 0 || wire >= int(t.wires.size())) return std::nullopt;
+    for (uint32_t id : t.wires[wire].tracks)
+      if (auto it = trackOfId.find(id); it != trackOfId.end()) return ItemRef{ItemType::Track, it->second};
+    return std::nullopt;
+  };
+  auto netOf = [&](int wire) { return wire >= 0 && wire < int(t.wires.size()) ? b.nets[t.wires[wire].net].name : std::string("?"); };
+  std::vector<DrcViolation> out;
+  for (const Violation& v : vs) {
+    DrcViolation d;
+    d.type = DrcViolation::Type::Topology;
+    d.pos = v.pos;
+    d.layer = v.layer;
+    using K = Violation::Kind;
+    switch (v.kind) {
+      case K::Crossing: d.message = std::format("wires crossing: {} / {}", netOf(v.wireA), netOf(v.wireB)); break;
+      case K::ThroughPad: d.message = std::format("wire {} through another net's copper", netOf(v.wireA)); break;
+      case K::OutsideBoard: d.message = std::format("wire {} the mesh does not hold", netOf(v.wireA)); break;
+      case K::Overflow: d.message = std::format("edge overflowing by {:.3f} mm", v.deficit / 1e6); break;
+    }
+    if (auto a = trackOf(v.wireA)) d.a = *a;
+    if (auto c = trackOf(v.wireB)) {
+      d.b = *c;
+      d.hasB = true;
+    } else if (v.kind == K::ThroughPad && v.owner >= 0 && v.owner < int(t.owners.size()) && t.owners[v.owner].pad >= 0) {
+      d.b = ItemRef{ItemType::Pad, t.owners[v.owner].pad};
+      d.hasB = true;
+    }
+    out.push_back(std::move(d));
+  }
+  return out;
+}
+
 }  // namespace xr::topo

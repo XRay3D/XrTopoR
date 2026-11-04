@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "core/Board.h"
+#include "drc/Drc.h"
 #include "router/topo/Realizer.h"
 #include "topo/Topology.h"
 
@@ -70,6 +71,10 @@ struct OptimizeModelResult {
   RealizeStats stats;
 };
 OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOptions& o = {});
+
+// The model's violations as DRC violations (Type::Topology) for the message list and the selection: `a`
+// and `b` are tracks of the wires concerned (or the pad a wire runs through).
+std::vector<DrcViolation> topologyViolations(const Board& b, const Topology& t, const std::vector<Violation>& vs);
 
 }  // namespace xr::topo
 

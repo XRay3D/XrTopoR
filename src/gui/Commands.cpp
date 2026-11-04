@@ -264,6 +264,11 @@ Commands::Commands(QWidget* window) : QObject(window), window_(window) {
   add("Cmd_RecalcEdited", tr("Расчёт формы: только изменённые проводники"),
       tr("F5 без выделения пересчитывает только проводники, изменённые с прошлого расчёта"), {}, {})
       ->setCheckable(true);
+  add("Cmd_RecalcModel", tr("Расчёт формы и подвижка по топологической модели"),
+      tr("F5 без выделения и F7 работают в топологической модели: провода как цепочки пересечённых рёбер триангуляции, "
+         "реализатор рисует в конце; пересечение проводов или провод сквозь чужой контакт прерывают команду"),
+      {}, {})
+      ->setCheckable(true);
   addGroup("Accel_RecalcWires", {"Cmd_RecalcArcs", "Cmd_RecalcAny", "Cmd_Recalc45"}, "Cmd_RecalcAny");
   addGroup("Accel_RefineWires", {"Cmd_RefineLayers", "Cmd_RefineSame"}, "Cmd_RefineLayers");
   addGroup("Accel_AutoStart", {"Cmd_MoveVias", "Cmd_MoveViasRefine", "Cmd_MoveCompsVias"}, "Cmd_MoveVias");

@@ -33,6 +33,7 @@
 #include "gui/Schemes.h"
 #include "gui/ToporConfig.h"
 #include "io/BoardIO.h"
+#include "topo/Sidecar.h"
 
 using namespace xr;
 using namespace xr::gui;
@@ -1047,4 +1048,106 @@ TEST(Gui, ComponentBounds) {
   }
   doc.display().show["showComponents"] = false;
   EXPECT_FALSE(edgeIsBound());
+}
+
+namespace {
+
+// Two nets, two pads each, on one layer 30 x 30 mm; the tracks crossing or not.
+Board crossBoard(bool crossing) {
+  Board b;
+  LayerId top = b.addLayer("Top", LayerKind::Copper, Side::Top);
+  b.layers[top].copperIndex = 0;
+  auto mm = [](double x, double y) { return Vec2{x * kNmPerMm, y * kNmPerMm}; };
+  b.outline.push_back({mm(0, 0), mm(30, 0), mm(30, 30), mm(0, 30)});
+  int A = b.addNet("A"), B = b.addNet("B");
+  Component c;
+  c.ref = "U1";
+  b.components.push_back(c);
+  auto pad = [&](Vec2 at, int net) {
+    Pad p;
+    p.number = std::to_string(b.pads.size());
+    p.component = 0;
+    p.net = net;
+    p.pos = Point(at);
+    p.shape.w = p.shape.h = mmToNm(1.0);
+    p.copper = LayerMask(1) << top;
+    b.pads.push_back(p);
+  };
+  auto track = [&](Vec2 p, Vec2 q, int net) {
+    Track t;
+    t.a = Point(p);
+    t.b = Point(q);
+    t.width = mmToNm(0.3);
+    t.layer = top;
+    t.net = net;
+    b.tracks.push_back(t);
+  };
+  pad(mm(5, 15), A);
+  pad(mm(25, 15), A);
+  pad(mm(15, 5), B);
+  pad(mm(15, 25), B);
+  track(mm(5, 15), mm(25, 15), A);
+  if (crossing) track(mm(15, 5), mm(15, 25), B);
+  else track(mm(15, 5), mm(15, 12), B), track(mm(15, 12), mm(3, 12), B), track(mm(3, 12), mm(3, 18), B), track(mm(3, 18), mm(15, 18), B), track(mm(15, 18), mm(15, 25), B);
+  return b;
+}
+
+}  // namespace
+
+// F5 through the model on a board whose wires cross: nothing is drawn, the crossing goes to the
+// message list as a topological violation, the two tracks are selected, the undo stack is untouched.
+TEST(Gui, F5AbortsOnCrossing) {
+  app();
+  QSettings().setValue("topo/model", true);
+  Document doc;
+  BoardView view(&doc);
+  view.resize(800, 600);
+  doc.setBoard(std::make_unique<Board>(crossBoard(true)), "x");
+  const size_t tracks = doc.board()->tracks.size();
+  view.recomputeShapes();
+  EXPECT_EQ(doc.board()->tracks.size(), tracks);
+  EXPECT_EQ(doc.undoStack()->count(), 0);
+  ASSERT_TRUE(doc.drcRun());
+  ASSERT_FALSE(doc.drc().empty());
+  for (const DrcViolation& v : doc.drc()) EXPECT_EQ(v.type, DrcViolation::Type::Topology);
+  int selectedTracks = 0;
+  for (ItemRef r : doc.selectedItems()) selectedTracks += r.type == ItemType::Track;
+  EXPECT_EQ(selectedTracks, 2) << "the two crossing tracks";
+  // Without the crossing the same board is drawn.
+  doc.setBoard(std::make_unique<Board>(crossBoard(false)), "x");
+  view.recomputeShapes();
+  EXPECT_EQ(doc.undoStack()->count(), 1);
+  EXPECT_NE(doc.board()->tracks.size(), 6u);
+}
+
+// The model follows the board through a tool, an undo and a save: after F5 it is the board's, after
+// an undo it is built again (the same wires), and the file next to the board is written and read back.
+TEST(Gui, UndoKeepsTopologyInSync) {
+  app();
+  QSettings().setValue("topo/model", true);
+  Document doc;
+  BoardView view(&doc);
+  view.resize(800, 600);
+  auto b = io::loadBoard(data("topor/Example_03/arz_2L.fst"));
+  ASSERT_TRUE(b);
+  QTemporaryDir dir;
+  const QString path = dir.filePath("board.fst");
+  doc.setBoard(std::move(*b), path);
+  const size_t wires = doc.topology().wires.size();
+  view.recomputeShapes();
+  EXPECT_EQ(doc.undoStack()->count(), 1);
+  EXPECT_EQ(doc.topology().boardHash, topo::boardHashOf(*doc.board())) << "the model is the drawn board's";
+  const topo::Topology* drawn = &doc.topology();
+  EXPECT_EQ(&doc.topology(), drawn) << "not rebuilt while the board stands";
+  doc.undoStack()->undo();
+  EXPECT_NE(doc.topology().boardHash, drawn->boardHash);
+  EXPECT_EQ(doc.topology().wires.size(), wires) << "built from the tracks again after the undo";
+  doc.undoStack()->redo();
+  ASSERT_TRUE(io::saveBoard(*doc.board(), path.toStdString()).has_value());
+  ASSERT_TRUE(doc.saveTopologyFile(path).has_value());
+  auto again = io::loadBoard(path.toStdString());
+  ASSERT_TRUE(again);
+  topo::Topology::assignIds(**again);
+  auto loaded = topo::loadTopology(**again, topo::sidecarPath(path.toStdString()));
+  EXPECT_TRUE(loaded.has_value()) << (loaded ? "" : loaded.error());
 }

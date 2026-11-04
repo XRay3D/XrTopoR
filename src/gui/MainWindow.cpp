@@ -45,6 +45,7 @@
 #include "io/Report.h"
 #include "io/gerber/GerberWriter.h"
 #include "io/svg/SvgWriter.h"
+#include "router/topo/ModelTools.h"
 #include "router/topo/Optimizer.h"
 #include "router/topo/Refine.h"
 #include "router/topo/TopoRouter.h"
@@ -303,6 +304,8 @@ void MainWindow::bindCommands() {
   c.bind("Cmd_RecalcArcs", [this] { view_->recomputeShapes(); });
   c["Cmd_RecalcEdited"]->setChecked(QSettings().value("f5/editedOnly", true).toBool());
   c.bind("Cmd_RecalcEdited", [this] { QSettings().setValue("f5/editedOnly", (*cmds_)["Cmd_RecalcEdited"]->isChecked()); }, false);
+  c["Cmd_RecalcModel"]->setChecked(QSettings().value("topo/model", true).toBool());
+  c.bind("Cmd_RecalcModel", [this] { QSettings().setValue("topo/model", (*cmds_)["Cmd_RecalcModel"]->isChecked()); }, false);
   c.bind("Cmd_MoveVias", [this] { optimize(false); });
   c.bind("Cmd_MoveViasRefine", [this] { optimize(false, true); });
   c.bind("Cmd_RefineLayers", [this] { refine(true); });
@@ -380,7 +383,7 @@ void MainWindow::buildMenus() {
                                            "-", "Cmd_Fanout", "Cmd_WiresToCopper"});
   sub(tools, tr("Области &металлизации"), {"Accel_PourAllPoly", "Accel_UnPourAllPoly", "Accel_RePourAllPoly"});
   cmds_->fill(tools, {"-", "Cmd_RemoveExcessVias", "Cmd_RemoveSinglePinNets", "-", "Cmd_Sync", "Cmd_Eco", "-",
-                      "Cmd_RecalcEdited", "Cmd_Settings"});
+                      "Cmd_RecalcEdited", "Cmd_RecalcModel", "Cmd_Settings"});
 
   menu(tr("&Справка"), {"Accel_Help", "Cmd_Features", "Cmd_HotkeysHelp", "-", "Cmd_HomePage", "-", "Cmd_About"});
 }
@@ -835,6 +838,12 @@ void MainWindow::closeBoard() {
   updateTitle();
 }
 
+// The topological model next to the board file, when the model is the board's.
+void MainWindow::saveTopologyFile(const QString& boardPath) {
+  if (auto r = doc_->saveTopologyFile(boardPath); !r)
+    doc_->addLog({LogMessage::Kind::Warning, tr("Документ"), tr("Модель не записана: %1").arg(QString::fromStdString(r.error()))});
+}
+
 bool MainWindow::save() {
   if (!doc_->hasBoard()) return false;
   QString p = doc_->path();
@@ -844,6 +853,7 @@ bool MainWindow::save() {
     QMessageBox::warning(this, tr("Сохранить"), QString::fromStdString(r.error()));
     return false;
   }
+  saveTopologyFile(p);
   doc_->undoStack()->setClean();
   showHint(tr("Сохранён %1").arg(p));
   return true;
@@ -858,6 +868,7 @@ bool MainWindow::saveAs() {
     QMessageBox::warning(this, tr("Сохранить"), QString::fromStdString(r.error()));
     return false;
   }
+  saveTopologyFile(f);
   doc_->setPath(QFileInfo(f).absoluteFilePath());
   doc_->undoStack()->setClean();
   if (project_) {
@@ -1227,8 +1238,28 @@ void MainWindow::refine(bool changeLayers) {
   }));
 }
 
+// A tool stopped by the model's violations: they go to the message list, the wires concerned are
+// selected, the board stays as it is.
+void MainWindow::showTopologyViolations(const Board& b, const topo::Topology& t, const std::vector<topo::Violation>& vs, const QString& what) {
+  auto drc = topo::topologyViolations(b, t, vs);
+  std::vector<ItemRef> sel;
+  for (const DrcViolation& v : drc) {
+    if (v.a.type == ItemType::Track) sel.push_back(v.a);
+    if (v.hasB) sel.push_back(v.b);
+  }
+  std::ranges::sort(sel, [](ItemRef x, ItemRef y) { return std::tie(x.type, x.index) < std::tie(y.type, y.index); });
+  sel.erase(std::unique(sel.begin(), sel.end(), [](ItemRef x, ItemRef y) { return x.type == y.type && x.index == y.index; }), sel.end());
+  doc_->setDrc(drc);
+  doc_->setSelection(sel, {});
+  showHint(tr("%1 прервана: топологических нарушений %2 (проводники выделены, см. окно сообщений)").arg(what).arg(drc.size()), 10000);
+}
+
 void MainWindow::optimize(bool components, bool thenRefine) {
   if (!doc_->hasBoard()) return;
+  if (!components && QSettings().value("topo/model", true).toBool()) {
+    optimizeModel(thenRefine);
+    return;
+  }
   auto work = std::make_shared<Board>(*doc_->board());
   cancel_ = std::make_shared<std::atomic<bool>>(false);
   auto* dlg = new QProgressDialog(tr("Подвижка..."), tr("Остановить"), 0, 100, this);
@@ -1276,6 +1307,48 @@ void MainWindow::optimize(bool components, bool thenRefine) {
     };
     return topo::optimize(*work, o);
   }));
+}
+
+// F7 on the topological model: the vias and branch points relax in the model, the realiser draws once
+// at the end (ModelTools.h). Stopped by a violation, nothing changes and the wires concerned are shown.
+void MainWindow::optimizeModel(bool thenRefine) {
+  auto topo = std::make_shared<topo::Topology>(doc_->topology());  // a copy, with the ids given
+  auto work = std::make_shared<Board>(*doc_->board());
+  auto* dlg = new QProgressDialog(tr("Подвижка по модели..."), QString(), 0, 0, this);
+  dlg->setCancelButton(nullptr);
+  dlg->setWindowModality(Qt::WindowModal);
+  dlg->setMinimumDuration(300);
+  auto* watcher = new QFutureWatcher<topo::OptimizeModelResult>(this);
+  connect(watcher, &QFutureWatcher<topo::OptimizeModelResult>::finished, this, [this, watcher, dlg, work, topo, thenRefine] {
+    topo::OptimizeModelResult res = watcher->result();
+    dlg->close();
+    dlg->deleteLater();
+    watcher->deleteLater();
+    doc_->clearLog(tr("Подвижка"));
+    for (auto& l : res.log) doc_->addLog({LogMessage::Kind::Info, tr("Подвижка"), QString::fromStdString(l)});
+    if (!res.drawn) {
+      showTopologyViolations(*work, *topo, res.violations, tr("Подвижка"));
+      return;
+    }
+    auto before = doc_->beginEdit();
+    Board& b = *doc_->board();
+    b.tracks = work->tracks;
+    b.vias = work->vias;
+    b.zones = work->zones;
+    doc_->commitEdit(before, tr("Подвижка"), false);
+    doc_->setTopology(std::make_unique<topo::Topology>(std::move(*topo)));
+    showHint(tr("Подвижка по модели: переходов %1, ветвлений %2; итераций %3, проверок %4 (откатов %5); конфликтов %6 → %7")
+                 .arg(res.viaMoves)
+                 .arg(res.junctionMoves)
+                 .arg(res.iterations)
+                 .arg(res.checkpoints)
+                 .arg(res.rollbacks)
+                 .arg(res.conflictsBefore)
+                 .arg(res.conflictsAfter),
+             10000);
+    if (thenRefine) refine(true);
+  });
+  watcher->setFuture(QtConcurrent::run([work, topo] { return topo::optimizeModel(*work, *topo); }));
 }
 
 }  // namespace xr::gui

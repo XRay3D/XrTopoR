@@ -3,6 +3,7 @@
 #include <QColor>
 #include <QObject>
 #include <QUndoStack>
+#include <expected>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -10,6 +11,7 @@
 #include "core/Connectivity.h"
 #include "drc/Drc.h"
 #include "gui/Units.h"
+#include "topo/Topology.h"
 
 namespace xr::gui {
 
@@ -99,6 +101,16 @@ class Document : public QObject {
   const Connectivity& connectivity();
   void invalidate();  // call after any board edit
 
+  // The topological model of the board as it is (F5 and F7 work in it): the one a tool left when the
+  // board has not changed since, else the file next to the board when that is fresh, else built from
+  // the tracks. Gives the tracks and vias their ids.
+  topo::Topology& topology();
+  // A tool drew the board from this model: it is the board's now.
+  void setTopology(std::unique_ptr<topo::Topology> t);
+  void markTopologyFresh();  // the model matches the board as the tool left it
+  // Writes the model next to the board file (the board's model: a tool's, the file's, or built).
+  std::expected<void, std::string> saveTopologyFile(const QString& boardPath);
+
   // Selection
   std::vector<ItemRef> selectedItems() const { return selection_; }
   std::vector<int> selectedComponents() const { return selComponents_; }
@@ -144,6 +156,7 @@ class Document : public QObject {
   Unit unit_ = Unit::Mm;
   std::optional<SpatialIndex> index_;
   std::optional<Connectivity> conn_;
+  std::unique_ptr<topo::Topology> topo_;
   std::vector<ItemRef> selection_;
   std::vector<int> selComponents_;
   int highlightNet_ = kNoNet;

@@ -8,7 +8,9 @@
 namespace xr {
 
 struct DrcViolation {
-  enum class Type { Clearance, Short, Edge, Unconnected, Width, Keepout };
+  // Topology: a violation of the topological model that stopped F5/F7 before anything was drawn (wires
+  // crossing on a layer, a wire through another net's pad); `message` names the kind and the nets.
+  enum class Type { Clearance, Short, Edge, Unconnected, Width, Keepout, Topology };
   Type type = Type::Clearance;
   std::string message;
   Vec2 pos;

@@ -19,6 +19,7 @@
 #include "gui/SmallDialogs.h"
 #include "io/BoardIO.h"
 #include "router/topo/Optimizer.h"
+#include "router/topo/ModelTools.h"
 #include "router/topo/Wires.h"
 #include "router/topo/Refine.h"
 
@@ -2090,6 +2091,10 @@ void BoardView::recomputeShapes() {
       if (b.tracks[i].edited && !b.tracks[i].locked) { chosen[i] = 1; any = true; }
     local = any;
   }
+  if (!any && QSettings().value("topo/model", true).toBool()) {
+    recomputeShapesModel();
+    return;
+  }
   if (!any)
     for (size_t i = 0; i < b.tracks.size(); ++i) chosen[i] = !b.tracks[i].locked;
   std::vector<int> nets;  // junctions settle on the re-laid nets only (all when everything is re-laid)
@@ -2110,6 +2115,38 @@ void BoardView::recomputeShapes() {
     msg += tr("; топологическое пересечение проводников: %1 (уложены как нарисованы)").arg(pairs.join(", "));
   }
   emit status(msg);
+}
+
+// F5 on the topological model (ModelTools.h): every unlocked wire drawn from the model. Stopped by a
+// violation (wires crossing, a wire through another net's pad) nothing changes and the wires concerned
+// are selected, the violations in the message list.
+void BoardView::recomputeShapesModel() {
+  Board& b = *doc_->board();
+  auto before = doc_->beginEdit();
+  topo::Topology& t = doc_->topology();
+  auto res = topo::runF5Model(b, t);
+  if (!res.drawn) {
+    auto drc = topo::topologyViolations(b, t, res.violations);
+    std::vector<ItemRef> sel;
+    for (const DrcViolation& v : drc) {
+      if (v.a.type == ItemType::Track) sel.push_back(v.a);
+      if (v.hasB) sel.push_back(v.b);
+    }
+    std::ranges::sort(sel, [](ItemRef x, ItemRef y) { return std::tie(x.type, x.index) < std::tie(y.type, y.index); });
+    sel.erase(std::unique(sel.begin(), sel.end(), [](ItemRef x, ItemRef y) { return x.type == y.type && x.index == y.index; }), sel.end());
+    doc_->setDrc(drc);
+    doc_->setSelection(sel, {});
+    emit status(tr("Расчёт формы прерван: топологических нарушений %1 (проводники выделены, см. окно сообщений)").arg(drc.size()));
+    return;
+  }
+  for (auto& tr : b.tracks) tr.edited = false;
+  doc_->clearSelection();
+  doc_->commitEdit(before, tr("Расчёт формы проводников"), false);
+  doc_->markTopologyFresh();
+  emit status(tr("Расчёт формы проводников по модели: %1 проводник(ов), %2 дуг, переполненных рёбер %3")
+                  .arg(res.wires)
+                  .arg(res.stats.arcs)
+                  .arg(res.stats.overflowEdges));
 }
 
 void BoardView::cancelTool() {
