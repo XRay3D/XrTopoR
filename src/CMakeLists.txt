@@ -41,6 +41,12 @@ add_library(xrdrc STATIC
 )
 target_link_libraries(xrdrc PUBLIC xrcore)
 
+add_library(xrtopo STATIC
+  topo/Cdt.cpp
+  topo/Topology.cpp
+)
+target_link_libraries(xrtopo PUBLIC xrcore CGAL::CGAL)
+
 add_library(xrrouter STATIC
   router/topo/TopoMesh.cpp
   router/topo/TopoRouter.cpp
@@ -50,7 +56,7 @@ add_library(xrrouter STATIC
   router/topo/Freestyle.cpp
   router/topo/Refine.cpp
 )
-target_link_libraries(xrrouter PUBLIC xrcore xrdrc CGAL::CGAL)
+target_link_libraries(xrrouter PUBLIC xrcore xrdrc xrtopo CGAL::CGAL)
 
 if(XR_BUILD_GUI)
   find_package(Qt6 REQUIRED COMPONENTS Widgets Concurrent)

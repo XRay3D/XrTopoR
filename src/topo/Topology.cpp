@@ -1,0 +1,370 @@
+#include "topo/Topology.h"
+
+#include <algorithm>
+#include <cmath>
+#include <format>
+#include <map>
+
+#include "topo/Cdt.h"
+
+namespace xr::topo {
+
+namespace {
+
+// Points along a closed or open polyline every `pitch` at most.
+std::vector<Vec2> subdivide(const Polyline& pts, bool closed, double pitch) {
+  std::vector<Vec2> out;
+  size_t n = pts.size(), segs = closed ? n : n - 1;
+  for (size_t i = 0; i < segs; ++i) {
+    Vec2 a = pts[i], c = pts[(i + 1) % n];
+    int parts = std::max(1, int(std::ceil((c - a).len() / pitch)));
+    for (int k = 0; k < parts; ++k) out.push_back(a + (c - a) * (double(k) / parts));
+  }
+  if (!closed) out.push_back(pts.back());
+  return out;
+}
+
+// The axis and half width of a pad's copper. A capsule or a rectangle has its long axis; a round or
+// square pad none; a custom polygon none and its corners as fixed vertices.
+void padGeometry(const Shape& s, Owner& o, std::vector<Vec2>& corners) {
+  switch (s.kind) {
+    case Shape::Kind::Point:
+      o.c = s.a;
+      o.axis = {};
+      o.halfWidth = s.r;
+      break;
+    case Shape::Kind::Segment:
+      o.c = (s.a + s.b) * 0.5;
+      o.axis = (s.b - s.a) * 0.5;
+      o.halfWidth = s.r;
+      break;
+    case Shape::Kind::Polygon: {
+      Vec2 c{};
+      for (Vec2 p : s.poly) c += p;
+      o.c = c / double(s.poly.size());
+      o.axis = {};
+      o.halfWidth = s.r;
+      if (s.poly.size() == 4) {
+        Vec2 d0 = s.poly[1] - s.poly[0], d1 = s.poly[2] - s.poly[1];
+        double l0 = d0.len(), l1 = d1.len();
+        // A rectangle (opposite sides equal): the long side is the axis, the short one the width.
+        bool rect = std::abs((s.poly[3] - s.poly[2]).len() - l0) < 10 && std::abs((s.poly[0] - s.poly[3]).len() - l1) < 10 &&
+                    std::abs(d0.dot(d1)) < 1e-3 * l0 * l1;
+        if (rect) {
+          if (std::abs(l0 - l1) >= 1000) {
+            o.axis = (l0 > l1 ? d0 : d1) * 0.5;
+            o.halfWidth = std::min(l0, l1) / 2 + s.r;
+          } else {
+            o.halfWidth = l0 / 2 + s.r;
+          }
+          return;
+        }
+      }
+      for (Vec2 p : s.poly) corners.push_back(p - o.c);
+      break;
+    }
+  }
+}
+
+}  // namespace
+
+void Topology::assignIds(Board& b) {
+  uint32_t next = 1;
+  for (const Track& t : b.tracks) next = std::max(next, t.id + 1);
+  for (const Via& v : b.vias) next = std::max(next, v.id + 1);
+  for (Track& t : b.tracks)
+    if (!t.id) t.id = next++;
+  for (Via& v : b.vias)
+    if (!v.id) v.id = next++;
+}
+
+const LayerMesh* Topology::mesh(LayerId layer) const {
+  for (const LayerMesh& m : layers)
+    if (m.layer == layer) return &m;
+  return nullptr;
+}
+
+LayerMesh* Topology::mesh(LayerId layer) {
+  for (LayerMesh& m : layers)
+    if (m.layer == layer) return &m;
+  return nullptr;
+}
+
+void Topology::placeVertex(LayerMesh& m, int v) const {
+  Vertex& x = m.verts[v];
+  const Owner& o = owners[x.owner];
+  x.p = o.c + o.axis * x.t + x.off;
+}
+
+int LayerMesh::locate(Vec2 p) const {
+  for (int t = 0; t < int(tris.size()); ++t) {
+    const Tri& T = tris[t];
+    if (!T.inside) continue;
+    Vec2 a = verts[T.v[0]].p, b = verts[T.v[1]].p, c = verts[T.v[2]].p;
+    if (orient(a, b, p) >= 0 && orient(b, c, p) >= 0 && orient(c, a, p) >= 0) return t;
+  }
+  return -1;
+}
+
+void Topology::build(const Board& b) {
+  owners.clear();
+  junctions.clear();
+  layers.clear();
+  wires.clear();
+  crossings.clear();
+  violations.clear();
+  const LayerMask cuMask = b.allCopperMask();
+  // Per owner: the fixed corners of a custom pad (empty for the others).
+  std::vector<std::vector<Vec2>> corners;
+  auto add = [&](Owner o) {
+    owners.push_back(std::move(o));
+    corners.emplace_back();
+    return int(owners.size() - 1);
+  };
+  for (int pi = 0; pi < int(b.pads.size()); ++pi) {
+    const Pad& p = b.pads[pi];
+    Owner o;
+    o.kind = Owner::Kind::Pad;
+    o.pad = pi;
+    o.net = p.net;
+    if (!(p.copper & cuMask)) {
+      if (p.drill == 0) continue;
+      // A hole without copper: nobody's, in everybody's way on every layer.
+      o.net = kNoNet;
+      o.c = p.pos.v();
+      o.halfWidth = p.drill / 2.0;
+      o.shape = Shape::circle(o.c, o.halfWidth);
+      o.layers = cuMask;
+      add(std::move(o));
+      continue;
+    }
+    o.shape = p.shapeGeom();
+    o.layers = p.copper & cuMask;
+    std::vector<Vec2> cs;
+    padGeometry(o.shape, o, cs);
+    int id = add(std::move(o));
+    corners[id] = std::move(cs);
+  }
+  for (int vi = 0; vi < int(b.vias.size()); ++vi) {
+    const Via& v = b.vias[vi];
+    Owner o;
+    o.kind = Owner::Kind::Via;
+    o.via = vi;
+    o.viaId = v.id;
+    o.net = v.net;
+    o.c = v.pos.v();
+    o.halfWidth = v.diameter / 2.0;
+    o.shape = Shape::circle(o.c, o.halfWidth);
+    o.layers = v.layers & cuMask;
+    o.locked = v.locked;
+    add(std::move(o));
+  }
+  // The outline, subdivided so that the edge clearance is sampled densely enough, and the keepouts.
+  double viaDia = 0;
+  for (const NetClass& nc : b.netClasses) viaDia = std::max(viaDia, double(nc.viaDiameter));
+  const double pitch = std::max(1.2 * (viaDia + double(b.maxClearance())), 1.0 * kNmPerMm);
+  std::vector<std::pair<int, int>> outlineLinks;  // owner pairs
+  auto outlineLoop = [&](const Polyline& loop) {
+    int first = -1, prev = -1;
+    for (Vec2 p : subdivide(loop, true, pitch)) {
+      Owner o;
+      o.kind = Owner::Kind::Outline;
+      o.net = kBoardEdge;
+      o.c = p;
+      o.shape = Shape::circle(p, 0);
+      o.layers = cuMask;
+      int id = add(std::move(o));
+      if (prev >= 0) outlineLinks.push_back({prev, id});
+      else first = id;
+      prev = id;
+    }
+    if (prev >= 0 && first >= 0 && prev != first) outlineLinks.push_back({prev, first});
+  };
+  for (const auto& loop : b.outline) outlineLoop(loop);
+  if (b.outline.empty()) {
+    BBox bb = b.bbox();
+    if (bb.valid()) {
+      BBox ob = bb.inflated(2 * kNmPerMm);
+      outlineLoop({{ob.minX, ob.minY}, {ob.maxX, ob.minY}, {ob.maxX, ob.maxY}, {ob.minX, ob.maxY}});
+    }
+  }
+  struct KeepoutLoop {
+    LayerMask layers;
+    std::vector<int> owners;
+    bool area;
+  };
+  std::vector<KeepoutLoop> keepoutLoops;
+  for (const Keepout& k : b.keepouts) {
+    if (k.role != Keepout::Role::Route || !k.wires) continue;
+    LayerMask layers = (k.layers ? k.layers : cuMask) & cuMask;
+    for (const Shape& s : k.shapes()) {
+      KeepoutLoop kl{layers, {}, s.kind != Shape::Kind::Segment};
+      Polyline pts = s.kind == Shape::Kind::Polygon ? s.poly
+                     : s.kind == Shape::Kind::Point ? s.outline(std::max(2000.0, s.r * 0.02))
+                                                    : Polyline{s.a, s.b};
+      for (Vec2 p : subdivide(pts, kl.area, pitch)) {
+        Owner o;
+        o.kind = Owner::Kind::Keepout;
+        o.net = kNoNet;
+        o.c = p;
+        o.shape = Shape::circle(p, 0);
+        o.layers = layers;
+        kl.owners.push_back(add(std::move(o)));
+      }
+      keepoutLoops.push_back(std::move(kl));
+    }
+  }
+
+  // One mesh per copper layer, of the owners on it.
+  for (LayerId layer : b.copperLayers()) {
+    LayerMesh m;
+    m.layer = layer;
+    m.ownerVerts.assign(owners.size(), {});
+    CdtInput in;
+    auto vertex = [&](int owner, double t, Vec2 off) {
+      Vertex x;
+      x.owner = owner;
+      x.t = t;
+      x.off = off;
+      m.verts.push_back(x);
+      int v = int(m.verts.size() - 1);
+      placeVertex(m, v);
+      in.points.push_back(m.verts[v].p);
+      m.ownerVerts[owner].push_back(v);
+      return v;
+    };
+    for (int oi = 0; oi < int(owners.size()); ++oi) {
+      const Owner& o = owners[oi];
+      if (!((o.layers >> layer) & 1)) continue;
+      vertex(oi, 0, {});
+      if (o.axis.len2() > 0) {
+        vertex(oi, -1, {});
+        vertex(oi, 1, {});
+      }
+      for (Vec2 c : corners[oi]) vertex(oi, 0, c);
+    }
+    auto only = [&](int owner) { return m.ownerVerts[owner].front(); };
+    for (auto [a, c] : outlineLinks) {
+      in.constraints.push_back({only(a), only(c)});
+      in.border.push_back(1);
+    }
+    for (const KeepoutLoop& kl : keepoutLoops) {
+      if (!((kl.layers >> layer) & 1)) continue;
+      for (size_t i = 0; i + 1 < kl.owners.size(); ++i) {
+        in.constraints.push_back({only(kl.owners[i]), only(kl.owners[i + 1])});
+        in.border.push_back(0);
+      }
+      if (kl.area && kl.owners.size() > 2) {
+        in.constraints.push_back({only(kl.owners.back()), only(kl.owners.front())});
+        in.border.push_back(0);
+      }
+    }
+    CdtResult r = triangulate(in);
+    // Points the constraints' intersections created: outline owners of this layer.
+    for (Vec2 p : r.extra) {
+      Owner o;
+      o.kind = Owner::Kind::Outline;
+      o.net = kBoardEdge;
+      o.c = p;
+      o.shape = Shape::circle(p, 0);
+      o.layers = LayerMask(1) << layer;
+      int id = add(std::move(o));
+      m.ownerVerts.emplace_back();
+      vertex(id, 0, {});
+    }
+    // Coincident points: the vertex that stayed stands for both; of two pads there (a connector drawn
+    // as two parts, one without nets) the one with a net owns it, or its own net could not reach it.
+    for (size_t i = 0; i < r.alias.size(); ++i) {
+      if (r.alias[i] < 0) continue;
+      int keep = r.alias[i];
+      Vertex& mine = m.verts[i];
+      Vertex& theirs = m.verts[keep];
+      if (owners[theirs.owner].net == kNoNet && owners[mine.owner].net != kNoNet) {
+        theirs.owner = mine.owner;
+        theirs.t = mine.t;
+        theirs.off = mine.off;
+      }
+      for (auto& list : m.ownerVerts)
+        for (int& v : list)
+          if (v == int(i)) v = keep;
+    }
+    for (const CdtTri& ct : r.tris) {
+      Tri t;
+      for (int i = 0; i < 3; ++i) t.v[i] = ct.v[i];
+      t.inside = ct.inside;
+      m.tris.push_back(t);
+    }
+    for (const CdtEdge& ce : r.edges) {
+      Edge e;
+      e.v[0] = ce.v[0];
+      e.v[1] = ce.v[1];
+      e.constrained = ce.constrained;
+      m.edges.push_back(e);
+    }
+    for (int ti = 0; ti < int(m.tris.size()); ++ti) {
+      Tri& t = m.tris[ti];
+      for (int i = 0; i < 3; ++i) {
+        int e = r.triEdges[ti][i];
+        t.e[i] = e;
+        Edge& me = m.edges[e];
+        if (me.t[0] < 0) me.t[0] = ti;
+        else me.t[1] = ti;
+        int n = r.tris[ti].nb[i];
+        t.nb[i] = n >= 0 && m.tris.size() > size_t(n) ? n : -1;
+      }
+    }
+    for (Tri& t : m.tris)
+      for (int i = 0; i < 3; ++i)
+        if (t.nb[i] >= 0 && (!m.tris[t.nb[i]].inside || m.edges[t.e[i]].constrained)) t.nb[i] = -1;
+    for (const KeepoutLoop& kl : keepoutLoops) {
+      if (!kl.area || !((kl.layers >> layer) & 1)) continue;
+      Polyline poly;
+      for (int o : kl.owners) poly.push_back(owners[o].c);
+      for (Tri& t : m.tris)
+        if (t.inside && pointInPolygon((m.verts[t.v[0]].p + m.verts[t.v[1]].p + m.verts[t.v[2]].p) / 3.0, poly)) t.blocked = true;
+    }
+    for (int ti = 0; ti < int(m.tris.size()); ++ti)
+      if (m.tris[ti].inside)
+        for (int i = 0; i < 3; ++i) m.verts[m.tris[ti].v[i]].tris.push_back(ti);
+    layers.push_back(std::move(m));
+  }
+}
+
+std::vector<std::string> Topology::check() const {
+  std::vector<std::string> bad;
+  auto fail = [&](const LayerMesh& m, std::string what) {
+    if (bad.size() < 50) bad.push_back(std::format("layer {}: {}", m.layer, what));
+  };
+  for (const LayerMesh& m : layers) {
+    for (int ti = 0; ti < int(m.tris.size()); ++ti) {
+      const Tri& t = m.tris[ti];
+      if (m.dead(ti)) continue;
+      if (t.inside && orient(m.verts[t.v[0]].p, m.verts[t.v[1]].p, m.verts[t.v[2]].p) <= 0) fail(m, std::format("triangle {} is not counter-clockwise", ti));
+      for (int i = 0; i < 3; ++i) {
+        int e = t.e[i];
+        if (e < 0 || e >= int(m.edges.size())) { fail(m, std::format("triangle {} has no edge {}", ti, i)); continue; }
+        const Edge& E = m.edges[e];
+        auto [lo, hi] = std::minmax(t.v[(i + 1) % 3], t.v[(i + 2) % 3]);
+        if (E.v[0] != lo || E.v[1] != hi) fail(m, std::format("edge {} of triangle {} joins other vertices", e, ti));
+        if (E.t[0] != ti && E.t[1] != ti) fail(m, std::format("edge {} does not know triangle {}", e, ti));
+        int n = t.nb[i];
+        if (n >= 0) {
+          const Tri& N = m.tris[n];
+          int back = m.localEdge(n, e);
+          if (back < 0 || N.nb[back] != ti) fail(m, std::format("triangles {} and {} disagree about edge {}", ti, n, e));
+          if (!t.inside || !N.inside) fail(m, std::format("outside triangle {} has a neighbour", ti));
+        } else if (t.inside && !E.constrained) {
+          int other = E.t[0] == ti ? E.t[1] : E.t[0];
+          if (other >= 0 && m.tris[other].inside) fail(m, std::format("triangle {} ignores its neighbour {} across edge {}", ti, other, e));
+        }
+        if (t.inside && !std::ranges::contains(m.verts[t.v[i]].tris, ti)) fail(m, std::format("vertex {} does not list triangle {}", t.v[i], ti));
+      }
+    }
+    for (int v = 0; v < int(m.verts.size()); ++v)
+      for (int ti : m.verts[v].tris)
+        if (m.localVertex(ti, v) < 0 || !m.tris[ti].inside) fail(m, std::format("vertex {} lists triangle {} it is not in", v, ti));
+  }
+  return bad;
+}
+
+}  // namespace xr::topo

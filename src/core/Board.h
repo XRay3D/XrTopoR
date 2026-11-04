@@ -116,6 +116,7 @@ struct Track {
   int net = kNoNet;
   bool locked = false;
   bool edited = false;  // changed by hand since the last shape computation (F5 re-lays these first)
+  uint32_t id = 0;      // stable identity across edits and undo (0: not assigned yet); see topo::Topology
   bool isArc() const { return mid.has_value(); }
   Polyline path(double tol = 2000) const;  // centreline points
   double length() const;                   // along the centreline, nm
@@ -128,6 +129,7 @@ struct Via {
   LayerMask layers = 0;  // copper layers spanned (through via = all copper)
   int net = kNoNet;
   bool locked = false;
+  uint32_t id = 0;  // as Track::id
   bool onLayer(LayerId l) const { return (layers >> l) & 1; }
 };
 
