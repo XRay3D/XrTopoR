@@ -302,6 +302,15 @@ bool BoardView::componentVisible(int ci) const {
   return doc_->board()->components[ci].side == Side::Bottom ? d.flag("showCompBot") : d.flag("showCompTop");
 }
 
+BBox BoardView::componentBounds(int ci) const {
+  const Board& b = *doc_->board();
+  const Component& c = b.components[ci];
+  BBox bb;
+  for (int pi : c.pads) bb.add(b.pads[pi].shapeGeom().bbox());
+  for (auto& g : c.graphics) bb.add(graphicBBox(g));
+  return bb;
+}
+
 // ---------------------------------------------------------------- painting
 
 static QPolygonF toPoly(const Polyline& pl, auto&& map) {
@@ -720,6 +729,16 @@ void BoardView::drawBoard(QPainter& p) {
       if (groupOf(l) == -1) drawLayer(p, l);
   }
   drawKeepouts(p);
+  // «Габариты»: the rectangle enclosing the component's pads and drawings, as TopoR draws it.
+  if (d.flag("showCompsBound", false)) {
+    p.setPen(QPen(doc_->color("compsBound", 0xffffff), 1));
+    p.setBrush(Qt::NoBrush);
+    for (int ci = 0; ci < int(b.components.size()); ++ci) {
+      if (!componentVisible(ci)) continue;
+      BBox bb = componentBounds(ci);
+      if (bb.valid()) p.drawRect(QRectF(toScreen({bb.minX, bb.minY}), toScreen({bb.maxX, bb.maxY})).normalized());
+    }
+  }
   drawLabels(p);
 
   // Ratsnest, with the «Показывать связи» filter.

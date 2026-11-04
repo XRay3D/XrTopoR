@@ -1000,3 +1000,51 @@ TEST(Gui, RouteToTarget) {
   o.unconnected = false;
   EXPECT_EQ(runDrc(b, o).size(), 0u);
 }
+
+// «Габариты»: the component's bounding rectangle in the compsBound colour, only when the flag is on.
+TEST(Gui, ComponentBounds) {
+  app();
+  Document doc;
+  auto b = io::loadBoard(data("topor/Example_04/Arcs_master.pcb"));
+  ASSERT_TRUE(b) << b.error();
+  BoardView view(&doc);
+  view.resize(800, 600);
+  view.show();
+  doc.setBoard(std::move(*b), "x");
+  QTest::qWait(50);
+  const Board& brd = *doc.board();
+  int ci = 0;
+  BBox bb;
+  for (int pi : brd.components[ci].pads) bb.add(brd.pads[pi].shapeGeom().bbox());
+  for (auto& g : brd.components[ci].graphics) {
+    bb.add(g.a);
+    bb.add(g.b);
+  }
+  ASSERT_TRUE(bb.valid());
+  Vec2 c = bb.center();
+  double mm = std::max(bb.width(), bb.height()) / kNmPerMm * 1.5;
+  view.centerOn(c, mm);
+  double s = view.width() / (mm * kNmPerMm);
+  QPoint edge = screenOf(view, Vec2{bb.minX, c.y}, c, s);  // the left side of the rectangle
+  // The 1 px line is antialiased over two pixels: a light grey, unlike the dark background and the coloured copper.
+  auto edgeIsBound = [&] {
+    QImage img = view.grab().toImage();
+    for (int dx = -1; dx <= 1; ++dx) {
+      QColor px = img.pixelColor(edge + QPoint(dx, 0));
+      if (std::min({px.red(), px.green(), px.blue()}) >= 0x60) return true;
+    }
+    return false;
+  };
+  EXPECT_FALSE(doc.display().flag("showCompsBound", false));
+  EXPECT_FALSE(edgeIsBound());
+  doc.display().show["showCompsBound"] = true;
+  view.update();
+  QTest::qWait(10);
+  EXPECT_TRUE(edgeIsBound());
+  if (const char* dir = std::getenv("XR_SHOT_DIR")) {
+    view.fitBoard();
+    view.grab().save(QString(dir) + "/bounds.png");
+  }
+  doc.display().show["showComponents"] = false;
+  EXPECT_FALSE(edgeIsBound());
+}
