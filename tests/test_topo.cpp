@@ -1161,10 +1161,14 @@ TEST(Topo, SidecarRoundTrip) {
     }
     for (size_t v = 0; v < a.verts.size(); ++v) EXPECT_LT((c.verts[v].p - a.verts[v].p).len(), 1) << "vertex " << v;
   }
-  // Stale: a track changed.
+  // Stale: a track changed; a track dragged elsewhere (the counts the hash sees are the same).
   Board edited = b;
   edited.tracks.front().width += 1000;
   auto stale = topo::loadTopology(edited, path);
   EXPECT_FALSE(stale.has_value());
+  Board dragged = b;
+  dragged.tracks.front().a.x += Coord(1 * kNmPerMm);
+  auto stale2 = topo::loadTopology(dragged, path);
+  EXPECT_FALSE(stale2.has_value());
   std::filesystem::remove(path);
 }

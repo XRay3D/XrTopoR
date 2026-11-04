@@ -1140,9 +1140,24 @@ TEST(Gui, UndoKeepsTopologyInSync) {
   const topo::Topology* drawn = &doc.topology();
   EXPECT_EQ(&doc.topology(), drawn) << "not rebuilt while the board stands";
   doc.undoStack()->undo();
-  EXPECT_NE(doc.topology().boardHash, drawn->boardHash);
-  EXPECT_EQ(doc.topology().wires.size(), wires) << "built from the tracks again after the undo";
+  EXPECT_NE(&doc.topology(), drawn) << "built from the tracks again after the undo";
+  EXPECT_EQ(doc.topology().wires.size(), wires);
   doc.undoStack()->redo();
+  // A segment dragged by hand (the track count unchanged, as the hash sees it): the model is built again
+  // and follows the drag — F7 after a hand edit must not put the wire back.
+  const topo::Topology* before = &doc.topology();
+  {
+    auto snap = doc.beginEdit();
+    Board& bd = *doc.board();
+    int moved = -1;
+    for (size_t i = 0; i < bd.tracks.size() && moved < 0; ++i)
+      if (!bd.tracks[i].isArc() && (bd.tracks[i].a.v() - bd.tracks[i].b.v()).len() > 5 * kNmPerMm) moved = int(i);
+    ASSERT_GE(moved, 0);
+    bd.tracks[moved].a.x += Coord(0.5 * kNmPerMm);
+    doc.commitEdit(snap, "drag");
+  }
+  EXPECT_NE(&doc.topology(), before) << "a drag makes the model stale";
+  doc.undoStack()->undo();
   ASSERT_TRUE(io::saveBoard(*doc.board(), path.toStdString()).has_value());
   ASSERT_TRUE(doc.saveTopologyFile(path).has_value());
   auto again = io::loadBoard(path.toStdString());

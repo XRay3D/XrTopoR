@@ -157,6 +157,7 @@ class Document : public QObject {
   std::optional<SpatialIndex> index_;
   std::optional<Connectivity> conn_;
   std::unique_ptr<topo::Topology> topo_;
+  bool topoStale_ = true;  // the board was edited since the model was the board's (the hash is too coarse for a drag)
   std::vector<ItemRef> selection_;
   std::vector<int> selComponents_;
   int highlightNet_ = kNoNet;

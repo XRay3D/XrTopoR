@@ -282,6 +282,11 @@ std::expected<void, std::string> saveTopology(Topology& t, const Board& b, const
   root["ownerTracks"] = std::move(ownerTracks);
   root["pads"] = int64_t(b.pads.size());
   root["vias"] = int64_t(b.vias.size());
+  // Every track of the board, by content: a board whose tracks do not all match within the tolerance (a
+  // segment dragged elsewhere keeps the counts the hash sees) is another board.
+  json::array allTracks;
+  for (const Track& tr : b.tracks) allTracks.push_back(trackJson(b, tr));
+  root["tracks"] = std::move(allTracks);
   std::ofstream out(path, std::ios::binary);
   if (!out) return std::unexpected("cannot write " + path);
   out << json::serialize(root) << '\n';
@@ -384,6 +389,15 @@ std::expected<Topology, std::string> loadTopology(const Board& b, const std::str
     std::map<std::tuple<int64_t, int64_t, std::string>, std::vector<int>> viasAt;
     for (int i = 0; i < int(b.vias.size()); ++i) viasAt[{q(double(b.vias[i].pos.x)), q(double(b.vias[i].pos.y)), netName(b, b.vias[i].net)}].push_back(i);
     std::map<std::tuple<int64_t, int64_t, std::string>, size_t> viaTaken;
+    if (auto* all = root.if_contains("tracks")) {
+      const json::array& keys = all->as_array();
+      if (keys.size() != b.tracks.size()) return std::unexpected("model file " + path + " is stale (other tracks)");
+      std::vector<char> usedAll(b.tracks.size(), 0);
+      std::swap(used, usedAll);
+      for (const json::value& k : keys)
+        if (!idOf(k.as_array())) return std::unexpected("model file " + path + " is stale (a track moved)");
+      std::swap(used, usedAll);
+    }
     Topology t;
     t.boardHash = hash;
     t.padOwner.assign(b.pads.size(), -1);
