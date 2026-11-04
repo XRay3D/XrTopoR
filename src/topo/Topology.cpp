@@ -326,6 +326,13 @@ void Topology::build(const Board& b) {
     for (int ti = 0; ti < int(m.tris.size()); ++ti)
       if (m.tris[ti].inside)
         for (int i = 0; i < 3; ++i) m.verts[m.tris[ti].v[i]].tris.push_back(ti);
+    m.ownerClr.resize(owners.size());
+    for (int oi = 0; oi < int(owners.size()); ++oi) {
+      const Owner& o = owners[oi];
+      m.ownerClr[oi] = o.kind == Owner::Kind::Outline ? double(b.edgeClearance)
+                       : o.kind == Owner::Kind::Keepout ? 0.0
+                                                        : double(b.clearance(o.net, layer));
+    }
     layers.push_back(std::move(m));
   }
 }

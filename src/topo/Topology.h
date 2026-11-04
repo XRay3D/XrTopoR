@@ -75,6 +75,7 @@ struct LayerMesh {
   std::vector<Tri> tris;
   std::vector<Edge> edges;
   std::vector<std::vector<int>> ownerVerts;  // per owner: its vertices on this layer
+  std::vector<double> ownerClr;              // per owner: the clearance its net keeps on this layer
 
   int localEdge(int t, int e) const {
     for (int i = 0; i < 3; ++i)

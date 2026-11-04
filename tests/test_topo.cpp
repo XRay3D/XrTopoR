@@ -6,6 +6,7 @@
 #include <string>
 
 #include "io/BoardIO.h"
+#include "topo/Capacity.h"
 #include "topo/Flip.h"
 #include "topo/Topology.h"
 
@@ -149,4 +150,100 @@ TEST(Topo, LawsonIsDelaunay) {
                                 m.verts[T2.v[m.localEdge(E.t[1], e)]].p)) << "edge " << e;
   }
   EXPECT_EQ(topo::flipLoop(m), 0);
+}
+
+namespace {
+
+// One edge between two round pads 1 mm across, `wires` wires of another net crossing it.
+topo::Topology edgeModel(double lengthMm, int wires, double widthMm, double minWidthMm) {
+  topo::Topology t;
+  for (int i = 0; i < 2; ++i) {
+    topo::Owner o;
+    o.kind = topo::Owner::Kind::Pad;
+    o.net = i;
+    o.c = {i * lengthMm * kNmPerMm, 0};
+    o.halfWidth = 0.5 * kNmPerMm;
+    o.shape = Shape::circle(o.c, o.halfWidth);
+    o.layers = 1;
+    t.owners.push_back(o);
+  }
+  topo::LayerMesh m;
+  m.layer = 0;
+  m.ownerClr = {0.2 * kNmPerMm, 0.2 * kNmPerMm};
+  for (int i = 0; i < 2; ++i) {
+    topo::Vertex v;
+    v.owner = i;
+    v.p = t.owners[i].c;
+    m.verts.push_back(v);
+  }
+  topo::Edge e;
+  e.v[0] = 0;
+  e.v[1] = 1;
+  for (int k = 0; k < wires; ++k) {
+    topo::Wire w;
+    w.net = 2 + k;
+    w.width = mmToNm(widthMm);
+    w.widthMin = mmToNm(minWidthMm);
+    w.clr = mmToNm(0.2);
+    t.wires.push_back(w);
+    t.crossings.push_back({k, 0, 0, double(w.width)});
+    e.cross.push_back(k);
+  }
+  m.edges.push_back(e);
+  t.layers.push_back(std::move(m));
+  return t;
+}
+
+}  // namespace
+
+TEST(Topo, CapacityIsTheRealisersPacking) {
+  const double m = topo::kCapacityMargin;
+  // Two wires 0.2 mm: 0.5 + 0.5 of copper, 0.4 of wire, three clearances of 0.2 and three margins.
+  {
+    topo::Topology t = edgeModel(3.0, 2, 0.2, 0.2);
+    auto c = topo::edgeCapacity(t, t.layers[0], 0);
+    EXPECT_NEAR(c.freeLen, 2.0 * kNmPerMm, 1);
+    EXPECT_NEAR(c.need, 2.0 * kNmPerMm + 3 * m, 1);
+    EXPECT_EQ(c.cls, 0);
+    EXPECT_TRUE(c.margin);
+    EXPECT_NEAR(c.a[0], 0.8 * kNmPerMm + m, 1);
+    EXPECT_NEAR(c.a[1], 1.2 * kNmPerMm + 2 * m, 1);
+    EXPECT_NEAR(topo::slotOf(c, 0).hi, 3.0 * kNmPerMm - 1.2 * kNmPerMm - 2 * m, 1);
+    EXPECT_NEAR(topo::stackRadius(c, 1, 0), c.a[1], 0);
+  }
+  // Exactly the bare rule: the margin goes, as the realiser drops it.
+  {
+    topo::Topology t = edgeModel(2.0, 2, 0.2, 0.2);
+    auto c = topo::edgeCapacity(t, t.layers[0], 0);
+    EXPECT_EQ(c.cls, 1);
+    EXPECT_FALSE(c.margin);
+    EXPECT_NEAR(c.slack, 0, 1);
+  }
+  // 0.1 mm short: overflow by that much, the slots collapse to shared points in order.
+  {
+    topo::Topology t = edgeModel(1.9, 2, 0.2, 0.2);
+    auto c = topo::edgeCapacity(t, t.layers[0], 0);
+    EXPECT_EQ(c.cls, 2);
+    EXPECT_NEAR(c.deficit, 0.1 * kNmPerMm, 1);
+    EXPECT_LT(topo::slotOf(c, 0).mid(), topo::slotOf(c, 1).mid());
+    topo::refreshEdge(t, t.layers[0], 0);
+    EXPECT_EQ(t.layers[0].edges[0].cls, 2);
+  }
+  // Narrowing makes room: 0.3 mm wires with a minimum of 0.15 on an edge that holds 2 × 0.15.
+  {
+    topo::Topology t = edgeModel(1.9, 2, 0.3, 0.15);
+    auto c = topo::edgeCapacity(t, t.layers[0], 0);
+    EXPECT_TRUE(c.narrowed);
+    EXPECT_EQ(c.cls, 1);
+    EXPECT_EQ(c.deficit, 0);
+    topo::refreshEdge(t, t.layers[0], 0);
+    EXPECT_EQ(t.crossings[0].width, 0.15 * kNmPerMm);
+  }
+  // Nothing crosses: nothing is needed.
+  {
+    topo::Topology t = edgeModel(1.0, 0, 0.2, 0.2);
+    auto c = topo::edgeCapacity(t, t.layers[0], 0);
+    EXPECT_EQ(c.cls, 0);
+    EXPECT_EQ(c.need, 0);
+  }
 }
