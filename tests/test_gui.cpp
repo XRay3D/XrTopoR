@@ -1166,3 +1166,32 @@ TEST(Gui, UndoKeepsTopologyInSync) {
   auto loaded = topo::loadTopology(**again, topo::sidecarPath(path.toStdString()));
   EXPECT_TRUE(loaded.has_value()) << (loaded ? "" : loaded.error());
 }
+
+// Ctrl+A takes what the selection filter allows (and nothing of the kinds it does not), like a frame
+// round the whole board.
+TEST(Gui, SelectAllFollowsTheFilter) {
+  app();
+  Document doc;
+  BoardView view(&doc);
+  view.resize(800, 600);
+  auto b = io::loadBoard(data("topor/Example_04/Arcs_master.pcb"));
+  ASSERT_TRUE(b);
+  doc.setBoard(std::move(*b), "x");
+  const Board& bd = *doc.board();
+  doc.setSelectionFilter(SelVias);
+  view.selectAll();
+  EXPECT_EQ(doc.selectedItems().size(), bd.vias.size());
+  for (ItemRef r : doc.selectedItems()) EXPECT_EQ(r.type, ItemType::Via);
+  EXPECT_TRUE(doc.selectedComponents().empty());
+  doc.setSelectionFilter(SelWires);
+  view.selectAll();
+  EXPECT_EQ(doc.selectedItems().size(), bd.tracks.size());
+  for (ItemRef r : doc.selectedItems()) EXPECT_EQ(r.type, ItemType::Track);
+  doc.setSelectionFilter(SelComponents);
+  view.selectAll();
+  EXPECT_TRUE(doc.selectedItems().empty());
+  EXPECT_EQ(doc.selectedComponents().size(), bd.components.size());
+  doc.setSelectionFilter(SelAll);
+  view.selectAll();
+  EXPECT_GE(doc.selectedItems().size(), bd.tracks.size() + bd.vias.size());
+}

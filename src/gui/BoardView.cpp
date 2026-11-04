@@ -2610,15 +2610,23 @@ void BoardView::toggleFix() {
   doc_->commitEdit(before, allFixed ? tr("Расфиксировать") : tr("Фиксировать"));
 }
 
+// Ctrl+A: what a crossing frame round the whole board would take — by the selection filter and the
+// visibility of the layers and kinds, as TopoR does.
 void BoardView::selectAll() {
   if (!doc_->hasBoard()) return;
   const Board& b = *doc_->board();
-  std::vector<ItemRef> items;
-  for (int i = 0; i < int(b.tracks.size()); ++i) items.push_back({ItemType::Track, i});
-  for (int i = 0; i < int(b.vias.size()); ++i) items.push_back({ItemType::Via, i});
-  std::vector<int> comps(b.components.size());
-  std::ranges::iota(comps, 0);
-  doc_->setSelection(std::move(items), std::move(comps));
+  BBox all;
+  for (const auto& loop : b.outline)
+    for (Vec2 p : loop) all.add(p);
+  for (const Track& t : b.tracks) all.add(itemBBox(b, {ItemType::Track, int(&t - b.tracks.data())}));
+  for (const Via& v : b.vias) all.add(v.pos.v());
+  for (const Pad& p : b.pads) all.add(p.pos.v());
+  for (const Text& t : b.texts) all.add(itemBBox(b, {ItemType::Text, int(&t - b.texts.data())}));
+  for (const Graphic& g : b.graphics) all.add(itemBBox(b, {ItemType::Detail, int(&g - b.graphics.data())}));
+  if (!all.valid()) return;
+  const double margin = 10 * kNmPerMm;
+  QPointF a = toScreen({all.minX - margin, all.minY - margin}), c = toScreen({all.maxX + margin, all.maxY + margin});
+  selectInFrame(QRectF(a, c).normalized(), true, false);
 }
 
 void BoardView::finishRoute() {
