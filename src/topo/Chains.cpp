@@ -210,6 +210,7 @@ std::vector<WireChain> wireChains(const Board& b, const WireGraph& g, const std:
     w.width = t0.width;
     w.closed = closed;
     int ti = start, curV = vid[start][fromEnd];
+    w.vertex[0] = curV;
     w.path.push_back((fromEnd ? t0.b : t0.a).v());
     while (true) {
       used[ti] = 1;
@@ -224,6 +225,7 @@ std::vector<WireChain> wireChains(const Board& b, const WireGraph& g, const std:
       }
       if (w.path.back() != next.v()) w.path.push_back(next.v());
       curV = vid[ti][nextEnd];
+      w.vertex[1] = curV;
       if (isEnd(curV, next, ti)) break;
       int cont = -1;
       for (int j : ends[curV])

@@ -218,7 +218,9 @@ void Topology::convertWires(const Board& b, BuildScratch& scratch) {
     int owner = -1;
   };
   std::vector<std::array<End, 2>> ends(chains.size());
-  std::map<std::tuple<Coord, Coord, LayerId, int>, int> junctionAt;  // 1 um cells
+  // Keyed by the wire graph's glued vertex: the ends of the chains meeting at a branch point lie within
+  // the glue of each other (a 50 um track between two of them on Arcs_master), one junction for all.
+  std::map<std::tuple<int, LayerId, int>, int> junctionAt;
   for (size_t ci = 0; ci < chains.size(); ++ci) {
     const WireChain& c = chains[ci];
     for (int end = 0; end < 2; ++end) {
@@ -227,7 +229,7 @@ void Topology::convertWires(const Board& b, BuildScratch& scratch) {
         ends[ci][end].owner = r->type == ItemType::Pad ? padOwner[r->index] : viaOwner[r->index];
         continue;
       }
-      auto key = std::tuple{Coord(std::llround(p.x / 1000)), Coord(std::llround(p.y / 1000)), c.layer, c.net};
+      auto key = std::tuple{c.vertex[end], c.layer, c.net};
       auto it = junctionAt.find(key);
       if (it == junctionAt.end()) {
         Owner o;
@@ -249,6 +251,14 @@ void Topology::convertWires(const Board& b, BuildScratch& scratch) {
       ++junctions[o.junction].degree;
       ends[ci][end].owner = it->second;
     }
+  }
+  // The tiny tracks at a branch point (glued into its vertex, in no chain) are the junction's: they go
+  // when its wires are redrawn, or they would be left behind by a move.
+  for (size_t i = 0; i < b.tracks.size(); ++i) {
+    if (!g.relevant[i] || !g.tiny[i]) continue;
+    const Track& tr = b.tracks[i];
+    auto it = junctionAt.find(std::tuple{g.vid[i][0], tr.layer, tr.net});
+    if (it != junctionAt.end()) ownerTracks.push_back({it->second, tr.id});
   }
   buildMeshes(b, scratch);
 

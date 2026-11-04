@@ -151,3 +151,28 @@ TEST(Realizer, ModelReshapeIsAFixedPoint) {
     EXPECT_NEAR(lengthAt[1], lengthAt[0], 0.5 * kNmPerMm) << name;
   }
 }
+
+// F7 on the model: the vias and branch points relaxed by the model's forces, the drawing judged at the
+// checkpoints. Never worse than F5 from the model (the best drawn state is kept), nothing lost, and on
+// these boards better: Arcs_master 29 -> 15, arz_2L 9 -> 1 (F5 on the tracks then relaxed: 12 and 2).
+TEST(Optimizer, ModelRelaxDoesNotBreak) {
+  struct Expect { const char* file; int f5; int conflicts; };
+  for (Expect x : {Expect{"topor/Example_04/Arcs_master.pcb", 29, 20}, Expect{"topor/Example_03/arz_2L.fst", 9, 5}}) {
+    auto lb = io::loadBoard(data(x.file));
+    ASSERT_TRUE(lb.has_value()) << x.file;
+    Board& b = **lb;
+    size_t unrouted = Connectivity::compute(b).ratsnest.size();
+    topo::Topology::assignIds(b);
+    topo::Topology t;
+    t.build(b);
+    auto res = topo::optimizeModel(b, t);
+    ASSERT_TRUE(res.drawn) << x.file;
+    std::println("{}: F7 model {} iterations, {} checkpoints ({} rolled back), {} via and {} junction moves, conflicts {} -> {}, length {:.1f} mm", x.file,
+                 res.iterations, res.checkpoints, res.rollbacks, res.viaMoves, res.junctionMoves, res.conflictsBefore, res.conflictsAfter, length(b) / 1e6);
+    EXPECT_LE(res.conflictsBefore, x.f5) << x.file;
+    EXPECT_LE(conflicts(b), x.conflicts) << x.file;
+    EXPECT_LE(conflicts(b), res.conflictsBefore) << x.file;
+    EXPECT_LE(Connectivity::compute(b).ratsnest.size(), unrouted) << x.file;
+    EXPECT_EQ(t.check(), std::vector<std::string>{}) << x.file;
+  }
+}

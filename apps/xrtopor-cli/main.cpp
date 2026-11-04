@@ -38,6 +38,7 @@ void usage() {
       "  reshape    <board> -o <out> [--nets a,b] [--around MM] [--no-settle]  recompute track shapes (TopoR F5); --nets: those chains only\n"
       "                     [--model [--no-flips]]  F5 on the topological model\n"
       "  optimize   <board> -o <out> [--iterations N] [--step MM] [--components] [--relax]   move vias/parts (F7)\n"
+      "                     [--model [--no-flips] [--verbose]]  F7 on the topological model\n"
       "  refine     <board> -o <out> [--same-layer]   shorter wire paths around the copper as it lies (F6)\n"
       "  fill       <board> -o <out> [--no-thermals]  pour copper zones\n"
       "  report     <board> [--bom out.csv]          routing statistics per layer and net, BOM\n"
@@ -171,6 +172,34 @@ int main(int argc, char** argv) {
     zo.thermals = !a.flag("--no-thermals");
     auto st = fillZones(b, zo);
     std::println("filled {} zone(s): {} polygon(s), {} island(s) removed", st.zones, st.polygons, st.islandsRemoved);
+    if (auto r = io::saveBoard(b, std::string(a.opt("-o"))); !r) return fail(r.error());
+    return 0;
+  }
+  if (cmd == "optimize" && !a.opt("-o").empty() && a.flag("--model")) {
+    // F7 on the topological model: the vias and branch points relax under the model's forces, the
+    // realiser draws once at the end.
+    topo::Topology::assignIds(b);
+    topo::Topology t;
+    t.build(b);
+    topo::OptimizeModelOptions mo;
+    mo.flips = !a.flag("--no-flips");
+    auto res = topo::optimizeModel(b, t, mo);
+    if (a.flag("--verbose"))
+      for (auto& l : res.log) std::println("{}", l);
+    for (const topo::Violation& v : res.violations) {
+      using K = topo::Violation::Kind;
+      const char* what = v.kind == K::Crossing ? "wires crossing" : v.kind == K::ThroughPad ? "wire through another net's copper"
+                         : v.kind == K::OutsideBoard ? "wire the mesh does not hold" : "edge overflowing";
+      std::println("  {} at ({:.3f}, {:.3f}) on layer {}: {}{}{}", what, v.pos.x / 1e6, v.pos.y / 1e6, b.layers[v.layer].name,
+                   v.wireA >= 0 ? b.nets[t.wires[v.wireA].net].name : "", v.wireB >= 0 ? " / " + b.nets[t.wires[v.wireB].net].name : "",
+                   v.deficit > 0 ? std::format(" by {:.3f} mm", v.deficit / 1e6) : "");
+    }
+    if (!res.drawn) return fail("stopped by the violations above, nothing drawn");
+    std::println("model: {} iterations ({} undone), {} via move(s), {} junction move(s); model length {:.1f} -> {:.1f} mm, shortfall {:.3f} -> {:.3f} mm; "
+                 "{} checkpoints ({} rolled back), conflicts {} -> {}",
+                 res.iterations, res.undoneIterations, res.viaMoves, res.junctionMoves, res.lengthBefore / 1e6, res.lengthAfter / 1e6,
+                 res.deficitBefore / 1e6, res.deficitAfter / 1e6, res.checkpoints, res.rollbacks, res.conflictsBefore, res.conflictsAfter);
+    xr::Prof::get().report("optimize --model");
     if (auto r = io::saveBoard(b, std::string(a.opt("-o"))); !r) return fail(r.error());
     return 0;
   }

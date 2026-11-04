@@ -51,6 +51,7 @@ struct WireChain {
   int net = kNoNet;
   Coord width = 0;
   bool closed = false;  // a loop: no end of its own
+  int vertex[2] = {-1, -1};  // the wire graph's (glued) vertices at the ends
   Vec2 a() const { return path.front(); }
   Vec2 b() const { return path.back(); }
 };
