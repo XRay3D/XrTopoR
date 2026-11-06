@@ -175,9 +175,11 @@ TEST(Optimizer, ModelRelaxDoesNotBreak) {
 
 // F6 on the model: the wires re-laid by cheaper paths over the triangulation (TopoR's re-laying; its own F6 of
 // Arcs_standard_routing takes 63 mm with 28 wires moved to the other side of other nets' pads, 8 branch
-// points moved and no via). Ours after F5 on the model: 20 wires re-laid — the same nets — and the branch points
-// to their balance, 75 mm shorter, no place of violation added; the model whole (its invariants, no wires
-// crossing), and what F5 drew at the pads and the width joints kept.
+// points moved and no via). Ours after F5 on the model (which has taken the branch points to their balance
+// already): 19 wires re-laid — the same nets — 43 mm shorter, no place of violation added; no wire is led past
+// a via that still stands too close to a pad (F7 has to take it off, and after an F6 that used that room it
+// was left with 5 deep violations for 2); the model whole (its invariants, no wires crossing), and what F5
+// drew at the pads and the width joints kept.
 TEST(Refine, ModelRelaysTheLongWaysRound) {
   auto lb = io::loadBoard(data("topor/Example_04/Arcs_standard_routing.fst"));
   ASSERT_TRUE(lb.has_value());
@@ -196,7 +198,7 @@ TEST(Refine, ModelRelaysTheLongWaysRound) {
   std::println("F6 model: {} wires tried, {} found, {} re-laid, {} branch points moved, {} drawings; places {} -> {}, length {:.1f} -> {:.1f} mm", res.wires, res.found,
                res.relaid, res.junctionMoves, res.drawings, before.places, after.places, before.length / 1e6, after.length / 1e6);
   EXPECT_GE(res.relaid, 15);
-  EXPECT_LT(after.length, before.length - 50 * kNmPerMm);
+  EXPECT_LT(after.length, before.length - 35 * kNmPerMm);
   EXPECT_LE(after.real, before.real);
   EXPECT_LE(after.shorts, before.shorts);
   EXPECT_LE(Connectivity::compute(b).ratsnest.size(), unrouted);

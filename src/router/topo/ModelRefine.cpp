@@ -59,13 +59,16 @@ RefineModelResult refineModel(Board& b, Topology& t, const RefineModelOptions& o
     if (detour >= o.detour) order.push_back({wi, detour});
   }
   std::ranges::sort(order, [](const Candidate& x, const Candidate& y) { return x.detour > y.detour; });
+  // No wire is led past a via that has yet to step off copper it is too close to (F7 does that): it would
+  // take the room the via has to step into.
+  const std::vector<char> unsettled = viasTooClose(b, t);
   for (const Candidate& c : order) {
     ++r.wires;
     const double was = tautLength(t, c.wire);
     std::optional<RelayPath> path;
     {
       ProfScope p("F6 model: search");
-      path = findRelay(t, c.wire);
+      path = findRelay(t, c.wire, &unsettled);
     }
     if (!path) continue;
     Topology saved = t;

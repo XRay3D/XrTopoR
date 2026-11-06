@@ -166,7 +166,7 @@ double tautLength(const Topology& t, int wi) {
   return len;
 }
 
-std::optional<RelayPath> findRelay(const Topology& t, int wi) {
+std::optional<RelayPath> findRelay(const Topology& t, int wi, const std::vector<char>* avoid) {
   const Wire& w = t.wires[wi];
   const LayerMesh& m = *t.mesh(w.layer);
   RelayPath out;
@@ -244,6 +244,9 @@ std::optional<RelayPath> findRelay(const Topology& t, int wi) {
     if (!fresh) return it->second;
     const Edge& E = m.edges[e];
     if (E.constrained) return it->second;
+    if (avoid)
+      for (int v : E.v)
+        if (const int o = m.verts[v].owner; o >= 0 && o < int(avoid->size()) && (*avoid)[size_t(o)]) return it->second;
     std::vector<int> ws;
     for (int cid : cids) ws.push_back(t.crossings[cid].wire);
     ws.insert(ws.begin() + gap, wi);

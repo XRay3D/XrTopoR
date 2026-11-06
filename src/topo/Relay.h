@@ -30,7 +30,8 @@ struct RelayPath {
 
 // The cheapest path for the wire with its present crossings [first, last) out of the way (they are not
 // touched: the search looks past them). Nothing when there is none, or when it would cross an edge twice.
-std::optional<RelayPath> findRelay(const Topology& t, int wire);
+// `avoid` (per owner, may be null): the path crosses no edge at these owners.
+std::optional<RelayPath> findRelay(const Topology& t, int wire, const std::vector<char>* avoid = nullptr);
 // Takes the wire's old crossings out and puts the path's in; the edges' capacities are refreshed.
 void applyRelay(Topology& t, int wire, const RelayPath& path);
 

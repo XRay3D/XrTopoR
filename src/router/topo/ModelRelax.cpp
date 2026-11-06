@@ -296,6 +296,17 @@ DrawingScore scoreDrawing(const Board& b) {
   return s;
 }
 
+std::vector<char> viasTooClose(const Board& b, const Topology& t) {
+  std::vector<char> out(t.owners.size(), 0);
+  OwnerGrid grid;
+  grid.build(t);
+  for (int oi = 0; oi < int(t.owners.size()); ++oi) {
+    const Owner& o = t.owners[oi];
+    if (o.kind == Owner::Kind::Via && o.layers != 0 && copperPush(b, t, grid, oi, o.c).shortfall > 0) out[size_t(oi)] = 1;
+  }
+  return out;
+}
+
 bool betterDrawing(const DrawingScore& a, const DrawingScore& than) {
   const auto ka = std::tuple(a.unrouted, a.shorts, a.deep, a.real), kb = std::tuple(than.unrouted, than.shorts, than.deep, than.real);
   return ka < kb || (ka == kb && a.score() < than.score());

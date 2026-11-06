@@ -59,6 +59,11 @@ DrawingScore scoreDrawing(const Board& b);
 // A violation is not bought with length: less unrouted, then fewer places shorted, deep, real; then the score.
 bool betterDrawing(const DrawingScore& a, const DrawingScore& than);
 
+// The vias that stand closer to copper of other nets than the rule (per owner; F7's first steps take them off
+// it). F6 leaves the edges at them alone: a wire led past such a via takes the room it has to step into
+// (Arcs_standard_routing: F7 after such an F6 was left with 5 deep violations of via against pad, 2 without).
+std::vector<char> viasTooClose(const Board& b, const Topology& t);
+
 // Relaxes the unlocked vias and the branch points of unlocked wires and draws the model: the board gets the
 // best drawing seen. The first one is F5's own, so the result is never worse than F5 by the judge: less
 // unrouted, then fewer places shorted, deeper than the limit of a violation, real at all (a violation is not
