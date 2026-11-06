@@ -101,10 +101,12 @@ TEST(Realizer, SettledReshapeIsAFixedPoint) {
 // F5 on the model, the realiser fed from the model: a fixed point — a board re-laid from its own result
 // comes out the same (the same violations, the length within half a millimetre). The violations are those
 // of F5 on the tracks (arz_2L 9, arz_4L 10) or a few more (Arcs_master 22 against 18, local stacking
-// defects at the QFP still to be found).
+// defects at the QFP still to be found). With the nominal clearance kept from round copper (the arz boards'
+// rules: 0.2 / 0.3) arz_4L has 13: one bend of net 84 round a via, the outer of two wires there, is dropped
+// where its radius grew (3 records of one place, 0.066 mm deep); 10 at the minimum.
 TEST(Realizer, ModelReshapeIsAFixedPoint) {
   struct Expect { const char* file; int conflicts; };
-  for (Expect x : {Expect{"topor/Example_03/arz_2L.fst", 9}, Expect{"topor/Example_03/arz_4L.fst", 10}, Expect{"topor/Example_04/Arcs_master.pcb", 22}}) {
+  for (Expect x : {Expect{"topor/Example_03/arz_2L.fst", 9}, Expect{"topor/Example_03/arz_4L.fst", 13}, Expect{"topor/Example_04/Arcs_master.pcb", 22}}) {
     const char* name = x.file;
     auto lb = io::loadBoard(data(name));
     ASSERT_TRUE(lb.has_value()) << name;
@@ -143,9 +145,11 @@ TEST(Realizer, ModelReshapeIsAFixedPoint) {
 // the wires led from the pads' centres again).
 TEST(Optimizer, ModelRelaxDoesNotBreak) {
   // gain: mm the drawing gets shorter by, at least; force: what is left of the forces on the objects, at most
-  // (arz_2L: its vias stand against the pads of their own nets, pulled into them and held off).
+  // (arz_2L: its vias stand against the pads of their own nets, pulled into them and held off, and — its rules
+  // have a nominal clearance, 0.2 / 0.3 — stop where their wires would lose the nominal's room: 7 mm gained
+  // where 24 were with the stop at the minimum; Arcs_master.pcb has the one clearance).
   struct Expect { const char* file; int f5; int conflicts; double gain; double force; };
-  for (Expect x : {Expect{"topor/Example_04/Arcs_master.pcb", 22, 5, 150, 0.6}, Expect{"topor/Example_03/arz_2L.fst", 9, 6, 15, 0.9}}) {
+  for (Expect x : {Expect{"topor/Example_04/Arcs_master.pcb", 22, 5, 150, 0.6}, Expect{"topor/Example_03/arz_2L.fst", 9, 6, 5, 0.97}}) {
     auto lb = io::loadBoard(data(x.file));
     ASSERT_TRUE(lb.has_value()) << x.file;
     Board& b = **lb;

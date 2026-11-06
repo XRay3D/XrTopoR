@@ -183,14 +183,19 @@ RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int
             // A round pad is its radius; a polygon's centre is enclosed by its corners, a bare point.
             double r = o.shape.kind == Shape::Kind::Point ? o.halfWidth : centre ? 0.0 : o.shape.r;
             id = ob.add(x.p, r, clr, o.net);
+            ob.pts[id].round = o.shape.kind == Shape::Kind::Point;
             if (centre && o.shape.kind != Shape::Kind::Point) centreOf[x.owner] = id;
           }
           break;
         case Owner::Kind::Via:
           id = ob.add(x.p, o.halfWidth, clr, o.net);
           ob.pts[id].via = o.via;
+          ob.pts[id].round = true;
           break;
-        case Owner::Kind::Junction: id = ob.add(x.p, o.halfWidth, clr, o.net); break;
+        case Owner::Kind::Junction:
+          id = ob.add(x.p, o.halfWidth, clr, o.net);
+          ob.pts[id].round = true;
+          break;
         case Owner::Kind::Outline: id = ob.add(x.p, 0, clr, kBoardEdge); break;
         case Owner::Kind::Keepout: id = ob.add(x.p, 0, 0, kBoardEdge); break;
       }
@@ -422,6 +427,7 @@ void drawModel(Board& b, Topology& t, bool direct, RealizeStats& stats, int& nWi
       if (z.layer == w.layer) { z.filled.clear(); break; }
   RealizeOptions opt;
   opt.tracksAsObstacles = true;
+  opt.nominal = true;
   for (const Junction& j : t.junctions) opt.anchors.push_back({j.pos, j.layer, j.net, t.owners[j.owner].halfWidth});
   const size_t before = b.tracks.size();
   {

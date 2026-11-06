@@ -16,6 +16,9 @@ namespace xr::topo {
 // Safety margin (nm) the realiser adds to every wire's clearance so that arc tessellation and
 // integer rounding never eat into the rule; the router reserves the same amount per wire.
 constexpr double kRealizeMargin = 2000;
+// The slack an edge keeps when the copper at its ends has the nominal clearance (the realiser's shares of
+// it: RealizeOptions::nominal); F7 stops a via where its wires would lose that room.
+constexpr double kNominalRoom = 200000;
 
 struct RealWire {
   int net = kNoNet;
@@ -83,11 +86,12 @@ struct RealizeOptions {
   // The wires leave their pads by TopoR's pattern (topo/PadExit.h). Off: every wire is laid taut from the
   // very point its sketch begins at (a drawing to compare two sketches of one wire by).
   bool padPattern = true;
-  // The wires keep the nominal clearance from what they bend round, and from each other in the stacks there,
-  // wherever the edges at that obstacle have room for it (Board::clearanceNom; TopoR: the nominal clearance
-  // everywhere the wires can be moved apart, the minimum in the tight spots). Off: the minimum everywhere.
-  // Experimental (see Realizer.cpp): the stacks of a bus lose their nesting between an obstacle that has the
-  // room and one that has not.
+  // The wires keep the nominal clearance from the round copper they bend round (vias, round pads, branch
+  // points) wherever the edges at that copper have room for it (Board::clearanceNom; TopoR: the nominal
+  // clearance everywhere the wires can be moved apart, the minimum in the tight spots); the gaps between the
+  // wires of a stack stay at the minimum. The model's drawing asks for it (F5 and F7 on the model); the
+  // drawing from the tracks does not: re-laid over its own result it did not come out the same (arz_2L: 1.9 mm
+  // between two passes), and a wire of F6 laid alone was left with dead ends. XR_NO_NOMINAL=1: nowhere.
   bool nominal = false;
 };
 

@@ -134,6 +134,21 @@ CopperPush copperPush(const Board& b, const Topology& t, const OwnerGrid& grid, 
   return out;
 }
 
+// What the nominal clearance adds to the rule between a moving object and other copper (0 where the design
+// has no nominal above the minimum). TopoR's vias stop at the nominal clearance from the copper around them
+// (its F7 of Arcs_standard_routing: 109 of 145 with the nearest copper at 0.43-0.47 mm, rule 0.3 / 0.45).
+double nominalExcess(const Board& b, int netA, int netB, LayerMask layers) {
+  if (!b.hasNominal() || netA < 0) return 0;
+  if (netB < 0) netB = netA;
+  LayerId layer = -1;
+  for (LayerId l = 0; l < LayerId(b.layers.size()); ++l)
+    if ((layers >> l) & 1) {
+      layer = l;
+      break;
+    }
+  return std::max(0.0, double(b.clearanceNom(netA, netB, layer)) - double(b.clearance(netA, netB, layer)));
+}
+
 // A via does not go into a pad of its own net: its wire to that pad pulls it there, and nothing of another
 // net's rule holds it off (arz: vias 70 um from the centre of their pad's end after F7; TopoR's F7 of
 // Arcs_standard_routing leaves no via nearer than 1.86 mm to the pad its wire goes to, its F5 had 1.43). What
@@ -147,7 +162,8 @@ double ownPadRule(const Owner& mover, const Owner& other) {
 // comes from (a step out of a conflict is no conflict). The worst such copper's centre.
 std::optional<Vec2> blockerAt(const Board& b, const Topology& t, const OwnerGrid& grid, int oi, Vec2 p) {
   const Owner& ob = t.owners[oi];
-  const double maxClr = double(b.maxClearance());
+  double maxClr = double(b.maxClearance());
+  for (const ClearancePair& p : b.nominalRules) maxClr = std::max(maxClr, double(p.clearance));
   double shortThere = 0, shortHere = 0, worstShort = 0;
   std::optional<Vec2> worst;
   {
@@ -168,7 +184,7 @@ std::optional<Vec2> blockerAt(const Board& b, const Topology& t, const OwnerGrid
     double req = ownPadRule(ob, o);
     if (req < 0) {
       if (o.net == ob.net) return;
-      req = ob.halfWidth + requiredClearance(b, ob.net, o.net, ob.layers & o.layers);
+      req = ob.halfWidth + requiredClearance(b, ob.net, o.net, ob.layers & o.layers) + nominalExcess(b, ob.net, o.net, ob.layers & o.layers);
     }
     double there = std::max(0.0, req - 1000 - o.shape.distance(p)), here = std::max(0.0, req - 1000 - o.shape.distance(ob.c));
     shortThere += there;
@@ -345,9 +361,20 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
   // that the spokes, as long as they would be there, have no room for. Asked before the step is taken: a step
   // cannot be taken back (the way back may lie across an edge that does not flip, and the object stays short
   // of where it was — arz_4L: two branch points of +5B, 0.55 and 0.78 mm off after a step of 1 mm and back).
+  // ... and at the nominal clearance: what the spokes that have it now would lack of the room the realiser asks
+  // for to lay the wires at the nominal from the copper at their ends (round copper: vias, round pads, branch
+  // points). A step may not take that room: the object stops where its wires would have to close in.
+  auto takesNominal = [&](const Owner& o) {
+    return o.net >= 0 && (o.kind == Owner::Kind::Via || o.kind == Owner::Kind::Junction || (o.kind == Owner::Kind::Pad && o.shape.kind == Shape::Kind::Point));
+  };
+  struct Short {
+    double least = 0, nominal = 0;
+  };
   auto shortAt = [&](int oi, Vec2 at) {
     const Vec2 d = at - t.owners[oi].c;
-    double s = copperPush(b, t, grid, oi, at).shortfall;
+    Short s;
+    s.least = copperPush(b, t, grid, oi, at).shortfall;
+    const bool nominal = b.hasNominal();
     for (const LayerMesh& m : t.layers) {
       if (oi >= int(m.ownerVerts.size())) continue;
       for (int v : m.ownerVerts[oi])
@@ -357,7 +384,17 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
           EdgeCapacity c = edgeCapacity(t, m, e);
           const Vec2 other = m.verts[E.v[0] == v ? E.v[1] : E.v[0]].p;
           const double grown = (m.verts[v].p + d - other).len() - c.L;
-          s += std::max(0.0, -(c.slack + grown));  // `need` holds the ends' reach: the slack is of the whole length
+          s.least += std::max(0.0, -(c.slack + grown));  // `need` holds the ends' reach: the slack is of the whole length
+          if (!nominal) continue;
+          double excess = 0;
+          for (int end = 0; end < 2; ++end) {
+            const Owner& o = t.owners[m.verts[E.v[end]].owner];
+            const Wire& w = t.wires[t.crossings[end == 0 ? E.cross.front() : E.cross.back()].wire];
+            if (takesNominal(o) && o.net != w.net && w.net >= 0) excess += nominalExcess(b, o.net, w.net, LayerMask(1) << m.layer);
+          }
+          // Only a spoke that has the nominal's room now: one already tighter is the minimum's business (in a
+          // dense place everything is, and nothing could move: arz_2L gained half a millimetre).
+          if (const double room = c.slack - excess - kNominalRoom; excess > 0 && room >= 0) s.nominal += std::max(0.0, -(room + grown));
         }
     }
     return s;
@@ -415,7 +452,8 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
     // fixed thing that part of its force is lost (it slides); two movable ones share theirs along the line
     // between them and go as one (TopoR's blocker joins the moving group under the sum of the forces).
     if (o.contacts && !clearing) {
-      const double maxClr = double(b.maxClearance());
+      double maxClr = double(b.maxClearance());
+      for (const ClearancePair& p : b.nominalRules) maxClr = std::max(maxClr, double(p.clearance));
       std::vector<Vec2> shared = force;
       for (size_t k = 0; k < objs.size(); ++k) {
         const int oi = objs[k].owner;
@@ -428,7 +466,7 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
           double req = ownPadRule(ob, x);
           if (req < 0) {
             if (x.net == ob.net) return;
-            req = ob.halfWidth + requiredClearance(b, ob.net, x.net, ob.layers & x.layers);
+            req = ob.halfWidth + requiredClearance(b, ob.net, x.net, ob.layers & x.layers) + nominalExcess(b, ob.net, x.net, ob.layers & x.layers);
           }
           if (x.shape.distance(ob.c) > req + kContact) return;
           Vec2 n = awayFrom(x.shape, ob.c, x.c) * -1.0;  // towards the other
@@ -479,12 +517,13 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
       Vec2 delta = off ? (F.len() > limit ? F.normalized() * limit : F) : F.normalized() * (limit * std::min(1.0, F.len() / kFullForce));
       if (delta.len() < kMinStep) continue;
       const Vec2 at = t.owners[ob.owner].c;
-      const double shortBefore = shortAt(ob.owner, at);
+      const Short shortBefore = shortAt(ob.owner, at);
       bool went = false;
       auto attempt = [&](Vec2 d) {
         if (d.len() < kMinStep) return false;
         if (blockerAt(b, t, grid, ob.owner, at + d)) return ++why[0], false;
-        if (shortAt(ob.owner, at + d) > shortBefore + 1) return ++why[2], false;
+        // (A step off copper too close is held to the minimum alone: it may take a spoke's nominal room.)
+        if (const Short there = shortAt(ob.owner, at + d); there.least > shortBefore.least + 1 || (!off && there.nominal > 1)) return ++why[2], false;
         if (moveOwner(t, ob.owner, d) <= 0) return ++why[1], false;
         return true;
       };
