@@ -1,4 +1,5 @@
 #include "router/topo/RealizerInput.h"
+#include "topo/Narrowing.h"
 #include "router/topo/Realizer.h"
 
 #include "core/Prof.h"
@@ -792,18 +793,35 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
         }
         return L - a[n - 1] - bb[n - 1];
       };
-      double slack = pack();
-      if (slack <= 0) {        // No room for the nominal widths: the wires that may be narrowed are, on this edge.
-        bool any = false;
+      // The widths of this round: nominal, unless the edge is short of room at the bare rule by more than
+      // the limit and narrowing cures it (topo/Capacity.h; the model's capacity decides the same way). The
+      // decision comes from the wires' packing alone — not from the bends of the round before — so a wire
+      // is as wide as it can be every round and widens back when the room returns.
+      {
+        std::vector<double> nominal(n), mins(n), chosen;
         for (int k = 0; k < n; ++k) {
           const RealWire& w = wires[list[k].first];
-          if (w.widthMin > 0 && w.widthMin < w.width && wAt(k) > double(w.widthMin)) {
-            hw[list[k].first][list[k].second] = double(w.widthMin);
-            any = true;
-          }
+          nominal[k] = double(w.width);
+          mins[k] = double(w.widthMin);
+          hw[list[k].first][list[k].second] = nominal[k];
         }
-        if (any) slack = pack();
+        // What the edge needs at the bare rule: the stack from u up to the last wire, and that wire's own
+        // distance from v (as pack() has it: a[n - 1] + bb[n - 1]).
+        auto bare = [&](const OPt& o, const RealWire& w, double width) {
+          double x = need(o, w, width);
+          return x > 0 ? x - margin : 0.0;
+        };
+        double a0 = 0;
+        for (int k = 0; k < n; ++k) {
+          const RealWire& w = wires[list[k].first];
+          double own = bare(U, w, nominal[k]);
+          a0 = k == 0 ? own : std::max(a0 + nominal[k - 1] / 2.0 + clrBetween(wires[list[k - 1].first], w) + nominal[k] / 2.0, own);
+        }
+        const double deficit = a0 + bare(V, wires[list[n - 1].first], nominal[n - 1]) - L;
+        if (deficit > kNarrowDeficitLimit && chooseNarrowing(nominal, mins, deficit, chosen))
+          for (int k = 0; k < n; ++k) hw[list[k].first][list[k].second] = chosen[k];
       }
+      double slack = pack();
       if (slack < 0 && slack > -2.0 * kMargin * (n + 1)) {
         margin = 0;
         slack = pack();
@@ -919,10 +937,10 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
     }
 
     auto L_of = [&](const EdgeHit& h) { return (ob.pts[h.v].p - ob.pts[h.u].p).len(); };
-    // The ends take the width of the first and last crossing: a wire leaving a fine-pitch pad from
-    // its end is narrowed from the pad on.
+    // The ends are of the nominal width: a wire is narrowed between the bends at the tight edge only, its
+    // run out of the pad and into it stays whole.
     std::vector<Circle> cs;
-    cs.push_back({sk.front(), 0, -1, 0, hw[wi].empty() ? double(w.width) : hw[wi].front()});
+    cs.push_back({sk.front(), 0, -1, 0, double(w.width)});
     for (const FunnelApex& ap : apexes) {
       const EdgeHit& h = hits[wi][ap.portal - 1];
       const Slot& sl = slots[wi][ap.portal - 1];
@@ -956,7 +974,7 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
         cs.push_back({c, ap.side * R, o, ap.portal, width});
       }
     }
-    cs.push_back({sk.back(), 0, -1, int(portals.size()) - 1, hw[wi].empty() ? double(w.width) : hw[wi].back()});
+    cs.push_back({sk.back(), 0, -1, int(portals.size()) - 1, double(w.width)});
     if (std::getenv("XR_DEBUG2")) {
       std::print(stderr, "wire {} net {} sketch {} hits {} bends:", wi, b.nets[w.net].name, sk.size(), hits[wi].size());
       if (std::getenv("XR_DEBUG2SK")) {
@@ -1272,8 +1290,13 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
   phase.emplace("realize: emission");
   for (int wi = 0; wi < NW; ++wi) {
     const RealWire& w = wires[wi];
+    bool narrowedWire = false;
     for (double x : hw[wi])
-      if (x < double(w.width)) ++st.narrowed;
+      if (x < double(w.width)) {
+        ++st.narrowed;
+        narrowedWire = true;
+      }
+    st.narrowedWires += narrowedWire;
     // A tangent between two bends is as narrow as the narrower bend (the step sits where there is room).
     auto emitSeg = [&](Vec2 p, Vec2 q, double width) {
       Track t;
@@ -1389,12 +1412,53 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
     for (size_t k = 0; k + 1 < n; ++k) {
       Vec2 p = (k == 0) ? startAt : to[k];
       Vec2 q = (k + 1 == n - 1) ? endAt : ti[k + 1];
-      // The tangent runs through every portal between its bends: as narrow as the narrowest of them.
-      double width = std::min(cs[k].width, cs[k + 1].width);
-      for (int hi = cs[k].portal + 1; hi < cs[k + 1].portal; ++hi)
-        if (hi >= 1 && hi <= int(hits[wi].size())) width = std::min(width, hw[wi][hi - 1]);
+      // The tangent is of the nominal width but where a narrowed crossing or bend needs it narrow: within
+      // the reach of the copper at that edge's ends, where the whole width would be short of the rule (the
+      // crossing lies at d from an end; the whole width needs d + (W - w) / 2). The step sits where there
+      // is room, and a straight wire through one tight gap is narrow at the gap only.
       emitSeg(cur, p, cs[k].width);
-      emitSeg(p, q, width);
+      {
+        const double nominal = double(w.width);
+        const LayerObstacles& obE = obstacles.at(w.layer);
+        const Vec2 d = q - p;
+        const double len = d.len();
+        double lo = 2, hi = -1, width = nominal;  // the narrow stretch along p -> q, in [0, 1]
+        auto within = [&](Vec2 centre, double R) {  // the part of the tangent nearer the centre than R
+          if (len <= 0) return;
+          const double tc = std::clamp((centre - p).dot(d) / (len * len), 0.0, 1.0);
+          const double dist = (p + d * tc - centre).len();
+          if (dist >= R) return;
+          const double half = std::sqrt(R * R - dist * dist) / len;
+          lo = std::min(lo, std::max(0.0, tc - half));
+          hi = std::max(hi, std::min(1.0, tc + half));
+        };
+        for (int h = cs[k].portal + 1; h < cs[k + 1].portal; ++h) {
+          if (h < 1 || h > int(hits[wi].size()) || hw[wi][h - 1] >= nominal) continue;
+          const EdgeHit& eh = hits[wi][h - 1];
+          const Vec2 U = obE.pts[eh.u].p, V = obE.pts[eh.v].p;
+          // Where the tangent crosses the edge.
+          const double den = d.cross(V - U);
+          Vec2 X = (p + q) * 0.5;
+          if (std::abs(den) > 1e-9) X = p + d * std::clamp((U - p).cross(V - U) / den, 0.0, 1.0);
+          const double more = (nominal - hw[wi][h - 1]) / 2.0 + kMargin;
+          within(U, (X - U).len() + more);
+          within(V, (X - V).len() + more);
+          width = std::min(width, hw[wi][h - 1]);
+        }
+        for (size_t e : {k, k + 1}) {
+          const Circle& C = cs[e];
+          if (C.obst < 0 || C.width >= nominal) continue;  // an end, or a bend of the whole width
+          within(C.c, std::abs(C.rho) + (nominal - C.width) / 2.0 + kMargin);
+          width = std::min(width, C.width);
+        }
+        if (hi < lo) {
+          emitSeg(p, q, nominal);
+        } else {
+          emitSeg(p, p + d * lo, nominal);
+          emitSeg(p + d * lo, p + d * hi, width);
+          emitSeg(p + d * hi, q, nominal);
+        }
+      }
       cur = q;
       if (k + 1 < n - 1) {
         const Circle& C = cs[k + 1];

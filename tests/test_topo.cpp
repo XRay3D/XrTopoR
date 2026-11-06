@@ -1386,3 +1386,94 @@ TEST(Topo, PourKeepsThePairRule) {
   EXPECT_GT(gapToOther(), before + 0.3 * kNmPerMm);
   EXPECT_GE(gapToOther(), double(rule) - 1000);
 }
+
+// Which wires of an edge are narrowed: the fewest, by what is missing and no more; nothing when it cannot be had.
+TEST(Topo, ChooseNarrowing) {
+  std::vector<double> out;
+  const double mm = kNmPerMm;
+  EXPECT_FALSE(topo::chooseNarrowing({0.8 * mm, 0.3 * mm}, {0.3 * mm, 0.3 * mm}, 0, out));
+  EXPECT_EQ(out, (std::vector<double>{0.8 * mm, 0.3 * mm}));
+  EXPECT_TRUE(topo::chooseNarrowing({0.8 * mm, 0.3 * mm}, {0.3 * mm, 0.3 * mm}, 0.2 * mm, out));
+  EXPECT_EQ(out, (std::vector<double>{0.6 * mm, 0.3 * mm})) << "only the wire that can give, only what is missing";
+  EXPECT_TRUE(topo::chooseNarrowing({0.5 * mm, 0.8 * mm}, {0.3 * mm, 0.3 * mm}, 0.6 * mm, out));
+  EXPECT_EQ(out, (std::vector<double>{0.4 * mm, 0.3 * mm})) << "the one with the most to give first";
+  EXPECT_FALSE(topo::chooseNarrowing({0.8 * mm, 0.8 * mm}, {0.3 * mm, 0.3 * mm}, 1.2 * mm, out));
+  EXPECT_EQ(out, (std::vector<double>{0.8 * mm, 0.8 * mm})) << "what cannot cure the edge is not done";
+}
+
+// Narrowing is the last resort, on the model and on the tracks: a 0.8 mm wire (minimum 0.3, clearance 0.3)
+// between two pads of another net keeps its width where it fits at the bare rule and where it is short of
+// room by less than the limit; it is narrowed by what is missing, between the bends at the gap only, where
+// that cures the gap; and it stays whole where even the minimum does not fit.
+TEST(Topo, NarrowingIsTheLastResort) {
+  auto mm = [](double x, double y) { return Vec2{x * kNmPerMm, y * kNmPerMm}; };
+  auto board = [&](double gap) {
+    Board b;
+    LayerId top = b.addLayer("Top", LayerKind::Copper, Side::Top);
+    b.layers[top].copperIndex = 0;
+    b.outline.push_back({mm(0, 0), mm(40, 0), mm(40, 20), mm(0, 20)});
+    int A = b.addNet("A"), C = b.addNet("C");
+    Component c;
+    c.ref = "U1";
+    b.components.push_back(c);
+    auto pad = [&](Vec2 at, int net) {
+      Pad p;
+      p.number = std::to_string(b.pads.size());
+      p.component = 0;
+      p.net = net;
+      p.pos = Point(at);
+      p.shape.w = p.shape.h = mmToNm(1.0);
+      p.copper = LayerMask(1) << top;
+      b.pads.push_back(p);
+    };
+    pad(mm(5, 10), A), pad(mm(35, 10), A);
+    pad(mm(20, 10 - gap / 2 - 0.5), C), pad(mm(20, 10 + gap / 2 + 0.5), C);
+    Track t;
+    t.a = Point(mm(5, 10));
+    t.b = Point(mm(35, 10));
+    t.width = mmToNm(0.8);
+    t.layer = top;
+    t.net = A;
+    b.tracks.push_back(t);
+    DesignRules r;
+    r.widths = {{true, {}, {}, mmToNm(0.3), mmToNm(0.8)}};
+    r.clearances = {{true, {}, {}, {}, mmToNm(0.3), mmToNm(0.3)}};
+    b.rules = r;
+    compileRules(b);
+    return b;
+  };
+  struct Case {
+    double gap;        // between the copper of the two pads, mm
+    double narrowest;  // of the wire afterwards, mm
+    bool clean;        // no clearance violation
+    const char* what;
+  };
+  for (Case c : {Case{1.4, 0.8, true, "fits at the bare rule"}, Case{1.37, 0.8, false, "short by less than the limit"},
+                 Case{1.2, 0.6, true, "short by 0.2 mm: narrowed by that"}, Case{0.8, 0.8, false, "the minimum does not fit either"}})
+    for (bool model : {true, false}) {
+      Board b = board(c.gap);
+      if (model) {
+        topo::Topology::assignIds(b);
+        topo::Topology t;
+        t.build(b);
+        ASSERT_TRUE(topo::runF5Model(b, t).drawn);
+      } else {
+        topo::reshapeTracks(b, std::vector<char>(b.tracks.size(), 1));
+      }
+      const std::string name = std::format("gap {} mm ({}), {}", c.gap, c.what, model ? "model" : "tracks");
+      Coord narrowest = mmToNm(0.8);
+      for (const Track& t : b.tracks) narrowest = std::min(narrowest, t.width);
+      EXPECT_NEAR(narrowest / 1e6, c.narrowest, 0.0015) << name;
+      // The ends at the pads are of the nominal width.
+      for (const Track& t : b.tracks)
+        for (Point p : {t.a, t.b})
+          if ((p.v() - mm(5, 10)).len() < 1000 || (p.v() - mm(35, 10)).len() < 1000) EXPECT_EQ(t.width, mmToNm(0.8)) << name;
+      int clearance = 0, width = 0;
+      for (const DrcViolation& v : runDrc(b)) {
+        clearance += v.type == DrcViolation::Type::Clearance || v.type == DrcViolation::Type::Short;
+        width += v.type == DrcViolation::Type::Width;
+      }
+      EXPECT_EQ(clearance == 0, c.clean) << name << ": " << clearance << " clearance violation(s)";
+      EXPECT_EQ(width, 0) << name;
+    }
+}

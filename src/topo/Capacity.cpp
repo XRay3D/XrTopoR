@@ -1,6 +1,7 @@
 #include "topo/Capacity.h"
 
 #include <algorithm>
+#include <cmath>
 
 namespace xr::topo {
 
@@ -17,6 +18,27 @@ EdgeCapacity edgeCapacity(const Topology& t, const LayerMesh& m, int e) {
   std::vector<int> ws;
   for (int cid : E.cross) ws.push_back(t.crossings[cid].wire);
   return capacityOf(t, m, E.v[0], E.v[1], ws, E.along);
+}
+
+bool chooseNarrowing(const std::vector<double>& width, const std::vector<double>& widthMin, double deficit, std::vector<double>& out) {
+  out = width;
+  std::vector<int> order;
+  double total = 0;
+  for (int k = 0; k < int(width.size()); ++k)
+    if (widthMin[k] > 0 && widthMin[k] < width[k]) {
+      order.push_back(k);
+      total += width[k] - widthMin[k];
+    }
+  if (deficit <= 0 || total < deficit) return false;
+  std::ranges::stable_sort(order, [&](int x, int y) { return width[x] - widthMin[x] > width[y] - widthMin[y]; });
+  double left = deficit;
+  for (int k : order) {
+    if (left <= 0) break;
+    double give = std::min(width[k] - widthMin[k], std::ceil(left / 1000) * 1000);
+    out[k] = width[k] - give;
+    left -= give;
+  }
+  return true;
 }
 
 EdgeCapacity capacityOf(const Topology& t, const LayerMesh& m, int va, int vb, const std::vector<int>& ws, int along) {
@@ -84,18 +106,16 @@ EdgeCapacity capacityOf(const Topology& t, const LayerMesh& m, int va, int vb, c
     return slack < 0 && slack > -1.0 ? 0.0 : slack;  // a nanometre of rounding is no shortfall
   };
   c.margin = true;
-  c.slack = pack(kCapacityMargin);
-  if (c.slack <= 0) {
-    // No room for the nominal widths: the wires that may be narrowed are, on this edge.
-    for (int k = 0; k < n; ++k) {
-      const Wire& w = wireOf(k);
-      if (w.widthMin > 0 && w.widthMin < w.width) {
-        c.width[k] = double(w.widthMin);
-        c.narrowed = true;
-      }
+  // Narrowing first of all needs a real shortfall: at the bare rule, the nominal widths, more than the limit.
+  if (double bare = pack(0); bare < -kNarrowDeficitLimit) {
+    std::vector<double> mins(n), chosen;
+    for (int k = 0; k < n; ++k) mins[k] = double(wireOf(k).widthMin);
+    if (chooseNarrowing(c.width, mins, -bare, chosen)) {
+      c.width = chosen;
+      c.narrowed = true;
     }
-    if (c.narrowed) c.slack = pack(kCapacityMargin);
   }
+  c.slack = pack(kCapacityMargin);
   if (c.slack < 0 && c.slack > -2.0 * kCapacityMargin * (n + 1)) {
     c.margin = false;
     c.slack = pack(0);

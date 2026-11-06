@@ -3,6 +3,7 @@
 // on the model, so that what fits and what overflows is known before anything is drawn.
 #include <vector>
 
+#include "topo/Narrowing.h"
 #include "topo/Topology.h"
 
 namespace xr::topo {

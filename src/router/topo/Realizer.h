@@ -35,7 +35,8 @@ struct RealVia {
 struct RealizeStats {
   int wires = 0;
   int arcs = 0;
-  int narrowed = 0;  // edge crossings realised at the minimum width
+  int narrowed = 0;  // edge crossings realised narrower than the wire
+  int narrowedWires = 0;  // wires with such a crossing
   int overflowEdges = 0;  // edges of the realiser's triangulation whose wires did not fit (violations)
   int droppedApexes = 0;
   int guardBends = 0;  // bends added by geometry around copper the taut path ran into
