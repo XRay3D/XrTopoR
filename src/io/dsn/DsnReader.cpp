@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <map>
 
+#include "core/Padstack.h"
 #include "io/BoardIO.h"
 #include "io/dsn/DsnCommon.h"
 
@@ -33,6 +34,7 @@ struct Image {
 
 struct Reader {
   Board& b;
+  std::vector<std::string> padStackNames;  // the source's pad stack / style of each pad
   double s = 1000;  // nm per coordinate unit
   std::map<std::string, PadstackDef> padstacks;
   std::map<std::string, Image> images;
@@ -254,6 +256,8 @@ struct Reader {
           p.localPos = Point(rotateBoard(abs - c.pos.v(), -c.angle));
           p.localAngle = p.angle - c.angle;
           b.pads.push_back(p);
+          padStackNames.resize(b.pads.size());
+          padStackNames.back() = ip.padstack;
           int pi = int(b.pads.size() - 1);
           b.components[ci].pads.push_back(pi);
           pinToPad[c.ref + "-" + ip.name] = pi;
@@ -367,6 +371,7 @@ Result<BoardPtr> readDsn(const std::string& text, const std::string& path) {
       if (nc.name == "Default") r.applyVia(nc, r.viaNames.front());
   }
   if (const Node* w = root.find("wiring")) r.readWiring(*w);
+  buildPadstacksFromPads(*b, r.padStackNames);
   buildOutline(*b, b->findLayer("Edge"));
   if (b->outline.size() > 1) b->outline.resize(1);
   auto src = std::make_shared<SourceDoc>();

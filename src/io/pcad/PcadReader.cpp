@@ -3,6 +3,7 @@
 #include <map>
 #include <tuple>
 
+#include "core/Padstack.h"
 #include "io/BoardIO.h"
 #include "io/Encoding.h"
 #include "io/sexpr/SExpr.h"
@@ -34,6 +35,7 @@ struct Pattern {
 
 struct Reader {
   Board& b;
+  std::vector<std::string> padStackNames;  // the source's pad stack / style of each pad
   double unit = kNmPerMil;  // default file unit
   std::map<std::string, PadStyle> padStyles;
   std::map<std::string, PadStyle> viaStyles;
@@ -325,6 +327,8 @@ struct Reader {
       p.localPos = Point(rotateBoard(abs - c.pos.v(), -c.angle));
       p.localAngle = p.angle - c.angle;
       b.pads.push_back(p);
+      padStackNames.resize(b.pads.size());
+      padStackNames.back() = pp.style;
       b.components[ci].pads.push_back(int(b.pads.size() - 1));
     }
   }
@@ -467,6 +471,7 @@ Result<BoardPtr> readPcad(const std::string& text, const std::string& path) {
           r.placePattern(ml->kids[k]);
         }
   if (const Node* nl = tree->find("netlist")) r.readNetlist(*nl);
+  buildPadstacksFromPads(*b, r.padStackNames);
   if (design) r.readDesign(*design);
   LayerId edge = r.mapLayer(r.boardNum, false);
   if (edge >= 0) buildOutline(*b, edge);

@@ -1,12 +1,44 @@
 #include "core/Board.h"
 
 #include <algorithm>
+#include <cmath>
 
 namespace xr {
 
 Vec2 rotateBoard(Vec2 v, double deg) {
   // Y-down frame: a CCW rotation on screen is a CW rotation in math terms.
   return v.rotated(-degToRad(deg));
+}
+
+Polyline rectCornersOutline(Coord fullW, Coord fullH, CornerHandling handling, Coord value, std::uint8_t mask) {
+  double w = double(fullW) / 2, h = double(fullH) / 2;
+  double v = std::min(double(value), std::min(w, h));
+  // The corners in TopoR's order (LB RB RT LT, frame Y up) in the board frame (Y down), going round.
+  struct Corner { std::uint8_t bit; Vec2 at, in1, in2; };  // in1/in2: unit vectors along the two sides
+  const Corner corners[] = {{kCornerLB, {-w, h}, {0, -1}, {1, 0}},
+                            {kCornerRB, {w, h}, {-1, 0}, {0, -1}},
+                            {kCornerRT, {w, -h}, {0, 1}, {-1, 0}},
+                            {kCornerLT, {-w, -h}, {1, 0}, {0, 1}}};
+  Polyline out;
+  for (auto& k : corners) {
+    if (!(mask & k.bit) || v <= 0 || handling == CornerHandling::None) {
+      out.push_back(k.at);
+      continue;
+    }
+    Vec2 a = k.at + k.in1 * v, b = k.at + k.in2 * v;
+    if (handling == CornerHandling::Chamfer) {
+      out.push_back(a);
+      out.push_back(b);
+      continue;
+    }
+    Vec2 centre = k.at + (k.in1 + k.in2) * v;
+    constexpr int n = 8;
+    for (int i = 0; i <= n; ++i) {
+      double t = kPi / 2 * i / n;
+      out.push_back(centre - k.in2 * (v * std::cos(t)) - k.in1 * (v * std::sin(t)));
+    }
+  }
+  return out;
 }
 
 Shape Pad::shapeGeom(double expand) const {

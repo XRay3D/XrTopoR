@@ -4,6 +4,7 @@ add_executable(xrtests
   test_geom.cpp
   test_io.cpp
   test_fst.cpp
+  test_padstack.cpp
   test_drc.cpp
   test_edit.cpp
   test_freestyle.cpp

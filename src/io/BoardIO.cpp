@@ -1,5 +1,7 @@
 #include "io/BoardIO.h"
 
+#include "core/Padstack.h"
+
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
@@ -59,6 +61,8 @@ Result<BoardPtr> loadBoard(const std::string& path) {
     default: return std::unexpected("unsupported file format: " + path);
   }
   if (b && (*b)->name.empty()) (*b)->name = std::filesystem::path(path).stem().string();
+  // Every pad has a stack: those the reader did not give one share one with the pads alike.
+  if (b) buildPadstacksFromPads(**b);
   return b;
 }
 

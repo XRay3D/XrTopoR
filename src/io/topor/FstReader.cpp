@@ -13,6 +13,7 @@
 #include <set>
 #include <tuple>
 
+#include "core/Padstack.h"
 #include "core/ZoneFill.h"
 #include "io/topor/Fst.h"
 #include "io/xml/Xml.h"
@@ -67,6 +68,7 @@ struct Reader {
   Board& b;
   double s = double(kNmPerMm);  // nm per file unit
   std::map<std::string, PadstackDef> padstacks;
+  std::map<std::string, int> stackIndex;  // into b.padstacks
   std::map<std::string, ViastackDef> viastacks;
   std::map<std::string, FootprintDef> footprints;
   std::map<std::string, std::string> componentValues;  // schematic component -> value attribute
@@ -186,11 +188,86 @@ struct Reader {
     return true;
   }
 
+  // One entry of a padstack's Pads as a detail of the stack.
+  std::optional<PadDetail> stackDetail(const Element& p) const {
+    PadDetail d;
+    if (p.is("PadCircle")) {
+      d.form = PadDetail::Form::Circle;
+      d.w = d.h = len(p.num("diameter"));
+    } else if (p.is("PadOval")) {
+      d.form = PadDetail::Form::Oval;
+      d.w = d.h = len(p.num("diameter"));
+      if (auto* st = p.find("Stretch")) d.stretch = toBoard(pt(st));
+    } else if (p.is("PadRect")) {
+      d.form = PadDetail::Form::Rect;
+      d.w = len(p.num("width"));
+      d.h = len(p.num("height"));
+      auto h = p.attr("handling", "None");
+      d.handling = h == "Rounding" ? CornerHandling::Rounding : h == "Chamfer" ? CornerHandling::Chamfer : CornerHandling::None;
+      d.handlingValue = len(p.num("handlingValue"));
+      d.custom = p.flag("custom", false);
+      if (p.flag("cornerLB", false)) d.corners |= kCornerLB;
+      if (p.flag("cornerRB", false)) d.corners |= kCornerRB;
+      if (p.flag("cornerRT", false)) d.corners |= kCornerRT;
+      if (p.flag("cornerLT", false)) d.corners |= kCornerLT;
+    } else if (p.is("PadPoly")) {
+      d.form = PadDetail::Form::Polygon;
+      BBox bb;
+      for (auto* dot : p.findAll("Dot")) {
+        d.poly.push_back(toBoard(pt(dot)));
+        bb.add(d.poly.back());
+      }
+      if (d.poly.size() < 3) return std::nullopt;
+      d.w = Coord(std::llround(bb.width()));
+      d.h = Coord(std::llround(bb.height()));
+    } else {
+      return std::nullopt;
+    }
+    if (auto* sf = p.find("Shift")) d.shift = toBoard(pt(sf));
+    if (auto* r = p.find("LayerTypeRef")) d.layerClass = std::string(r->attr("type", "Signal"));
+    else if (auto* r = p.find("LayerRef")) d.layer = std::string(r->attr("name"));
+    return d;
+  }
+
   void readPadstack(const Element& ps) {
     PadstackDef d;
     auto type = ps.attr("type", "Through");
+    bool mountHole = type == "MountHole" || type == "MountingHole";
     d.drill = len(ps.num("holeDiameter"));
-    d.plated = ps.flag("metallized", type != "MountHole");
+    d.plated = ps.flag("metallized", !mountHole);
+    // The stack as it is, for the editor and for writing it back.
+    Padstack st;
+    st.name = std::string(ps.attr("name"));
+    st.type = mountHole ? PadstackType::MountHole : type == "SMD" ? PadstackType::SMD : PadstackType::Through;
+    st.drill = st.type == PadstackType::SMD ? 0 : d.drill;
+    st.plated = d.plated;
+    auto conn = ps.attr("connectToCopper", "");
+    st.connect = conn == "NoneConnect" ? PadConnect::None : conn == "Direct" ? PadConnect::Direct
+               : conn == "Thermal"     ? PadConnect::Thermal : PadConnect::Unset;
+    if (auto* t = ps.find("Thermal")) {
+      st.thermal.spokes = int(t->num("spokeNum", 4));
+      st.thermal.minSpokes = int(t->num("minSpokeNum", 4));
+      st.thermal.angle = t->num("angle", 45);
+      st.thermal.spokeWidth = len(t->num("spokeWidth", 0.381));
+      st.thermal.backoff = len(t->num("backoff", 0.381));
+    }
+    if (auto* pads = ps.find("Pads"))
+      for (auto& p : pads->kids)
+        if (auto det = stackDetail(p)) {
+          // An entry without a layer (TopoR writes such ones for designs from P-CAD): the signal layers, then
+          // the plane ones.
+          if (det->layer.empty() && det->layerClass.empty()) {
+            auto has = [&](const char* cls) {
+              return std::ranges::any_of(st.details, [&](const PadDetail& x) { return x.layerClass == cls; });
+            };
+            if (!has("Signal")) det->layerClass = "Signal";
+            else if (!has("Plane")) det->layerClass = "Plane";
+            else continue;
+          }
+          st.details.push_back(std::move(*det));
+        }
+    stackIndex[st.name] = int(b.padstacks.size());
+    b.padstacks.push_back(std::move(st));
     if (auto* pads = ps.find("Pads")) {
       for (auto& p : pads->kids) {
         PadstackDef tmp;
@@ -445,8 +522,8 @@ struct Reader {
 
   // Adds one pad to the board; `local` is the pad centre in the fst footprint frame (before
   // mirroring), `padAngle` its rotation there.
-  void placePad(int ci, const std::string& number, const PadstackDef& ps, Vec2 local, double padAngle, bool flipped,
-                Vec2 org, double rot, bool bottom) {
+  void placePad(int ci, const std::string& number, const std::string& stackName, const PadstackDef& ps, Vec2 local,
+                double padAngle, bool flipped, Vec2 org, double rot, bool bottom) {
     const Component& c = b.components[ci];
     Pad p;
     p.component = ci;
@@ -454,6 +531,9 @@ struct Reader {
     p.shape = ps.shape;
     p.drill = ps.drill;
     p.plated = ps.plated;
+    if (auto it = stackIndex.find(stackName); it != stackIndex.end()) p.padstack = it->second;
+    p.mirror = bottom;
+    p.bottomSide = bottom != flipped;
     Vec2 centre = local + ps.shift.rotated(degToRad(padAngle));
     if (bottom) centre.x = -centre.x;
     Vec2 abs = toBoard(org + centre.rotated(degToRad(rot)));
@@ -524,7 +604,7 @@ struct Reader {
       }
       auto psIt = padstacks.find(psName);
       if (psIt == padstacks.end()) continue;
-      placePad(idx, fpad.name, psIt->second, local, fpad.angle, fpad.flipped, org, rot, bottom);
+      placePad(idx, fpad.name, psName, psIt->second, local, fpad.angle, fpad.flipped, org, rot, bottom);
       int pi = int(b.pads.size() - 1);
       pinToPad[key(c.ref, '\x01', fpad.name)] = pi;
       pinToPad[key(c.ref, '\x02', std::to_string(fpad.padNum))] = pi;
@@ -563,7 +643,7 @@ struct Reader {
     b.components.push_back(c);
     auto psIt = padstacks.find(psName);
     if (psIt == padstacks.end()) return;
-    placePad(idx, "1", psIt->second, {}, 0, false, org, rot, bottom);
+    placePad(idx, "1", psName, psIt->second, {}, 0, false, org, rot, bottom);
     int pi = int(b.pads.size() - 1);
     pinToPad[key(c.ref, '\x01', "1")] = pi;
     pinToPad[key(c.ref, '\x02', "1")] = pi;
@@ -1129,6 +1209,7 @@ Result<BoardPtr> readFst(const std::string& text, const std::string& path) {
   if (auto* lib = root.find("LocalLibrary")) r.readLibrary(*lib);
   if (auto* cs = root.find("Constructive")) r.readConstructive(*cs);
   if (auto* cob = root.find("ComponentsOnBoard")) r.readComponents(*cob);
+  syncPadsFromStacks(*b);  // shape, hole and layers as the stacks say
   if (auto* nl = root.find("NetList")) r.readNetList(*nl);
   if (auto* groups = root.find("Groups")) r.readGroups(*groups);
   if (auto* cn = root.find("Connectivity"))

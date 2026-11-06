@@ -82,11 +82,59 @@ Coord clearanceBetween(const std::vector<Coord>& byNet, const std::vector<LayerR
 
 enum class PadShapeKind { Circle, Rect, Oval, RoundRect, Polygon };
 
+// Corner handling of a rectangular pad: TopoR's PadRect «handling». The corners are named in the pad frame
+// as TopoR names them (Y up): LB = left bottom.
+enum class CornerHandling : std::uint8_t { None, Rounding, Chamfer };
+enum PadCorner : std::uint8_t { kCornerLB = 1, kCornerRB = 2, kCornerRT = 4, kCornerLT = 8, kCornersAll = 15 };
+
 struct PadShape {
   PadShapeKind kind = PadShapeKind::Circle;
   Coord w = 0, h = 0;      // full size
   double rratio = 0;       // RoundRect corner radius = rratio * min(w, h)
   std::vector<Vec2> poly;  // Polygon: local outline (pad frame, unrotated)
+};
+
+// «Деталь КП»: the pad of a pad stack on one class of layers (TopoR's violet rows: «Signal», «Plane», «Mask»,
+// «Paste», «Silk», «Mechanical», «Assy», «Doc») or on one layer by name (the yellow rows). Named layers are
+// those of the component side: «Top» is the bottom copper for a pad on the bottom side. Sizes in nm, vectors
+// in the board frame (Y down) of an unrotated, unmirrored pad.
+struct PadDetail {
+  enum class Form : std::uint8_t { Circle, Oval, Rect, Polygon };
+  std::string layerClass;  // or
+  std::string layer;
+  Form form = Form::Circle;
+  Coord w = 0, h = 0;      // Circle, Oval: the diameter in w; Rect: width and height
+  Vec2 stretch;            // Oval: the circle drawn along this vector (centred on the pad)
+  Vec2 shift;              // centre of the detail from the pad's anchor point
+  CornerHandling handling = CornerHandling::None;  // Rect
+  Coord handlingValue = 0;                         // radius of the rounding / leg of the chamfer
+  bool custom = false;                             // only the corners in `corners`, else all of them
+  std::uint8_t corners = 0;
+  std::vector<Vec2> poly;  // Polygon: vertices from the anchor
+  bool operator==(const PadDetail&) const = default;
+};
+
+enum class PadstackType : std::uint8_t { Through, SMD, MountHole };
+// «Способ подключения к металлизированной области» (connectToCopper): Unset = as the copper area says.
+enum class PadConnect : std::uint8_t { Unset, None, Direct, Thermal };
+
+struct PadThermal {
+  int spokes = 4, minSpokes = 4;
+  double angle = 45;
+  Coord spokeWidth = 381'000, backoff = 381'000;
+  bool operator==(const PadThermal&) const = default;
+};
+
+// «Стек КП»: a named pad type shared by pads, with one detail per layer or class of layers.
+struct Padstack {
+  std::string name;
+  PadstackType type = PadstackType::Through;
+  Coord drill = 0, drillH = 0;  // drillH: slot length, 0 = round (not in TopoR's format)
+  bool plated = true;
+  PadConnect connect = PadConnect::Unset;
+  PadThermal thermal;
+  std::vector<PadDetail> details;
+  bool operator==(const Padstack&) const = default;
 };
 
 struct Pad {
@@ -102,6 +150,10 @@ struct Pad {
   Coord drillH = 0;       // slot height (0 = round)
   bool plated = true;
   LayerMask copper = 0;   // mask over board copper layer ids
+  int padstack = -1;      // into Board::padstacks
+  bool mirror = false;    // the stack's geometry mirrored (a pad of a bottom-side component)
+  bool bottomSide = false;  // the stack's named layers mirrored: «Top» means the bottom copper
+  bool uniform = true;    // the same shape on all its copper layers (Pad::shape); else see padShapeOn()
 
   bool isThrough() const { return drill > 0; }
   bool onLayer(LayerId l) const { return (copper >> l) & 1; }
@@ -225,6 +277,7 @@ struct Board {
   std::vector<Net> nets;
   std::vector<Component> components;
   std::vector<Pad> pads;
+  std::vector<Padstack> padstacks;         // «Стеки КП» (core/Padstack.h)
   std::vector<Track> tracks;
   std::vector<Via> vias;
   std::vector<Zone> zones;
@@ -297,6 +350,9 @@ struct Board {
 
 // Rotate a local vector by an angle in degrees using the board (Y-down, CCW on screen) convention.
 Vec2 rotateBoard(Vec2 v, double deg);
+// Outline of a w x h rectangle with the corners in `mask` cut (Chamfer) or rounded (Rounding) by `value`, in
+// the pad frame (unrotated, centred, Y down).
+Polyline rectCornersOutline(Coord w, Coord h, CornerHandling handling, Coord value, std::uint8_t mask);
 
 // Holds the parsed source document so writers can preserve unknown content.
 struct SourceDoc {

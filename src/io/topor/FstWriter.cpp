@@ -9,6 +9,7 @@
 #include <map>
 #include <set>
 
+#include "core/Padstack.h"
 #include "io/topor/Fst.h"
 #include "io/xml/Xml.h"
 
@@ -183,6 +184,8 @@ struct Writer {
       bool taken = false;
       for (auto& [kk, nn] : padstacks)
         if (nn == r) { taken = true; break; }
+      for (auto& s : b.padstacks)
+        if (s.name == r) taken = true;
       if (!taken) return r;
       r = n + "_" + std::to_string(i);
     }
@@ -192,6 +195,10 @@ struct Writer {
     padPadstack.resize(b.pads.size());
     for (size_t i = 0; i < b.pads.size(); ++i) {
       const Pad& p = b.pads[i];
+      if (p.padstack >= 0 && size_t(p.padstack) < b.padstacks.size()) {
+        padPadstack[i] = b.padstacks[size_t(p.padstack)].name;
+        continue;
+      }
       bool bottom = p.component >= 0 && b.components[p.component].side == Side::Bottom;
       PadKey k = keyOf(p, bottom);
       auto it = padstacks.find(k);
@@ -248,8 +255,84 @@ struct Writer {
     }
   }
 
+  // The layer reference of a stack's detail: its class, or its layer by the name written.
+  void detailLayerRef(const PadDetail& d) {
+    if (d.layer.empty()) {
+      x.empty("LayerTypeRef", {{"type", d.layerClass.empty() ? std::string("Signal") : d.layerClass}});
+      return;
+    }
+    LayerId l = detailLayer(b, d.layer, false);
+    x.empty("LayerRef", {{"name", l >= 0 && !layerName[l].empty() ? layerName[l] : d.layer}});
+  }
+
+  void writeDetailShape(const PadDetail& d) {
+    auto shift = [&] {
+      if (d.shift.len() > 0.5) xy("Shift", toFst(d.shift));
+    };
+    switch (d.form) {
+      case PadDetail::Form::Circle:
+        x.open("PadCircle", {{"diameter", mm(double(d.w))}});
+        detailLayerRef(d);
+        shift();
+        x.close();
+        break;
+      case PadDetail::Form::Oval:
+        x.open("PadOval", {{"diameter", mm(double(d.w))}});
+        detailLayerRef(d);
+        xy("Stretch", toFst(d.stretch));
+        shift();
+        x.close();
+        break;
+      case PadDetail::Form::Rect: {
+        std::vector<std::pair<std::string, std::string>> at{{"width", mm(double(d.w))}, {"height", mm(double(d.h))}};
+        if (d.handling != CornerHandling::None) {
+          at.push_back({"handling", d.handling == CornerHandling::Rounding ? "Rounding" : "Chamfer"});
+          at.push_back({"handlingValue", mm(double(d.handlingValue))});
+          if (d.custom) {
+            at.push_back({"custom", "on"});
+            at.push_back({"cornerLB", onOff(d.corners & kCornerLB)});
+            at.push_back({"cornerRB", onOff(d.corners & kCornerRB)});
+            at.push_back({"cornerRT", onOff(d.corners & kCornerRT)});
+            at.push_back({"cornerLT", onOff(d.corners & kCornerLT)});
+          }
+        }
+        x.openList("PadRect", at);
+        detailLayerRef(d);
+        shift();
+        x.close();
+        break;
+      }
+      case PadDetail::Form::Polygon:
+        x.open("PadPoly");
+        detailLayerRef(d);
+        for (auto& v : d.poly) xy("Dot", toFst(v));
+        x.close();
+        break;
+    }
+  }
+
+  void writeStack(const Padstack& ps) {
+    std::vector<std::pair<std::string, std::string>> at{{"name", ps.name}};
+    if (ps.type == PadstackType::SMD) at.push_back({"type", "SMD"});
+    else if (ps.type == PadstackType::MountHole) at.push_back({"type", "MountHole"});
+    if (ps.type != PadstackType::SMD) at.push_back({"holeDiameter", mm(double(ps.drill))});
+    at.push_back({"metallized", onOff(ps.plated)});
+    if (ps.connect != PadConnect::Unset)
+      at.push_back({"connectToCopper", ps.connect == PadConnect::None ? "NoneConnect"
+                                       : ps.connect == PadConnect::Direct ? "Direct" : "Thermal"});
+    x.openList("Padstack", at);
+    x.empty("Thermal", {{"spokeNum", std::to_string(ps.thermal.spokes)}, {"minSpokeNum", std::to_string(ps.thermal.minSpokes)},
+                        {"angle", num(ps.thermal.angle, 3)}, {"spokeWidth", mm(double(ps.thermal.spokeWidth))},
+                        {"backoff", mm(double(ps.thermal.backoff))}});
+    x.open("Pads");
+    for (auto& d : ps.details) writeDetailShape(d);
+    x.close();
+    x.close();
+  }
+
   void writePadstacks() {
     x.open("Padstacks");
+    for (auto& ps : b.padstacks) writeStack(ps);
     for (auto& [k, name] : padstacks) {
       if (k.through)
         x.open("Padstack", {{"name", name}, {"holeDiameter", mm(k.drill)}, {"metallized", onOff(k.plated)}});
@@ -327,7 +410,12 @@ struct Writer {
       FpPadRec r;
       r.number = p.number;
       r.padstack = padPadstack[pi];
-      r.org = localToFst(p.localPos.v(), bottom);
+      // The footprint gives the stack's anchor point, the pad's centre less its detail's shift.
+      Vec2 local = p.localPos.v();
+      if (p.padstack >= 0 && size_t(p.padstack) < b.padstacks.size())
+        if (auto* pd = primaryDetail(b, b.padstacks[size_t(p.padstack)], p.bottomSide); pd && pd->shift.len() > 0.5)
+          local = local - rotateBoard(detailOffset(*pd, p.mirror, p.angle), -c.angle);
+      r.org = localToFst(local, bottom);
       r.angle = bottom ? -p.localAngle : p.localAngle;
       // SMD pad on the side opposite to the component.
       if (p.drill <= 0) {
