@@ -549,8 +549,20 @@ void BoardView::drawLayer(QPainter& p, LayerId l) {
   int group = layerGroup(b, l);
   bool groupPads = group == 0 ? d.flag("showTopMechPads") : group == 2 ? d.flag("showBotMechPads") : true;
   if ((L.kind == LayerKind::Mask || L.kind == LayerKind::Paste) && showPads && groupPads)
+  {
     for (auto& pad : b.pads)
       if (pad.padstack >= 0 && (pad.component < 0 || componentVisible(pad.component))) drawPad(p, pad, l, padColor);
+    // The vias' openings, as their type gives them.
+    if (d.flag("showVias") && b.rules) {
+      p.setPen(Qt::NoPen);
+      p.setBrush(padColor);
+      for (auto& v : b.vias)
+        if (Coord dia = viaDiameterOn(b, v, l); dia > 0) {
+          double r = px(dia / 2.0);
+          p.drawEllipse(toScreen(v.pos.v()), r, r);
+        }
+    }
+  }
   if (!showDetails || (group == 0 && !d.flag("showTopMechDetails")) || (group == 2 && !d.flag("showBotMechDetails")))
     return;
   auto draw = [&](const Graphic& g) {

@@ -276,6 +276,13 @@ std::vector<GerberFile> makeGerbers(const Board& b, const GerberOptions& opt) {
           fallback(p);
         }
       }
+      // Vias open where their type has a pad on the layer (tented otherwise).
+      if (tl >= 0)
+        for (auto& v : b.vias)
+          if (Coord dia = viaDiameterOn(b, v, tl); dia > 0) {
+            g.select(g.circle(double(dia)));
+            g.flash(v.pos.v());
+          }
     };
     if (opt.mask) {
       Gerber g("Soldermask," + sfx, "Negative");

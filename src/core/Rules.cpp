@@ -74,6 +74,15 @@ LayerMask Board::assignedLayers(int net) const {
   return m;
 }
 
+Coord viaPadDiameter(const ViaType& t, const std::string& layerClass, const std::string& layer) {
+  for (auto& p : t.pads)
+    if (!p.layer.empty() && p.layer == layer) return p.diameter;
+  for (auto& p : t.pads)
+    if (p.layer.empty() && p.layerClass == layerClass) return p.diameter;
+  if (layerClass == "Signal" || layerClass == "Plane") return t.diameter;
+  return 0;
+}
+
 void compileRules(Board& b) {
   if (!b.rules) return;
   const DesignRules& r = *b.rules;

@@ -382,14 +382,37 @@ struct Writer {
     x.open("Viastacks");
     for (auto& k : viastackOrder) {
       const std::string& name = viastacks.at(k);
-      x.open("Viastack", {{"name", name}, {"holeDiameter", mm(k.second)}});
+      // The via type of that name with its layer range and its pads layer by layer, if the rules have it.
+      const ViaType* t = nullptr;
+      for (auto& v : rules_.viaTypes)
+        if (v.name == name && v.diameter == k.first && v.drill == k.second) t = &v;
+      if (t && t->viaOnPin) x.open("Viastack", {{"name", name}, {"holeDiameter", mm(k.second)}, {"viaOnPin", "on"}});
+      else x.open("Viastack", {{"name", name}, {"holeDiameter", mm(k.second)}});
       x.open("LayerRange");
-      x.empty("AllLayers");
+      LayerId from = t && !t->from.empty() ? b.findLayer(t->from) : -1, to = t && !t->to.empty() ? b.findLayer(t->to) : -1;
+      if (from >= 0 && to >= 0 && !layerName[from].empty() && !layerName[to].empty()) {
+        x.empty("LayerRef", {{"name", layerName[from]}});
+        x.empty("LayerRef", {{"name", layerName[to]}});
+      } else {
+        x.empty("AllLayers");
+      }
       x.close();
       x.open("ViaPads");
-      x.open("PadCircle", {{"diameter", mm(k.first)}});
-      x.empty("LayerTypeRef", {{"type", "Signal"}});
-      x.close();
+      auto circle = [&](Coord d, const ViaPadSize& p) {
+        x.open("PadCircle", {{"diameter", mm(double(d))}});
+        if (!p.layer.empty()) {
+          LayerId l = b.findLayer(p.layer);
+          x.empty("LayerRef", {{"name", l >= 0 && !layerName[l].empty() ? layerName[l] : p.layer}});
+        } else {
+          x.empty("LayerTypeRef", {{"type", p.layerClass.empty() ? std::string("Signal") : p.layerClass}});
+        }
+        x.close();
+      };
+      // The signal pad is the type's diameter.
+      circle(k.first, {"Signal", "", k.first});
+      if (t)
+        for (auto& p : t->pads)
+          if (!(p.layer.empty() && p.layerClass == "Signal")) circle(p.diameter, p);
       x.close();
       x.close();
     }

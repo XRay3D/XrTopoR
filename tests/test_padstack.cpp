@@ -305,3 +305,49 @@ TEST(Padstack, GerberMaskFromTheDetails) {
   EXPECT_NE(now.find("C,1.7"), std::string::npos);
   EXPECT_NE(now.find("C,1.6"), std::string::npos);  // the other round stacks as before
 }
+
+// Via types keep their pads layer by layer, the layer range and «ПО на контакте»; a mask pad opens the mask
+// over the vias of the type.
+TEST(Padstack, ViaTypesLayerByLayer) {
+  std::string text = readText(data("topor/Example_04/Arcs_master_f5.fst"));
+  size_t a = text.find("<Viastack name=\"C140R.PS\"");
+  size_t e = text.find("</Viastack>", a);
+  ASSERT_NE(a, std::string::npos);
+  text = text.substr(0, a) + R"x(<Viastack name="C140R.PS" holeDiameter="0.6" viaOnPin="on">
+        <LayerRange><LayerRef name="Top"/><LayerRef name="Bottom"/></LayerRange>
+        <ViaPads>
+          <PadCircle diameter="1.4"><LayerTypeRef type="Signal"/></PadCircle>
+          <PadCircle diameter="1.2"><LayerTypeRef type="Mask"/></PadCircle>
+          <PadCircle diameter="1.3"><LayerRef name="BotMask"/></PadCircle>
+        </ViaPads>
+      )x" + text.substr(e);
+  auto r = io::readFst(text, "via.fst");
+  ASSERT_TRUE(r) << r.error();
+  const Board& b = **r;
+  ASSERT_TRUE(b.rules);
+  auto t = std::ranges::find_if(b.rules->viaTypes, [](const ViaType& v) { return v.name == "C140R.PS"; });
+  ASSERT_NE(t, b.rules->viaTypes.end());
+  EXPECT_EQ(t->diameter, mmToNm(1.4));
+  EXPECT_TRUE(t->viaOnPin);
+  EXPECT_EQ(t->from, "Top");
+  EXPECT_EQ(t->to, "Bottom");
+  EXPECT_EQ(viaPadDiameter(*t, "Mask", "TopMask"), mmToNm(1.2));
+  EXPECT_EQ(viaPadDiameter(*t, "Mask", "BotMask"), mmToNm(1.3));
+  EXPECT_EQ(viaPadDiameter(*t, "Paste", "TopPaste"), 0);
+  auto v = std::ranges::find_if(b.vias, [](const Via& v) { return v.diameter == mmToNm(1.4); });
+  ASSERT_NE(v, b.vias.end());
+  EXPECT_EQ(viaDiameterOn(b, *v, b.findLayer("TopMask")), mmToNm(1.2));
+  EXPECT_EQ(viaDiameterOn(b, *v, b.findLayer("BotMask")), mmToNm(1.3));
+  EXPECT_EQ(viaDiameterOn(b, *v, b.findLayer("TopPaste")), 0);
+  for (auto& f : io::makeGerbers(b))
+    if (f.name.ends_with("B_Mask.gbr")) EXPECT_NE(f.content.find("C,1.3"), std::string::npos);
+
+  auto again = io::readFst(io::writeFst(b), "via2.fst");
+  ASSERT_TRUE(again) << again.error();
+  auto t2 = std::ranges::find_if((*again)->rules->viaTypes, [](const ViaType& v) { return v.name == "C140R.PS"; });
+  ASSERT_NE(t2, (*again)->rules->viaTypes.end());
+  EXPECT_EQ(t2->viaOnPin, true);
+  EXPECT_EQ(t2->from, "Top");
+  EXPECT_EQ(t2->to, "Bottom");
+  EXPECT_EQ(t2->pads, t->pads);
+}

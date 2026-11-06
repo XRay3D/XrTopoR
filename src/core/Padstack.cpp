@@ -270,6 +270,27 @@ std::optional<Shape> padShapeOn(const Board& b, const Pad& p, LayerId l, double 
   return q.shapeGeom(expand);
 }
 
+const ViaType* viaTypeOf(const Board& b, const Via& v) {
+  if (!b.rules) return nullptr;
+  for (auto& t : b.rules->viaTypes)
+    if (t.diameter == v.diameter && t.drill == v.drill) return &t;
+  return nullptr;
+}
+
+Coord viaDiameterOn(const Board& b, const Via& v, LayerId l) {
+  if (l < 0 || l >= LayerId(b.layers.size())) return 0;
+  const Layer& L = b.layers[l];
+  if (L.kind == LayerKind::Copper) return v.onLayer(l) ? v.diameter : 0;
+  if (b.copperCount() == 0) return 0;
+  if (L.side == Side::Top && !v.onLayer(b.topCopper())) return 0;
+  if (L.side == Side::Bottom && !v.onLayer(b.bottomCopper())) return 0;
+  const ViaType* t = viaTypeOf(b, v);
+  if (!t) return 0;
+  std::string cls = layerClassOf(b, l);
+  if (cls == "Signal" || cls == "Plane" || cls.empty()) return 0;
+  return viaPadDiameter(*t, cls, L.name);
+}
+
 void updatePadUniform(Board& b) {
   for (Pad& p : b.pads) {
     p.uniform = true;

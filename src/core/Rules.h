@@ -32,9 +32,19 @@ struct ClearanceRule {
   Coord min = 0, nom = 0;
 };
 
+// The pad of a via type on a class of layers («Signal», «Plane», «Mask»...) or on one layer by name.
+struct ViaPadSize {
+  std::string layerClass, layer;
+  Coord diameter = 0;
+  bool operator==(const ViaPadSize&) const = default;
+};
+
 struct ViaType {
   std::string name;
-  Coord diameter = 0, drill = 0;
+  Coord diameter = 0, drill = 0;  // diameter: of the pad on the copper layers (the largest)
+  std::string from, to;           // «Начальный / Конечный слой» (LayerRange); empty: all layers
+  bool viaOnPin = false;          // «ПО на контакте»
+  std::vector<ViaPadSize> pads;   // the pads by class or layer (TopoR's ViaPads); empty: `diameter` on copper
 };
 
 struct ViaRule {
@@ -71,6 +81,10 @@ struct DesignRules {
   std::vector<LayerNetsRule> layerNets;
   Coord edgeWires = 0, edgeComps = 0;  // «Зазор до края платы»
 };
+
+// The diameter of a via type's pad on a layer of a class (`layerClass`) and name (`layer`): the layer's own
+// size, else its class's; 0: none there. The copper classes fall back on `diameter`.
+Coord viaPadDiameter(const ViaType& t, const std::string& layerClass, const std::string& layer);
 
 // Net classes, layer rules, plane nets and the edge clearance of the board from its rules.
 void compileRules(Board& b);

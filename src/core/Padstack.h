@@ -29,6 +29,12 @@ Vec2 detailOffset(const PadDetail& d, bool mirror, double angle);
 // its own shape on its copper layers. nullopt: nothing on that layer.
 std::optional<Shape> padShapeOn(const Board& b, const Pad& p, LayerId l, double expand = 0);
 
+// The via type of a via: the rules' type of its pad and hole sizes; nullptr: none.
+const ViaType* viaTypeOf(const Board& b, const Via& v);
+// The diameter of a via's pad on a layer: its copper, or its type's pad on a mask (paste...) layer of a side the
+// via reaches; 0: nothing there.
+Coord viaDiameterOn(const Board& b, const Via& v, LayerId l);
+
 // Pads follow their stacks: shape, hole, plating, copper layers. A pad keeps its anchor point, so when the
 // detail its shape comes from has moved (its shift) the pad's centre moves with it; `before` are the stacks
 // the pads were made from, index for index (empty: nothing moved).

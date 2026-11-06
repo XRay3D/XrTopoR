@@ -38,6 +38,9 @@ struct PadstackDef {
 struct ViastackDef {
   Coord diameter = 0, drill = 0;
   LayerMask layers = 0;  // 0 = all copper
+  std::string from, to;  // LayerRange by name
+  bool viaOnPin = false;
+  std::vector<ViaPadSize> pads;
 };
 
 struct FpPad {
@@ -289,15 +292,30 @@ struct Reader {
   void readViastack(const Element& vs) {
     ViastackDef d;
     d.drill = len(vs.num("holeDiameter"));
+    d.viaOnPin = vs.flag("viaOnPin", false);
+    Coord any = 0;
     if (auto* vp = vs.find("ViaPads"))
       for (auto& p : vp->kids) {
         PadShape sh;
         Vec2 sf;
-        if (padShape(p, sh, sf)) { d.diameter = std::max(d.diameter, sh.w); }
+        if (!padShape(p, sh, sf)) continue;
+        ViaPadSize ps;
+        ps.diameter = sh.w;
+        if (auto* r = p.find("LayerTypeRef")) ps.layerClass = std::string(r->attr("type", "Signal"));
+        else if (auto* r = p.find("LayerRef")) ps.layer = std::string(r->attr("name"));
+        else ps.layerClass = "Signal";
+        // The copper size: the largest of the copper pads (the mask ones are not copper).
+        bool copper = ps.layerClass == "Signal" || ps.layerClass == "Plane" || copperByName(ps.layer) >= 0;
+        if (copper) d.diameter = std::max(d.diameter, sh.w);
+        any = std::max(any, sh.w);
+        d.pads.push_back(std::move(ps));
       }
+    if (d.diameter == 0) d.diameter = any;
     if (auto* lr = vs.find("LayerRange")) {
       auto refs = lr->findAll("LayerRef");
       if (refs.size() == 2) {
+        d.from = std::string(refs[0]->attr("name"));
+        d.to = std::string(refs[1]->attr("name"));
         LayerId a = copperByName(refs[0]->attr("name")), c = copperByName(refs[1]->attr("name"));
         if (a >= 0 && c >= 0) {
           int ia = b.layers[a].copperIndex, ic = b.layers[c].copperIndex;
@@ -880,7 +898,9 @@ struct Reader {
       }
     }
     for (auto& [name, v] : viastacks) {
-      ViaType t{name, v.diameter, v.drill};
+      ViaType t{name, v.diameter, v.drill, v.from, v.to, v.viaOnPin, v.pads};
+      // Only the signal pad: nothing to keep apart from the diameter.
+      if (t.pads.size() == 1 && t.pads[0].layerClass == "Signal" && t.pads[0].diameter == t.diameter) t.pads.clear();
       if (name == def) r.viaTypes.insert(r.viaTypes.begin(), t);
       else r.viaTypes.push_back(t);
     }
