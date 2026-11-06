@@ -76,6 +76,61 @@ const PadDetail* copperDetail(const Padstack& ps) {
 
 }  // namespace
 
+namespace {
+
+class ColumnStretcher : public QObject {
+ public:
+  explicit ColumnStretcher(QTableWidget* t) : QObject(t), t_(t) {
+    setObjectName("columnStretcher");
+    t->viewport()->installEventFilter(this);
+  }
+  void fit() {
+    if (busy_) return;
+    busy_ = true;
+    auto* h = t_->horizontalHeader();
+    h->setStretchLastSection(false);
+    h->setSectionResizeMode(QHeaderView::Interactive);
+    t_->resizeColumnsToContents();
+    // A check box or row number column («», «#») keeps its width; the others share what is left.
+    auto grows = [&](int c) {
+      auto* h = t_->horizontalHeaderItem(c);
+      return !t_->isColumnHidden(c) && h && !h->text().isEmpty() && h->text() != "#";
+    };
+    int n = 0, sum = 0;
+    for (int c = 0; c < t_->columnCount(); ++c) {
+      if (!t_->isColumnHidden(c)) sum += t_->columnWidth(c);
+      if (grows(c)) ++n;
+    }
+    int extra = t_->viewport()->width() - sum;
+    if (n > 0 && extra > 0)
+      for (int c = 0, k = 0; c < t_->columnCount(); ++c)
+        if (grows(c)) {
+          // The last one takes the rounding, so the columns end at the edge.
+          int add = ++k == n ? extra - (extra / n) * (n - 1) : extra / n;
+          t_->setColumnWidth(c, t_->columnWidth(c) + add);
+        }
+    busy_ = false;
+  }
+
+ protected:
+  bool eventFilter(QObject*, QEvent* e) override {
+    if (e->type() == QEvent::Resize) fit();
+    return false;
+  }
+
+ private:
+  QTableWidget* t_;
+  bool busy_ = false;
+};
+
+}  // namespace
+
+void stretchColumns(QTableWidget* t) {
+  auto* s = static_cast<ColumnStretcher*>(t->findChild<QObject*>("columnStretcher", Qt::FindDirectChildrenOnly));
+  if (!s) s = new ColumnStretcher(t);
+  s->fit();
+}
+
 QString layerClassName(const std::string& cls) {
   if (cls == "Signal") return QObject::tr("Сигнальный");
   if (cls == "Plane") return QObject::tr("Опорный");
@@ -501,6 +556,7 @@ void PadstackEditor::showDetail(const PadDetail& d) {
     poly_->setItem(r, 0, new QTableWidgetItem(QString::number(toUnit(d.poly[size_t(r)].x, u_), 'f', 4)));
     poly_->setItem(r, 1, new QTableWidgetItem(QString::number(toUnit(-d.poly[size_t(r)].y, u_), 'f', 4)));
   }
+  stretchColumns(poly_);
 }
 
 void PadstackEditor::detailChanged() {
@@ -704,6 +760,7 @@ QWidget* PadstackEditor::detailPage() {
   poly_ = new QTableWidget(0, 2);
   poly_->setHorizontalHeaderLabels({"X, " + unitName(u_), "Y, " + unitName(u_)});
   poly_->verticalHeader()->setDefaultSectionSize(20);
+
   poly_->setMinimumHeight(120);
   pv->addWidget(poly_);
   auto* pb = new QHBoxLayout;
@@ -868,8 +925,7 @@ CreateDetailsDialog::CreateDetailsDialog(const Board& b, std::vector<Padstack> s
   left->addWidget(new QLabel(tr("Стеки КП, в которые будут добавлены детали:")));
   list_t_ = new QTableWidget(0, 5);
   list_t_->setHorizontalHeaderLabels({tr("Стек КП"), tm, "T", "B", bm});
-  list_t_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
-  for (int c = 1; c < 5; ++c) list_t_->setColumnWidth(c, 40);
+
   list_t_->verticalHeader()->hide();
   list_t_->setEditTriggers(QAbstractItemView::NoEditTriggers);
   list_t_->setSelectionBehavior(QAbstractItemView::SelectRows);
@@ -984,7 +1040,7 @@ CreateDetailsDialog::CreateDetailsDialog(const Board& b, std::vector<Padstack> s
   report_ = new QTableWidget(0, 6);
   report_->verticalHeader()->hide();
   report_->setEditTriggers(QAbstractItemView::NoEditTriggers);
-  report_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+
   v2->addWidget(report_, 1);
   auto* b2 = new QHBoxLayout;
   repeat_ = new QPushButton(tr("Изменить параметры для выбранных стеков КП"));
@@ -1106,6 +1162,7 @@ void CreateDetailsDialog::fillList() {
       list_t_->setItem(r, side ? 4 : 1, it);
     }
   }
+  stretchColumns(list_t_);
 }
 
 void CreateDetailsDialog::create() {
@@ -1144,7 +1201,7 @@ void CreateDetailsDialog::fillReport(const std::vector<std::pair<int, int>>& res
   QStringList headers{"", tr("Стек КП")};
   for (LayerId l : cols) headers << (l >= 0 ? QString::fromStdString(b_.layers[l].name) : QString("—"));
   report_->setHorizontalHeaderLabels(headers);
-  report_->setColumnWidth(0, 24);
+
   for (auto& [s, k] : result) {
     const Padstack& ps = current_[size_t(s)];
     int r = report_->rowCount();
@@ -1167,6 +1224,7 @@ void CreateDetailsDialog::fillReport(const std::vector<std::pair<int, int>>& res
       report_->setItem(r, c + 2, it);
     }
   }
+  stretchColumns(report_);
   repeat_->setEnabled(false);
 }
 
@@ -1199,7 +1257,6 @@ ViaPadsDialog::ViaPadsDialog(const Board& b, ViaType t, Unit u, QWidget* parent)
   auto table = [&](const QString& first) {
     auto* t = new QTableWidget(0, 2);
     t->setHorizontalHeaderLabels({first, tr("Диаметр, %1").arg(unitName(u))});
-    t->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
     t->verticalHeader()->hide();
     return t;
   };
@@ -1283,6 +1340,7 @@ void ViaPadsDialog::fill() {
     std::string cls = layerClassOf(b_, l);
     row(L.kind == LayerKind::Copper ? metalLayers_ : mechLayers_, QString::fromStdString(L.name), cls, L.name);
   }
+  for (QTableWidget* t : {metalClasses_, metalLayers_, mechClasses_, mechLayers_}) stretchColumns(t);
   updating_ = false;
 }
 

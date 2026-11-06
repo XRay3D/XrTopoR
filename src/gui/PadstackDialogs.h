@@ -188,6 +188,10 @@ class ViaStackDiagram : public QWidget {
   int current_ = -1;
 };
 
+// The columns of a table fill its width: each as wide as its contents, the rest of the width shared among them
+// (again when the table is resized or refilled: call it after filling).
+void stretchColumns(QTableWidget* t);
+
 // The diameters of a via type's pads, distinct ones in order: «1.4, 1.5».
 QString viaDiameters(const Board& b, const ViaType& t, Unit u);
 

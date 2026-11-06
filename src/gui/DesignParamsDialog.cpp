@@ -356,14 +356,12 @@ QWidget* DesignParamsDialog::ruleTable(const QStringList& headers, std::function
   t->setSelectionBehavior(QAbstractItemView::SelectRows);
   t->setSelectionMode(QAbstractItemView::SingleSelection);
   t->setEditTriggers(QAbstractItemView::NoEditTriggers);
-  t->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
-  t->horizontalHeader()->setStretchLastSection(false);
+
   for (int r = 0; r < t->rowCount(); ++r) {
     t->setItem(r, 0, new QTableWidgetItem(QString::number(r)));
     fillRow(t, r);
   }
-  t->resizeColumnsToContents();
-  t->setColumnWidth(0, 30);
+  stretchColumns(t);  // the columns fill the table's width
   v->addWidget(t, 1);
   auto* bar = new QHBoxLayout;
   auto button = [&](const QString& text, const QString& tip) {
@@ -430,7 +428,7 @@ QWidget* DesignParamsDialog::layersPage() {
     t->setItem(l, 2, new QTableWidgetItem(QString::fromStdString(layerTypeName(b, LayerId(l)))));
     t->setItem(l, 3, new QTableWidgetItem(L.planeNet >= 0 ? QString::fromStdString(b.nets[L.planeNet].name) : QString()));
   }
-  t->resizeColumnsToContents();
+  stretchColumns(t);
   return t;
 }
 
@@ -580,7 +578,7 @@ QWidget* DesignParamsDialog::padsPage() {
     }
     int unused = int(std::ranges::count(n, 0));
     count->setText(tr("<i>Всего стеков КП: %1 (%2 не используется)</i>").arg(stacks_.size()).arg(unused));
-    t->resizeColumnsToContents();
+    stretchColumns(t);
   };
   fill();
   connect(search, &QLineEdit::textChanged, this, fill);
@@ -758,10 +756,11 @@ QWidget* DesignParamsDialog::viaTypesPage() {
   v->addWidget(head);
   auto* diagram = new ViaStackDiagram(b, rules_.viaTypes, w);
   auto* scroll = new QScrollArea(w);
+  // The full width of the page, scrolled when the types need more.
+  scroll->setWidgetResizable(true);
+  diagram->setMinimumSize(110 + 140 * int(rules_.viaTypes.size()), diagram->sizeHint().height());
   scroll->setWidget(diagram);
-  scroll->setWidgetResizable(false);
-  diagram->resize(std::max(600, 110 + 140 * int(rules_.viaTypes.size())), diagram->sizeHint().height());
-  scroll->setMinimumHeight(std::min(260, diagram->height() + 20));
+  scroll->setMinimumHeight(std::min(260, diagram->sizeHint().height() + 20));
   v->addWidget(scroll);
   auto copper = b.copperLayers();
   auto refresh = [this, diagram] {
@@ -883,7 +882,6 @@ QWidget* DesignParamsDialog::viaTypesPage() {
       [this](int a, int b) { std::swap(rules_.viaTypes[size_t(a)], rules_.viaTypes[size_t(b)]); });
   v->addWidget(table, 1);
   if (auto* t = table->findChild<QTableWidget*>()) {
-    t->setColumnWidth(5, 170);
     connect(diagram, &ViaStackDiagram::picked, t, [t](int i) { t->selectRow(i); });
     connect(t, &QTableWidget::currentCellChanged, diagram, [diagram](int r) { diagram->setCurrent(r); });
   }
@@ -908,7 +906,7 @@ QWidget* DesignParamsDialog::netlistPage() {
     t->setItem(n, 2, new QTableWidgetItem(QString::fromStdString(b.classOf(n).name)));
   }
   t->setSortingEnabled(true);
-  t->resizeColumnsToContents();
+  stretchColumns(t);
   return t;
 }
 
