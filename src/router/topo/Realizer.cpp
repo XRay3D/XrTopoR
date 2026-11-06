@@ -862,7 +862,6 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
   for (int wi = 0; wi < NW; ++wi) hw[wi].assign(hits[wi].size(), double(wires[wi].width));
   phase.emplace("realize: rounds+tangents");
   for (int round = 0; round < 6; ++round) {
-  st.viaPush.clear();
   for (int pass = nominal && round == 0 ? 0 : 1; pass < 2; ++pass)  // 0: the obstacles' shares of the nominal clearance
   for (auto&& [layer, ids] : byLayer) {
     const LayerObstacles& ob = obstacles.at(layer);
@@ -997,12 +996,6 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
         margin = 0;
         slack = pack();
       }
-      // The squeeze on the vias at the ends of a tight edge: TopoR's F6/F7 push a via away from the
-      // neighbours whose edges carry more than fits (the sum of the unit vectors of the tight edges,
-      // weighted by the deficit).
-      if (slack < kMargin && L > 0)
-        for (auto [o, other] : {std::pair{&U, &V}, std::pair{&V, &U}})
-          if (o->via >= 0) st.viaPush[o->via] = st.viaPush[o->via] + (other->p - o->p) / L * (kMargin - slack);
       if (slack < 0) {
         if (round == 0) ++st.overflowEdges;
         if (round == 0 && std::getenv("XR_OVF")) {
