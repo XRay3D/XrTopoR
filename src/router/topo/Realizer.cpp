@@ -430,8 +430,10 @@ int narrowToFit(Board& b, size_t firstTrack) {
         for (auto& s1 : centre)
           for (auto& s2 : itemShapes(b, r)) room = std::min(room, s1.distance(s2) - req);
       });
-      if (room >= t.width / 2.0) continue;
-      Coord w = std::max(minW, Coord(std::llround(2 * room)));
+      // The last resort (topo/Narrowing.h): short of the rule by more than the limit, and cured by it.
+      if (room >= t.width / 2.0 - kNarrowDeficitLimit) continue;
+      Coord w = Coord(std::floor(2 * room / 1000) * 1000);
+      if (w < minW) continue;  // the minimum would not fit either: the wire stays whole, the DRC shows it
       if (w < t.width) {
         t.width = w;
         ++n;

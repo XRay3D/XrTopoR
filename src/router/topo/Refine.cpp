@@ -94,7 +94,14 @@ std::vector<Chain> chainsOf(const Board& b, const std::vector<char>& chosen) {
     auto [kx, ky] = key(p);
     return ends[{t.net, t.layer, kx, ky}];
   };
-  auto isEnd = [&](const Track& t, Vec2 p) { return at(t, p).size() != 2 || edit::anchoredAt(b, p, t.layer, t.net); };
+  // A change of width ends a chain as a pad, a via or a branch does: a bus and the thin wire that goes on
+  // from it are two wires, re-laid each with its own width (one chain took the width of the track it began
+  // with: after F6 47 mm of a 0.8 mm bus on Arcs_standard_routing were 0.3 mm, TopoR's F6 keeps every joint).
+  auto isEnd = [&](const Track& t, Vec2 p) {
+    const auto& list = at(t, p);
+    if (list.size() != 2 || edit::anchoredAt(b, p, t.layer, t.net)) return true;
+    return b.tracks[list[0]].width != b.tracks[list[1]].width;
+  };
   std::vector<char> used(b.tracks.size(), 0);
   std::vector<Chain> out;
   for (size_t i = 0; i < b.tracks.size(); ++i) {
@@ -352,15 +359,19 @@ RefineResult refine(Board& b, const RefineOptions& o) {
     LayerId bestLayer = c.layer;
     static const bool kDebug = std::getenv("XR_REFINE_DEBUG") != nullptr;
     for (LayerId l : layers) {
-      Coord width = l == c.layer ? c.width : b.trackWidth(c.net, l);
+      const Coord width = l == c.layer ? c.width : b.trackWidth(c.net, l);
       auto path = findPath(b, c.a, c.b, l, c.net, width, region, ignore);
-      // A wire in violation is worth a search over the whole board, and at its minimum width.
+      // A wire in violation is worth a search over the whole board, and for a way that only its minimum
+      // width gets through. The wire is laid with its own width all the same: the realiser narrows it
+      // where it must and no further (topo/Narrowing.h) — laid at the minimum from end to end, 7 mm of a
+      // 0.8 mm bus came out 0.3 mm for one tight place.
+      bool narrowWay = false;
       if (!path && conflicts0 > 0 && bb.valid()) path = findPath(b, c.a, c.b, l, c.net, width, bb.inflated(kNmPerMm), ignore);
       if (!path && conflicts0 > 0)
         if (Coord narrow = b.minTrackWidth(c.net, l); narrow > 0 && narrow < width) {
-          width = narrow;
-          path = findPath(b, c.a, c.b, l, c.net, width, region, ignore);
-          if (!path && bb.valid()) path = findPath(b, c.a, c.b, l, c.net, width, bb.inflated(kNmPerMm), ignore);
+          narrowWay = true;
+          path = findPath(b, c.a, c.b, l, c.net, narrow, region, ignore);
+          if (!path && bb.valid()) path = findPath(b, c.a, c.b, l, c.net, narrow, bb.inflated(kNmPerMm), ignore);
         }
       if (kDebug && conflicts0 > 0 && !path)
         std::fprintf(stderr, "chain net %s L%d tracks %zu conflicts %d: layer %d no path\n", b.nets[c.net].name.c_str(),
@@ -368,7 +379,7 @@ RefineResult refine(Board& b, const RefineOptions& o) {
       if (!path) continue;
       // Two candidates: the path pulled taut with arcs, and the grid path itself (the taut one can
       // conflict again where the grid path, which keeps every clearance, did not).
-      for (int raw = 0; raw < 2; ++raw) {
+      for (int raw = 0; raw < (narrowWay ? 1 : 2); ++raw) {  // the grid path as it is would be narrow all along
         Board trial = b;
         edit::Fragment f;
         f.tracks = c.tracks;
@@ -389,13 +400,13 @@ RefineResult refine(Board& b, const RefineOptions& o) {
           w.net = c.net;
           w.layer = l;
           w.width = width;
+          w.widthMin = std::min(width, b.minTrackWidth(c.net, l));
           w.clearance = b.clearance(c.net, l);
           w.sketch = *path;
           RealizeOptions ro;
           ro.tracksAsObstacles = true;
           ro.region = region;
           realize(trial, {w}, {}, ro);
-          narrowToFit(trial, before);
         }
         double len = 0;
         BBox judge1 = judge;  // the new path may lie far from the old one: judge both, before and after

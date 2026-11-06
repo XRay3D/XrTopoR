@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <format>
+#include <print>
 #include <set>
 
 #include "core/SpatialIndex.h"
@@ -144,6 +145,12 @@ RelayStats relayStats(const Board& b) {
       auto far = e ? ia : ic;
       bool bridge = far && far->type == ItemType::Pad && far->index != in->index;
       ++(bridge ? s.exitsBridge : s.exitsSide);
+      if (!bridge && std::getenv("XR_TOPO_DEBUG")) {
+        const Pad& p = b.pads[size_t(in->index)];
+        std::println(stderr, "side exit: pad {}-{} net {} at ({:.3f},{:.3f}), leaves at local ({:.3f},{:.3f}) of half sizes {:.3f} x {:.3f}",
+                     p.component >= 0 ? b.components[size_t(p.component)].ref : "?", p.number, b.nets[size_t(t.net)].name, f.c.x / 1e6, f.c.y / 1e6,
+                     f.local(outside).x / 1e6, f.local(outside).y / 1e6, f.L / 1e6, f.W / 1e6);
+      }
     }
   }
   // A neck: a run narrower than the wires at both its ends, in series off the copper.
