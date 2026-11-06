@@ -77,6 +77,7 @@ class BoardView : public QWidget {
   void selectCopper(int toporIndex);  // 0 = bottom, 1 = top, 2..9 = inner layers (with a via while routing)
   void toggleMetalLayers();           // all copper layers on/off
   void toggleFix();                   // F: lock/unlock the selection
+  void toggleFlexFix();               // the flexible fixation of the nets of the selected wires and vias
   void selectAll();
   void cycleSelection();             // X: segment → wire → net
   void selectWire();                 // whole wires (chains up to pads, vias, junctions) of the selected segments

@@ -333,6 +333,9 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
     for (int oi = 0; oi < int(t.owners.size()); ++oi) {
       const Owner& ow = t.owners[oi];
       if (ow.layers == 0 || ow.locked || lockedAt.contains(oi)) continue;
+      // The vias of a flexibly fixed net stand (its topology is fixed, its vias' places with it); its branch
+      // points move: where they are is the shape of its wires.
+      if (ow.kind == Owner::Kind::Via && b.flexFixed(ow.net)) continue;
       if ((ow.kind == Owner::Kind::Via && o.vias) || (ow.kind == Owner::Kind::Junction && o.junctions)) objs.push_back({oi, {}, 1.0, ends[oi], ow.c});
     }
   }
@@ -690,7 +693,7 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
     grid.slack = 0;
     for (const Obj& ob : objs) {
       const Owner& ow = bt.owners[ob.owner];
-      if (ow.kind != Owner::Kind::Junction || ob.ends < 3) continue;
+      if (ow.kind != Owner::Kind::Junction || ob.ends < 3 || b.flexFixed(ow.net)) continue;  // a merge is a change of topology
       int into = -1;
       double nearest = 0;
       grid.near(ow.c, 1000, [&](int oj) {

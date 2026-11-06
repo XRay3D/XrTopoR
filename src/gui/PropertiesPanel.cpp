@@ -366,6 +366,7 @@ QWidget* PropertiesPanel::wirePage(const std::vector<int>& tracks) {
   f->addRow(title(tracks.size() == 1 ? tr("Проводник") : tr("Участки проводников (%1)").arg(tracks.size())));
   auto net = common<int>(tracks, [&](int t) { return b.tracks[t].net; });
   f->addRow(tr("Цепь:"), new QLabel(net && *net >= 0 ? QString::fromStdString(b.nets[*net].name) : QString()));
+  if (net && b.flexFixed(*net)) f->addRow(tr("Гибкая фиксация цепи:"), new QLabel(tr("включена")));
   double total = 0;
   for (int t : tracks) total += b.tracks[t].length();
   f->addRow(tr("Длина:"), new QLabel(formatLength(total, u, 3) + " " + unitName(u)));
@@ -413,6 +414,7 @@ QWidget* PropertiesPanel::viaPage(const std::vector<int>& vias) {
   f->addRow(title(vias.size() == 1 ? tr("Переход") : tr("Переходы (%1)").arg(vias.size())));
   auto net = common<int>(vias, [&](int v) { return b.vias[v].net; });
   f->addRow(tr("Цепь:"), new QLabel(net && *net >= 0 ? QString::fromStdString(b.nets[*net].name) : QString()));
+  if (net && b.flexFixed(*net)) f->addRow(tr("Гибкая фиксация цепи:"), new QLabel(tr("включена")));
   if (vias.size() == 1) {
     const Via& v = b.vias[vias[0]];
     f->addRow("x:", length(double(v.pos.x), [this, vi = vias[0]](double x) {

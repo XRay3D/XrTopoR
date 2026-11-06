@@ -814,6 +814,14 @@ struct Writer {
       x.close();
     }
     x.close();
+    // The nets' properties (TopoR writes one for every net): the flexible fixation and «Трассировать».
+    x.open("NetProperties");
+    for (const Net& n : b.nets) {
+      x.open("NetProperty", {{"flexfix", onOff(n.flexFixed)}, {"route", onOff(n.route)}});
+      x.empty("NetRef", {{"name", n.name}});
+      x.close();
+    }
+    x.close();
     if (!rules_.planes.empty()) {
       x.open("RulesPlaneLayersNets");
       for (auto& p : rules_.planes) {

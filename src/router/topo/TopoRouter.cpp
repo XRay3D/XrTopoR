@@ -259,6 +259,7 @@ class Router {
   BBox targetBox_;
   int startPad_ = -1;
   bool relaxed_ = false;
+  bool keptRouting_ = false;  // tracks or vias left on the board when the routing began
 
   bool cancelled() const { return o_.cancel && o_.cancel->load(); }
   Vec2 P(int v) const { return m_.verts[v].p; }
@@ -563,6 +564,7 @@ void Router::setup() {
   for (auto&& [net, pads] : netPads) {
     if (pads.size() < 2) continue;
     if (!o_.nets.empty() && !std::ranges::contains(o_.nets, b_.nets[net].name)) continue;
+    if (b_.nets[size_t(net)].flexFixed || !b_.nets[size_t(net)].route) continue;  // not to be routed
     NetJob j;
     j.net = net;
     j.pads = pads;
@@ -2337,7 +2339,15 @@ int Router::penalizeAround(int wire, Vec2 pos, double radius) {
 
 RouterResult Router::run() {
   auto t0 = std::chrono::steady_clock::now();
-  if (o_.ripupExisting) b_.clearRouting(true);
+  // What is not to be routed stays on the board as it is and is copper to route round: the locked tracks, the
+  // flexibly fixed nets (their topology is fixed: they are neither re-routed nor finished) and the nets whose
+  // «Трассировать» is off.
+  auto stays = [&](int net) { return net >= 0 && (b_.nets[size_t(net)].flexFixed || !b_.nets[size_t(net)].route); };
+  if (o_.ripupExisting) {
+    std::erase_if(b_.tracks, [&](const Track& t) { return !t.locked && !stays(t.net); });
+    std::erase_if(b_.vias, [&](const Via& v) { return !v.locked && !stays(v.net); });
+  }
+  keptRouting_ = !b_.tracks.empty() || !b_.vias.empty();
   int clearedZones = 0;
   for (auto& z : b_.zones)
     if (!z.filled.empty()) { z.filled.clear(); ++clearedZones; }
@@ -2537,7 +2547,7 @@ RouterResult Router::run() {
   if (o_.optimizeIterations > 0 && !cancelled() && !std::getenv("XR_SKETCH")) {
     OptimizeOptions oo;
     oo.iterations = o_.optimizeIterations;
-    if (!o_.ripupExisting || !o_.nets.empty())
+    if (!o_.ripupExisting || !o_.nets.empty() || keptRouting_)
       for (auto& j : jobs_) oo.nets.push_back(j.net);  // the wires kept on the board stay as they are
     oo.cancel = o_.cancel;
     oo.progress = o_.progress;

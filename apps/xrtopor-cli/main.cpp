@@ -47,6 +47,7 @@ void usage() {
       "  fill       <board> -o <out> [--no-thermals]  pour copper zones\n"
       "  report     <board> [--bom out.csv]          routing statistics per layer and net, BOM\n"
       "  padstats   <board>                         how the wires meet the pads: widths, exits, runs inside copper, joints\n"
+      "  flexfix    <board> -o <out> --nets a,b [--off]  set (or take off) the flexible fixation of nets\n"
       "boards: .kicad_pcb, .dsn, P-CAD ASCII .pcb");
 }
 
@@ -80,6 +81,8 @@ int cmdInfo(const Board& b) {
                tht, connected);
   std::println("nets       {}\ntracks     {}\nvias       {}\nzones      {}\noutline    {} contour(s)", b.nets.size(),
                b.tracks.size(), b.vias.size(), b.zones.size(), b.outline.size());
+  if (auto n = std::ranges::count_if(b.nets, [](const Net& x) { return x.flexFixed; }); n > 0) std::println("flexibly fixed nets {}", n);
+  if (auto n = std::ranges::count_if(b.nets, [](const Net& x) { return !x.route; }); n > 0) std::println("nets not to route   {}", n);
   for (auto& nc : b.netClasses)
     std::println("class      {:<12} width {:.3f} clearance {:.3f} via {:.3f}/{:.3f} mm", nc.name, nc.trackWidth / 1e6,
                  nc.clearance / 1e6, nc.viaDiameter / 1e6, nc.viaDrill / 1e6);
@@ -183,6 +186,23 @@ int main(int argc, char** argv) {
       if (auto r = io::writeFile(std::string(p), io::bomCsv(b)); !r) return fail(r.error());
       std::println("BOM written to {}", p);
     }
+    return 0;
+  }
+  if (cmd == "flexfix" && !a.opt("-o").empty()) {
+    // The flexible fixation of the nets named (--off takes it off); «Трассировать» goes the other way.
+    const auto names = a.opt("--nets") | std::views::split(',') | std::ranges::to<std::vector<std::string>>();
+    const bool on = !a.flag("--off");
+    if (names.empty()) return fail("flexfix: --nets a,b names the nets");
+    int n = 0;
+    for (const std::string& name : names) {
+      const int net = b.findNet(name);
+      if (net < 0) return fail(std::format("no net {}", name));
+      b.nets[size_t(net)].flexFixed = on;
+      b.nets[size_t(net)].route = !on;
+      ++n;
+    }
+    std::println("flexible fixation {} for {} net(s)", on ? "set" : "taken off", n);
+    if (auto r = io::saveBoard(b, std::string(a.opt("-o"))); !r) return fail(r.error());
     return 0;
   }
   if (cmd == "padstats") {

@@ -542,7 +542,7 @@ int removeExcessVias(Board& b) {
   int n = 0;
   for (int vi = int(b.vias.size()) - 1; vi >= 0; --vi) {
     const Via& v = b.vias[vi];
-    if (v.locked) continue;
+    if (v.locked || b.flexFixed(v.net)) continue;  // a flexibly fixed net keeps its vias
     LayerMask used = 0;
     for (const Track& t : b.tracks)
       if (onVia(v, t.a.v(), t.layer, t.net) || onVia(v, t.b.v(), t.layer, t.net)) used |= LayerMask(1) << t.layer;

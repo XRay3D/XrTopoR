@@ -1363,3 +1363,36 @@ TEST(Gui, SelectWireThroughASerpentine) {
   view.selectWire();
   EXPECT_EQ(doc.selectedItems().size(), 1u) << "a branch alone, up to the junction";
 }
+
+// The flexible fixation is set for the nets of the selected wires («Трассировать» goes off with it), is undone
+// with the edit, and «Удалить разводку» leaves such a net's wires.
+TEST(Gui, FlexFixTogglesAndUndoes) {
+  app();
+  Document doc;
+  auto b = io::loadBoard(data("astable.kicad_pcb"));
+  ASSERT_TRUE(b);
+  BoardView view(&doc);
+  view.resize(800, 600);
+  doc.setBoard(std::move(*b), "x");
+  Board& brd = *doc.board();
+  ASSERT_FALSE(brd.tracks.empty());
+  const int net = brd.tracks[0].net;
+  ASSERT_GE(net, 0);
+  doc.setSelection({{ItemType::Track, 0}}, {});
+  view.toggleFlexFix();
+  EXPECT_TRUE(brd.nets[size_t(net)].flexFixed);
+  EXPECT_FALSE(brd.nets[size_t(net)].route);
+  const size_t ofNet = size_t(std::ranges::count_if(brd.tracks, [&](const Track& t) { return t.net == net; }));
+  Board cleared = brd;
+  cleared.clearRouting(true);
+  EXPECT_EQ(cleared.tracks.size(), ofNet);  // the fixed net's wires stay, the rest go
+  doc.undoStack()->undo();
+  EXPECT_FALSE(doc.board()->nets[size_t(net)].flexFixed);
+  EXPECT_TRUE(doc.board()->nets[size_t(net)].route);
+  doc.undoStack()->redo();
+  EXPECT_TRUE(doc.board()->nets[size_t(net)].flexFixed);
+  doc.setSelection({{ItemType::Track, 0}}, {});
+  view.toggleFlexFix();  // all the selected nets have it: off again
+  EXPECT_FALSE(doc.board()->nets[size_t(net)].flexFixed);
+  EXPECT_TRUE(doc.board()->nets[size_t(net)].route);
+}

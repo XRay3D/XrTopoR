@@ -300,3 +300,67 @@ TEST(Mesh, SplitTriangle) {
   m.splitTriangle(t2, c2, topo::VKind::ViaSite);
   check();
 }
+
+// A flexibly fixed net is left as it is: its wires stay where they are and are copper to route round, and the
+// part of it that is not routed is not finished (TopoR: the autorouter does not change the topology of such
+// nets, nor route them to the end). The same board with the fixation off is routed whole.
+TEST(Router, FlexFixedNetIsLeftAsItIs) {
+  auto mm = [](double x, double y) { return Vec2{x * kNmPerMm, y * kNmPerMm}; };
+  Board b = twoPads();
+  const int nb = b.addNet("B");
+  for (Vec2 at : {mm(20, 3), mm(20, 23), mm(30, 27)}) {
+    Component c;
+    c.ref = "K" + std::to_string(b.components.size());
+    c.pos = Point(at);
+    Pad p;
+    p.number = "1";
+    p.component = int(b.components.size());
+    p.net = nb;
+    p.shape.w = p.shape.h = mmToNm(1.6);
+    p.drill = mmToNm(0.8);
+    p.copper = b.allCopperMask();
+    c.pads.push_back(int(b.pads.size()));
+    b.pads.push_back(p);
+    b.components.push_back(c);
+    b.updatePadPositions(int(b.components.size()) - 1);
+  }
+  Track wall;  // B's first two pads joined across the way of A; its third pad left unrouted
+  wall.a = Point(mm(20, 3));
+  wall.b = Point(mm(20, 23));
+  wall.width = mmToNm(0.3);
+  wall.layer = b.topCopper();
+  wall.net = nb;
+  b.tracks.push_back(wall);
+  auto ofB = [&](const Board& x) {
+    std::vector<std::pair<Point, Point>> out;
+    for (const Track& t : x.tracks)
+      if (t.net == nb) out.push_back({t.a, t.b});
+    return out;
+  };
+  auto unroutedOf = [&](const Board& x, int net) {
+    int n = 0;
+    for (const auto& r : Connectivity::compute(x).ratsnest) n += r.net == net;
+    return n;
+  };
+  ASSERT_EQ(unroutedOf(b, nb), 1);
+  topo::RouterOptions o;
+  o.copperIndices = {0};
+  {
+    Board fixed = b;
+    fixed.nets[size_t(nb)].flexFixed = true;
+    fixed.nets[size_t(nb)].route = false;
+    auto r = topo::routeBoard(fixed, o);
+    EXPECT_EQ(r.connections, 1);  // A's only
+    EXPECT_EQ(r.routed, 1);
+    EXPECT_EQ(ofB(fixed), ofB(b));       // B's wire as it was
+    EXPECT_EQ(unroutedOf(fixed, nb), 1);  // ... and its third pad still unrouted
+    EXPECT_EQ(unroutedOf(fixed, b.findNet("A")), 0);
+    EXPECT_EQ(clearanceViolations(fixed), 0);
+  }
+  {
+    Board free = b;
+    auto r = topo::routeBoard(free, o);
+    EXPECT_EQ(r.connections, 3);
+    EXPECT_EQ(unroutedOf(free, nb), 0);
+  }
+}

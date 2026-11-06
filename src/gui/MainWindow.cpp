@@ -183,6 +183,7 @@ void MainWindow::bindCommands() {
   c.bind("Accel_Duplicate", [this] { view_->duplicateSelection(); });
   c.bind("Accel_SelAll", [this] { view_->selectAll(); });
   c.bind("Accel_Fix", [this] { view_->toggleFix(); });
+  c.bind("Cmd_FlexFix", [this] { view_->toggleFlexFix(); });
   c.bind("Accel_Layer", [this] { view_->changeLayer(); });
   c.bind("Accel_Reduce", [this] { view_->straighten(); });
   c.bind("Accel_Unlink", [this] { view_->unlinkSelection(); });
@@ -1072,6 +1073,7 @@ void MainWindow::showContextMenu(QPoint globalPos) {
   if (tracks) m.addAction(tr("Выделить весь проводник"), view_, &BoardView::selectWire);
   if (tracks || vias || pads || zones) m.addAction(tr("Выделить всю цепь"), view_, &BoardView::selectNet);
   if (tracks || vias || !comps.empty()) m.addAction(c["Accel_Fix"]);
+  if (tracks || vias) m.addAction(c["Cmd_FlexFix"]);
   if (tracks) c.fill(&m, {"Accel_Width", "Accel_Layer", "Accel_Reduce"});
   if (tracks || vias || pads || zones) m.addAction(c["Accel_ChangeNet"]);
   if (!comps.empty() || tracks || vias || zones) {

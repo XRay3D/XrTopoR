@@ -47,6 +47,14 @@ struct NetClass {
 struct Net {
   std::string name;
   int netClass = 0;
+  // TopoR's flexible fixation («гибкая фиксация»): the net's topology is fixed — which way its wires go round
+  // what, where its vias stand — and the shape of its wires is not. The autorouter leaves such a net as it is
+  // (and does not finish it when it is not routed whole), F6 does not re-lay its wires, F7 does not move its
+  // vias; F5 draws its wires anew.
+  bool flexFixed = false;
+  // TopoR's «Трассировать»: off, and the autorouter does not route the net (setting the flexible fixation
+  // takes it off).
+  bool route = true;
 };
 
 // Layer-specific override of width/clearance for some nets (empty = all), applied in order.
@@ -278,7 +286,10 @@ struct Board {
   // corners of its box in board coordinates.
   std::array<Vec2, 4> textBox(const Text& t) const;
   void rebuildNetIndex();  // fixes cached lookup after edits
+  // The routing goes; the locked tracks and vias stay (when asked), and so does what belongs to the flexibly
+  // fixed nets.
   void clearRouting(bool keepLocked = true);
+  bool flexFixed(int net) const { return net >= 0 && net < int(nets.size()) && nets[size_t(net)].flexFixed; }
 
  private:
   std::map<std::string, int> netIndex_;

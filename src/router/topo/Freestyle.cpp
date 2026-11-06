@@ -83,7 +83,7 @@ void pushAround(Board& b, std::vector<Mover> movers, const edit::Fragment& fixed
         };
         switch (r.type) {
           case ItemType::Via:
-            if (!movedVia[r.index] && !b.vias[r.index].locked) keepLonger(viaPush[r.index], need);
+            if (!movedVia[r.index] && !b.vias[r.index].locked && !b.flexFixed(b.vias[r.index].net)) keepLonger(viaPush[r.index], need);
             break;
           case ItemType::Pad:
             if (int ci = b.pads[r.index].component;

@@ -414,7 +414,7 @@ OptimizeResult optimize(Board& b, const OptimizeOptions& o) {
       std::vector<ViaJob> jobs;
       for (int vi = 0; vi < int(b.vias.size()); ++vi) {
         const Via& v = b.vias[vi];
-        if (v.locked || (!o.nets.empty() && !std::ranges::contains(o.nets, v.net))) continue;
+        if (v.locked || b.flexFixed(v.net) || (!o.nets.empty() && !std::ranges::contains(o.nets, v.net))) continue;
         ViaJob j;
         j.vi = vi;
         j.vs = Shape::circle(v.pos.v(), v.diameter / 2.0);

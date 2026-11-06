@@ -52,7 +52,7 @@ RefineModelResult refineModel(Board& b, Topology& t, const RefineModelOptions& o
   std::vector<Candidate> order;
   for (int wi = 0; wi < int(t.wires.size()); ++wi) {
     const Wire& w = t.wires[wi];
-    if (w.locked || w.cross.empty() || w.end[0] < 0 || w.end[1] < 0) continue;
+    if (w.locked || b.flexFixed(w.net) || w.cross.empty() || w.end[0] < 0 || w.end[1] < 0) continue;  // a flexibly fixed net keeps its paths
     const LayerMesh& m = *t.mesh(w.layer);
     const double straight = (m.verts[w.endVertex[1]].p - m.verts[w.endVertex[0]].p).len();
     const double detour = tautLength(t, wi) - straight;

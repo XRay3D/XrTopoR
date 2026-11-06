@@ -856,6 +856,15 @@ struct Reader {
         if (obj.empty()) continue;
         r.vias.push_back({v->flag("enabled", true), ruleNets(*obj[0]), ref ? std::string(ref->attr("name")) : std::string()});
       }
+    // The nets' properties: the flexible fixation and «Трассировать».
+    if (auto* np = rules.find("NetProperties"))
+      for (auto* p : np->findAll("NetProperty")) {
+        auto* ref = p->find("NetRef");
+        const int net = ref ? b.findNet(std::string(ref->attr("name"))) : -1;
+        if (net < 0) continue;
+        b.nets[size_t(net)].flexFixed = p->flag("flexfix", false);
+        b.nets[size_t(net)].route = p->flag("route", true);
+      }
     if (auto* sl = rules.find("RulesSignalLayersNets"))
       for (auto* s : sl->findAll("SignalLayerNets")) {
         auto* lr = s->find("LayerRef");

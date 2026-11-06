@@ -1953,3 +1953,44 @@ TEST(Topo, RelayGoesBetweenTwoWires) {
   for (const topo::LayerMesh& m : t.layers) EXPECT_TRUE(t.findCrossings(m).empty());
   EXPECT_EQ(p.violations(), 0);
 }
+
+// The flexible fixation of a net: F6 does not re-lay its wires (the long way round stays), F7 does not move its
+// vias; F5 draws its wires anew — their shape is not fixed.
+TEST(Topo, FlexFixedNetKeepsItsTopology) {
+  {
+    PinBoard p;
+    p.pad("N2", 20, 10, PadShapeKind::Circle, 1, 1);
+    p.pad("N2", 20, 17, PadShapeKind::Circle, 1, 1);
+    p.track("N2", {{20, 10}, {20, 17}}, 0.3);
+    p.pad("N1", 5, 8, PadShapeKind::Circle, 1, 1);
+    p.pad("N1", 35, 8, PadShapeKind::Circle, 1, 1);
+    p.track("N1", {{5, 8}, {17, 13}, {18.5, 13}, {18.5, 18.5}, {21.5, 18.5}, {21.5, 13}, {23, 13}, {35, 8}}, 0.3);
+    p.b.nets[size_t(p.net("N1"))].flexFixed = true;
+    topo::Topology::assignIds(p.b);
+    topo::Topology t;
+    t.build(p.b);
+    topo::RefineModelOptions o;
+    o.junctions = false;
+    auto res = topo::refineModel(p.b, t, o);
+    ASSERT_TRUE(res.drawn);
+    EXPECT_EQ(res.relaid, 0);
+    EXPECT_GT(p.length("N1"), 34.0);  // still over the two pads (pulled taut: the shape is F6's to draw)
+    EXPECT_EQ(p.violations(), 0);
+  }
+  {
+    PinBoard p;
+    p.pad("N1", 5, 5, PadShapeKind::Circle, 1, 1);
+    p.pad("N1", 25, 15, PadShapeKind::Circle, 1, 1);
+    p.via("N1", 25, 5, 1.0);
+    p.track("N1", {{5, 5}, {12, 7}, {25, 5}}, 0.3);  // a bend F5 pulls out
+    p.track("N1", {{25, 5}, {25, 15}}, 0.3);
+    p.b.nets[size_t(p.net("N1"))].flexFixed = true;
+    const double drawn = p.length("N1");
+    auto res = p.f7();
+    ASSERT_TRUE(res.drawn);
+    EXPECT_EQ(res.viaMoves, 0);
+    EXPECT_EQ(p.b.vias[0].pos, Point(PinBoard::at(25, 5)));
+    EXPECT_LT(p.length("N1"), drawn - 0.2);  // the bend is gone: the wires were drawn anew
+    EXPECT_NEAR(p.length("N1"), 30.0, 0.05);
+  }
+}

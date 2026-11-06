@@ -309,6 +309,9 @@ RefineResult refine(Board& b, const RefineOptions& o) {
   else
     for (int ti : o.tracks)
       if (ti >= 0 && ti < int(chosen.size())) chosen[ti] = 1;
+  // The wires of a flexibly fixed net keep their paths (TopoR: Refine is not run on them).
+  for (size_t i = 0; i < b.tracks.size(); ++i)
+    if (b.flexFixed(b.tracks[i].net)) chosen[i] = 0;
   if (!o.nets.empty())
     for (size_t i = 0; i < b.tracks.size(); ++i)
       if (!std::ranges::contains(o.nets, b.tracks[i].net)) chosen[i] = 0;

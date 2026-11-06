@@ -304,8 +304,8 @@ BBox Board::bbox() const {
 }
 
 void Board::clearRouting(bool keepLocked) {
-  std::erase_if(tracks, [&](const Track& t) { return !(keepLocked && t.locked); });
-  std::erase_if(vias, [&](const Via& v) { return !(keepLocked && v.locked); });
+  std::erase_if(tracks, [&](const Track& t) { return !(keepLocked && t.locked) && !flexFixed(t.net); });
+  std::erase_if(vias, [&](const Via& v) { return !(keepLocked && v.locked) && !flexFixed(v.net); });
 }
 
 }  // namespace xr

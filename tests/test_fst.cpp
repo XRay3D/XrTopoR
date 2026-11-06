@@ -481,3 +481,31 @@ TEST(FstIO, KeepoutsToKicad) {
   EXPECT_EQ((*r)->keepouts[0].layers, LayerMask(1) << (*r)->topCopper());
   EXPECT_EQ((*r)->zones.size(), b.zones.size());
 }
+
+// The nets' properties of TopoR's file: the flexible fixation and «Трассировать» are read, written for every
+// net and read back.
+TEST(FstIO, NetPropertiesRoundTrip) {
+  auto r = io::loadBoard(data("topor/Example_04/Arcs_standard_routing.fst"));
+  ASSERT_TRUE(r) << r.error();
+  Board& a = **r;
+  ASSERT_GE(a.nets.size(), 3u);
+  for (const Net& n : a.nets) {
+    EXPECT_FALSE(n.flexFixed) << n.name;  // the file has flexfix="off" route="on" for every net
+    EXPECT_TRUE(n.route) << n.name;
+  }
+  a.nets[1].flexFixed = true;
+  a.nets[1].route = false;
+  a.nets[2].route = false;
+  std::string text = io::writeFst(a);
+  EXPECT_NE(text.find("<NetProperty flexfix=\"on\" route=\"off\">"), std::string::npos);
+  auto again = io::readFst(text, "np.fst");
+  ASSERT_TRUE(again) << again.error();
+  const Board& c = **again;
+  ASSERT_EQ(c.nets.size(), a.nets.size());
+  for (size_t i = 0; i < a.nets.size(); ++i) {
+    const int j = c.findNet(a.nets[i].name);
+    ASSERT_GE(j, 0) << a.nets[i].name;
+    EXPECT_EQ(c.nets[size_t(j)].flexFixed, a.nets[i].flexFixed) << a.nets[i].name;
+    EXPECT_EQ(c.nets[size_t(j)].route, a.nets[i].route) << a.nets[i].name;
+  }
+}

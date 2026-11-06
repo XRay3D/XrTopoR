@@ -2631,6 +2631,31 @@ void BoardView::toggleMetalLayers() {
   doc_->displayChanged();
 }
 
+// TopoR's «гибкая фиксация» of a net: its topology stays (the autorouter and F6 leave it, F7 leaves its vias),
+// the shape of its wires does not. Set for the nets of the selected wires and vias unless all of them have it;
+// «Трассировать» goes the other way, as in TopoR.
+void BoardView::toggleFlexFix() {
+  if (!doc_->hasBoard()) return;
+  Board& b = *doc_->board();
+  std::set<int> nets;
+  for (ItemRef r : doc_->selectedItems())
+    if (r.type == ItemType::Track || r.type == ItemType::Via)
+      if (int net = itemNet(b, r); net >= 0) nets.insert(net);
+  if (nets.empty()) {
+    emit status(tr("Гибкая фиксация: выделите проводник или переход цепи"));
+    return;
+  }
+  const bool all = std::ranges::all_of(nets, [&](int n) { return b.nets[size_t(n)].flexFixed; });
+  auto before = doc_->beginEdit();
+  for (int n : nets) {
+    b.nets[size_t(n)].flexFixed = !all;
+    b.nets[size_t(n)].route = all;
+  }
+  doc_->commitEdit(before, all ? tr("Снять гибкую фиксацию") : tr("Гибкая фиксация"), false);
+  emit status((all ? tr("Гибкая фиксация снята, цепей: %1") : tr("Гибкая фиксация включена, цепей: %1")).arg(nets.size()));
+  update();
+}
+
 void BoardView::toggleFix() {
   if (!doc_->hasBoard()) return;
   auto items = doc_->selectedItems();
