@@ -30,7 +30,8 @@ constexpr double kWalkSlack = 2 * kNmPerMm;    // the walk may stand this much a
 constexpr int kWalkReal = 0;                   // ... but with no more real violations (2 let in: Arcs ended 63 mm longer, the best seven iterations back)
 constexpr double kNoise = 5000;                // nm: a shallower violation is the drawing's noise at the rule's edge
 constexpr int kFreeze = 3;                     // iterations an object stands still after its step was blamed
-constexpr double kBalanced = 0.05;             // a force below this is none: the object is where it should be
+constexpr double kBalanced = 0.01;             // a force below this is none: the object is where it should be
+constexpr double kFullForce = 0.2;             // ... and from this on the step is the whole limit (TopoR's forces always are)
 constexpr double kTightStep = 0.5 * kNmPerMm;  // the step limit of an object with an edge short of room (TopoR)
 constexpr double kCrowd = 4;                   // the push of an edge without room against a wire's pull of 1 (TopoR: 64 to 16)
 constexpr double kCrowdFull = 50000;           // ... in full when this much is missing
@@ -455,7 +456,7 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
       ob.last = F;
       double limit = tol * ob.scale;
       if (tight[k]) limit = std::min(limit, kTightStep);
-      Vec2 delta = off ? (F.len() > limit ? F.normalized() * limit : F) : F.normalized() * (limit * std::min(1.0, F.len()));
+      Vec2 delta = off ? (F.len() > limit ? F.normalized() * limit : F) : F.normalized() * (limit * std::min(1.0, F.len() / kFullForce));
       if (delta.len() < kMinStep) continue;
       const Vec2 at = t.owners[ob.owner].c;
       const double shortBefore = shortAt(ob.owner, at);

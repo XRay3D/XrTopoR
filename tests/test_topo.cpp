@@ -1642,6 +1642,28 @@ struct PinBoard {
     return int(runDrc(b, d).size());
   }
   void f5() { topo::reshapeTracks(b, std::vector<char>(b.tracks.size(), 1)); }
+  void via(const std::string& n, double x, double y, double diameter) {
+    Via v;
+    v.pos = Point(at(x, y));
+    v.diameter = mmToNm(diameter);
+    v.drill = mmToNm(diameter / 2);
+    v.layers = LayerMask(1) << top;
+    v.net = net(n);
+    b.vias.push_back(v);
+  }
+  // F7 on the model, built from the tracks as they lie.
+  topo::OptimizeModelResult f7() {
+    topo::Topology::assignIds(b);
+    topo::Topology t;
+    t.build(b);
+    return topo::optimizeModel(b, t);
+  }
+  double length(const std::string& n) const {
+    double l = 0;
+    for (const Track& t : b.tracks)
+      if (b.nets[t.net].name == n) l += t.length();
+    return l / kNmPerMm;
+  }
 };
 
 }  // namespace
@@ -1812,5 +1834,47 @@ TEST(Topo, SelectedWireTakesItsLead) {
   EXPECT_NEAR(p.b.tracksLength(), length, 0.02 * kNmPerMm);  // laid against the wire beside it as it lies: microns
   EXPECT_EQ(s.deadEnds, 0) << s.text();
   EXPECT_EQ(s.padsAtCentre, s.pads) << s.text();
+  EXPECT_EQ(p.violations(), 0);
+}
+
+// F7 moves a via by what its wires do to it (TopoR's forces, Bessonov et al. 2014, fig. 3a). A via in the corner
+// of an L of its two wires is pulled by both: it goes to the straight line between the pads, where the pulls
+// cancel, and the wire gets as short as the straight line.
+TEST(Topo, F7PullsAViaOntoTheStraightLine) {
+  PinBoard p;
+  p.pad("N1", 5, 5, PadShapeKind::Circle, 1, 1);
+  p.pad("N1", 25, 15, PadShapeKind::Circle, 1, 1);
+  p.via("N1", 25, 5, 1.0);
+  p.track("N1", {{5, 5}, {25, 5}}, 0.3);
+  p.track("N1", {{25, 5}, {25, 15}}, 0.3);
+  auto res = p.f7();
+  ASSERT_TRUE(res.drawn);
+  ASSERT_EQ(p.b.vias.size(), 1u);
+  const Vec2 v = p.b.vias[0].pos.v();
+  EXPECT_LT(distPointSegment(v, PinBoard::at(5, 5), PinBoard::at(25, 15)), 0.05 * kNmPerMm) << "the via at (" << v.x / 1e6 << ", " << v.y / 1e6 << ")";
+  EXPECT_LT(p.length("N1"), std::hypot(20.0, 10.0) + 0.05);
+  EXPECT_LT(res.forceAfter, 0.1);
+  EXPECT_EQ(p.violations(), 0);
+}
+
+// ... and a wire of another net bent round the via presses on it, towards the centre of the bend: the via
+// leaves the wire's way and the wire runs straight. Here the via's own wires pull it the same way; it ends on
+// the line between its pads, and the other net's wire is as long as the straight line between its own.
+TEST(Topo, F7MovesAViaOutOfAWiresWay) {
+  PinBoard p;
+  p.pad("N2", 14, 4, PadShapeKind::Circle, 1, 1);
+  p.pad("N2", 26, 4, PadShapeKind::Circle, 1, 1);
+  p.via("N2", 20, 10, 1.0);
+  p.track("N2", {{14, 4}, {20, 10}}, 0.3);
+  p.track("N2", {{20, 10}, {26, 4}}, 0.3);
+  p.pad("N1", 5, 10, PadShapeKind::Circle, 1, 1);
+  p.pad("N1", 35, 10, PadShapeKind::Circle, 1, 1);
+  p.track("N1", {{5, 10}, {19, 11.5}, {21, 11.5}, {35, 10}}, 0.3);  // over the via
+  auto res = p.f7();
+  ASSERT_TRUE(res.drawn);
+  const Vec2 v = p.b.vias[0].pos.v();
+  EXPECT_LT(distPointSegment(v, PinBoard::at(14, 4), PinBoard::at(26, 4)), 0.05 * kNmPerMm) << "the via at (" << v.x / 1e6 << ", " << v.y / 1e6 << ")";
+  EXPECT_LT(p.length("N1"), 30.05);
+  EXPECT_LT(p.length("N2"), 12.05);
   EXPECT_EQ(p.violations(), 0);
 }
