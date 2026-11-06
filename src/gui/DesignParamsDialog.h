@@ -5,9 +5,11 @@
 // clears the undo history.
 #include <QDialog>
 #include <functional>
+#include <set>
 
 #include "gui/Document.h"
 
+class QDoubleSpinBox;
 class QPushButton;
 class QStackedWidget;
 class QTableWidget;
@@ -21,6 +23,8 @@ class DesignParamsDialog : public QDialog {
  public:
   explicit DesignParamsDialog(Document* doc, QWidget* parent = nullptr);
   void showPage(const QString& title);
+  // The pad stacks being edited (test hook).
+  const std::vector<Padstack>& stacks() const { return stacks_; }
 
  private:
   void load();      // rules of the design → editor
@@ -53,12 +57,22 @@ class DesignParamsDialog : public QDialog {
   // one over the high one takes the high one along, lowering the high one under the low one takes that along.
   void orderedCells(QTableWidget* t, int row, int lowColumn, int highColumn, Coord low, Coord high,
                     std::function<void(Coord low, Coord high)> set);
+  std::pair<QDoubleSpinBox*, QDoubleSpinBox*> orderedSpins(Coord low, Coord high, std::function<void(Coord low, Coord high)> set);
   QWidget* netsCell(const RuleNets& value, std::function<void(RuleNets)> set);
   QWidget* layerCell(const std::vector<std::string>& value, std::function<void(std::vector<std::string>)> set);
   QWidget* checkCell(bool value, std::function<void(bool)> set);
 
+  // Pad stacks: the editor, «Создать детали на слоях», the stacks of the selected rows.
+  void editStack(int i);
+  void newStack();
+  void createDetails(LayerKind kind, std::vector<int> stacks);
+
   Document* doc_;
   DesignRules rules_;
+  std::vector<Padstack> stacks_;           // the design's pad stacks, edited
+  std::vector<int> stackOrigin_;           // the board's index of each (-1: new)
+  std::set<std::string> hiddenPadColumns_;  // «Выбор столбцов»: layers not shown in the stacks' table
+  std::vector<int> selectedStacks_;        // rows selected in the stacks' table (kept across rebuilds)
   std::vector<std::pair<ViaType, ViaType>> viaEdits_;  // via types resized: vias on the board follow
   QTreeWidget* nav_;
   QStackedWidget* pages_;

@@ -82,6 +82,7 @@ if(XR_BUILD_GUI)
     gui/BuiltinSchemes.cpp
     gui/Commands.cpp
     gui/DesignParamsDialog.cpp
+    gui/PadstackDialogs.cpp
     gui/DisplayPanel.cpp
     gui/DrcDialog.cpp
     gui/Document.cpp

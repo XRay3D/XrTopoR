@@ -8,6 +8,7 @@
 #include <QTableWidget>
 #include <QFile>
 #include <QDoubleSpinBox>
+#include <QLabel>
 #include <QLineEdit>
 #include <QTreeWidget>
 #include <QMenuBar>
@@ -18,6 +19,7 @@
 #include <QTemporaryDir>
 #include <QTest>
 #include <QToolBar>
+#include <QToolButton>
 #include <gtest/gtest.h>
 #include <set>
 
@@ -28,6 +30,8 @@
 #include "gui/Document.h"
 #include "gui/AutorouteWindow.h"
 #include "gui/DesignParamsDialog.h"
+#include "gui/PadstackDialogs.h"
+#include "core/Padstack.h"
 #include "gui/DisplayPanel.h"
 #include "gui/DrcDialog.h"
 #include "gui/MainWindow.h"
@@ -1411,10 +1415,15 @@ TEST(Gui, DesignParametersStayOrdered) {
     dlg.showPage(page);
     auto* t = stack->currentWidget()->findChild<QTableWidget*>();
     EXPECT_TRUE(t && t->rowCount() > 0) << page;
-    return std::pair{qobject_cast<QDoubleSpinBox*>(t->cellWidget(0, low)), qobject_cast<QDoubleSpinBox*>(t->cellWidget(0, high))};
+    // A cell is the spin box, or holds it (the via pad's «...» next to it).
+    auto spin = [](QWidget* w) {
+      auto* s = qobject_cast<QDoubleSpinBox*>(w);
+      return s ? s : w ? w->findChild<QDoubleSpinBox*>() : nullptr;
+    };
+    return std::pair{spin(t->cellWidget(0, low)), spin(t->cellWidget(0, high))};
   };
   for (auto [page, low, high] : {std::tuple{"Ширина проводников", 4, 5}, std::tuple{"Зазор между проводниками", 5, 6},
-                                 std::tuple{"Переходные отверстия (ПО)", 4, 3}}) {
+                                 std::tuple{"Переходные отверстия (ПО)", 6, 5}}) {
     auto [lo, hi] = cells(page, low, high);
     ASSERT_TRUE(lo && hi) << page;
     hi->setValue(0.5);
@@ -1490,4 +1499,184 @@ TEST(Gui, GridStepsKeepProportion) {
   steps[0]->setValue(3.0);
   EXPECT_NEAR(d.gridX, mmToNm(3.0), 1);
   EXPECT_NEAR(steps[1]->value(), 1.0, 1e-9);
+}
+
+// «Контактные площадки (КП)»: TopoR's table of the stacks with a column per layer, the used and the unused ones.
+TEST(Gui, PadstacksPage) {
+  Fixture f("topor/Example_04/Arcs_master_f5.fst");
+  f.doc.setUnit(Unit::Mm);
+  DesignParamsDialog dlg(&f.doc);
+  dlg.resize(1150, 640);
+  dlg.showPage("Контактные площадки (КП)");
+  auto* t = dlg.findChild<QTableWidget*>("padstacks");
+  ASSERT_TRUE(t);
+  EXPECT_EQ(t->rowCount(), 9);
+  QStringList headers;
+  for (int c = 0; c < t->columnCount(); ++c) headers << t->horizontalHeaderItem(c)->text();
+  EXPECT_TRUE(headers.contains("TopMask"));
+  EXPECT_TRUE(headers.contains("Top"));
+  EXPECT_TRUE(headers.contains("BotMask"));
+  EXPECT_FALSE(headers.contains("TopSilk"));  // hidden at first, as in TopoR
+  bool counted = false;
+  for (auto* l : dlg.findChildren<QLabel*>())
+    if (l->text().contains("Всего стеков КП: 9 (2 не используется)")) counted = true;
+  EXPECT_TRUE(counted);
+  if (const char* dir = std::getenv("XR_SHOT_DIR")) dlg.grab().save(QString(dir) + "/padstacks.png");
+}
+
+// «Редактор контактных площадок»: a detail's size edited and applied; the pads of the stack follow.
+TEST(Gui, PadstackEditorResizesPads) {
+  Fixture f("topor/Example_04/Arcs_master_f5.fst");
+  f.doc.setUnit(Unit::Mm);
+  const Board& b = f.b();
+  int si = -1;
+  for (size_t i = 0; i < b.padstacks.size(); ++i)
+    if (b.padstacks[i].name == "N150S.PS") si = int(i);
+  ASSERT_GE(si, 0);
+  PadstackEditor ed(b, b.padstacks[size_t(si)], Unit::Mm, {}, false);
+  ed.resize(920, 600);
+  auto* tree = ed.findChild<QTreeWidget*>();
+  ASSERT_TRUE(tree);
+  // The detail of the «Top» layer row: right under it.
+  QTreeWidgetItem* detail = nullptr;
+  for (int i = 0; i + 1 < tree->topLevelItemCount(); ++i)
+    if (tree->topLevelItem(i)->text(0).startsWith("Top :")) detail = tree->topLevelItem(i + 1);
+  ASSERT_TRUE(detail);
+  tree->setCurrentItem(detail);
+  auto* width = ed.findChild<QDoubleSpinBox*>("width");
+  auto* height = ed.findChild<QDoubleSpinBox*>("height");
+  ASSERT_TRUE(width && height);
+  EXPECT_NEAR(width->value(), 1.5, 1e-9);
+  width->setValue(2.0);
+  if (const char* dir = std::getenv("XR_SHOT_DIR")) ed.grab().save(QString(dir) + "/padeditor.png");
+  std::optional<Padstack> got;
+  QObject::connect(&ed, &PadstackEditor::applied, [&](const Padstack& ps) { got = ps; });
+  ed.findChild<QPushButton*>("apply")->click();
+  ASSERT_TRUE(got);
+  // Into the design, as «Свойства» does: one undoable step.
+  auto before = f.doc.beginEdit();
+  std::vector<Padstack> stacks = f.doc.board()->padstacks;
+  stacks[size_t(si)] = *got;
+  std::vector<int> origin(stacks.size());
+  for (size_t i = 0; i < origin.size(); ++i) origin[i] = int(i);
+  setPadstacks(*f.doc.board(), stacks, origin);
+  f.doc.commitEdit(before, "Изменить стек КП");
+  for (auto& p : f.b().pads)
+    if (p.padstack == si && p.onLayer(f.b().topCopper())) {
+      auto s = padShapeOn(f.b(), p, f.b().topCopper());
+      ASSERT_TRUE(s);
+      EXPECT_NEAR(std::max(s->bbox().width(), s->bbox().height()), double(mmToNm(2.0)), 10);
+    }
+  f.doc.undoStack()->undo();
+  for (auto& p : f.b().pads)
+    if (p.padstack == si) EXPECT_EQ(std::max(p.shape.w, p.shape.h), mmToNm(1.5));
+  // A form button turns the detail into another form.
+  PadstackEditor ed2(b, b.padstacks[size_t(si)], Unit::Mm, {}, false);
+  auto* tree2 = ed2.findChild<QTreeWidget*>();
+  for (int i = 0; i + 1 < tree2->topLevelItemCount(); ++i)
+    if (tree2->topLevelItem(i)->text(0).startsWith("Top :")) tree2->setCurrentItem(tree2->topLevelItem(i + 1));
+  ed2.findChild<QToolButton*>("form4")->click();  // cut corners
+  std::optional<Padstack> got2;
+  QObject::connect(&ed2, &PadstackEditor::applied, [&](const Padstack& ps) { got2 = ps; });
+  ed2.findChild<QPushButton*>("apply")->click();
+  ASSERT_TRUE(got2);
+  auto top = std::ranges::find_if(got2->details, [](const PadDetail& d) { return d.layer == "Top"; });
+  ASSERT_NE(top, got2->details.end());
+  EXPECT_EQ(top->handling, CornerHandling::Chamfer);
+}
+
+// «Создать детали в стеках контактных площадок»: masks for two stacks, the report, «Изменить параметры для
+// выбранных стеков КП» back to the settings with the checked one only; the paste goes inward.
+TEST(Gui, CreateMaskDetails) {
+  Fixture f("topor/Example_04/Arcs_master_f5.fst");
+  const Board& b = f.b();
+  auto index = [&](const char* name) {
+    for (size_t i = 0; i < b.padstacks.size(); ++i)
+      if (b.padstacks[i].name == name) return int(i);
+    return -1;
+  };
+  int round = index("N150R.PS"), square = index("N150S.PS");
+  auto mask = [&](const Padstack& ps, const char* layer) -> const PadDetail* {
+    for (auto& d : ps.details)
+      if (d.layer == layer) return &d;
+    return nullptr;
+  };
+  CreateDetailsDialog dlg(b, b.padstacks, {round, square}, LayerKind::Mask, Unit::Mm);
+  dlg.resize(820, 520);
+  if (const char* dir = std::getenv("XR_SHOT_DIR")) dlg.grab().save(QString(dir) + "/createmask.png");
+  dlg.create();
+  EXPECT_TRUE(dlg.findChild<QLabel*>("summary")->text().contains("Добавлены детали в 2 из 2 стеков КП"));
+  ASSERT_TRUE(mask(dlg.stacks()[size_t(round)], "TopMask"));
+  EXPECT_EQ(mask(dlg.stacks()[size_t(round)], "TopMask")->w, mmToNm(1.7));
+  EXPECT_EQ(mask(dlg.stacks()[size_t(square)], "BotMask")->h, mmToNm(1.7));
+  if (const char* dir = std::getenv("XR_SHOT_DIR")) dlg.grab().save(QString(dir) + "/createmask-report.png");
+  dlg.changeChecked({round});
+  EXPECT_EQ(dlg.listed(), std::vector<int>{round});
+  EXPECT_FALSE(mask(dlg.stacks()[size_t(round)], "TopMask"));  // back to what it was
+  EXPECT_TRUE(mask(dlg.stacks()[size_t(square)], "TopMask"));  // the other keeps its new mask
+  dlg.setOffset(0, mmToNm(0.2));
+  dlg.create();
+  EXPECT_EQ(mask(dlg.stacks()[size_t(round)], "TopMask")->w, mmToNm(1.9));
+  EXPECT_EQ(mask(dlg.stacks()[size_t(round)], "BotMask")->w, mmToNm(1.7));
+
+  CreateDetailsDialog paste(b, b.padstacks, {square}, LayerKind::Paste, Unit::Mm);
+  paste.create();
+  EXPECT_EQ(mask(paste.stacks()[size_t(square)], "TopPaste")->w, mmToNm(1.3));
+}
+
+// «Диаметр площадки переходного отверстия»: the mask class's size, inherited by the mask layers.
+TEST(Gui, ViaPadsDialog) {
+  Fixture f("topor/Example_04/Arcs_master_f5.fst");
+  ViaType t{"V", mmToNm(1.4), mmToNm(0.6)};
+  ViaPadsDialog dlg(f.b(), t, Unit::Mm);
+  QTableWidget* mech = nullptr;
+  for (auto* tw : dlg.findChildren<QTableWidget*>())
+    for (int r = 0; r < tw->rowCount(); ++r)
+      if (tw->item(r, 0) && tw->item(r, 0)->text() == "Маска") mech = tw;
+  ASSERT_TRUE(mech);
+  for (int r = 0; r < mech->rowCount(); ++r)
+    if (mech->item(r, 0)->text() == "Маска") mech->item(r, 1)->setText("1.5");
+  ASSERT_EQ(dlg.type().pads.size(), 1u);
+  EXPECT_EQ(dlg.type().pads[0].layerClass, "Mask");
+  EXPECT_EQ(viaPadDiameter(dlg.type(), "Mask", "TopMask"), mmToNm(1.5));
+  if (const char* dir = std::getenv("XR_SHOT_DIR")) dlg.grab().save(QString(dir) + "/viapads.png");
+  DesignParamsDialog dp(&f.doc);
+  dp.resize(1150, 640);
+  dp.showPage("Переходные отверстия (ПО)");
+  if (const char* dir = std::getenv("XR_SHOT_DIR")) dp.grab().save(QString(dir) + "/viatypes.png");
+}
+
+// The mask layer shows the pads' mask details (and nothing where a stack has none).
+TEST(Gui, MaskLayerShowsDetails) {
+  Fixture f("topor/Example_04/Arcs_master_f5.fst");
+  Board& b = *f.doc.board();
+  int round = -1;
+  for (size_t i = 0; i < b.padstacks.size(); ++i)
+    if (b.padstacks[i].name == "N150R.PS") round = int(i);
+  LayerId topMask = b.findLayer("TopMask");
+  std::vector<Padstack> stacks = b.padstacks;
+  createLayerDetails(b, stacks, {round}, topMask, mmToNm(0.5), true);
+  std::vector<int> origin(stacks.size());
+  for (size_t i = 0; i < origin.size(); ++i) origin[i] = int(i);
+  setPadstacks(b, stacks, origin);
+  // Only the mask layer on.
+  DisplayControl& d = f.doc.display();
+  for (auto& L : b.layers)
+    if (auto* ld = d.layer(L.name)) ld->visible = L.name == "TopMask";
+  d.show["showTopMechPads"] = true;
+  f.view.show();
+  auto pr = std::ranges::find_if(b.pads, [&](const Pad& p) { return p.padstack == round; });
+  auto other = std::ranges::find_if(b.pads, [&](const Pad& p) { return p.padstack != round && p.padstack >= 0; });
+  ASSERT_NE(pr, b.pads.end());
+  ASSERT_NE(other, b.pads.end());
+  QRgb bg = QColor(f.doc.color("background", 0x030b10)).rgb();
+  auto at = [&](const Pad& p) {
+    f.look(p.pos.v(), 10);
+    f.view.update();
+    QTest::qWait(10);
+    return f.view.grab().toImage().pixel(f.at(p.pos.v()) + QPoint(int(f.scale * mmToNm(0.9)), 0));  // in the ring
+  };
+  EXPECT_NE(at(*pr) & 0xffffff, bg & 0xffffff);
+  EXPECT_EQ(at(*other) & 0xffffff, bg & 0xffffff);
+  if (const char* dir = std::getenv("XR_SHOT_DIR")) f.view.grab().save(QString(dir) + "/masklayer.png");
 }

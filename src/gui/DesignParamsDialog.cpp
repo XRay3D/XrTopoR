@@ -1,6 +1,7 @@
 #include "gui/DesignParamsDialog.h"
 
 #include <QCheckBox>
+#include <QCollator>
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QFileDialog>
@@ -12,6 +13,8 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMessageBox>
+#include <QScrollArea>
+#include <QMenu>
 #include <QPushButton>
 #include <QSplitter>
 #include <QStackedWidget>
@@ -23,7 +26,9 @@
 #include <format>
 #include <set>
 
+#include "core/Padstack.h"
 #include "core/ZoneFill.h"
+#include "gui/PadstackDialogs.h"
 #include "gui/Schemes.h"
 #include "io/BoardIO.h"
 
@@ -152,6 +157,12 @@ void DesignParamsDialog::showPage(const QString& title) {
 void DesignParamsDialog::load() {
   const Board& b = *doc_->board();
   rules_ = b.rules ? *b.rules : rulesFromBoard(b);
+  stacks_ = b.padstacks;
+  stackOrigin_.resize(stacks_.size());
+  for (size_t i = 0; i < stacks_.size(); ++i) stackOrigin_[i] = int(i);
+  if (hiddenPadColumns_.empty())
+    for (auto& L : b.layers)
+      if (L.kind == LayerKind::Silk) hiddenPadColumns_.insert(L.name);  // as TopoR shows the table at first
   viaEdits_.clear();
   dirty_ = false;
   applyButton_->setEnabled(false);
@@ -189,6 +200,9 @@ bool DesignParamsDialog::apply() {
         v.diameter = to.diameter;
         v.drill = to.drill;
       }
+  // Pad stacks: the pads follow theirs.
+  setPadstacks(b, stacks_, stackOrigin_);
+  for (size_t i = 0; i < stackOrigin_.size(); ++i) stackOrigin_[i] = int(i);
   b.rules = rules_;
   compileRules(b);
   // Plane layers follow their nets.
@@ -240,8 +254,8 @@ QWidget* DesignParamsDialog::lengthCell(Coord value, std::function<void(Coord)> 
   return s;
 }
 
-void DesignParamsDialog::orderedCells(QTableWidget* t, int row, int lowColumn, int highColumn, Coord low, Coord high,
-                                      std::function<void(Coord low, Coord high)> set) {
+std::pair<QDoubleSpinBox*, QDoubleSpinBox*> DesignParamsDialog::orderedSpins(Coord low, Coord high,
+                                                                       std::function<void(Coord low, Coord high)> set) {
   Unit u = doc_->unit();
   auto cell = [&](Coord value) {
     auto* s = new QDoubleSpinBox;
@@ -269,6 +283,12 @@ void DesignParamsDialog::orderedCells(QTableWidget* t, int row, int lowColumn, i
   };
   bind(lo, hi, true);
   bind(hi, lo, false);
+  return {lo, hi};
+}
+
+void DesignParamsDialog::orderedCells(QTableWidget* t, int row, int lowColumn, int highColumn, Coord low, Coord high,
+                                      std::function<void(Coord low, Coord high)> set) {
+  auto [lo, hi] = orderedSpins(low, high, std::move(set));
   t->setCellWidget(row, lowColumn, lo);
   t->setCellWidget(row, highColumn, hi);
 }
@@ -417,52 +437,442 @@ QWidget* DesignParamsDialog::layersPage() {
 QWidget* DesignParamsDialog::padsPage() {
   const Board& b = *doc_->board();
   Unit u = doc_->unit();
-  // Distinct pad stacks: shape and size, hole.
-  std::set<std::tuple<int, Coord, Coord, Coord>> stacks;
-  for (auto& p : b.pads) stacks.insert({int(p.shape.kind), p.shape.w, p.shape.h, p.drill});
-  auto* t = new QTableWidget(int(stacks.size()), 4);
-  t->setHorizontalHeaderLabels({"#", tr("Форма"), tr("Размер, %1").arg(unitName(u)), tr("Отверстие, %1").arg(unitName(u))});
+  auto* w = new QWidget;
+  auto* v = new QVBoxLayout(w);
+  v->setContentsMargins(0, 0, 0, 0);
+  auto* top = new QHBoxLayout;
+  auto* count = new QLabel;
+  auto* search = new QLineEdit;
+  search->setPlaceholderText(tr("Поиск"));
+  search->setClearButtonEnabled(true);
+  search->setMaximumWidth(200);
+  top->addWidget(count);
+  top->addStretch(1);
+  top->addWidget(search);
+  v->addLayout(top);
+  auto* split = new QSplitter(Qt::Horizontal, w);
+  auto* t = new QTableWidget(split);
   t->verticalHeader()->hide();
   t->setEditTriggers(QAbstractItemView::NoEditTriggers);
-  const char* shapes[] = {"Круг", "Прямоугольник", "Овал", "Скруглённый прямоугольник", "Многоугольник"};  // PadShapeKind
-  int r = 0;
-  for (auto& [kind, w, h, drill] : stacks) {
-    t->setItem(r, 0, new QTableWidgetItem(QString::number(r)));
-    t->setItem(r, 1, new QTableWidgetItem(kind >= 0 && kind < int(std::size(shapes)) ? tr(shapes[kind]) : QString::number(kind)));
-    t->setItem(r, 2, new QTableWidgetItem(formatLength(w, u, 3) + " x " + formatLength(h, u, 3)));
-    t->setItem(r, 3, new QTableWidgetItem(drill > 0 ? formatLength(drill, u, 3) : QString()));
-    ++r;
+  t->setSelectionBehavior(QAbstractItemView::SelectRows);
+  t->setSelectionMode(QAbstractItemView::ExtendedSelection);
+  t->setContextMenuPolicy(Qt::CustomContextMenu);
+  t->setObjectName("padstacks");
+  // «Выбор столбцов»: the layers by group, as the visibility panel groups them.
+  auto* columns = new QTreeWidget(split);
+  columns->setHeaderLabel(tr("Выбор столбцов"));
+  columns->setRootIsDecorated(false);
+  split->addWidget(t);
+  split->addWidget(columns);
+  split->setSizes({640, 220});
+  v->addWidget(split, 1);
+  // The layers a stack can have details on, top to bottom.
+  std::vector<LayerId> layers;
+  for (LayerId l = 0; l < LayerId(b.layers.size()); ++l) {
+    LayerKind k = b.layers[l].kind;
+    if (k == LayerKind::Mask || k == LayerKind::Silk || k == LayerKind::Paste || k == LayerKind::Copper) layers.push_back(l);
   }
-  t->resizeColumnsToContents();
-  return t;
+  auto rank = [&](LayerId l) {
+    const Layer& L = b.layers[l];
+    if (L.kind == LayerKind::Copper) return 100 + L.copperIndex;
+    return L.side == Side::Bottom ? 1000 + int(l) : int(l);  // each side's mask outermost, as the file lists them
+  };
+  std::ranges::stable_sort(layers, {}, rank);
+  {
+    QSignalBlocker block(columns);
+    const QString groups[] = {tr("Верхние механические"), tr("Металлические"), tr("Нижние механические")};
+    for (int g = 0; g < 3; ++g) {
+      auto* head = new QTreeWidgetItem(columns, {groups[g]});
+      head->setBackground(0, kHeader);
+      head->setForeground(0, Qt::white);
+      head->setFlags(Qt::ItemIsEnabled);
+      for (LayerId l : layers) {
+        const Layer& L = b.layers[l];
+        if ((L.kind == LayerKind::Copper ? 1 : L.side == Side::Bottom ? 2 : 0) != g) continue;
+        auto* it = new QTreeWidgetItem(columns, {QString("%1 (%2)").arg(QString::fromStdString(L.name), layerClassName(layerClassOf(b, l)))});
+        it->setFlags(Qt::ItemIsEnabled | Qt::ItemIsUserCheckable);
+        it->setCheckState(0, hiddenPadColumns_.contains(L.name) ? Qt::Unchecked : Qt::Checked);
+        it->setData(0, Qt::UserRole, QString::fromStdString(L.name));
+      }
+    }
+  }
+  auto* bar = new QHBoxLayout;
+  auto button = [&](const QString& text, const QString& tip) {
+    auto* bt = new QToolButton(w);
+    bt->setText(text);
+    bt->setToolTip(tip);
+    bar->addWidget(bt);
+    return bt;
+  };
+  auto* plus = button("+", tr("Создать новый стек КП"));
+  auto* minus = button(QString::fromUtf8("−"), tr("Удалить выбранный стек КП"));
+  auto* edit = button(QString::fromUtf8("✎"), tr("Изменить"));
+  auto* more = new QPushButton(tr("Дополнительно"), w);
+  bar->addWidget(more);
+  bar->addStretch(1);
+  v->addLayout(bar);
+
+  // How many pads use each stack being edited.
+  auto uses = [this, &b] {
+    auto onBoard = padstackUse(b);
+    std::vector<int> n(stacks_.size(), 0);
+    for (size_t i = 0; i < stacks_.size(); ++i)
+      if (stackOrigin_[i] >= 0 && size_t(stackOrigin_[i]) < onBoard.size()) n[i] = onBoard[size_t(stackOrigin_[i])];
+    return n;
+  };
+  auto selected = [t] {
+    std::set<int> s;
+    for (auto* it : t->selectedItems()) s.insert(it->data(Qt::UserRole).toInt());
+    return std::vector<int>(s.begin(), s.end());
+  };
+  auto fill = [this, t, count, search, layers, uses, u, &b] {
+    QSignalBlocker block(t);
+    std::vector<LayerId> shown;
+    for (LayerId l : layers)
+      if (!hiddenPadColumns_.contains(b.layers[l].name)) shown.push_back(l);
+    QStringList headers{tr("Стек КП"), tr("Отверстие %1").arg(unitName(u))};
+    for (LayerId l : shown) headers << QString::fromStdString(b.layers[l].name);
+    t->clear();
+    t->setColumnCount(int(headers.size()));
+    t->setHorizontalHeaderLabels(headers);
+    for (size_t c = 0; c < shown.size(); ++c) {
+      LayerKind k = b.layers[shown[c]].kind;
+      QColor bg = k == LayerKind::Copper ? QColor(0xf4, 0xb8, 0x60) : k == LayerKind::Mask ? QColor(0x98, 0xd8, 0xa8)
+                : k == LayerKind::Paste ? QColor(0xd8, 0xd8, 0xd8) : QColor(0xf8, 0xc8, 0xd8);
+      t->horizontalHeaderItem(int(c) + 2)->setBackground(bg);
+    }
+    auto n = uses();
+    std::vector<int> order(stacks_.size());
+    for (size_t i = 0; i < order.size(); ++i) order[i] = int(i);
+    // Natural order, as TopoR sorts: C35 before C140.
+    QCollator coll;
+    coll.setNumericMode(true);
+    std::ranges::sort(order, [&](int x, int y) {
+      return coll.compare(QString::fromStdString(stacks_[size_t(x)].name), QString::fromStdString(stacks_[size_t(y)].name)) < 0;
+    });
+    QString f = search->text();
+    t->setRowCount(0);
+    for (int i : order) {
+      const Padstack& ps = stacks_[size_t(i)];
+      QString name = QString::fromStdString(ps.name);
+      if (!f.isEmpty() && !name.contains(f, Qt::CaseInsensitive)) continue;
+      int r = t->rowCount();
+      t->insertRow(r);
+      auto item = [&](int col, const QString& text) {
+        auto* it = new QTableWidgetItem(text);
+        it->setData(Qt::UserRole, i);
+        if (n[size_t(i)] == 0) it->setForeground(Qt::gray);  // not used
+        t->setItem(r, col, it);
+        return it;
+      };
+      item(0, name)->setToolTip(tr("Контактов: %1").arg(n[size_t(i)]));
+      item(1, ps.type == PadstackType::SMD ? QString() : QString::number(toUnit(double(ps.drill), u), 'f', 2));
+      for (size_t c = 0; c < shown.size(); ++c) {
+        const PadDetail* d = detailOn(b, ps, shown[c], false);
+        auto* it = item(int(c) + 2, d ? detailSize(*d, u) : QString());
+        if (d) {
+          it->setIcon(detailIcon(*d));
+          it->setToolTip(detailFormName(*d));
+        }
+      }
+      if (std::ranges::contains(selectedStacks_, i))
+        t->selectionModel()->select(t->model()->index(r, 0), QItemSelectionModel::Select | QItemSelectionModel::Rows);
+    }
+    int unused = int(std::ranges::count(n, 0));
+    count->setText(tr("<i>Всего стеков КП: %1 (%2 не используется)</i>").arg(stacks_.size()).arg(unused));
+    t->resizeColumnsToContents();
+  };
+  fill();
+  connect(search, &QLineEdit::textChanged, this, fill);
+  connect(t, &QTableWidget::itemSelectionChanged, this, [this, selected] { selectedStacks_ = selected(); });
+  connect(columns, &QTreeWidget::itemChanged, this, [this, fill](QTreeWidgetItem* it) {
+    std::string name = it->data(0, Qt::UserRole).toString().toStdString();
+    if (name.empty()) return;
+    if (it->checkState(0) == Qt::Checked) hiddenPadColumns_.erase(name);
+    else hiddenPadColumns_.insert(name);
+    fill();
+  });
+  connect(t, &QTableWidget::cellDoubleClicked, this, [this, t](int r) {
+    if (auto* it = t->item(r, 0)) editStack(it->data(Qt::UserRole).toInt());
+  });
+  connect(edit, &QToolButton::clicked, this, [this, selected] {
+    auto s = selected();
+    if (!s.empty()) editStack(s.front());
+  });
+  connect(plus, &QToolButton::clicked, this, [this] { newStack(); });
+  auto removeStacks = [this, uses, fill](std::vector<int> which) {
+    auto n = uses();
+    std::vector<int> busy;
+    for (int i : which)
+      if (n[size_t(i)] > 0) busy.push_back(i);
+    if (!busy.empty()) {
+      QStringList names;
+      for (int i : busy) names << QString::fromStdString(stacks_[size_t(i)].name);
+      QMessageBox::warning(this, windowTitle(), tr("Стеки КП используются контактами и не удаляются: %1").arg(names.join(", ")));
+    }
+    std::ranges::sort(which, std::greater{});
+    bool any = false;
+    for (int i : which)
+      if (n[size_t(i)] == 0) {
+        stacks_.erase(stacks_.begin() + i);
+        stackOrigin_.erase(stackOrigin_.begin() + i);
+        any = true;
+      }
+    if (!any) return;
+    selectedStacks_.clear();
+    changed();
+    fill();
+  };
+  connect(minus, &QToolButton::clicked, this, [selected, removeStacks] { removeStacks(selected()); });
+  auto createMenu = [this, selected](QMenu* m) {
+    auto* sub = m->addMenu(tr("Создать детали на слоях"));
+    sub->addAction(tr("Маски..."), this, [this, selected] { createDetails(LayerKind::Mask, selected()); });
+    sub->addAction(tr("Пасты..."), this, [this, selected] { createDetails(LayerKind::Paste, selected()); });
+  };
+  auto* moreMenu = new QMenu(more);
+  moreMenu->addAction(tr("Удалить неиспользуемые стеки"), this, [this, uses, removeStacks] {
+    auto n = uses();
+    std::vector<int> unused;
+    for (size_t i = 0; i < n.size(); ++i)
+      if (n[i] == 0) unused.push_back(int(i));
+    removeStacks(unused);
+  });
+  createMenu(moreMenu);
+  more->setMenu(moreMenu);
+  connect(t, &QTableWidget::customContextMenuRequested, this, [this, t, &b, selected, createMenu, removeStacks, fill](QPoint at) {
+    auto s = selected();
+    if (s.empty()) return;
+    QMenu m(t);
+    m.addAction(tr("Изменить..."), this, [this, s] { editStack(s.front()); });
+    createMenu(&m);
+    auto* del = m.addMenu(tr("Удалить детали на слое"));
+    for (LayerId l = 0; l < LayerId(b.layers.size()); ++l)
+      if (b.layers[l].kind == LayerKind::Mask || b.layers[l].kind == LayerKind::Paste)
+        del->addAction(QString::fromStdString(b.layers[l].name), this, [this, s, l, &b, fill] {
+          deleteLayerDetails(b, stacks_, s, l);
+          changed();
+          fill();
+        });
+    m.addAction(tr("Переименовать"), this, [this, s, fill] {
+      Padstack& ps = stacks_[size_t(s.front())];
+      bool ok = false;
+      QString name = QInputDialog::getText(this, tr("Переименовать"), tr("Имя стека КП:"), QLineEdit::Normal,
+                                           QString::fromStdString(ps.name), &ok).trimmed();
+      if (!ok || name.isEmpty() || name.toStdString() == ps.name) return;
+      if (std::ranges::any_of(stacks_, [&](const Padstack& o) { return o.name == name.toStdString(); })) {
+        QMessageBox::warning(this, windowTitle(), tr("Стек КП с таким именем уже существует."));
+        return;
+      }
+      ps.name = name.toStdString();
+      changed();
+      fill();
+    });
+    m.addAction(tr("Удалить"), this, [s, removeStacks] { removeStacks(s); });
+    m.exec(t->viewport()->mapToGlobal(at));
+  });
+  return w;
+}
+
+void DesignParamsDialog::editStack(int i) {
+  if (i < 0 || size_t(i) >= stacks_.size()) return;
+  std::vector<std::string> others;
+  for (size_t k = 0; k < stacks_.size(); ++k)
+    if (int(k) != i) others.push_back(stacks_[k].name);
+  PadstackEditor dlg(*doc_->board(), stacks_[size_t(i)], doc_->unit(), others, false, this);
+  connect(&dlg, &PadstackEditor::applied, this, [this, i](const Padstack& ps) {
+    stacks_[size_t(i)] = ps;
+    changed();
+  });
+  dlg.exec();
+  rebuildPages();
+}
+
+void DesignParamsDialog::newStack() {
+  const Board& b = *doc_->board();
+  bool ok = false;
+  QStringList types{tr("Сквозной"), tr("Планарный"), tr("Монтажное отверстие")};
+  QString type = QInputDialog::getItem(this, tr("Создать новый стек КП"), tr("Тип стека:"), types, 0, false, &ok);
+  if (!ok) return;
+  Padstack ps;
+  ps.type = PadstackType(types.indexOf(type));
+  ps.name = uniquePadstackName(stacks_, "PAD");
+  PadDetail d;
+  d.form = PadDetail::Form::Circle;
+  d.w = d.h = mmToNm(1.5);
+  switch (ps.type) {
+    case PadstackType::Through:
+      ps.drill = mmToNm(0.8);
+      d.layerClass = "Signal";
+      ps.details.push_back(d);
+      d.layerClass = "Plane";
+      ps.details.push_back(d);
+      break;
+    case PadstackType::SMD:
+      d.form = PadDetail::Form::Rect;
+      d.h = mmToNm(1);
+      d.layer = b.layers[b.topCopper()].name;
+      ps.details.push_back(d);
+      break;
+    case PadstackType::MountHole:
+      ps.drill = mmToNm(3);
+      ps.plated = false;
+      break;
+  }
+  std::vector<std::string> others;
+  for (auto& s : stacks_) others.push_back(s.name);
+  PadstackEditor dlg(b, ps, doc_->unit(), others, true, this);
+  connect(&dlg, &PadstackEditor::applied, this, [this](const Padstack& made) {
+    stacks_.push_back(made);
+    stackOrigin_.push_back(-1);
+    selectedStacks_ = {int(stacks_.size() - 1)};
+    changed();
+  });
+  dlg.exec();
+  rebuildPages();
+}
+
+void DesignParamsDialog::createDetails(LayerKind kind, std::vector<int> which) {
+  const Board& b = *doc_->board();
+  bool layer = std::ranges::any_of(b.layers, [&](const Layer& L) { return L.kind == kind; });
+  if (!layer) {
+    QMessageBox::information(this, windowTitle(), kind == LayerKind::Mask ? tr("В дизайне нет слоёв маски.")
+                                                                          : tr("В дизайне нет слоёв пасты."));
+    return;
+  }
+  CreateDetailsDialog dlg(b, stacks_, std::move(which), kind, doc_->unit(), this);
+  if (dlg.exec() != QDialog::Accepted) return;
+  if (dlg.stacks() == stacks_) return;
+  stacks_ = dlg.stacks();
+  changed();
+  rebuildPages();
 }
 
 QWidget* DesignParamsDialog::viaTypesPage() {
+  const Board& b = *doc_->board();
   Unit u = doc_->unit();
-  return ruleTable(
-      {"#", tr("Имя"), tr("Сквозной"), tr("Диам. площадки, %1").arg(unitName(u)), tr("Диам. отверстия, %1").arg(unitName(u))},
+  auto* w = new QWidget;
+  auto* v = new QVBoxLayout(w);
+  v->setContentsMargins(0, 0, 0, 0);
+  auto* head = new QLabel(tr("<b>Типы переходных отверстий</b>"));
+  head->setStyleSheet("background:#9d8fbf; color:white; padding:2px;");
+  v->addWidget(head);
+  auto* diagram = new ViaStackDiagram(b, rules_.viaTypes, w);
+  auto* scroll = new QScrollArea(w);
+  scroll->setWidget(diagram);
+  scroll->setWidgetResizable(false);
+  diagram->resize(std::max(600, 110 + 140 * int(rules_.viaTypes.size())), diagram->sizeHint().height());
+  scroll->setMinimumHeight(std::min(260, diagram->height() + 20));
+  v->addWidget(scroll);
+  auto copper = b.copperLayers();
+  auto refresh = [this, diagram] {
+    diagram->setTypes(rules_.viaTypes);
+  };
+  auto* table = ruleTable(
+      {"#", tr("Имя"), tr("Сквозной"), tr("Начальный слой"), tr("Конечный слой"), tr("Диам. площадки, %1").arg(unitName(u)),
+       tr("Диам. отверстия, %1").arg(unitName(u)), tr("ПО на контакте")},
       [this] { return int(rules_.viaTypes.size()); },
-      [this](QTableWidget* t, int r) {
-        auto* name = new QLineEdit(QString::fromStdString(rules_.viaTypes[size_t(r)].name));
+      [this, &b, u, copper, refresh](QTableWidget* t, int r) {
+        ViaType& vt = rules_.viaTypes[size_t(r)];
+        auto* name = new QLineEdit(QString::fromStdString(vt.name));
         name->setFrame(false);
-        connect(name, &QLineEdit::editingFinished, this, [this, name, r] {
+        connect(name, &QLineEdit::editingFinished, this, [this, name, r, refresh] {
           std::string old = rules_.viaTypes[size_t(r)].name, now = name->text().toStdString();
           if (old == now || now.empty()) return;
           for (auto& v : rules_.vias)
             if (v.viaType == old) v.viaType = now;
           rules_.viaTypes[size_t(r)].name = now;
           changed();
+          refresh();
         });
         t->setCellWidget(r, 1, name);
-        t->setItem(r, 2, new QTableWidgetItem(QString::fromUtf8("✓")));
+        // The copper range: «сквозной» from the top to the bottom, «глухой» from an outer layer, else «скрытый».
+        auto index = [&](const std::string& n, int def) {
+          LayerId l = b.findLayer(n);
+          return l >= 0 && b.layers[l].copperIndex >= 0 ? b.layers[l].copperIndex : def;
+        };
+        int last = int(copper.size()) - 1;
+        int from = vt.from.empty() ? 0 : index(vt.from, 0), to = vt.to.empty() ? last : index(vt.to, last);
+        if (from > to) std::swap(from, to);
+        auto* kind = new QTableWidgetItem(from == 0 && to == last ? tr("сквозной") : from == 0 || to == last ? tr("глухой") : tr("скрытый"));
+        kind->setForeground(Qt::gray);
+        t->setItem(r, 2, kind);
+        auto layerCombo = [&](int current) {
+          auto* cb = new QComboBox;
+          cb->setFrame(false);
+          for (LayerId l : copper) cb->addItem(QString::fromStdString(b.layers[l].name));
+          cb->setCurrentIndex(current);
+          return cb;
+        };
+        auto* fromBox = layerCombo(from);
+        auto* toBox = layerCombo(to);
+        // Start above (or on) the end: one moved past the other takes it along.
+        auto range = [this, r, fromBox, toBox, kind, last, refresh](bool fromEdited) {
+          int a = fromBox->currentIndex(), c = toBox->currentIndex();
+          if (a > c) {
+            QSignalBlocker b1(fromBox), b2(toBox);
+            if (fromEdited) toBox->setCurrentIndex(c = a);
+            else fromBox->setCurrentIndex(a = c);
+          }
+          ViaType& vt = rules_.viaTypes[size_t(r)];
+          bool through = a == 0 && c == last;
+          vt.from = through ? std::string() : fromBox->currentText().toStdString();
+          vt.to = through ? std::string() : toBox->currentText().toStdString();
+          kind->setText(through ? tr("сквозной") : a == 0 || c == last ? tr("глухой") : tr("скрытый"));
+          changed();
+          refresh();
+        };
+        connect(fromBox, &QComboBox::activated, this, [range] { range(true); });
+        connect(toBox, &QComboBox::activated, this, [range] { range(false); });
+        t->setCellWidget(r, 3, fromBox);
+        t->setCellWidget(r, 4, toBox);
         // The hole never exceeds the pad: one of them edited past the other takes it along, as one resize.
-        orderedCells(t, r, 4, 3, rules_.viaTypes[size_t(r)].drill, rules_.viaTypes[size_t(r)].diameter,
-                     [this, r](Coord drill, Coord diameter) {
-                       ViaType before = rules_.viaTypes[size_t(r)];
-                       rules_.viaTypes[size_t(r)].drill = drill;
-                       rules_.viaTypes[size_t(r)].diameter = diameter;
-                       viaEdits_.push_back({before, rules_.viaTypes[size_t(r)]});
-                     });
+        auto [hole, pad] = orderedSpins(vt.drill, vt.diameter, [this, r, refresh](Coord drill, Coord diameter) {
+          ViaType before = rules_.viaTypes[size_t(r)];
+          rules_.viaTypes[size_t(r)].drill = drill;
+          rules_.viaTypes[size_t(r)].diameter = diameter;
+          viaEdits_.push_back({before, rules_.viaTypes[size_t(r)]});
+          refresh();
+        });
+        // The pad: the signal diameter, the others listed, «...» for them layer by layer.
+        auto* padCell = new QWidget;
+        auto* ph = new QHBoxLayout(padCell);
+        ph->setContentsMargins(0, 0, 0, 0);
+        ph->setSpacing(2);
+        auto* others = new QLabel;
+        auto showOthers = [this, r, others, &b, u] {
+          const ViaType& vt = rules_.viaTypes[size_t(r)];
+          QString all = viaDiameters(b, vt, u);
+          QString first = formatLength(double(vt.diameter), u, 4);
+          others->setText(all == first ? QString() : all.mid(first.size()));
+          others->setToolTip(all);
+        };
+        showOthers();
+        auto* dots = new QToolButton;
+        dots->setText("...");
+        dots->setToolTip(tr("Диаметр площадки переходного отверстия"));
+        ph->addWidget(pad, 1);
+        ph->addWidget(others);
+        ph->addWidget(dots);
+        connect(dots, &QToolButton::clicked, this, [this, r, &b, u, pad, hole, showOthers, refresh] {
+          ViaPadsDialog dlg(b, rules_.viaTypes[size_t(r)], u, this);
+          if (dlg.exec() != QDialog::Accepted) return;
+          ViaType before = rules_.viaTypes[size_t(r)];
+          ViaType now = dlg.type();
+          if (now.drill > now.diameter) now.drill = now.diameter;
+          rules_.viaTypes[size_t(r)] = now;
+          if (now.diameter != before.diameter || now.drill != before.drill) viaEdits_.push_back({before, now});
+          {
+            QSignalBlocker b1(pad), b2(hole);
+            pad->setValue(toUnit(double(now.diameter), u));
+            hole->setValue(toUnit(double(now.drill), u));
+          }
+          showOthers();
+          changed();
+          refresh();
+        });
+        t->setCellWidget(r, 5, padCell);
+        t->setCellWidget(r, 6, hole);
+        t->setCellWidget(r, 7, checkCell(vt.viaOnPin, [this, r](bool on) { rules_.viaTypes[size_t(r)].viaOnPin = on; }));
       },
       [this] {
         ViaType t = rules_.viaTypes.empty() ? ViaType{"", mmToNm(0.6), mmToNm(0.3)} : rules_.viaTypes.back();
@@ -471,6 +881,13 @@ QWidget* DesignParamsDialog::viaTypesPage() {
       },
       [this](int r) { rules_.viaTypes.erase(rules_.viaTypes.begin() + r); },
       [this](int a, int b) { std::swap(rules_.viaTypes[size_t(a)], rules_.viaTypes[size_t(b)]); });
+  v->addWidget(table, 1);
+  if (auto* t = table->findChild<QTableWidget*>()) {
+    t->setColumnWidth(5, 170);
+    connect(diagram, &ViaStackDiagram::picked, t, [t](int i) { t->selectRow(i); });
+    connect(t, &QTableWidget::currentCellChanged, diagram, [diagram](int r) { diagram->setCurrent(r); });
+  }
+  return w;
 }
 
 QWidget* DesignParamsDialog::netlistPage() {

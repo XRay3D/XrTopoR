@@ -4,6 +4,8 @@
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QFormLayout>
+#include <QHBoxLayout>
+#include <QPushButton>
 #include <QHeaderView>
 #include <QLabel>
 #include <QLineEdit>
@@ -13,7 +15,9 @@
 #include <QTableWidget>
 #include <QVBoxLayout>
 
+#include "core/Padstack.h"
 #include "core/ZoneFill.h"
+#include "gui/PadstackDialogs.h"
 
 namespace xr::gui {
 
@@ -364,6 +368,34 @@ QWidget* PropertiesPanel::padPage(int pi) {
   f->addRow(tr("Угол:"), new QLabel(QString("%1°").arg(p.angle)));
   f->addRow(tr("Размер:"), new QLabel(QString("%1 x %2").arg(len(p.shape.w), len(p.shape.h))));
   if (p.drill > 0) f->addRow(tr("Отверстие:"), new QLabel(len(p.drill)));
+  // «Стек КП» and the way to its editor: the change applies to every pad of the stack and is undone in one step.
+  if (p.padstack >= 0 && size_t(p.padstack) < b.padstacks.size()) {
+    auto* row = new QWidget;
+    auto* h = new QHBoxLayout(row);
+    h->setContentsMargins(0, 0, 0, 0);
+    h->addWidget(new QLabel(QString::fromStdString(b.padstacks[size_t(p.padstack)].name)), 1);
+    auto* editStack = new QPushButton(tr("Изменить..."));
+    h->addWidget(editStack);
+    f->addRow(tr("Стек КП:"), row);
+    int si = p.padstack;
+    connect(editStack, &QPushButton::clicked, this, [this, si] {
+      const Board& b = *doc_->board();
+      std::vector<std::string> others;
+      for (size_t k = 0; k < b.padstacks.size(); ++k)
+        if (int(k) != si) others.push_back(b.padstacks[k].name);
+      PadstackEditor dlg(b, b.padstacks[size_t(si)], doc_->unit(), others, false, this);
+      connect(&dlg, &PadstackEditor::applied, this, [this, si](const Padstack& ps) {
+        edit(tr("Изменить стек КП"), [&](Board& bd) {
+          std::vector<Padstack> stacks = bd.padstacks;
+          stacks[size_t(si)] = ps;
+          std::vector<int> origin(stacks.size());
+          for (size_t i = 0; i < origin.size(); ++i) origin[i] = int(i);
+          setPadstacks(bd, std::move(stacks), origin);
+        });
+      });
+      dlg.exec();
+    });
+  }
   return w;
 }
 
