@@ -304,17 +304,6 @@ void Topology::convertWires(const Board& b, BuildScratch& scratch) {
     // stuck out of the pad into the gap beside it (arz_2L: 13 violations at one connector). An oval is
     // drawn to the end nearer the path's end (from the centre a wire ran the pad's length and out the other
     // end, 470 mm over arz_2L), the rest have one vertex.
-    auto endVertexOf = [&](int owner, Vec2 at) {
-      const Owner& o = owners[owner];
-      if (o.shape.kind == Shape::Kind::Polygon)
-        for (int v : m.ownerVerts[owner])
-          if (m.verts[v].t == 0 && m.verts[v].off.len2() < 1) return v;
-      return nearestVertex(m, owner, at);
-    };
-    int v0 = endVertexOf(w.end[0], c.a()), v1 = endVertexOf(w.end[1], c.b());
-    w.endVertex[0] = v0;
-    w.endVertex[1] = v1;
-    Polyline sk{m.verts[v0].p};
     const Owner& o0 = owners[w.end[0]];
     const Owner& o1 = owners[w.end[1]];
     // Where the path leaves each end's copper: the boundary point between the last point inside and the
@@ -336,6 +325,21 @@ void Topology::convertWires(const Board& b, BuildScratch& scratch) {
         break;
       }
     }
+    // An oval's end is chosen by where the path leaves the copper, not by where it ends inside it: a track
+    // drawn to the pad's centre is as far from one end as from the other, and from the wrong one the wire
+    // ran the pad's length through its own far end (Arcs_master: 30 violations on the first pass, 24 on
+    // the next, when the drawn wire started at the right end).
+    auto endVertexOf = [&](int owner, int end) {
+      const Owner& o = owners[owner];
+      if (o.shape.kind == Shape::Kind::Polygon)
+        for (int v : m.ownerVerts[owner])
+          if (m.verts[v].t == 0 && m.verts[v].off.len2() < 1) return v;
+      return nearestVertex(m, owner, w.hasExit[end] ? w.exit[end] : end ? c.b() : c.a());
+    };
+    int v0 = endVertexOf(w.end[0], 0), v1 = endVertexOf(w.end[1], 1);
+    w.endVertex[0] = v0;
+    w.endVertex[1] = v1;
+    Polyline sk{m.verts[v0].p};
     // Through the exits: from the pad's centre straight to the first point outside, the walk cut across the
     // neighbouring pad where the tracks left near a corner.
     auto push = [&](Vec2 p) {
@@ -409,6 +413,7 @@ void Topology::convertWires(const Board& b, BuildScratch& scratch) {
         std::println(stderr, "loop: net {} L{} owner {} kind {} path {} points from ({:.3f},{:.3f}) to ({:.3f},{:.3f}), sketch {} points",
                      b.nets[c.net].name, int(c.layer), w.end[0], int(owners[w.end[0]].kind), c.path.size(), c.a().x / 1e6, c.a().y / 1e6,
                      c.b().x / 1e6, c.b().y / 1e6, sk.size());
+      for (int ti : c.tracks) ownerTracks.push_back({w.end[0], b.tracks[ti].id});  // goes when the owner's wires are redrawn
       continue;
     }
     // Nothing crossed between two different owners: the wire runs along the edge joining them.

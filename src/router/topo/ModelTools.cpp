@@ -133,6 +133,19 @@ RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int
     in.stubs.assign(wires.size(), {});
     if (opt.region) in.oidx.build(b, *opt.region);
     else in.oidx.build(b);
+    // A wire of an oval pad is laid from the pad's centre (TopoR: every wire ends at the centre of its pad):
+    // the lead from the centre to the end vertex — the centre of the rounded end, the inner point of the
+    // pattern — is drawn with the wire. It covers no crossing: the wire's crossings start beyond that vertex.
+    for (size_t k = 0; k < wires.size(); ++k) {
+      const Wire& w = t.wires[chosen[k]];
+      const LayerMesh& m = *t.mesh(w.layer);
+      for (int end = 0; end < 2; ++end) {
+        const Owner& o = t.owners[w.end[end]];
+        if (o.kind != Owner::Kind::Pad || o.shape.kind != Shape::Kind::Segment) continue;
+        const Vec2 v = m.verts[w.endVertex[end]].p;
+        if ((v - o.c).len() > 1) in.stubs[k][end] = Stub{o.c, v, v, true, 0};
+      }
+    }
   }
   const int NW = int(wires.size());
   if (std::getenv("XR_TOPO_DEBUG")) {

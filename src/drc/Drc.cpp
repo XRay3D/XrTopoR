@@ -59,6 +59,28 @@ std::string mm(double nm) {
   return buf;
 }
 
+// A straight track lying wholly inside the copper of a pad or via of its own net is that copper (a wire's
+// lead from the pad's centre to its end): what it is too close to, the pad is too, and is reported once.
+bool inOwnCopper(const Board& b, const SpatialIndex& idx, ItemRef r) {
+  if (r.type != ItemType::Track) return false;
+  const Track& t = b.tracks[r.index];
+  if (t.net == kNoNet || t.isArc()) return false;
+  const double hw = t.width / 2.0 - kDrcTolerance;
+  bool in = false;
+  BBox q;
+  q.add(t.a.v());
+  q.add(t.b.v());
+  idx.query(q, LayerMask(1) << t.layer, [&](ItemRef o) {
+    if (in || (o.type != ItemType::Pad && o.type != ItemType::Via) || itemNet(b, o) != t.net) return;
+    for (auto& s : itemShapes(b, o))
+      if (s.distance(t.a.v()) <= -hw && s.distance(t.b.v()) <= -hw) {
+        in = true;
+        return;
+      }
+  });
+  return in;
+}
+
 bool skipPair(const Board& b, ItemRef a, ItemRef c) {
   int na = itemNet(b, a), nc = itemNet(b, c);
   if (na != kNoNet && na == nc) return true;
@@ -120,8 +142,9 @@ ConflictSum regionConflicts(const Board& b, const SpatialIndex& idx, const BBox&
     BBox bb;
     for (auto& s : shapes) bb.add(s.bbox());
     LayerMask lm = itemLayers(b, a);
+    if (inOwnCopper(b, idx, a)) continue;
     idx.query(bb.inflated(maxClr), lm, [&](ItemRef c) {
-      if (c == a || skipPair(b, a, c)) return;
+      if (c == a || skipPair(b, a, c) || inOwnCopper(b, idx, c)) return;
       if (!aChanged && !changed(c)) return;
       int ka = gid(a), kc = gid(c);
       if (!seen.insert({std::min(ka, kc), std::max(ka, kc)}).second) return;
@@ -171,8 +194,9 @@ std::vector<DrcViolation> runDrc(const Board& b, const DrcOptions& opt) {
       BBox bb;
       for (auto& s : shapes) bb.add(s.bbox());
       LayerMask lm = itemLayers(b, a);
+      if (inOwnCopper(b, idx, a)) return;
       idx.query(bb.inflated(maxClr), lm, [&](ItemRef c) {
-        if (c == a || skipPair(b, a, c)) return;
+        if (c == a || skipPair(b, a, c) || inOwnCopper(b, idx, c)) return;
         int ka = gid(a), kc = gid(c);
         if (!seen.insert({std::min(ka, kc), std::max(ka, kc)}).second) return;
         int na = itemNet(b, a), nc = itemNet(b, c);
