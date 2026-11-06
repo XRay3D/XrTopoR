@@ -46,6 +46,7 @@ struct RefineModelResult {
   int branches = 0;        // branch points made
   int branchesMerged = 0;  // pairs of branch points made one
   int viasRemoved = 0;
+  int reattached = 0;      // branches moved to a nearer wire of their net
   int drawings = 0;
   int conflictsBefore = 0, conflictsAfter = 0;
   double lengthBefore = 0, lengthAfter = 0;  // the drawn tracks, nm

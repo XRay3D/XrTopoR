@@ -233,8 +233,8 @@ int main(int argc, char** argv) {
       for (auto& l : res.log) std::println("{}", l);
     if (!res.drawn) return fail("stopped by the model's violations, nothing drawn");
     std::println("model: {} wire(s) tried, {} with a shorter path, {} re-laid ({} in a clinch); {} via(s) removed; {} branch point(s) made, {} pair(s) made one, "
-                 "{} moved; {} drawings; conflicts {} -> {}, length {:.1f} -> {:.1f} mm",
-                 res.wires, res.found, res.relaid, res.clinches, res.viasRemoved, res.branches, res.branchesMerged, res.junctionMoves, res.drawings, res.conflictsBefore,
+                 "{} moved, {} branch(es) re-attached; {} drawings; conflicts {} -> {}, length {:.1f} -> {:.1f} mm",
+                 res.wires, res.found, res.relaid, res.clinches, res.viasRemoved, res.branches, res.branchesMerged, res.junctionMoves, res.reattached, res.drawings, res.conflictsBefore,
                  res.conflictsAfter, res.lengthBefore / 1e6, res.lengthAfter / 1e6);
     xr::Prof::get().report("refine --model");
     if (auto r = io::saveBoard(b, std::string(a.opt("-o"))); !r) return fail(r.error());

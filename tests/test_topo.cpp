@@ -2497,6 +2497,55 @@ TEST(Topo, ViaGoesAndItsNeighbourTakesAWiderType) {
   EXPECT_EQ(p.violations(), 0);
 }
 
+// The clinch paper's fig. 6: the only wire of a pad goes to a branch point the long way while another wire, or
+// another pad, of the net is nearer. Trunk of N1 from (2, 18) to (38, 18) with its branch point at (36, 18), the
+// pad at (10, 10) wired to it (27 mm): the tree is 63.2 mm. F6 re-attaches a branch (the trunk's left end to the
+// pad, 11.3 mm for 34) and the forces take the branch point on: the tree of least length, 40.4 mm. With a wire of
+// N2 between the pad and the trunk the pad's own way up is barred and N2 has no short way round it; the wire
+// stays, and what is re-attached goes round its end.
+TEST(Topo, BranchIsMovedToTheNearWire) {
+  auto board = [](PinBoard& p) {
+    p.pad("N1", 2, 18, PadShapeKind::Circle, 1, 1);
+    p.pad("N1", 38, 18, PadShapeKind::Circle, 1, 1);
+    p.pad("N1", 10, 10, PadShapeKind::Circle, 1, 1);
+    p.track("N1", {{2, 18}, {36, 18}, {38, 18}}, 0.3);
+    p.track("N1", {{10, 10}, {36, 18}}, 0.3);
+  };
+  {
+    PinBoard p;
+    board(p);
+    topo::Topology::assignIds(p.b);
+    topo::Topology t;
+    t.build(p.b);
+    EXPECT_EQ(p.violations(), 0);
+    auto res = topo::refineModel(p.b, t);
+    ASSERT_TRUE(res.drawn);
+    EXPECT_GE(res.reattached, 1);
+    EXPECT_NEAR(p.length("N1"), 40.43, 0.5);
+    EXPECT_LE(branchPointsOf(p.b, "N1").size(), 1u);
+    expectSoundModel(t);
+    EXPECT_EQ(p.violations(), 0);
+  }
+  {
+    PinBoard p;
+    board(p);
+    p.pad("N2", 6, 14, PadShapeKind::Circle, 1, 1);
+    p.pad("N2", 14, 14, PadShapeKind::Circle, 1, 1);
+    p.track("N2", {{6, 14}, {14, 14}}, 0.3);
+    topo::Topology::assignIds(p.b);
+    topo::Topology t;
+    t.build(p.b);
+    auto res = topo::refineModel(p.b, t);
+    ASSERT_TRUE(res.drawn);
+    EXPECT_GE(res.reattached, 1);
+    EXPECT_NEAR(p.length("N2"), 8.0, 0.05);
+    EXPECT_LT(p.length("N1"), 50.0);
+    EXPECT_GT(p.length("N1"), 40.5);  // round N2's end (40.43 without it)
+    expectSoundModel(t);
+    EXPECT_EQ(p.violations(), 0);
+  }
+}
+
 // A clinch with two hindering wires (the paper: «все мешающие проводники следует переложить по очереди»): two
 // wires of N2 leave its pad at (25, 5) side by side and both go round N1's lower pad; with one of them taken out
 // the other still bars N1's straight way, so neither alone is a clinch F6 would undo. Both are taken out, N1 is

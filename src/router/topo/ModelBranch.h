@@ -39,4 +39,11 @@ BranchResult splitBranches(Board& b, Topology& t, const BranchOptions& o = {});
 // The branch points of a net and layer that stand within each other's copper become one.
 BranchResult mergeBranchPoints(Board& b, Topology& t, const BranchOptions& o = {});
 
+// The clinch paper's fig. 6 (Luzin, Popov, Popov 2012): the only wire of a pad or a via goes to a branch point
+// of three wires the long way, while another wire of the net passes nearer to the pad. That wire is taken off,
+// the pad is joined to the near wire by a new branch point (a wire of the model laid from a stub on the near
+// wire to the pad, the wires of other nets that hold it taken out and laid anew after it), and the old branch
+// point is left a bend. One re-attachment a call, the one with the most to gain that the judge takes.
+BranchResult reattachBranches(Board& b, Topology& t, const BranchOptions& o = {});
+
 }  // namespace xr::topo

@@ -242,6 +242,14 @@ RefineModelResult refineModel(Board& b, Topology& t, const RefineModelOptions& o
       if (br.made == 0) break;
     }
   };
+  // A branch that goes to its branch point the long way past a nearer wire of its net (the clinch paper's
+  // fig. 6) is moved there, one at a time.
+  if (o.branches)
+    for (int pass = 0; pass < 6; ++pass) {
+      const BranchResult br = reattachBranches(b, t, bo);
+      take(br, r.reattached);
+      if (br.made == 0) break;
+    }
   split();
   relax();
   if (o.branches && (r.branches > 0 || o.junctions)) {
@@ -256,7 +264,7 @@ RefineModelResult refineModel(Board& b, Topology& t, const RefineModelOptions& o
   // A branch round a vertex in its way goes the other side of it, if that is shorter (fig. 6), and a branch
   // point that moved has opened ways that were not there (on Arcs_standard_routing 2 wires more after the 8
   // that F6 moves); the branch points follow.
-  if ((r.branches > 0 || r.junctionMoves > 0) && relayAll()) relax();
+  if ((r.branches > 0 || r.reattached > 0 || r.junctionMoves > 0) && relayAll()) relax();
   if (clinchesOfMany > 0) r.log.push_back(std::format("clinches: {} undone with more than one wire taken out", clinchesOfMany));
   return r;
 }

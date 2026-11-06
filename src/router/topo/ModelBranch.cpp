@@ -14,6 +14,7 @@
 #include "drc/Drc.h"
 #include "geom/Geometry.h"
 #include "router/topo/ModelTools.h"
+#include "topo/Relay.h"
 
 namespace xr::topo {
 
@@ -57,6 +58,36 @@ std::optional<Leg> legOf(const Board& b, const Topology& t, const std::map<uint3
   return std::nullopt;
 }
 
+// A segment of a wire of `net` keeps the rule from the copper of other nets.
+bool segmentClear(const Board& b, const SpatialIndex& idx, double maxClr, Vec2 p, Vec2 q, int net, LayerId layer, double width, ItemRef* hit = nullptr) {
+  if ((q - p).len() < 1) return true;
+  BBox box;
+  box.add(p);
+  box.add(q);
+  bool ok = true;
+  idx.query(box.inflated(width / 2 + maxClr + 1000), LayerMask(1) << layer, [&](ItemRef it) {
+    if (!ok) return;
+    const int other = itemNet(b, it);
+    if (other == net) return;
+    const double need = width / 2 + double(other >= 0 ? b.clearance(net, other, layer) : b.clearance(net, layer));
+    for (const Shape& sh : itemShapes(b, it))
+      if (sh.distanceToSegment(p, q) < need) {
+        ok = false;
+        if (hit) *hit = it;
+        return;
+      }
+  });
+  return ok;
+}
+
+// Not inside copper of its own net: there the conversion would end the wires at the pad, off its centre.
+bool offOwnCopper(const Topology& t, Vec2 p, int net, LayerId layer, double half) {
+  for (const Owner& x : t.owners)
+    if (x.net == net && x.layers != 0 && ((x.layers >> layer) & 1) && (x.kind == Owner::Kind::Pad || x.kind == Owner::Kind::Via) && x.shape.distance(p) < half + kKeepOff)
+      return false;
+  return true;
+}
+
 // The point that joins three with the least length (Fermat's; the vertex itself when the angle there is 120
 // degrees or more).
 Vec2 steinerPoint(Vec2 v, Vec2 a, Vec2 c) { return geometricMedian(Polyline{v, a, c}, (v + a + c) / 3.0); }
@@ -75,38 +106,17 @@ BranchResult splitBranches(Board& b, Topology& t, const BranchOptions& o) {
   const double maxClr = double(b.maxClearance());
   // A new segment keeps the rule from the copper of other nets (it lies inside the triangle of the two it
   // replaces, but that triangle may hold a pad).
-  auto clear = [&](Vec2 p, Vec2 q, int net, LayerId layer, double width, ItemRef* hit = nullptr) {
-    if ((q - p).len() < 1) return true;
-    BBox box;
-    box.add(p);
-    box.add(q);
-    bool ok = true;
-    idx.query(box.inflated(width / 2 + maxClr + 1000), LayerMask(1) << layer, [&](ItemRef it) {
-      if (!ok) return;
-      const int other = itemNet(b, it);
-      if (other == net) return;
-      const double need = width / 2 + double(other >= 0 ? b.clearance(net, other, layer) : b.clearance(net, layer));
-      for (const Shape& sh : itemShapes(b, it))
-        if (sh.distanceToSegment(p, q) < need) {
-          ok = false;
-          if (hit) *hit = it;
-          return;
-        }
-    });
-    return ok;
-  };
-  // Not inside copper of its own net: there the conversion would end the wires at the pad, off its centre.
-  auto offOwnCopper = [&](Vec2 p, int net, LayerId layer, double half) {
-    for (const Owner& x : t.owners)
-      if (x.net == net && x.layers != 0 && ((x.layers >> layer) & 1) && (x.kind == Owner::Kind::Pad || x.kind == Owner::Kind::Via) &&
-          x.shape.distance(p) < half + kKeepOff)
-        return false;
-    return true;
-  };
+  auto clear = [&](Vec2 p, Vec2 q, int net, LayerId layer, double width, ItemRef* hit = nullptr) { return segmentClear(b, idx, maxClr, p, q, net, layer, width, hit); };
+  auto offOwnCopper = [&](Vec2 p, int net, LayerId layer, double half) { return topo::offOwnCopper(t, p, net, layer, half); };
 
   // The legs by the vertex they leave.
   std::map<std::tuple<int, LayerId, long, long>, std::vector<Leg>> at;  // (owner, layer, the point) -> legs
   int dEnds = 0, dNoVertex = 0, dNoLeg = 0, dPairs = 0, dWidth = 0, dWide = 0, dGain = 0, dInV = 0, dEnd = 0, dOwn = 0, dClear = 0;
+  // What is not done, counted (XR_TOPO_DEBUG): pairs of two widths and pairs at polygon pads that would gain,
+  // obstacles not looked at; a pair stopped by another net's track, and by its pad or via.
+  int dWidthCould = 0, dPolyCould = 0, dClearTrack = 0;
+  double gWidth = 0, gPoly = 0;
+  std::map<std::pair<int, LayerId>, std::vector<Leg>> atPoly;  // the legs at the polygon pads
   for (int wi = 0; wi < int(t.wires.size()); ++wi) {
     const Wire& w = t.wires[wi];
     if (w.locked || b.flexFixed(w.net) || w.net < 0) continue;  // a flexibly fixed net keeps its wires
@@ -119,6 +129,8 @@ BranchResult splitBranches(Board& b, Topology& t, const BranchOptions& o) {
       ++dEnds;
       if (!vertex) {
         ++dNoVertex;
+        if (debug && V.kind == Owner::Kind::Pad && V.shape.kind == Shape::Kind::Polygon)
+          if (auto leg = legOf(b, t, trackOf, wi, end)) atPoly[{w.end[end], leg->layer}].push_back(*leg);
         continue;
       }
       if (!legOf(b, t, trackOf, wi, end)) ++dNoLeg;
@@ -176,6 +188,17 @@ BranchResult splitBranches(Board& b, Topology& t, const BranchOptions& o) {
         ++dPairs;
         if (x.width != y.width) {
           ++dWidth;
+          if (debug) {
+            const Vec2 n = x.from, dx = x.to - n, dy = y.to - n;
+            if (dx.len() >= 1 && dy.len() >= 1 && dx.dot(dy) / (dx.len() * dy.len()) > -0.5) {
+              const Vec2 s = steinerPoint(n, x.to, y.to);
+              const double g = dx.len() + dy.len() - ((s - n).len() + (s - x.to).len() + (s - y.to).len());
+              if (g >= o.gain && V.shape.distance(s) >= std::max(x.width, y.width) / 2.0 + kKeepOff) {
+                ++dWidthCould;
+                gWidth += g;
+              }
+            }
+          }
           continue;
         }
         const Vec2 n = x.from, dx = x.to - n, dy = y.to - n;
@@ -256,6 +279,12 @@ BranchResult splitBranches(Board& b, Topology& t, const BranchOptions& o) {
         }
         if (why != 0) {
           ++(why == 1 ? dInV : why == 2 ? dEnd : why == 3 ? dOwn : why == 4 ? dClear : dGain);
+          if (debug && why == 4) {
+            ItemRef hit{};
+            if ((!clear(n, steiner, net, x.layer, x.width, &hit) || !clear(steiner, x.to, net, x.layer, x.width, &hit) || !clear(steiner, y.to, net, x.layer, x.width, &hit)) &&
+                hit.type == ItemType::Track)
+              ++dClearTrack;
+          }
           continue;
         }
         const double gain = round ? roundGain : gainAt(p);
@@ -273,10 +302,63 @@ BranchResult splitBranches(Board& b, Topology& t, const BranchOptions& o) {
       ++taken;
     }
   }
-  if (debug)
+  if (debug) {
     std::println(stderr, "new branch points: {} wire ends, {} not at a vertex, {} with no straight leg; {} pairs: {} of two widths, {} at 120 degrees or more, {} with too "
                          "little to gain, {} with the point in the vertex's copper, {} at a leg's end, {} in copper of the net, {} too close to another net; {} left",
                  dEnds, dNoVertex, dNoLeg, dPairs, dWidth, dWide, dGain, dInV, dEnd, dOwn, dClear, splits.size());
+    // The pairs at polygon pads: from the pad's centre, as if it were a vertex.
+    for (auto& [key, legs] : atPoly) {
+      const Owner& V = t.owners[size_t(key.first)];
+      for (size_t i = 0; i < legs.size(); ++i)
+        for (size_t j = i + 1; j < legs.size(); ++j) {
+          const Leg& x = legs[i];
+          const Leg& y = legs[j];
+          const Vec2 n = V.c, dx = x.to - n, dy = y.to - n;
+          if (x.wire == y.wire || x.width != y.width || dx.len() < 1 || dy.len() < 1 || dx.dot(dy) / (dx.len() * dy.len()) <= -0.5) continue;
+          const Vec2 s = steinerPoint(n, x.to, y.to);
+          const double g = dx.len() + dy.len() - ((s - n).len() + (s - x.to).len() + (s - y.to).len());
+          if (g >= o.gain && V.shape.distance(s) >= x.width / 2.0 + kKeepOff) {
+            ++dPolyCould;
+            gPoly += g;
+          }
+        }
+    }
+    // The only wire of a pad or a via, to a branch point of three wires, and a track of the net that is no wire
+    // of that branch point nearer to the pad than the wire is long (the clinch paper's fig. 6: the wire goes,
+    // the pad is joined to the near wire by a new branch point). What stands between is not looked at.
+    int dReattach = 0;
+    double gReattach = 0;
+    for (int wi = 0; wi < int(t.wires.size()); ++wi) {
+      const Wire& w = t.wires[size_t(wi)];
+      if (w.locked || w.net < 0 || b.flexFixed(w.net) || w.end[0] < 0 || w.end[1] < 0) continue;
+      for (int end = 0; end < 2; ++end) {
+        const Owner& T = t.owners[size_t(w.end[end])];
+        const int ji = w.end[1 - end];
+        const Owner& J = t.owners[size_t(ji)];
+        if ((T.kind != Owner::Kind::Pad && T.kind != Owner::Kind::Via) || wiresAt[size_t(w.end[end])] != 1 || J.kind != Owner::Kind::Junction || wiresAt[size_t(ji)] != 3)
+          continue;
+        std::set<uint32_t> skip;  // the tracks of the wires of that branch point
+        for (const Wire& x : t.wires)
+          if (x.end[0] == ji || x.end[1] == ji) skip.insert(x.tracks.begin(), x.tracks.end());
+        double near = 1e18;
+        for (const Track& tr : b.tracks) {
+          if (tr.net != w.net || tr.layer != w.layer || (tr.id && skip.contains(tr.id))) continue;
+          const Polyline pl = tr.path();
+          for (size_t k = 1; k < pl.size(); ++k) near = std::min(near, Shape::circle(T.c, 1).distanceToSegment(pl[k - 1], pl[k]));
+        }
+        const double len = tautLength(t, wi);
+        if (near < len - std::max(0.3 * kNmPerMm, 0.05 * len)) {
+          ++dReattach;
+          gReattach += len - near;
+          std::println(stderr, "  wire of {} from ({:.3f}, {:.3f}) to its branch point: {:.2f} mm, another wire of the net {:.2f} mm away", b.nets[size_t(w.net)].name,
+                       T.c.x / 1e6, -T.c.y / 1e6, len / 1e6, near / 1e6);
+        }
+      }
+    }
+    std::println(stderr, "not done: {} pair(s) of two widths would gain {:.2f} mm; {} pair(s) at polygon pads {:.2f} mm; of the {} too close to another net {} are stopped "
+                         "by its track; {} wire(s) to a branch point with another wire of the net nearer, {:.2f} mm",
+                 dWidthCould, gWidth / 1e6, dPolyCould, gPoly / 1e6, dClear, dClearTrack, dReattach, gReattach / 1e6);
+  }
   std::ranges::sort(splits, [](const Split& x, const Split& y) { return x.gain > y.gain; });
   // A wire in one split a pass (its other end may be a pair's leg too).
   {
@@ -363,6 +445,214 @@ BranchResult splitBranches(Board& b, Topology& t, const BranchOptions& o) {
           out[k] = 1;
           --drop;
         }
+    }
+  }
+  return r;
+}
+
+BranchResult reattachBranches(Board& b, Topology& t, const BranchOptions& o) {
+  ProfScope pAll("branch points: re-attached");
+  BranchResult r;
+  const bool debug = std::getenv("XR_TOPO_DEBUG") != nullptr;
+  SpatialIndex idx;
+  idx.build(b);
+  std::vector<int> wiresAt(t.owners.size(), 0);
+  for (const Wire& w : t.wires)
+    for (int end = 0; end < 2; ++end)
+      if (w.end[end] >= 0) ++wiresAt[size_t(w.end[end])];
+  std::vector<char> fixedNets(b.nets.size(), 0);
+  for (int n = 0; n < int(b.nets.size()); ++n) fixedNets[size_t(n)] = b.flexFixed(n);
+  struct Cand {
+    int wire, term, junction;
+    size_t track;     // the near wire's track, and the point on it nearest the pad...
+    Vec2 p;
+    int target = -1;  // ... or a pad or via of the net nearer than that (the wire is laid to it, no stub)
+    double len, near;
+  };
+  std::vector<Cand> cands;
+  for (int wi = 0; wi < int(t.wires.size()); ++wi) {
+    const Wire& w = t.wires[size_t(wi)];
+    if (w.locked || w.net < 0 || b.flexFixed(w.net) || w.end[0] < 0 || w.end[1] < 0 || w.tracks.empty()) continue;
+    for (int end = 0; end < 2; ++end) {
+      const int ti = w.end[end], ji = w.end[1 - end];
+      const Owner& T = t.owners[size_t(ti)];
+      const Owner& J = t.owners[size_t(ji)];
+      if ((T.kind != Owner::Kind::Pad && T.kind != Owner::Kind::Via) || T.locked || wiresAt[size_t(ti)] != 1 || J.kind != Owner::Kind::Junction || wiresAt[size_t(ji)] != 3)
+        continue;
+      std::set<uint32_t> skip;  // the tracks of the wires of that branch point (its own two: the forces slide it)
+      for (const Wire& x : t.wires)
+        if (x.end[0] == ji || x.end[1] == ji) skip.insert(x.tracks.begin(), x.tracks.end());
+      ++r.candidates;
+      Cand c{.wire = wi, .term = ti, .junction = ji, .track = 0, .p = {}, .target = -1, .len = tautLength(t, wi), .near = 1e18};
+      // The nearest point of the net's tracks on the layer: on a straight track anywhere, on an arc at its ends.
+      for (size_t k = 0; k < b.tracks.size(); ++k) {
+        const Track& tr = b.tracks[k];
+        if (tr.net != w.net || tr.layer != w.layer || tr.locked || (tr.id && skip.contains(tr.id))) continue;
+        const Vec2 a = tr.a.v(), d = tr.b.v() - a;
+        if (d.len2() < 1) continue;
+        const double f = tr.isArc() ? ((T.c - a).len() <= (T.c - tr.b.v()).len() ? 0.0 : 1.0) : std::clamp((T.c - a).dot(d) / d.len2(), 0.0, 1.0);
+        const Vec2 q = a + d * f;
+        const double dist = (q - T.c).len();
+        if (dist < c.near) {
+          c.near = dist;
+          c.p = q;
+          c.track = k;
+        }
+      }
+      // A pad or a via of the net nearer than that (the near point found may be the lead inside one): the wire
+      // goes to it.
+      for (int oi = 0; oi < int(t.owners.size()); ++oi) {
+        const Owner& Q = t.owners[size_t(oi)];
+        if (oi == ti || oi == ji || Q.net != w.net || (Q.kind != Owner::Kind::Pad && Q.kind != Owner::Kind::Via) || !((Q.layers >> w.layer) & 1) || Q.locked) continue;
+        const double dist = Q.shape.distance(T.c);
+        if (dist < c.near || (c.target < 0 && !offOwnCopper(t, c.p, w.net, w.layer, w.width / 2.0) && Q.shape.distance(c.p) < w.width / 2.0 + kKeepOff)) {
+          c.near = std::min(c.near, dist);
+          c.target = oi;
+        }
+      }
+      if (c.near < c.len - std::max(o.gain, 0.05 * c.len)) cands.push_back(c);
+    }
+  }
+  std::ranges::sort(cands, [](const Cand& x, const Cand& y) { return x.len - x.near > y.len - y.near; });
+  const DrawingScore was = scoreDrawing(b);
+  int attempts = 0;
+  for (const Cand& c : cands) {
+    if (attempts >= 8) break;
+    const Wire& A = t.wires[size_t(c.wire)];
+    const Owner& T = t.owners[size_t(c.term)];
+    const double width = double(A.width);
+    // The stub from the near wire towards the pad: the new branch point and, at its free end, the vertex the
+    // wire to the pad is laid from (two tracks meeting there are one chain when the drawing is built anew).
+    const bool toOwner = c.target >= 0;
+    const Vec2 dir = toOwner ? Vec2{} : (T.c - c.p).normalized();
+    const double stub = toOwner ? 0.0 : std::min(std::max(width, 0.2 * kNmPerMm), (T.c - c.p).len() / 2);
+    const Vec2 f = toOwner ? t.owners[size_t(c.target)].c : c.p + dir * stub;
+    // The stub may stand nearer another net than the rule (a hindering wire right beside the near one is to be
+    // led behind the pad), not in its copper.
+    auto overlaps = [&] {
+      BBox box;
+      box.add(c.p);
+      box.add(f);
+      bool hit = false;
+      idx.query(box.inflated(width / 2 + 1000), LayerMask(1) << A.layer, [&](ItemRef it) {
+        if (hit || itemNet(b, it) == A.net) return;
+        for (const Shape& sh : itemShapes(b, it))
+          if (sh.distanceToSegment(c.p, f) < width / 2) hit = true;
+      });
+      return hit;
+    };
+    auto why = [&](const char* what) {
+      if (debug)
+        std::println(stderr, "branch of {} at ({:.3f}, {:.3f}), {:.2f} mm, the near wire {:.2f} mm away: {}", b.nets[size_t(A.net)].name, T.c.x / 1e6, -T.c.y / 1e6,
+                     c.len / 1e6, c.near / 1e6, what);
+    };
+    if (!toOwner && (overlaps() || !offOwnCopper(t, f, A.net, A.layer, width / 2))) {
+      why("no room for the stub");
+      continue;
+    }
+    ++attempts;
+    Board eb = b;
+    if (!toOwner) {
+      Track& tr = eb.tracks[c.track];
+      if ((c.p - tr.a.v()).len() > 1 && (c.p - tr.b.v()).len() > 1) {
+        Track second = tr;
+        second.id = 0;
+        second.a = Point(c.p);
+        tr.b = Point(c.p);
+        eb.tracks.push_back(second);
+      }
+      Track s = eb.tracks[c.track];
+      s.id = 0;
+      s.mid.reset();
+      s.a = Point(c.p);
+      s.b = Point(f);
+      eb.tracks.push_back(s);
+    }
+    {
+      const std::set<uint32_t> gone(A.tracks.begin(), A.tracks.end());
+      std::erase_if(eb.tracks, [&](const Track& x) { return x.id && gone.contains(x.id); });
+    }
+    Topology::assignIds(eb);
+    Topology mt;
+    mt.build(eb);
+    int nFlips = 0;
+    std::vector<Violation> stop;
+    if (!prepareModel(mt, o.flips, false, nFlips, stop)) {
+      why("the model of the tracks with the stub does not stand");
+      continue;
+    }
+    // The pad, and the stub's free end (or the pad the wire goes to) in the new model.
+    int term = -1, free = -1;
+    for (int oi = 0; oi < int(mt.owners.size()); ++oi) {
+      const Owner& x = mt.owners[size_t(oi)];
+      if (x.net != T.net) continue;
+      if (x.kind == T.kind && (x.c - T.c).len() < 1000) term = oi;
+      if (x.kind == (toOwner ? t.owners[size_t(c.target)].kind : Owner::Kind::Junction) && (x.c - f).len() < 1000) free = oi;
+    }
+    const LayerMesh* m = term >= 0 && free >= 0 ? mt.mesh(A.layer) : nullptr;
+    if (!m || m->ownerVerts[size_t(term)].empty() || m->ownerVerts[size_t(free)].empty()) {
+      why("the pad or the stub's end not found in the model");
+      continue;
+    }
+    Wire n = A;
+    n.end[0] = free;
+    n.end[1] = term;
+    auto vertexOf = [&](int owner, Vec2 from) {
+      if (mt.owners[size_t(owner)].shape.kind == Shape::Kind::Polygon)
+        for (int v : m->ownerVerts[size_t(owner)])
+          if (m->verts[size_t(v)].t == 0 && m->verts[size_t(v)].off.len2() < 1) return v;
+      return mt.nearestVertex(*m, owner, from);
+    };
+    n.endVertex[0] = vertexOf(free, T.c);
+    n.endVertex[1] = vertexOf(term, f);
+    n.hasExit[0] = n.hasExit[1] = false;
+    n.cross.clear();
+    n.tracks.clear();
+    n.locked = false;
+    n.dirty = true;
+    const int ni = int(mt.wires.size());
+    mt.wires.push_back(std::move(n));
+    const std::vector<char> unsettled = viasTooClose(eb, mt);
+    const double limit = c.len - stub - std::max(o.gain, 0.05 * c.len);
+    bool ok = false;
+    double others = 0;
+    if (const std::optional<RelayPath> path = findRelay(mt, ni, &unsettled); path && path->length <= limit) {
+      applyRelay(mt, ni, *path);
+      ok = true;
+    } else {
+      std::optional<Topology> saved;
+      const std::vector<int> holders = wiresRound(mt, A.layer, free, term, A.net, ni, &fixedNets);
+      const std::optional<PastResult> past = relayPast(mt, ni, holders, limit, &unsettled, saved);
+      ok = past && past->length + past->othersAfter <= limit + past->othersBefore;
+      if (ok) others = past->othersAfter - past->othersBefore;
+    }
+    if (!ok) {
+      why("no way from the stub to the pad short enough");
+      continue;
+    }
+    {
+      RealizeStats st;
+      int nWires = 0;
+      drawModel(eb, mt, true, st, nWires);
+      ++r.drawings;
+    }
+    std::optional<Redrawn> drawn = redrawTracks(eb, o.flips, r.drawings);
+    const bool better = drawn && betterDrawing(drawn->score, was);
+    r.log.push_back(std::format("branch of {} at ({:.3f}, {:.3f}) re-attached: {:.2f} mm to the branch point, the near {} {:.2f} mm away, {:.2f} mm in the model{}: {}",
+                                b.nets[size_t(A.net)].name, T.c.x / 1e6, -T.c.y / 1e6, c.len / 1e6, toOwner ? "pad or via" : "wire", c.near / 1e6,
+                                (stub + tautLength(mt, ni)) / 1e6,
+                                others != 0 ? std::format(", others {:+.2f}", others / 1e6) : "",
+                                !drawn ? "the model of the tracks does not stand"
+                                       : std::format("{} conflict(s) in {} place(s), {:.3f} mm short, {:.1f} mm (was {} in {}, {:.1f}): {}", drawn->score.conflicts,
+                                                     drawn->score.places, drawn->score.shortfall / 1e6, drawn->score.length / 1e6, was.conflicts, was.places,
+                                                     was.length / 1e6, better ? "taken" : "no better")));
+    if (debug) std::println(stderr, "{}", r.log.back());
+    if (better) {
+      r.gain = was.length - drawn->score.length;
+      b = std::move(drawn->board);
+      t = std::move(drawn->model);
+      r.made = 1;
+      return r;
     }
   }
   return r;
