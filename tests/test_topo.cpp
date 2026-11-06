@@ -589,6 +589,7 @@ TEST(Topo, FlipsKeepTheWiresWhereTheyWere) {
       copy.tracks.clear();
       topo::RealizeOptions ro;
       ro.tracksAsObstacles = true;
+      ro.padPattern = false;  // the end a wire leaves its pad through is chosen by the sketch's shape, not by its side
       for (const topo::Junction& j : tt.junctions) ro.anchors.push_back({j.pos, j.layer, j.net, tt.owners[j.owner].halfWidth});
       auto st = topo::realize(copy, ws, {}, ro);
       for (size_t k = 0; k < st.trackWire.size(); ++k) len[ids[st.trackWire[k]]] += copy.tracks[k].length();
@@ -618,9 +619,7 @@ TEST(Topo, FlipsKeepTheWiresWhereTheyWere) {
         ++moved;
       }
     std::println("{}: {} of {} wires drawn differently after the flips", name, moved, before.size());
-    // arz_2L: a few wires in its via rows come out a little differently (the sketch's exit from a via
-    // depends on the first crossing); their drawings stay clean.
-    EXPECT_LE(moved, std::string(name).ends_with("arz_2L.fst") ? 12 : 0) << name;
+    EXPECT_EQ(moved, 0) << name;
   }
 }
 
@@ -1580,5 +1579,153 @@ TEST(Topo, NarrowedPieceRejoinsItsWire) {
       EXPECT_EQ(w.widthsAt(5, 10), (std::set<Coord>{mmToNm(0.8)})) << how;
       EXPECT_EQ(topo::relayStats(w.b).jointBranch, 1) << how;
     }
+  }
+}
+
+namespace {
+
+// Pads of several shapes and nets on one layer, and the tracks drawn between them.
+struct PinBoard {
+  Board b;
+  LayerId top = 0;
+  PinBoard() {
+    top = b.addLayer("Top", LayerKind::Copper, Side::Top);
+    b.layers[top].copperIndex = 0;
+    b.outline.push_back({at(0, 0), at(40, 0), at(40, 20), at(0, 20)});
+    Component c;
+    c.ref = "U1";
+    b.components.push_back(c);
+  }
+  static Vec2 at(double x, double y) { return {x * kNmPerMm, y * kNmPerMm}; }
+  int net(const std::string& name) {
+    for (size_t i = 0; i < b.nets.size(); ++i)
+      if (b.nets[i].name == name) return int(i);
+    return b.addNet(name);
+  }
+  void pad(const std::string& n, double x, double y, PadShapeKind kind, double w, double h) {
+    Pad p;
+    p.number = std::to_string(b.pads.size());
+    p.component = 0;
+    p.net = net(n);
+    p.pos = Point(at(x, y));
+    p.shape.kind = kind;
+    p.shape.w = mmToNm(w);
+    p.shape.h = mmToNm(h);
+    p.copper = LayerMask(1) << top;
+    b.pads.push_back(p);
+  }
+  void track(const std::string& n, std::initializer_list<std::pair<double, double>> pts, double width) {
+    const std::pair<double, double>* prev = nullptr;
+    for (const auto& q : pts) {
+      if (prev) {
+        Track t;
+        t.a = Point(at(prev->first, prev->second));
+        t.b = Point(at(q.first, q.second));
+        t.width = mmToNm(width);
+        t.layer = top;
+        t.net = net(n);
+        b.tracks.push_back(t);
+      }
+      prev = &q;
+    }
+  }
+  bool vertexAt(double x, double y) const {
+    for (const Track& t : b.tracks)
+      if ((t.a.v() - at(x, y)).len() < 1000 || (t.b.v() - at(x, y)).len() < 1000) return true;
+    return false;
+  }
+  int violations() const {
+    DrcOptions d;
+    d.unconnected = false;
+    d.widths = false;
+    return int(runDrc(b, d).size());
+  }
+  void f5() { topo::reshapeTracks(b, std::vector<char>(b.tracks.size(), 1)); }
+};
+
+}  // namespace
+
+// The pins of a row are left through their ends only (TopoR's F5: 109 of the 110 exits of
+// Arcs_standard_routing, the one left is a dog-leg another wire runs round): a wire drawn out of the long
+// side is led from the pad's centre to the centre of the rounded end and straight out. Two pins of one net
+// side by side keep their bridge, centre to centre. The next F5 draws the same.
+TEST(Topo, RowPinsLeaveThroughTheEnd) {
+  PinBoard p;
+  const double x0 = 15, y0 = 10, pitch = 0.65;
+  for (int i = 0; i < 8; ++i) {
+    const std::string n = i == 4 ? "N3" : std::format("N{}", i);  // pins 3 and 4: one net
+    p.pad(n, x0 + i * pitch, y0, PadShapeKind::Oval, 0.3, 1.9);
+  }
+  // Out of the long side: the first pin to the left, the last one to the right.
+  p.pad("N0", 9, 4, PadShapeKind::Circle, 1, 1);
+  p.track("N0", {{x0, y0}, {13, y0}, {9, 4}}, 0.2);
+  p.pad("N7", 26, 16, PadShapeKind::Circle, 1, 1);
+  p.track("N7", {{x0 + 7 * pitch, y0}, {x0 + 7 * pitch + 2, y0}, {26, 16}}, 0.2);
+  // The pins between: from the centre through an end, at a slant.
+  p.pad("N1", 13, 3, PadShapeKind::Circle, 1, 1);
+  p.track("N1", {{x0 + pitch, y0}, {x0 + pitch, y0 - 2}, {13, 3}}, 0.2);
+  p.pad("N2", 16, 17, PadShapeKind::Circle, 1, 1);
+  p.track("N2", {{x0 + 2 * pitch, y0}, {x0 + 2 * pitch, y0 + 2}, {16, 17}}, 0.2);
+  p.track("N3", {{x0 + 3 * pitch, y0}, {x0 + 4 * pitch, y0}}, 0.2);  // the bridge
+  p.pad("N5", 19, 3, PadShapeKind::Circle, 1, 1);
+  p.track("N5", {{x0 + 5 * pitch, y0}, {x0 + 5 * pitch, y0 - 2}, {19, 3}}, 0.2);
+  p.pad("N6", 21, 17, PadShapeKind::Circle, 1, 1);
+  p.track("N6", {{x0 + 6 * pitch, y0}, {x0 + 6 * pitch, y0 + 2}, {21, 17}}, 0.2);
+  ASSERT_GT(topo::relayStats(p.b).exitsSide, 0) << "the drawing leaves two pins through their sides";
+
+  p.f5();
+  auto s = topo::relayStats(p.b);
+  EXPECT_EQ(s.exitsSide, 0) << s.text();
+  EXPECT_EQ(s.exitsEnd, 6) << s.text();
+  EXPECT_GT(s.exitsBridge, 0) << s.text();
+  EXPECT_EQ(s.padsAtCentre, s.pads) << s.text();
+  EXPECT_EQ(s.deadEnds, 0) << s.text();
+  EXPECT_EQ(p.violations(), 0);
+  // The first pin: its wire goes up, so through the upper end — the centre of the rounded end, then on.
+  EXPECT_TRUE(p.vertexAt(x0, y0)) << "the wire begins at the pad's centre";
+  EXPECT_TRUE(p.vertexAt(x0, y0 - 0.8)) << "... and goes through the centre of the rounded end";
+  EXPECT_TRUE(p.vertexAt(x0 + 7 * pitch, y0 + 0.8));
+  EXPECT_TRUE(p.vertexAt(x0 + 3 * pitch, y0) && p.vertexAt(x0 + 4 * pitch, y0)) << "the bridge is there";
+
+  const size_t tracks = p.b.tracks.size();
+  const double length = p.b.tracksLength();
+  p.f5();
+  auto again = topo::relayStats(p.b);
+  EXPECT_EQ(p.b.tracks.size(), tracks) << "the second F5 draws the same";
+  EXPECT_NEAR(p.b.tracksLength(), length, 2000);
+  EXPECT_EQ(again.exitsSide, 0);
+  EXPECT_EQ(again.exitsEnd, 6);
+  EXPECT_EQ(p.violations(), 0);
+}
+
+// A rectangular pad: from the centre to the inner point half a width short of the end, on the side the
+// wire goes to (TopoR: a pad 5.6 x 2 with a 0.3 wire — centre, (2.65, ±0.85)); a wire drawn out of the
+// long side leaves through the end. A run drawn inside the pad is gone, and nothing piles up there with
+// the passes.
+TEST(Topo, RectPadPattern) {
+  PinBoard p;
+  p.pad("A", 10, 10, PadShapeKind::Rect, 5.6, 2);
+  p.pad("A", 30, 16, PadShapeKind::Circle, 1, 1);
+  // Drawn by hand: a dog-leg inside the pad, out of the long side.
+  p.track("A", {{10, 10}, {11, 10.5}, {12, 10.5}, {12, 13}, {30, 16}}, 0.3);
+  p.f5();
+  auto s = topo::relayStats(p.b);
+  EXPECT_EQ(s.exitsSide, 0) << s.text();
+  EXPECT_EQ(s.padsAtCentre, s.pads) << s.text();
+  EXPECT_EQ(s.deadEnds, 0) << s.text();
+  EXPECT_TRUE(p.vertexAt(10, 10));
+  EXPECT_TRUE(p.vertexAt(12.65, 10.85)) << "the inner point: half a width short of the end, in the corner the wire goes to";
+  EXPECT_FALSE(p.vertexAt(11, 10.5)) << "the run drawn inside the pad is gone";
+  EXPECT_FALSE(p.vertexAt(12, 10.5));
+  EXPECT_EQ(s.inRect, 1) << "the lead from the centre and no more: " << s.text();
+  EXPECT_EQ(p.violations(), 0);
+
+  const size_t tracks = p.b.tracks.size();
+  const double length = p.b.tracksLength();
+  for (int pass = 0; pass < 2; ++pass) {
+    p.f5();
+    EXPECT_EQ(p.b.tracks.size(), tracks) << "pass " << pass;
+    EXPECT_NEAR(p.b.tracksLength(), length, 2000) << "pass " << pass;
+    EXPECT_TRUE(p.vertexAt(12.65, 10.85)) << "pass " << pass;
   }
 }

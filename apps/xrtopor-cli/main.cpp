@@ -37,7 +37,7 @@ void usage() {
       "  import-ses <board> <routes.ses> -o <out>\n"
       "  gerber     <board> <outdir>\n"
       "  svg        <board> <out.svg>\n"
-      "  reshape    <board> -o <out> [--nets a,b] [--around MM] [--no-settle]  recompute track shapes (TopoR F5); --nets: those chains only\n"
+      "  reshape    <board> -o <out> [--nets a,b] [--around MM] [--no-settle] [--again N]  recompute track shapes (TopoR F5); --nets: those chains only\n"
       "                     [--model [--no-flips]]  F5 on the topological model\n"
       "  optimize   <board> -o <out> [--iterations N] [--step MM] [--components] [--relax]   move vias/parts (F7)\n"
       "                     [--model [--no-flips] [--verbose]]  F7 on the topological model\n"
@@ -291,8 +291,28 @@ int main(int argc, char** argv) {
     }
     double around = a.opt("--around").empty() ? 0.0 : std::stod(std::string(a.opt("--around"))) * kNmPerMm;
     auto st = topo::reshapeTracks(b, all, {.local = local, .around = around});
-    std::println("reshaped {} wires, {} arcs, {} apexes dropped, {} arc bends, {} sketch crossings", st.wires, st.arcs,
-                 st.droppedApexes, st.arcBends, st.sketchCrossings);
+    // --again N: the whole board N more times in memory (the fixed point, without the file's rounding).
+    if (auto p = a.opt("--again"); !p.empty() && !local) {
+      auto perNet = [&] {
+        std::map<int, double> m;
+        for (auto& t : b.tracks) m[t.net] += t.length();
+        return m;
+      };
+      auto was = perNet();
+      for (int i = std::stoi(std::string(p)); i > 0; --i) {
+        st = topo::reshapeTracks(b, std::vector<char>(b.tracks.size(), 1), {.around = around});
+        auto now = perNet();
+        std::println("  {} tracks, {:.1f} mm", b.tracks.size(), b.tracksLength() / 1e6);
+        if (std::getenv("XR_TOPO_DEBUG")) {  // the nets whose length changed most
+          std::vector<std::pair<double, int>> d;
+          for (auto& [n, l] : now) d.push_back({l - was[n], n});
+          std::ranges::sort(d, std::greater{}, [](auto& x) { return std::abs(x.first); });
+          for (size_t k = 0; k < d.size() && k < 6 && std::abs(d[k].first) > 1000; ++k)
+            std::println("    {} {:+.3f} mm", d[k].second == kNoNet ? "-" : b.nets[d[k].second].name, d[k].first / 1e6);
+        }
+        was = std::move(now);
+      }
+    }
     for (auto [n1, n2] : st.crossingNets)
       std::println("  topological crossing of {} and {} (laid as drawn)", b.nets[n1].name, b.nets[n2].name);
     if (!a.flag("--no-settle")) {

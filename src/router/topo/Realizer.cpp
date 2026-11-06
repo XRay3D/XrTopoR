@@ -1,5 +1,6 @@
 #include "router/topo/RealizerInput.h"
 #include "topo/Narrowing.h"
+#include "topo/PadExit.h"
 #include "router/topo/Realizer.h"
 
 #include "core/Prof.h"
@@ -454,98 +455,216 @@ void prepareStubs(const Board& b, const std::vector<RealWire>& wires, const Real
   SpatialIndex& oidx = in.oidx;
   if (opt.region) oidx.build(b, *opt.region);
   else oidx.build(b);
+  // What the pattern replaced at each end: the drawn points it dropped (from the end on) and whether an exit
+  // point went in their place — kept to give the drawn exit back where the pattern cannot be had.
+  struct Lead {
+    Polyline dropped;
+    bool inserted = false;
+  };
+  std::vector<std::array<Lead, 2>> leads(NW);
   {
     const SpatialIndex& idx = oidx;
     for (int wi = 0; wi < NW; ++wi) {
       const RealWire& w = wires[wi];
       Polyline& sk = sketches[wi];
       sk = w.sketch;
-      if (sk.size() < 2 || w.net == kNoNet || opt.mesh) continue;
+      if (sk.size() < 2 || w.net == kNoNet || opt.mesh || !opt.padPattern) continue;
       double reach = double(w.clearance) + w.width / 2.0 + kMargin;  // the wire's envelope beyond the copper
       for (int end = 0; end < 2; ++end) {
         if (end) std::ranges::reverse(sk);
         Vec2 p = sk.front();
         std::optional<Shape> pad;
+        int padIndex = -1;
         BBox q;
         q.add(p);
         idx.query(q.inflated(1000), LayerMask(1) << w.layer, [&](ItemRef r) {
           if (pad || r.type != ItemType::Pad || b.pads[r.index].net != w.net) return;
           Shape s = b.pads[r.index].shapeGeom();
-          if (s.kind != Shape::Kind::Point && s.contains(p)) pad = s;
+          if (s.kind != Shape::Kind::Point && s.distance(p) <= kPadEdgeTol) {
+            pad = s;
+            padIndex = r.index;
+          }
         });
         bool on = false;
-        if (pad) {
-          size_t k = 1;  // the first sketch point clear of the pad
-          while (k < sk.size() && pad->distance(sk[k]) <= 0) ++k;
-          Vec2 M, n;
-          double len = -1;  // width of the end the wire leaves through, copper included
-          if (k < sk.size()) {
-            // Where the sketch leaves the copper: the end it crosses is the side nearest to that point.
-            Vec2 in = sk[k - 1], out = sk[k];
-            Vec2 X = in;
-            if (pad->distance(in) < -1000)
-              for (int it = 0; it < 30; ++it) {
-                Vec2 mid = (in + out) * 0.5;
-                (pad->distance(mid) <= 0 ? in : out) = mid;
-                X = out;
-              }
-            if (pad->kind == Shape::Kind::Polygon) {
-              const Polyline& pl = pad->poly;
-              size_t m = pl.size();
-              double bd = std::numeric_limits<double>::max();
-              for (size_t i = 0; i < m; ++i) {
-                Vec2 a = pl[i], c = pl[(i + 1) % m];
-                if ((c - a).len2() < 1) continue;
-                double d = distPointSegment(X, a, c);
-                if (d < bd) {
-                  bd = d;
-                  M = (a + c) * 0.5;
-                  n = (c - a).perp().normalized();
-                  if (n.dot(M - pad->center()) < 0) n = -n;
-                  len = (c - a).len() + 2 * pad->r;
-                }
-              }
-            } else if (pad->kind == Shape::Kind::Segment && (pad->b - pad->a).len2() > 1) {
-              // Through a cap of the oval only; a wire that leaves through the long side (a QFP pad
-              // entered from the side, as P-CAD and TopoR lay them) keeps its side exit.
-              Vec2 ab = pad->b - pad->a;
-              double t = (X - pad->a).dot(ab) / ab.len2();
-              if (t <= 0 || t >= 1) {
-                Vec2 e = t <= 0 ? pad->a : pad->b;
-                M = e;
-                n = (e - (pad->a + pad->b - e)).normalized();
-                len = 2 * pad->r;
+        size_t k = 1;  // the first sketch point clear of the pad
+        if (pad)
+          while (k < sk.size() && pad->distance(sk[k]) <= kPadEdgeTol) ++k;
+        if (pad && k < sk.size()) {
+          // TopoR's pattern (topo/PadExit.h): from the pad's centre to the inner point half a width short of
+          // the end, and out through that end — the end nearer to where the wire goes; an elongated pad is
+          // left through an end only, never through its long side.
+          PadFrame f = padFrame(b.pads[padIndex]);
+          // A bridge to the pad beside it in the row: the whole wire lies between the two pads, a straight
+          // run from centre to centre.
+          bool bridge = false;
+          {
+            std::optional<int> other;
+            BBox qb;
+            qb.add(sk.back());
+            idx.query(qb.inflated(1000), LayerMask(1) << w.layer, [&](ItemRef r) {
+              if (other || r.type != ItemType::Pad || r.index == padIndex || b.pads[r.index].net != w.net) return;
+              if (b.pads[r.index].shapeGeom().contains(sk.back())) other = r.index;
+            });
+            if (other) {
+              PadFrame g = padFrame(b.pads[*other]);
+              // Side by side: no further apart than a wire with its clearances would need to pass between,
+              // and across the pads' axes if they are elongated.
+              const Vec2 d = g.c - f.c;
+              auto across = [&](const PadFrame& x) { return !x.elongated() || std::abs(d.dot(x.t)) >= std::abs(d.dot(x.n)); };
+              bridge = d.len() - f.W - g.W <= double(w.width) + 2 * double(w.clearance) && across(f) && across(g);
+              for (size_t i = 0; i < sk.size() && bridge; ++i) bridge = distPointSegment(sk[i], f.c, g.c) <= double(w.width);
+              if (bridge) {
+                if (end == 0) sk = {f.c, g.c};  // once, from the first end
               }
             }
           }
-          if (len >= 0 && len < w.width + 2.0 * double(w.clearance)) {
-            // The exit point lies a clearance and half a width beyond the end: the first tangent then
-            // leaves the pad's neighbours room. (XR_EXITEDGE puts it on the copper boundary, as TopoR's
-            // wires end: measured no better — el4134 loses 3 µm at a USB-C pad, arz F5 unchanged.)
-            static const bool kBeyond = std::getenv("XR_EXITEDGE") == nullptr;
-            Vec2 E = M + n * (pad->r + (kBeyond ? reach : 0.0));
+          if (!bridge && f.kind != PadFrame::Kind::Other) {
+            // Where the drawn wire leaves the copper decides the end and the lateral offset of the exit.
+            Vec2 pin = sk[k - 1], pout = sk[k];
+            for (int it = 0; it < 30; ++it) {
+              Vec2 m = (pin + pout) * 0.5;
+              (pad->distance(m) <= 0 ? pin : pout) = m;
+            }
+            Vec2 l = f.local(pout);
+            bool throughEnd = f.onEnd(pout);
+            // A pad that is not elongated is left through the side the wire is drawn through: the frame turned.
+            if (!throughEnd && !f.elongated()) {
+              f = f.turned();
+              l = f.local(pout);
+              throughEnd = true;
+            }
+            // Where the wire goes: the drawn wire a few of the end's widths on from the copper.
+            Vec2 goes = pout;
+            {
+              const double far = 4 * f.W + reach;
+              double run = 0;
+              for (size_t i = k; i < sk.size() && run < far; ++i) {
+                const double step = (sk[i] - goes).len();
+                goes = run + step > far ? goes + (sk[i] - goes) * ((far - run) / step) : sk[i];
+                run += step;
+              }
+            }
+            // The inner point of an earlier pass stays (RealWire::inner, or the wire's first vertex if that
+            // lies in an end already): the wire that begins there crosses the edge a little aside, and both
+            // the end and the offset would creep with every pass.
+            const double depth = (f.innerPoint(1, double(w.width), 0) - f.c).dot(f.n);
+            std::optional<Vec2> was;
+            if (const auto& hint = w.inner[end]; hint && std::abs(f.local(*hint).x) >= depth - 1000) was = *hint;
+            else if (std::abs(f.local(sk[0]).x) >= depth - 1000 && depth > 1000) was = sk[0];
+            // Else the end the wire is drawn through; drawn through the long side of an elongated pad — the
+            // end nearer to where the wire goes (straight aside: to where it ends).
+            double along = was ? f.local(*was).x : throughEnd ? l.x : f.local(goes).x;
+            if (!was && !throughEnd && std::abs(along) < 1000) along = f.local(sk.back()).x;
+            const int sign = along >= 0 ? 1 : -1;
+            const Vec2 n = f.n * double(sign);
+            // The lateral offset (a rectangle's): the side the wire goes to; the wire is laid taut from the
+            // inner point, and one that started on the other side would wrap its own pad's corner.
+            const double v = was ? f.local(*was).y : f.local(goes).y;
+            const Vec2 I = f.innerPoint(sign, double(w.width), v), X = f.edgePoint(sign, double(w.width), v);
+            // A narrow end (no wider than the wire and its clearances): the wire goes on straight beyond it
+            // by its envelope, so that the first tangent leaves the pads beside it their room; the stub's
+            // points keep the other wires off it. Out of a wider end the wire is laid from the inner point
+            // (its first bend begins there, inside the copper, as TopoR's does): the pad itself keeps the
+            // others off, and the triangulation is the pads' alone.
+            const bool narrow = 2 * f.W < w.width + 2.0 * double(w.clearance);
+            Vec2 E = narrow ? X + n * reach : I;
             size_t drop = 1;
-            while (drop + 1 < sk.size() && pad->distance(sk[drop]) < (kBeyond ? reach : 1.0)) ++drop;
+            while (drop + 1 < sk.size() && pad->distance(sk[drop]) < (narrow ? reach : 1.0)) ++drop;
+            leads[wi][end].dropped.assign(sk.begin(), sk.begin() + drop);
             sk.erase(sk.begin(), sk.begin() + drop);
             // A via right in front of the end (a fanout site): the stub ends at it, no exit point beyond.
-            Vec2 q = sk.front() - M;
-            if (q.dot(n) < (E - M).dot(n) && std::abs(q.cross(n)) <= w.width / 2.0) E = sk.front();
-            else sk.insert(sk.begin(), E);
-            double free = std::max(0.0, (E - M).len() - pad->r);
-            // The chain already ends on the way out (a stub of the previous F5, cut at the copper): the
-            // stub starts there. Back to the middle of the end and out again would add a spur every F5.
-            if ((p - M).dot(n) > 0 && std::abs((p - M).cross(n)) < 1000) M = p;
-            stubs[wi][end] = {p, M, E, true, free};
+            Vec2 d = sk.front() - X;
+            if (narrow && d.dot(n) < (E - X).dot(n) && std::abs(d.cross(n)) <= w.width / 2.0) E = sk.front();
+            else {
+              sk.insert(sk.begin(), E);
+              leads[wi][end].inserted = true;
+            }
+            stubs[wi][end] = {f.c, I, E, true, (E - I).len(), narrow, padIndex};
             on = true;
           }
         }
-        if (std::getenv("XR_DEBUG_STUB") && pad)
-          std::println(stderr, "stub? net {} L{} end {} at ({:.3f},{:.3f}) kind {} -> {}; sketch {}", b.nets[w.net].name, int(w.layer), end,
-                       p.x / 1e6, -p.y / 1e6, int(pad->kind), on, sk.size());
+        if (std::getenv("XR_DEBUG_STUB") && pad) {
+          PadFrame f = padFrame(b.pads[padIndex]);
+          const Stub& d = stubs[wi][end];
+          std::println(stderr, "stub? net {} L{} end {} at ({:.4f},{:.4f}) pad ({:.4f},{:.4f}) {:.3f} x {:.3f} kind {} -> {}: ({:.4f},{:.4f}) ({:.4f},{:.4f}); sketch {}: ({:.4f},{:.4f}) ({:.4f},{:.4f}) .. ({:.4f},{:.4f})",
+                       b.nets[w.net].name, int(w.layer), end, p.x / 1e6, -p.y / 1e6, f.c.x / 1e6, -f.c.y / 1e6, f.L / 1e6, f.W / 1e6,
+                       int(f.kind), on, d.mid.x / 1e6, -d.mid.y / 1e6, d.to.x / 1e6, -d.to.y / 1e6, sk.size(), sk[0].x / 1e6, -sk[0].y / 1e6,
+                       sk[1].x / 1e6, -sk[1].y / 1e6, sk.back().x / 1e6, -sk.back().y / 1e6);
+        }
         if (end) std::ranges::reverse(sk);
       }
     }
   }
+  // The pattern moves the exit (a wire drawn out of the long side leaves through the end now). The new lead
+  // and the drawn one close a loop; a wire of another net that crosses it an odd number of times ends
+  // inside, or the drawn wires cross already: the pattern would put this wire on the other side of it, and
+  // the wire keeps its drawn exit (TopoR's F5 leaves such a dog-leg as drawn too: D1-30 of
+  // Arcs_standard_routing). An even number is a sketch drawn loosely across the lead, and no hindrance —
+  // unless it is the stub itself that the other wire passes through once: that is copper, and it does not
+  // give way.
+  auto crosses = [](Vec2 a, Vec2 c, Vec2 p, Vec2 q) {
+    double o1 = orient(a, c, p), o2 = orient(a, c, q), o3 = orient(p, q, a), o4 = orient(p, q, c);
+    return ((o1 > 0) != (o2 > 0)) && ((o3 > 0) != (o4 > 0)) && o1 != 0 && o2 != 0 && o3 != 0 && o4 != 0;
+  };
+  auto parted = [&](int wi, const Polyline& now, const Polyline& was) {
+    BBox bb;
+    for (Vec2 p : now) bb.add(p);
+    for (Vec2 p : was) bb.add(p);
+    for (int o = 0; o < NW; ++o) {
+      if (o == wi || wires[o].layer != wires[wi].layer || wires[o].net == wires[wi].net) continue;
+      const Polyline& s = sketches[o];
+      int n = 0, stub = 0;  // crossings of the loop; of the stub itself (the lead's first two runs: copper)
+      for (size_t i = 0; i + 1 < s.size(); ++i) {
+        BBox sb;
+        sb.add(s[i]);
+        sb.add(s[i + 1]);
+        if (!sb.intersects(bb)) continue;
+        for (const Polyline* lead : {&now, &was})
+          for (size_t j = 0; j + 1 < lead->size(); ++j)
+            if (crosses((*lead)[j], (*lead)[j + 1], s[i], s[i + 1])) {
+              ++n;
+              if (lead == &now && j < 2) ++stub;
+            }
+      }
+      if (n % 2 || stub % 2) return true;
+    }
+    return false;
+  };
+  // ... or runs through the copper of another net that the drawn one kept off.
+  auto through = [&](int wi, const Polyline& lead) {
+    int n = 0;
+    const RealWire& w = wires[wi];
+    BBox bb;
+    for (Vec2 p : lead) bb.add(p);
+    oidx.query(bb, LayerMask(1) << w.layer, [&](ItemRef r) {
+      if ((r.type != ItemType::Pad && r.type != ItemType::Via) || itemNet(b, r) == w.net) return;
+      for (auto& sh : itemShapes(b, r))
+        for (size_t j = 0; j + 1 < lead.size(); ++j) n += sh.distanceToSegment(lead[j], lead[j + 1]) <= 0;
+    });
+    return n;
+  };
+  for (int wi = 0; wi < NW; ++wi)
+    for (int end = 0; end < 2; ++end) {
+      Stub& st = stubs[wi][end];
+      const Lead& ld = leads[wi][end];
+      if (!st.on || ld.dropped.empty()) continue;
+      Polyline& sk = sketches[wi];
+      if (end) std::ranges::reverse(sk);
+      const size_t next = ld.inserted ? 1 : 0;  // the first drawn point the pattern kept
+      Polyline now{st.from, st.mid, st.to}, was = ld.dropped;
+      if (next < sk.size()) {
+        now.push_back(sk[next]);
+        was.push_back(sk[next]);
+      }
+      if (parted(wi, now, was) || through(wi, now) > through(wi, was)) {
+        if (ld.inserted) sk.erase(sk.begin());
+        sk.insert(sk.begin(), ld.dropped.begin(), ld.dropped.end());
+        // From the centre all the same: the lead of an earlier pass is gone with the runs inside the pad.
+        if ((sk.front() - st.from).len2() > 1) sk.insert(sk.begin(), st.from);
+        st = {};
+      }
+      if (end) std::ranges::reverse(sk);
+    }
 }
 
 RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::vector<RealVia>& vias,
@@ -577,7 +696,7 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
                                                             : collect(b, layer, vias, opt, oidx)).first->second;
     for (int wi : ids)
       for (const Stub& st : stubs[wi])
-        if (st.on) {
+        if (st.on && st.guard) {
           double r = wires[wi].width / 2.0, clr = double(wires[wi].clearance);
           int i = ob.add(st.mid, r, clr, wires[wi].net), j = ob.add(st.to, r, clr, wires[wi].net);
           ob.link(i, j, r);
@@ -943,11 +1062,22 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
     // run out of the pad and into it stays whole.
     std::vector<Circle> cs;
     cs.push_back({sk.front(), 0, -1, 0, double(w.width)});
+    // The pad a wire is led out of by the pattern is its own copper all over: which side of the pad's
+    // corner the sketch went is of no account, and the wire is not bent at that corner (a drawing that
+    // left through the long side would hang on the corner for one pass).
+    auto ownPad = [&](int o) {
+      const OPt& op = ob.pts[o];
+      if (op.net != w.net || w.net == kNoNet) return false;
+      for (const Stub& s : stubs[wi])
+        if (s.on && !s.guard && s.pad >= 0 && b.pads[s.pad].shapeGeom().distance(op.p) <= kPadEdgeTol) return true;
+      return false;
+    };
     for (const FunnelApex& ap : apexes) {
       const EdgeHit& h = hits[wi][ap.portal - 1];
       const Slot& sl = slots[wi][ap.portal - 1];
       bool atU = (ap.side > 0) == h.uLeft;  // the apex endpoint lies on u's side of the slot
       int o = atU ? h.u : h.v;
+      if (ownPad(o)) continue;
       double R = atU ? sl.ru : sl.rv;
       Vec2 c = atU ? sl.cu : sl.cv;
       double width = hw[wi][ap.portal - 1];

@@ -23,6 +23,10 @@ struct RealWire {
   Coord widthMin = 0;  // TopoR's «подрезка»: the width used where the nominal one does not fit (0: none)
   Coord clearance = 0;
   Polyline sketch;  // start vertex, edge crossing points..., end vertex
+  // The inner point of the pad's pattern this wire was led to at its front and back by an earlier pass
+  // (topo/PadExit.h): the pattern is drawn there again. The chains are cut at every vertex inside the
+  // copper, so the sketch itself begins a little further on.
+  std::optional<Vec2> inner[2];
 };
 
 struct RealVia {
@@ -67,6 +71,9 @@ struct RealizeOptions {
     double radius;
   };
   std::vector<Anchor> anchors;
+  // The wires leave their pads by TopoR's pattern (topo/PadExit.h). Off: every wire is laid taut from the
+  // very point its sketch begins at (a drawing to compare two sketches of one wire by).
+  bool padPattern = true;
 };
 
 // TopoR's «подрезка» by the copper as it lies: every track from `firstTrack` on that comes closer to

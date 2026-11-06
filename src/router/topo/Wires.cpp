@@ -2,12 +2,14 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <limits>
 #include <map>
 #include <set>
 #include <tuple>
 
 #include "core/Edit.h"
 #include "core/Prof.h"
+#include "topo/PadExit.h"
 
 namespace xr::topo {
 
@@ -44,6 +46,19 @@ std::vector<RealWire> sketchesOf(const Board& b, const std::vector<WireChain>& c
   // point): the end snaps there, so the wire leaves the copper along the radius and no stub from the
   // centre to the old vertex is left bent against it. A wire lying wholly inside one such pad or via is
   // the copper itself and goes.
+  // A wire lying wholly inside one pad of its net that the realiser draws its pattern in (topo/PadExit.h:
+  // centre, inner point, out) is a lead of an earlier pass or a run drawn by hand: it goes too, the wire
+  // that leaves the pad is led from the centre anew — through the point the lead from the centre ended at.
+  struct Run {
+    int pad;
+    LayerId layer;
+    Vec2 a, b;
+  };
+  std::vector<Run> runs;  // the wires dropped inside the pads
+  auto padOf = [&](const RealWire& w, Vec2 p) -> int {
+    auto r = copper.at(p, w.net, w.layer);
+    return r && r->type == ItemType::Pad ? r->index : -1;
+  };
   std::erase_if(wires, [&](RealWire& w) {
     auto h0 = copper.roundAt(w.sketch.front(), w.net, w.layer), h1 = copper.roundAt(w.sketch.back(), w.net, w.layer);
     if (h0 && h1 && (h0->first - h1->first).len2() < 1 &&
@@ -51,8 +66,44 @@ std::vector<RealWire> sketchesOf(const Board& b, const std::vector<WireChain>& c
       return true;  // inside one pad or via
     if (h0) w.sketch.front() = h0->first;
     if (h1) w.sketch.back() = h1->first;
+    const int p0 = padOf(w, w.sketch.front()), p1 = padOf(w, w.sketch.back());
+    if (p0 >= 0 && p0 == p1) {
+      const Shape sh = b.pads[p0].shapeGeom();
+      if (padFrame(b.pads[p0]).kind != PadFrame::Kind::Other &&
+          std::ranges::all_of(w.sketch, [&](Vec2 q) { return sh.distance(q) <= kPadEdgeTol; })) {
+        runs.push_back({p0, w.layer, w.sketch.front(), w.sketch.back()});
+        return true;
+      }
+    }
     return false;
   });
+  // The inner point a wire was led to: back from its end along the dropped runs to the one that begins at
+  // the pad's centre.
+  for (RealWire& w : wires)
+    for (int end = 0; end < 2; ++end) {
+      Vec2 cur = end ? w.sketch.back() : w.sketch.front();
+      const int pad = padOf(w, cur);
+      if (pad < 0) continue;
+      const Vec2 centre = padFrame(b.pads[pad]).c;
+      std::vector<char> used(runs.size(), 0);
+      for (int step = 0; step < 16 && (cur - centre).len() > edit::kJoinTol; ++step) {
+        int next = -1;
+        bool atA = false;
+        for (size_t i = 0; i < runs.size() && next < 0; ++i) {
+          if (used[i] || runs[i].pad != pad || runs[i].layer != w.layer) continue;
+          if ((runs[i].a - cur).len() <= edit::kJoinTol) { next = int(i); atA = true; }
+          else if ((runs[i].b - cur).len() <= edit::kJoinTol) next = int(i);
+        }
+        if (next < 0) break;
+        used[next] = 1;
+        const Vec2 other = atA ? runs[next].b : runs[next].a;
+        if ((other - centre).len() <= edit::kJoinTol) {
+          w.inner[end] = cur;
+          break;
+        }
+        cur = other;
+      }
+    }
   return wires;
 }
 

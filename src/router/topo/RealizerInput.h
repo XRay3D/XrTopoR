@@ -81,13 +81,17 @@ struct EdgeHit {
 };
 
 
-// A wire leaves a narrow pad straight through its end (TopoR does): the taut path from the pad
-// centre would cut the pad's own corner and brush the neighbouring pad. Such a wire is realised
-// from an exit point in front of the end; a stub joins it to the pad and keeps the other wires out.
+// A wire leaves its pad by TopoR's pattern (topo/PadExit.h): from the centre to the inner point half a
+// width short of the end, and out through the end. Beyond a narrow end it goes on straight by its
+// envelope: the taut path from the centre would cut the pad's own corner and brush the pad beside it.
+// The wire is realised from the exit point; the stub joins it to the pad. Out of a wide end the exit
+// point is the inner point: the stub is the lead from the centre and no more.
 struct Stub {
-  Vec2 from, mid, to;  // pad point -> middle of the end -> exit point
+  Vec2 from, mid, to;  // pad centre -> inner point -> exit point
   bool on = false;
-  double free = 0;     // length of the stub beyond the copper (room for the exit arc)
+  double free = 0;     // length of the stub the exit arc may take (from the inner point on)
+  bool guard = true;   // the stub runs beyond the copper: its points are obstacles to the other wires
+  int pad = -1;        // the board's pad the pattern is drawn in
 };
 
 struct RealizeInput {

@@ -59,17 +59,27 @@ bool PadFrame::onEnd(Vec2 boundaryPoint) const {
 }
 
 Vec2 PadFrame::innerPoint(int sign, double width, double v) const {
+  if (kind == Kind::Oval) return world(sign * (L - W), 0);  // the centre of the rounded end
   const double room = std::max(0.0, W - width / 2);
   return world(sign * std::max(0.0, L - width / 2), std::clamp(v, -room, room));
 }
 
 Vec2 PadFrame::edgePoint(int sign, double width, double v) const {
+  if (kind == Kind::Oval) return world(sign * L, 0);
   const double room = std::max(0.0, W - width / 2);
-  const double vv = std::clamp(v, -room, room);
-  // An oval's end is round: the edge straight beyond the inner point.
-  double u = L;
-  if (kind == Kind::Oval) u = (L - W) + std::sqrt(std::max(0.0, W * W - vv * vv));
-  return world(sign * u, vv);
+  return world(sign * L, std::clamp(v, -room, room));
+}
+
+PadFrame PadFrame::turned() const {
+  PadFrame f = *this;
+  std::swap(f.n, f.t);
+  std::swap(f.L, f.W);
+  if (kind == Kind::Oval) {
+    // Out through the long side of a short oval: within its straight part.
+    f.kind = Kind::Rect;
+    f.W = std::max(0.0, L - W);
+  }
+  return f;
 }
 
 }  // namespace xr::topo
