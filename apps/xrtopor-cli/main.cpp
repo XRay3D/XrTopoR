@@ -40,7 +40,7 @@ void usage() {
       "  svg        <board> <out.svg>\n"
       "  reshape    <board> -o <out> [--nets a,b] [--around MM] [--no-settle] [--again N]  recompute track shapes (TopoR F5); --nets: those chains only\n"
       "                     [--model [--no-flips] [--again N]]  F5 on the topological model\n"
-      "  optimize   <board> -o <out> [--iterations N] [--step MM] [--components] [--relax]   move vias/parts (F7)\n"
+      "  optimize   <board> -o <out> [--iterations N] [--step MM] [--components]   move vias/parts (F7, trial moves on the tracks)\n"
       "                     [--model [--no-flips] [--verbose]]  F7 on the topological model\n"
       "  refine     <board> -o <out> [--same-layer]   shorter wire paths around the copper as it lies (F6)\n"
       "  fill       <board> -o <out> [--no-thermals]  pour copper zones\n"
@@ -233,10 +233,8 @@ int main(int argc, char** argv) {
     if (auto p = a.opt("--iterations"); !p.empty()) oo.iterations = std::stoi(std::string(p));
     if (auto p = a.opt("--step"); !p.empty()) oo.step = std::stod(std::string(p)) * kNmPerMm;
     oo.components = a.flag("--components");
-    oo.relax = a.flag("--relax");
     auto res = topo::optimize(b, oo);
     for (auto& l : res.log) std::println("{}", l);
-    if (res.relaxIterations) std::println("relaxed in {} iteration(s)", res.relaxIterations);
     std::println("moved {} via(s), {} junction(s), {} component(s); conflicts {} -> {}; length {:.1f} -> {:.1f} mm; {:.2f} s",
                  res.viaMoves, res.junctionMoves, res.componentMoves, res.conflictsBefore, res.conflictsAfter,
                  res.lengthBefore / 1e6, res.lengthAfter / 1e6, res.seconds);

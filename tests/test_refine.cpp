@@ -98,26 +98,6 @@ TEST(Realizer, SettledReshapeIsAFixedPoint) {
   }
 }
 
-// The relaxation takes the vias off the pads they are too close to (P-CAD's fanouts on Arcs_master are
-// 0.1-0.2 mm short of the clearance around the QFP), without a connection lost.
-TEST(Optimizer, RelaxationClearsViasOffPads) {
-  auto lb = io::loadBoard(data("topor/Example_04/Arcs_master.pcb"));
-  ASSERT_TRUE(lb.has_value());
-  Board& b = **lb;
-  topo::reshapeTracks(b, std::vector<char>(b.tracks.size(), 1));
-  size_t unrouted = Connectivity::compute(b).ratsnest.size();
-  double before = length(b);
-  topo::OptimizeOptions o;
-  o.relax = true;
-  topo::optimize(b, o);
-  EXPECT_LE(conflicts(b), 4);
-  EXPECT_LT(length(b), before);
-  EXPECT_LE(Connectivity::compute(b).ratsnest.size(), unrouted);
-  DrcOptions d;
-  d.unconnected = false;
-  for (const DrcViolation& v : runDrc(b, d)) EXPECT_LT(v.required - v.actual, 50000.0) << v.message;
-}
-
 // F5 on the model, the realiser fed from the model: a fixed point — a board re-laid from its own result
 // comes out the same (the same violations, the length within half a millimetre). The violations are those
 // of F5 on the tracks (arz_2L 9, arz_4L 10) or a few more (Arcs_master 22 against 18, local stacking
