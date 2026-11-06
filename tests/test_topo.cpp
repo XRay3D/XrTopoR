@@ -1729,3 +1729,34 @@ TEST(Topo, RectPadPattern) {
     EXPECT_TRUE(p.vertexAt(12.65, 10.85)) << "pass " << pass;
   }
 }
+
+// The model's wires leave a rectangular pad where the tracks had them (the exit is pinned), and are drawn
+// with the pattern's vertices on the way: the inner point half a width short of the edge and the point of
+// the edge straight beyond it. The next F5 on the model draws the same.
+TEST(Topo, RectPadPatternOnTheModel) {
+  PinBoard p;
+  p.pad("A", 10, 10, PadShapeKind::Rect, 5.6, 2);
+  p.pad("A", 30, 16, PadShapeKind::Circle, 1, 1);
+  p.track("A", {{10, 10}, {14, 10.5}, {30, 16}}, 0.3);  // out of the end x = 12.8 at y = 10.35
+  auto f5 = [&] {
+    topo::Topology::assignIds(p.b);
+    topo::Topology t;
+    t.build(p.b);
+    ASSERT_TRUE(topo::runF5Model(p.b, t).drawn);
+  };
+  f5();
+  auto s = topo::relayStats(p.b);
+  EXPECT_EQ(s.padsAtCentre, s.pads) << s.text();
+  EXPECT_EQ(s.exitsSide, 0) << s.text();
+  EXPECT_TRUE(p.vertexAt(10, 10));
+  EXPECT_TRUE(p.vertexAt(12.65, 10.35)) << "the inner point: " << s.text();
+  EXPECT_TRUE(p.vertexAt(12.8, 10.35)) << "the point of the edge";
+  EXPECT_EQ(s.inRect, 2) << "centre - inner point - edge: " << s.text();
+  EXPECT_EQ(p.violations(), 0);
+  const size_t tracks = p.b.tracks.size();
+  const double length = p.b.tracksLength();
+  f5();
+  EXPECT_EQ(p.b.tracks.size(), tracks);
+  EXPECT_NEAR(p.b.tracksLength(), length, 2000);
+  EXPECT_TRUE(p.vertexAt(12.65, 10.35));
+}

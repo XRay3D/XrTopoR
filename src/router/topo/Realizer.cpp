@@ -1430,7 +1430,7 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
       }
     st.narrowedWires += narrowedWire;
     // A tangent between two bends is as narrow as the narrower bend (the step sits where there is room).
-    auto emitSeg = [&](Vec2 p, Vec2 q, double width) {
+    auto emitRaw = [&](Vec2 p, Vec2 q, double width) {
       Track t;
       t.a = Point(p);
       t.b = Point(q);
@@ -1440,6 +1440,71 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
       if (t.a == t.b) return;
       b.tracks.push_back(t);
       st.trackWire.push_back(wi);
+    };
+    // A wire laid from the centre of a rectangular pad with no stub (the model's wires: their first crossing
+    // is the pad's own side) gets the pattern's vertices on its way out: the inner point half a width short
+    // of the edge and the point of the edge, straight beyond it (TopoR: centre, (L - w/2, v), (L, v)). The
+    // wire outside the copper is as it was.
+    struct RectLead {
+      Vec2 c;
+      PadFrame f;
+    };
+    std::optional<RectLead> rectLead[2];
+    if (opt.padPattern && sketches[wi].size() >= 2)
+      for (int end = 0; end < 2; ++end) {
+        if (stubs[wi][end].on) continue;
+        const Vec2 c = end ? sketches[wi].back() : sketches[wi].front();
+        BBox q;
+        q.add(c);
+        oidx.query(q.inflated(1000), LayerMask(1) << w.layer, [&](ItemRef r) {
+          if (rectLead[end] || r.type != ItemType::Pad || b.pads[r.index].net != w.net) return;
+          PadFrame f = padFrame(b.pads[r.index]);
+          if (f.kind == PadFrame::Kind::Rect && (f.c - c).len() < 1000) rectLead[end] = RectLead{c, f};
+        });
+      }
+    // The lead's points between the centre and `out`, if the run centre -> out leaves the pad through an
+    // end (any side of a pad that is not elongated).
+    auto leadPoints = [&](const RectLead& l, Vec2 out, double width, Vec2& I, Vec2& X) {
+      // Signed distance to the rectangle's edge (a polygon's own distance is nought all over its inside).
+      auto beyond = [&](Vec2 q) {
+        const Vec2 lq = l.f.local(q);
+        return std::max(std::abs(lq.x) - l.f.L, std::abs(lq.y) - l.f.W);
+      };
+      const double d = beyond(out);
+      if (d < -kPadEdgeTol) return false;  // the run stays inside
+      Vec2 pin = l.c, pout = out;
+      if (d > kPadEdgeTol)  // else it ends on the edge: the exit the model pinned the wire at
+        for (int it = 0; it < 40; ++it) {
+          Vec2 m = (pin + pout) * 0.5;
+          (beyond(m) <= 0 ? pin : pout) = m;
+        }
+      PadFrame f = l.f;
+      if (!f.onEnd(pout)) {
+        if (f.elongated()) return false;  // drawn out of the long side, and kept so
+        f = f.turned();
+      }
+      const Vec2 lx = f.local(pout);
+      // Out at the very corner (a wire that runs on along the pad's side, another pad of its net it only
+      // passes): the inner point would lie on the side, half out of the copper — straight to the corner.
+      if (std::abs(lx.y) > f.W - width / 2.0 + 1000) return false;
+      const int sign = lx.x >= 0 ? 1 : -1;
+      X = pout;
+      I = X - f.n * (sign * width / 2.0);
+      return (I - l.c).len() > 1000;
+    };
+    auto emitSeg = [&](Vec2 p, Vec2 q, double width) {
+      Vec2 I, X;
+      if (rectLead[0] && (p - rectLead[0]->c).len2() < 1 && leadPoints(*rectLead[0], q, width, I, X)) {
+        emitRaw(p, I, width);
+        emitRaw(I, X, width);
+        emitRaw(X, q, width);
+      } else if (rectLead[1] && (q - rectLead[1]->c).len2() < 1 && leadPoints(*rectLead[1], p, width, I, X)) {
+        emitRaw(p, X, width);
+        emitRaw(X, I, width);
+        emitRaw(I, q, width);
+      } else {
+        emitRaw(p, q, width);
+      }
     };
     auto emitArc = [&](Vec2 c, Vec2 from, double sweep, double width) {
       auto g = ArcGeom::fromCenter(c, from, sweep);

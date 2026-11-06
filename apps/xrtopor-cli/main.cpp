@@ -38,7 +38,7 @@ void usage() {
       "  gerber     <board> <outdir>\n"
       "  svg        <board> <out.svg>\n"
       "  reshape    <board> -o <out> [--nets a,b] [--around MM] [--no-settle] [--again N]  recompute track shapes (TopoR F5); --nets: those chains only\n"
-      "                     [--model [--no-flips]]  F5 on the topological model\n"
+      "                     [--model [--no-flips] [--again N]]  F5 on the topological model\n"
       "  optimize   <board> -o <out> [--iterations N] [--step MM] [--components] [--relax]   move vias/parts (F7)\n"
       "                     [--model [--no-flips] [--verbose]]  F7 on the topological model\n"
       "  refine     <board> -o <out> [--same-layer]   shorter wire paths around the copper as it lies (F6)\n"
@@ -271,6 +271,33 @@ int main(int argc, char** argv) {
     std::println("model: {} wires, {} flips; realised {} wires, {} arcs, {} apexes dropped, {} overflowed edges, {} sketch crossings",
                  t.wires.size(), res.flips, res.stats.wires, res.stats.arcs, res.stats.droppedApexes, res.stats.overflowEdges,
                  res.stats.sketchCrossings);
+    // --again N: N more times, the model built from the tracks just drawn each time (the fixed point of
+    // the conversion and the drawing together).
+    if (auto p = a.opt("--again"); !p.empty()) {
+      auto perNet = [&] {
+        std::map<int, double> m;
+        for (auto& tr : b.tracks) m[tr.net] += tr.length();
+        return m;
+      };
+      auto was = perNet();
+      for (int i = std::stoi(std::string(p)); i > 0; --i) {
+        topo::Topology::assignIds(b);
+        t = topo::Topology();
+        t.build(b);
+        res = topo::runF5Model(b, t, fo);
+        if (!res.drawn) return fail("a later pass was stopped by violations");
+        auto now = perNet();
+        std::println("  {} tracks, {:.1f} mm", b.tracks.size(), b.tracksLength() / 1e6);
+        if (std::getenv("XR_TOPO_DEBUG")) {
+          std::vector<std::pair<double, int>> d;
+          for (auto& [n, l] : now) d.push_back({l - was[n], n});
+          std::ranges::sort(d, std::greater{}, [](auto& x) { return std::abs(x.first); });
+          for (size_t k = 0; k < d.size() && k < 6 && std::abs(d[k].first) > 1000; ++k)
+            std::println("    {} {:+.3f} mm", d[k].second == kNoNet ? "-" : b.nets[d[k].second].name, d[k].first / 1e6);
+        }
+        was = std::move(now);
+      }
+    }
     // No legacy settling of the junctions here: F7 on the model moves them, and the settle re-lays the
     // whole board on the tracks for minutes.
     xr::Prof::get().report("reshape --model");
