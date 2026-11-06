@@ -86,6 +86,12 @@ struct RealizeOptions {
   // The wires leave their pads by TopoR's pattern (topo/PadExit.h). Off: every wire is laid taut from the
   // very point its sketch begins at (a drawing to compare two sketches of one wire by).
   bool padPattern = true;
+  // The wires keep the nominal clearance from what they bend round, and from each other in the stacks there,
+  // wherever the edges at that obstacle have room for it (Board::clearanceNom; TopoR: the nominal clearance
+  // everywhere the wires can be moved apart, the minimum in the tight spots). Off: the minimum everywhere.
+  // Experimental (see Realizer.cpp): the stacks of a bus lose their nesting between an obstacle that has the
+  // room and one that has not.
+  bool nominal = false;
 };
 
 // TopoR's «подрезка» by the copper as it lies: every track from `firstTrack` on that comes closer to

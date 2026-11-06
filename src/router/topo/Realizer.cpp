@@ -35,6 +35,8 @@ using CDT = CGAL::Constrained_Delaunay_triangulation_2<K, Tds, CGAL::Exact_predi
 using CPoint = CDT::Point;
 
 constexpr double kMargin = kRealizeMargin;
+// The slack an edge keeps with the nominal stacks from both its ends for its ends to get the nominal clearance.
+constexpr double kNominalRoom = 200000;
 constexpr double kExitRadius = 1.0 * kNmPerMm;  // the largest exit arc out of a pad end
 // Extra clearance to a fixed track laid against (nm). 20 um took the 5–17 um deficits out of a wire
 // re-laid alone next to fixed ones (one net of Arcs: 38 → 33 violations) but squeezed the channels of
@@ -831,6 +833,29 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
       if (Coord c = pairClearance(b.pairRules, x.net, y.net, x.layer); c > 0) return double(c);
     return std::max(double(x.clearance), double(y.clearance));
   };
+  // The nominal clearance (RealizeOptions::nominal; off unless asked for, XR_NOMINAL=1 asks). What a gap gets
+  // above the rule's minimum is the nominal's excess times the share of the obstacle the stack hangs on: 1
+  // where every crossed edge at that obstacle has room for the nominal stacks from both its ends, else 0 — one
+  // radius round the obstacle on every edge of a wire's fan, and every edge still fits (its two ends' shares
+  // are no more than its own). Fixed in the first round, from the packing alone.
+  // Not ready to be the default: the vias of Arcs_standard_routing do come to stand at 0.45 mm from the wires
+  // (77 of 145 after F5, TopoR's F5: 76), but the wires of a bus stacked round one obstacle at the nominal and
+  // round the next at the minimum lose their nesting between the two — F5 on the model: Arcs_standard_routing
+  // 23 violations as without it, but one of them a wire through a pad; arz_2L 15 against 9; arz_4L 42 (21
+  // shorts) against 10.
+  static const bool kAsked = std::getenv("XR_NOMINAL") != nullptr;
+  const bool nominal = (opt.nominal || kAsked) && b.hasNominal();
+  auto extraTo = [&](const OPt& o, const RealWire& w) {
+    if (!nominal || o.net < 0 || w.net < 0) return 0.0;
+    return std::max(0.0, double(b.clearanceNom(o.net, w.net, w.layer)) - clrTo(o, w));
+  };
+  auto extraBetween = [&](const RealWire& x, const RealWire& y) {
+    if (!nominal || x.net < 0 || y.net < 0) return 0.0;
+    return std::max(0.0, double(b.clearanceNom(x.net, y.net, x.layer)) - clrBetween(x, y));
+  };
+  std::map<LayerId, std::vector<double>> nominalShare;
+  if (nominal)
+    for (auto&& [layer, ob] : obstacles) nominalShare[layer].assign(ob.pts.size(), 1.0);
   // Width of every wire at every crossing: nominal, or the minimum where an edge cannot take the
   // nominal widths of the wires crossing it (TopoR's «подрезка»).
   std::vector<std::vector<double>> hw(NW);
@@ -838,6 +863,7 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
   phase.emplace("realize: rounds+tangents");
   for (int round = 0; round < 6; ++round) {
   st.viaPush.clear();
+  for (int pass = nominal && round == 0 ? 0 : 1; pass < 2; ++pass)  // 0: the obstacles' shares of the nominal clearance
   for (auto&& [layer, ids] : byLayer) {
     const LayerObstacles& ob = obstacles.at(layer);
     for (auto& [uv, list] : edgeLists[layer]) {
@@ -856,10 +882,11 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
       double margin = kMargin;
       Vec2 dir = L > 0 ? (V.p - U.p) / L : Vec2{};
       double xu = ob.reach(U, dir), xv = ob.reach(V, -dir);
+      double su = 0, sv = 0;  // the shares of the nominal clearance at the two ends
       auto need = [&](const OPt& o, const RealWire& w, double width) {
         if (own(o, w) || o.net == kTransparent) return 0.0;
         double x = &o == &U ? xu : xv;
-        return x + clrTo(o, w) + margin + width / 2.0;
+        return x + clrTo(o, w) + (&o == &U ? su : sv) * extraTo(o, w) + margin + width / 2.0;
       };
       auto usedR = [&](int k, int end, double packed) { return std::max(packed, bendR[list[k].first][list[k].second][end]); };
       auto actualFromU = [&](int k) { return actual[list[k].first][list[k].second]; };
@@ -875,7 +902,7 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
             int pw = list[k - 1].first;
             // Stack on the inner wire (packed radius, or its actual crossing from the previous round),
             // but never closer to the obstacle than the wire's own rule allows.
-            double spacing = wAt(k - 1) / 2.0 + clrBetween(wires[pw], w) + margin + wAt(k) / 2.0;
+            double spacing = wAt(k - 1) / 2.0 + clrBetween(wires[pw], w) + su * extraBetween(wires[pw], w) + margin + wAt(k) / 2.0;
             double packed = usedR(k - 1, 0, a[k - 1]) + spacing;
             double act = actualFromU(k - 1) >= 0 ? actualFromU(k - 1) + spacing : -1;
             a[k] = std::max({packed, act, need(U, w, wAt(k))});
@@ -894,7 +921,7 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
             bR[k] = bb[k];
           } else {
             int nw = list[k + 1].first;
-            double spacing = wAt(k + 1) / 2.0 + clrBetween(wires[nw], w) + margin + wAt(k) / 2.0;
+            double spacing = wAt(k + 1) / 2.0 + clrBetween(wires[nw], w) + sv * extraBetween(wires[nw], w) + margin + wAt(k) / 2.0;
             // Only outer wires adapt to inner ones (monotone: paths move outward only); the v side
             // stays packed — neither the actual crossings nor the bend radii of the inner wires feed
             // it — so that the two directions cannot push each other back and forth. (Bend radii did
@@ -942,7 +969,30 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
         if (deficit > kNarrowDeficitLimit && chooseNarrowing(nominal, mins, deficit, chosen))
           for (int k = 0; k < n; ++k) hw[list[k].first][list[k].second] = chosen[k];
       }
+      if (pass == 0) {
+        // What this edge can give of the nominal: all of it when the nominal stacks from both ends fit with
+        // room to spare, else none. A part of it — by the slack, so that the edge is filled exactly — left
+        // the bends on the two sides of a gap touching, and the tangent between them was dropped (Arcs: 135
+        // bends dropped against 12, wires through pads); without the room to spare the arcs between two edges
+        // of a fan came too near the outline (52 violations of the board's edge).
+        su = sv = 1;
+        const double s1 = pack();
+        const double share = s1 >= kNominalRoom ? 1.0 : 0.0;
+        std::vector<double>& at = nominalShare[layer];
+        at[size_t(uv.first)] = std::min(at[size_t(uv.first)], share);
+        at[size_t(uv.second)] = std::min(at[size_t(uv.second)], share);
+        continue;
+      }
+      if (nominal) {
+        su = nominalShare[layer][size_t(uv.first)];
+        sv = nominalShare[layer][size_t(uv.second)];
+      }
       double slack = pack();
+      if (slack < 0 && (su > 0 || sv > 0)) {
+        // The bends of the round before took more than the packing the shares were found by: the minimum here.
+        su = sv = 0;
+        slack = pack();
+      }
       if (slack < 0 && slack > -2.0 * kMargin * (n + 1)) {
         margin = 0;
         slack = pack();

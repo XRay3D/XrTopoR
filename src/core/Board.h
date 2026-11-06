@@ -210,6 +210,10 @@ struct Board {
   std::vector<NetClass> netClasses{NetClass{}};
   std::vector<LayerRule> layerRules;
   std::vector<ClearancePair> pairRules;
+  // The nominal clearances (TopoR's «номинальный зазор»: kept wherever there is room, the minimum only in the
+  // tight spots): every clearance rule whose nominal is above its minimum, in the rules' order, the last one
+  // naming both nets wins. Empty: the design has no nominal clearance above the minimum.
+  std::vector<ClearancePair> nominalRules;
   std::vector<Net> nets;
   std::vector<Component> components;
   std::vector<Pad> pads;
@@ -247,6 +251,9 @@ struct Board {
   Coord clearance(int net, LayerId layer) const;
   // Between two nets (-1: all layers): their own clearances, or the pair rule naming them both.
   Coord clearance(int netA, int netB, LayerId layer) const;
+  // The clearance the two nets keep where there is room for it: never less than clearance().
+  Coord clearanceNom(int netA, int netB, LayerId layer) const;
+  bool hasNominal() const { return !nominalRules.empty(); }
   // The most a net keeps from any other on a layer (its own, or a pair rule naming it): for estimates that
   // do not know the other net, as the router's capacity of an edge.
   Coord clearanceUpper(int net, LayerId layer) const;

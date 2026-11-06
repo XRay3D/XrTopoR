@@ -175,6 +175,16 @@ Coord Board::clearance(int netA, int netB, LayerId layer) const {
   return std::max(clearance(netA, layer), clearance(netB, layer));
 }
 
+Coord Board::clearanceNom(int netA, int netB, LayerId layer) const {
+  const Coord least = clearance(netA, netB, layer);
+  auto in = [](const std::vector<int>& nets, int net) { return nets.empty() || (net >= 0 && std::ranges::contains(nets, net)); };
+  for (auto p = nominalRules.rbegin(); p != nominalRules.rend(); ++p) {
+    if (p->layers && (layer < 0 || !((p->layers >> layer) & 1))) continue;
+    if ((in(p->netsA, netA) && in(p->netsB, netB)) || (in(p->netsA, netB) && in(p->netsB, netA))) return std::max(least, p->clearance);
+  }
+  return least;
+}
+
 Coord Board::clearanceUpper(int net, LayerId layer) const {
   Coord c = clearance(net, layer);
   auto in = [](const std::vector<int>& nets, int n) { return nets.empty() || std::ranges::contains(nets, n); };

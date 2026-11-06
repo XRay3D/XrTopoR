@@ -1878,3 +1878,20 @@ TEST(Topo, F7MovesAViaOutOfAWiresWay) {
   EXPECT_LT(p.length("N2"), 12.05);
   EXPECT_EQ(p.violations(), 0);
 }
+
+// TopoR's rules carry two clearances: the minimum, which every spot must keep (Board::clearance — what the DRC
+// asks for), and the nominal, kept wherever there is room (Board::clearanceNom). Arcs: 0.3 and 0.45 for all nets.
+TEST(Topo, NominalClearanceIsRead) {
+  auto lb = io::loadBoard(data("topor/Example_04/Arcs_master_f5.fst"));
+  ASSERT_TRUE(lb.has_value());
+  const Board& b = **lb;
+  ASSERT_GE(b.nets.size(), 2u);
+  EXPECT_TRUE(b.hasNominal());
+  EXPECT_EQ(b.clearance(0, 1, 0), mmToNm(0.3));
+  EXPECT_EQ(b.clearanceNom(0, 1, 0), mmToNm(0.45));
+  EXPECT_EQ(b.clearanceNom(0, kNoNet, 0), mmToNm(0.45));  // a pad without a net: the wire's own rule
+  auto pcb = io::loadBoard(data("topor/Example_04/Arcs_master.pcb"));  // P-CAD has the one clearance
+  ASSERT_TRUE(pcb.has_value());
+  EXPECT_FALSE((**pcb).hasNominal());
+  EXPECT_EQ((**pcb).clearanceNom(0, 1, 0), (**pcb).clearance(0, 1, 0));
+}

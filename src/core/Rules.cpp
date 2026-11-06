@@ -112,7 +112,7 @@ void compileRules(Board& b) {
     }
     apply(nets, [&] { d.trackWidth = width; }, [&](PerNet& p, bool reset) { p.width = reset ? 0 : width; });
   }
-  std::vector<ClearancePair> pairRules;
+  std::vector<ClearancePair> pairRules, nominalRules;
   for (auto& c : r.clearances) {
     // TopoR uses the nominal clearance where there is room and the minimum in tight spots; the
     // single value our rules carry is the one every spot must satisfy: the minimum.
@@ -122,6 +122,10 @@ void compileRules(Board& b) {
     // one with a set against all nets is that set's own clearance.
     auto a = netsOf(b, r, c.a), bn = netsOf(b, r, c.b);
     if ((a && a->empty()) || (bn && bn->empty())) continue;  // a group without nets (empty in a pair rule means all)
+    // The nominal of the rule, for the nets it names (Board::clearanceNom): kept once any rule has one above
+    // its minimum, so that a later rule without one takes it back for its nets.
+    if (const Coord nom = std::max(c.nom, clr); nom > clr || !nominalRules.empty())
+      nominalRules.push_back({a.value_or(std::vector<int>{}), bn.value_or(std::vector<int>{}), layersOf(b, c.layers), nom});
     if (a && bn) {
       pairRules.push_back({*a, *bn, layersOf(b, c.layers), clr});
       continue;
@@ -168,6 +172,7 @@ void compileRules(Board& b) {
   }
   b.layerRules = std::move(layerRules);
   b.pairRules = std::move(pairRules);
+  b.nominalRules = std::move(nominalRules);
 
   for (auto& L : b.layers) L.planeNet = kNoNet;
   for (auto& p : r.planes)
