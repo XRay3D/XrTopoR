@@ -43,9 +43,9 @@ struct OptimizeModelResult {
 };
 
 // Relaxes the unlocked vias and the branch points of unlocked wires and draws the model: the board gets the
-// best drawing seen (the first one is F5's own, so the result is never worse than F5 by the judge: nothing
-// unrouted, shorted or deeper than the limit of a violation added, and length + 100 mm per mm of shortfall
-// + 1 mm per violation not grown).
+// best drawing seen. The first one is F5's own, so the result is never worse than F5 by the judge: less
+// unrouted, then fewer places shorted, deeper than the limit of a violation, real at all (a violation is not
+// bought with length), then length + 100 mm per mm of shortfall + 1 mm per place.
 OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOptions& o = {});
 
 }  // namespace xr::topo

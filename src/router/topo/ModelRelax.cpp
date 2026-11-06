@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <format>
 #include <map>
@@ -26,6 +27,9 @@ namespace {
 constexpr double kDepthCost = 100;             // a mm of shortfall is worth 100 mm of wire
 constexpr double kCountCost = 1 * kNmPerMm;    // ... and a violation, however shallow, 1 mm
 constexpr double kWalkSlack = 2 * kNmPerMm;    // the walk may stand this much above the best drawing seen
+constexpr int kWalkReal = 0;                   // ... but with no more real violations (2 let in: Arcs ended 63 mm longer, the best seven iterations back)
+constexpr double kNoise = 5000;                // nm: a shallower violation is the drawing's noise at the rule's edge
+constexpr int kFreeze = 3;                     // iterations an object stands still after its step was blamed
 constexpr double kBalanced = 0.05;             // a force below this is none: the object is where it should be
 constexpr double kTightStep = 0.5 * kNmPerMm;  // the step limit of an object with an edge short of room (TopoR)
 constexpr double kCrowd = 4;                   // the push of an edge without room against a wire's pull of 1 (TopoR: 64 to 16)
@@ -164,19 +168,45 @@ std::optional<Vec2> blockerAt(const Board& b, const Topology& t, const OwnerGrid
   return std::nullopt;
 }
 
-// The violations on `now` with none of the same nets close by on `was`: what a change added.
-std::vector<DrcViolation> addedViolations(const Board& was, const std::vector<DrcViolation>& wasV, const Board& now, const std::vector<DrcViolation>& nowV) {
-  auto netsOf = [](const Board& x, const DrcViolation& v) { return std::minmax(itemNet(x, v.a), v.hasB ? itemNet(x, v.b) : kNoNet); };
-  std::vector<char> used(wasV.size(), 0);
-  std::vector<DrcViolation> added;
-  for (const DrcViolation& v : nowV) {
-    bool old = false;
-    for (size_t k = 0; k < wasV.size() && !old; ++k)
-      if (!used[k] && netsOf(was, wasV[k]) == netsOf(now, v) && (wasV[k].pos - v.pos).len() < 1 * kNmPerMm) {
-        old = true;
-        used[k] = 1;
+// The DRC names a violation once per pair of pieces (an arc is many tracks): the places are what is judged —
+// the violations of one pair of nets within a millimetre of each other, as deep as the deepest of them.
+struct Place {
+  std::pair<int, int> nets;
+  Vec2 pos;
+  double depth = 0;
+  bool shorted = false;
+};
+std::vector<Place> placesOf(const Board& b, const std::vector<DrcViolation>& vs) {
+  std::vector<Place> out;
+  for (const DrcViolation& v : vs) {
+    const std::pair<int, int> nets = std::minmax(itemNet(b, v.a), v.hasB ? itemNet(b, v.b) : kNoNet);
+    const double depth = std::max(0.0, v.required - v.actual);
+    Place* at = nullptr;
+    for (Place& p : out)
+      if (p.nets == nets && (p.pos - v.pos).len() < 1 * kNmPerMm) {
+        at = &p;
+        break;
       }
-    if (!old) added.push_back(v);
+    if (!at) {
+      out.push_back({nets, v.pos, depth, v.type == DrcViolation::Type::Short});
+      continue;
+    }
+    if (depth > at->depth) {
+      at->depth = depth;
+      at->pos = v.pos;
+    }
+    at->shorted |= v.type == DrcViolation::Type::Short;
+  }
+  return out;
+}
+// The places of `now` that `was` has not, or has shallower by more than the drawing's noise: what a change added.
+std::vector<Place> addedPlaces(const std::vector<Place>& was, const std::vector<Place>& now) {
+  std::vector<Place> added;
+  for (const Place& p : now) {
+    const Place* old = nullptr;
+    for (const Place& q : was)
+      if (q.nets == p.nets && (q.pos - p.pos).len() < 1 * kNmPerMm && (!old || q.depth > old->depth)) old = &q;
+    if (!old || p.depth > old->depth + kNoise || (p.shorted && !old->shorted)) added.push_back(p);
   }
   return added;
 }
@@ -187,6 +217,7 @@ struct Obj {
   double scale = 1;  // of the step limit: x 1.5 while the force keeps its way, x 0.6 when it turns, at most 1
   int ends = 0;      // wires ending at it
   Vec2 start;
+  int frozen = 0;    // iterations it stands still for: its step broke the drawing
 };
 
 // The model drawn on a copy of the board, and what the drawing is worth.
@@ -194,14 +225,17 @@ struct Drawn {
   Topology model;   // the model as drawn: its wires own the tracks of the board it came with
   Topology owning;  // the same model, its wires owning the drawing's tracks
   Board board;
-  std::vector<DrcViolation> violations;
+  std::vector<Place> places;
   std::vector<Vec2> pos;  // the objects' centres
   RealizeStats stats;
   int wires = 0;
-  int conflicts = 0, deep = 0, shorts = 0;
+  int conflicts = 0;      // as the DRC counts them
+  double shortfall = 0;   // ... and sums their depth
+  int deep = 0, shorts = 0;  // places deeper than the limit of a violation; places where copper touches
+  int real = 0;              // places deeper than the noise (those two among them)
   double depth = 0, length = 0;
   size_t unrouted = 0;
-  double score() const { return length + depth * kDepthCost + conflicts * kCountCost; }
+  double score() const { return length + depth * kDepthCost + double(places.size()) * kCountCost; }
 };
 
 }  // namespace
@@ -247,13 +281,15 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
       ProfScope pj("F7 model: judging");
       DrcOptions d;
       d.unconnected = false;
-      c.violations = runDrc(c.board, d);
-      for (const DrcViolation& v : c.violations) {
-        ++c.conflicts;
-        const double depth = std::max(0.0, v.required - v.actual);
-        c.depth += depth;
-        if (v.type == DrcViolation::Type::Short) ++c.shorts;
-        else if (depth > kNarrowDeficitLimit) ++c.deep;
+      const std::vector<DrcViolation> vs = runDrc(c.board, d);
+      c.conflicts = int(vs.size());
+      for (const DrcViolation& v : vs) c.shortfall += std::max(0.0, v.required - v.actual);
+      c.places = placesOf(c.board, vs);
+      for (const Place& p : c.places) {
+        c.depth += p.depth;
+        if (p.shorted) ++c.shorts;
+        else if (p.depth > kNarrowDeficitLimit) ++c.deep;
+        if (p.shorted || p.depth > kNoise) ++c.real;
       }
       c.length = c.board.tracksLength();
       c.unrouted = Connectivity::compute(c.board).ratsnest.size();
@@ -274,22 +310,38 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
     for (Vec2 x : f) s += x.len();
     return s;
   };
-  // Nothing lost, shorted or deeper than the limit of a violation added — no length buys those — and the
-  // weighted sum no more than `slack` above the other's.
-  auto notWorse = [](const Drawn& c, const Drawn& than, double slack) {
-    return c.unrouted <= than.unrouted && c.shorts <= than.shorts && c.deep <= than.deep && c.score() <= than.score() + slack;
+  // The judge. A violation is not to be bought with length (Polubasov, 2010): one drawing is better than
+  // another when it has less unrouted, then fewer places shorted, fewer deeper than the limit of a violation,
+  // fewer real ones at all — and, those equal, a smaller sum of the length, 100 mm per mm of shortfall and 1 mm
+  // per place (what is left to weigh is the noise at the rule's edge). The result is the best drawing; the
+  // walk may stand a few mm above it, but never with more lost, shorted, deep or real.
+  auto keys = [](const Drawn& c) { return std::tuple(c.unrouted, c.shorts, c.deep, c.real); };
+  auto better = [&](const Drawn& c, const Drawn& than) { return keys(c) < keys(than) || (keys(c) == keys(than) && c.score() < than.score()); };
+  auto walkable = [&](const Drawn& c, const Drawn& best) {
+    if (better(c, best)) return true;
+    return c.unrouted <= best.unrouted && c.shorts <= best.shorts && c.deep <= best.deep && c.real <= best.real + kWalkReal &&
+           c.score() <= best.score() + kWalkSlack;
   };
 
   OwnerGrid grid;
-  // What the object is short of around it in the model: the edges of its stars whose wires do not fit, and
-  // the copper it is too close to.
-  auto localShort = [&](int oi) {
-    double s = copperPush(b, t, grid, oi, t.owners[oi].c).shortfall;
+  // What the object would be short of at `at`: the copper too close there, and the wires across its spokes
+  // that the spokes, as long as they would be there, have no room for. Asked before the step is taken: a step
+  // cannot be taken back (the way back may lie across an edge that does not flip, and the object stays short
+  // of where it was — arz_4L: two branch points of +5B, 0.55 and 0.78 mm off after a step of 1 mm and back).
+  auto shortAt = [&](int oi, Vec2 at) {
+    const Vec2 d = at - t.owners[oi].c;
+    double s = copperPush(b, t, grid, oi, at).shortfall;
     for (const LayerMesh& m : t.layers) {
       if (oi >= int(m.ownerVerts.size())) continue;
       for (int v : m.ownerVerts[oi])
-        for (int e : starEdges(m, v))
-          if (m.edges[e].v[0] >= 0 && !m.edges[e].cross.empty()) s += edgeCapacity(t, m, e).deficit;
+        for (int e : starEdges(m, v)) {
+          const Edge& E = m.edges[e];
+          if ((E.v[0] != v && E.v[1] != v) || E.cross.empty()) continue;
+          EdgeCapacity c = edgeCapacity(t, m, e);
+          const Vec2 other = m.verts[E.v[0] == v ? E.v[1] : E.v[0]].p;
+          const double grown = (m.verts[v].p + d - other).len() - c.L;
+          s += std::max(0.0, -(c.slack + grown));  // `need` holds the ends' reach: the slack is of the whole length
+        }
     }
     return s;
   };
@@ -298,10 +350,10 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
   Drawn best = prev;    // the best drawing seen: the result
   r.conflictsBefore = best.conflicts;
   r.lengthBefore = best.length;
-  r.depthBefore = best.depth;
+  r.depthBefore = best.shortfall;
   r.forceBefore = sumOf(forcesOf(best));
-  r.log.push_back(std::format("start: {} conflict(s) ({} deep, {} short), {:.3f} mm short, {:.1f} mm, forces {:.1f}", best.conflicts, best.deep, best.shorts,
-                              best.depth / 1e6, best.length / 1e6, r.forceBefore));
+  r.log.push_back(std::format("start: {} conflict(s) in {} place(s) ({} deep, {} shorted), {:.3f} mm short, {:.1f} mm, forces {:.1f}", best.conflicts,
+                              best.places.size(), best.deep, best.shorts, best.shortfall / 1e6, best.length / 1e6, r.forceBefore));
 
   int clearRounds = o.clearRounds;
   int held = 0;
@@ -373,6 +425,9 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
       }
       force = std::move(shared);
     }
+    double freeForce = 0;  // what is left of the forces with the contacts taken off: what the steps go by
+    for (size_t k = 0; k < objs.size(); ++k)
+      if (clear[k].len2() == 0) freeForce += force[k].len();
     // Steps, the strongest force first, each object on its own: the limit by Rprop, the step along the force
     // and as long as the force is strong, checked against the copper where it lands (shortened, or slid along
     // what blocks it) and against the room in the model around it — the step goes back if that got shorter.
@@ -381,11 +436,17 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
     auto strength = [&](size_t k) { return clear[k].len2() > 0 ? 1e9 : force[k].len(); };
     std::ranges::sort(order, [&](size_t x, size_t y) { return strength(x) > strength(y); });
     int stepped = 0, blocked = 0;
+    int why[3] = {0, 0, 0};  // attempts refused by the copper, by the mesh, by the room in the model
+    std::vector<std::pair<size_t, Vec2>> taken;  // the steps as they went, in order
     for (size_t k : order) {
       Obj& ob = objs[k];
       const bool off = clear[k].len2() > 0;
       Vec2 F = off ? clear[k] : force[k];
       if (clearing && !off) continue;
+      if (ob.frozen > 0 && !off) {
+        --ob.frozen;
+        continue;
+      }
       if (!off && F.len() < kBalanced) {
         ob.last = F;
         continue;
@@ -397,14 +458,14 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
       Vec2 delta = off ? (F.len() > limit ? F.normalized() * limit : F) : F.normalized() * (limit * std::min(1.0, F.len()));
       if (delta.len() < kMinStep) continue;
       const Vec2 at = t.owners[ob.owner].c;
-      const double shortBefore = localShort(ob.owner);
+      const double shortBefore = shortAt(ob.owner, at);
       bool went = false;
       auto attempt = [&](Vec2 d) {
-        if (d.len() < kMinStep || blockerAt(b, t, grid, ob.owner, at + d)) return false;
-        if (moveOwner(t, ob.owner, d) <= 0) return false;
-        if (localShort(ob.owner) <= shortBefore + 1) return true;
-        moveOwner(t, ob.owner, at - t.owners[ob.owner].c);
-        return false;
+        if (d.len() < kMinStep) return false;
+        if (blockerAt(b, t, grid, ob.owner, at + d)) return ++why[0], false;
+        if (shortAt(ob.owner, at + d) > shortBefore + 1) return ++why[2], false;
+        if (moveOwner(t, ob.owner, d) <= 0) return ++why[1], false;
+        return true;
       };
       for (double f : {1.0, 0.5, 0.25, 0.125}) {
         if ((went = attempt(delta * f))) break;
@@ -419,8 +480,10 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
           }
         }
       }
-      if (went) ++stepped;
-      else {
+      if (went) {
+        ++stepped;
+        taken.push_back({k, t.owners[ob.owner].c - at});
+      } else {
         ++blocked;
         ob.scale = std::max(0.1, ob.scale * 0.6);
       }
@@ -435,44 +498,68 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
       schedule();
       continue;
     }
-    // The drawing judges. Worse: the objects that stepped and stand near a violation it added go back (the
-    // nearest if none does), three times wider each time; what is still worse goes back whole.
+    // The drawing judges. Not to be walked on: the objects blamed for what it added go back and stand still a
+    // few iterations; what is still no good after four tries goes back whole.
     Drawn cur = draw();
-    const double kBlame = 0.5 * kNmPerMm;
-    int tries = 0;
-    for (; !notWorse(cur, best, kWalkSlack) && tries < 3; ++tries) {
-      auto added = addedViolations(prev.board, prev.violations, cur.board, cur.violations);
+    if (debug) {
+      std::println(stderr, "relax {}: attempts refused by copper {}, by the mesh {}, by the room {}", r.iterations + 1, why[0], why[1], why[2]);
+      for (const Place& v : addedPlaces(prev.places, cur.places))
+        std::println(stderr, "  added: {} / {} at ({:.3f}, {:.3f}) {:.3f} mm short{}", v.nets.first >= 0 ? b.nets[v.nets.first].name : "-",
+                     v.nets.second >= 0 ? b.nets[v.nets.second].name : "-", v.pos.x / 1e6, -v.pos.y / 1e6, v.depth / 1e6, v.shorted ? ", shorted" : "");
+    }
+    // Who to blame for a place the drawing added: the objects that stepped near it, and those of its two nets
+    // further off (a via's step re-lays its wires far from it) — wider with every try; the nearest if none.
+    constexpr double kBlame[] = {0.5 * kNmPerMm, 1.5 * kNmPerMm, 4 * kNmPerMm, 10 * kNmPerMm};
+    auto blameFor = [&](const std::vector<Place>& added, int wide) {
       std::vector<char> blamed(objs.size(), 0);
-      bool any = false;
-      const double blame = kBlame * (tries + 1);
-      for (const DrcViolation& v : added) {
-        std::array<int, 2> nets{itemNet(cur.board, v.a), v.hasB ? itemNet(cur.board, v.b) : kNoNet};
+      for (const Place& v : added) {
+        std::array<int, 2> nets{v.nets.first, v.nets.second};
         size_t nearest = objs.size();
         double nd = std::numeric_limits<double>::max();
         bool hit = false;
         for (size_t k = 0; k < objs.size(); ++k) {
           const Owner& ow = t.owners[objs[k].owner];
-          if ((ow.c - prev.pos[k]).len() < 1 || blamed[k]) continue;
+          if ((ow.c - prev.pos[k]).len() < 1) continue;
           double dist = (ow.c - v.pos).len();
           if (dist < nd) { nd = dist; nearest = k; }
-          if (dist < blame || (dist < 3 * blame && std::ranges::contains(nets, ow.net))) { blamed[k] = 1; hit = any = true; }
+          if (dist < kBlame[wide] || (dist < 8 * kBlame[wide] && std::ranges::contains(nets, ow.net))) blamed[k] = 1, hit = true;
         }
-        if (!hit && nearest < objs.size()) { blamed[nearest] = 1; any = true; }
+        if (!hit && nearest < objs.size()) blamed[nearest] = 1;
       }
-      if (!any) break;
+      return blamed;
+    };
+    // The blamed steps are taken out by taking the others again from where the walk stood (not by stepping back:
+    // see shortAt).
+    std::vector<char> out(objs.size(), 0);
+    int tries = 0;
+    for (; !walkable(cur, best) && tries < 4; ++tries) {
+      auto blamed = blameFor(addedPlaces(prev.places, cur.places), tries);
+      bool any = false;
       for (size_t k = 0; k < objs.size(); ++k)
-        if (blamed[k]) {
-          moveOwner(t, objs[k].owner, prev.pos[k] - t.owners[objs[k].owner].c);
+        if (blamed[k] && !out[k]) {
+          out[k] = 1;
           objs[k].scale = std::max(0.1, objs[k].scale * 0.6);
+          objs[k].frozen = kFreeze;
+          any = true;
         }
+      if (!any) break;
+      t = prev.model;
+      for (auto [k, d] : taken)
+        if (!out[k]) moveOwner(t, objs[k].owner, d);
       cur = draw();
     }
-    const bool kept = notWorse(cur, best, kWalkSlack);
-    r.log.push_back(std::format("relax {}: tol {:.3f} mm, {} step(s) ({} blocked){}; {} conflict(s) ({} deep, {} short), {:.3f} mm short, {:.1f} mm, forces {:.1f}, {} blame round(s): {}",
-                                r.iterations + 1, tol / kNmPerMm, stepped, blocked, clearing ? ", clearing" : "", cur.conflicts, cur.deep, cur.shorts,
-                                cur.depth / 1e6, cur.length / 1e6, sumOf(forcesOf(cur)), tries, kept ? "kept" : "rolled back"));
+    const bool kept = walkable(cur, best);
+    if (!kept) {
+      // Still worse: all of it goes back, and whoever stepped anywhere near what it added stands still a while.
+      auto blamed = blameFor(addedPlaces(prev.places, cur.places), 3);
+      for (size_t k = 0; k < objs.size(); ++k)
+        if (blamed[k]) objs[k].frozen = 2 * kFreeze;
+    }
+    r.log.push_back(std::format("relax {}: tol {:.3f} mm, {} step(s) ({} blocked){}; {} conflict(s) in {} place(s) ({} deep, {} shorted), {:.3f} mm short, {:.1f} mm, forces {:.1f} ({:.1f} free), {} blame round(s): {}",
+                                r.iterations + 1, tol / kNmPerMm, stepped, blocked, clearing ? ", clearing" : "", cur.conflicts, cur.places.size(), cur.deep,
+                                cur.shorts, cur.shortfall / 1e6, cur.length / 1e6, sumOf(forcesOf(cur)), freeForce, tries, !kept ? "rolled back" : better(cur, best) ? "kept, the best" : "kept"));
     if (kept) {
-      if (notWorse(cur, best, 0)) best = cur;
+      if (better(cur, best)) best = cur;
       prev = std::move(cur);
     } else {
       t = prev.model;
@@ -486,7 +573,7 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
     if ((best.pos[k] - objs[k].start).len() > 1000) ++(t.owners[objs[k].owner].kind == Owner::Kind::Via ? r.viaMoves : r.junctionMoves);
   r.conflictsAfter = best.conflicts;
   r.lengthAfter = best.length;
-  r.depthAfter = best.depth;
+  r.depthAfter = best.shortfall;
   r.forceAfter = sumOf(forcesOf(best));
   r.stats = best.stats;
   r.wires = best.wires;
