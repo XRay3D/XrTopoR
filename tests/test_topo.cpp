@@ -2086,31 +2086,64 @@ TEST(Topo, TwoWiresUnder120DegreesGetABranchPoint) {
   EXPECT_NEAR(q.length("N1"), 42.57, 0.01);
 }
 
-// ... and with a pad of another net between the two wires (fig. 6) the shared way ends before it: the branch
-// point stands in front of the pad, the branches go either side of it, the rule is kept.
-TEST(Topo, BranchPointStopsBeforeWhatStandsBetweenTheBranches) {
-  PinBoard p;
+// ... and with something of another net between the two wires (fig. 6). A pad in the shared way alone: the
+// way goes round it and the branch point stands where it would without the pad (the trunk passes the pad, which
+// is one of the two paths laid the other side of it). A wire across the fork: the shared way ends before it,
+// the branches go either side.
+TEST(Topo, BranchPointAndWhatStandsBetweenTheBranches) {
   const double h = 20 * std::tan(20 * std::numbers::pi / 180);
-  p.via("N1", 5, 10, 1.0);
-  p.pad("N1", 25, 10 - h, PadShapeKind::Circle, 1, 1);
-  p.pad("N1", 25, 10 + h, PadShapeKind::Circle, 1, 1);
-  p.track("N1", {{5, 10}, {25, 10 - h}}, 0.3);
-  p.track("N1", {{5, 10}, {25, 10 + h}}, 0.3);
-  p.pad("N2", 15, 10, PadShapeKind::Circle, 1, 1);  // at x = 15 the two wires pass 3.64 mm above and below
-  topo::Topology::assignIds(p.b);
-  topo::Topology t;
-  t.build(p.b);
-  const double before = p.length("N1");
-  auto res = topo::refineModel(p.b, t);
-  ASSERT_TRUE(res.drawn);
-  EXPECT_EQ(res.branches, 1);
-  const std::vector<Vec2> at = branchPointsOf(p.b, "N1");
-  ASSERT_EQ(at.size(), 1u);
-  EXPECT_LT(at[0].x, 14.5 * kNmPerMm);  // before the pad's copper
-  EXPECT_GT(at[0].x, 10.0 * kNmPerMm);  // ... and as far towards it as the rule lets the branches pass
-  EXPECT_LT(p.length("N1"), before - 2.0);
-  expectSoundModel(t);
-  EXPECT_EQ(p.violations(), 0);
+  auto fork = [&](PinBoard& p) {
+    p.via("N1", 5, 10, 1.0);
+    p.pad("N1", 25, 10 - h, PadShapeKind::Circle, 1, 1);
+    p.pad("N1", 25, 10 + h, PadShapeKind::Circle, 1, 1);
+    p.track("N1", {{5, 10}, {25, 10 - h}}, 0.3);
+    p.track("N1", {{5, 10}, {25, 10 + h}}, 0.3);
+  };
+  const double x = 25 - h / std::tan(60 * std::numbers::pi / 180);  // the branch point with nothing in the way
+  {
+    PinBoard p;
+    fork(p);
+    p.pad("N2", 15, 10, PadShapeKind::Circle, 1, 1);  // at x = 15 the two wires pass 3.64 mm above and below
+    topo::Topology::assignIds(p.b);
+    topo::Topology t;
+    t.build(p.b);
+    auto res = topo::refineModel(p.b, t);
+    ASSERT_TRUE(res.drawn);
+    EXPECT_EQ(res.branches, 1);
+    const std::vector<Vec2> at = branchPointsOf(p.b, "N1");
+    ASSERT_EQ(at.size(), 1u);
+    // Beyond the pad, and a little to the side of where it would stand without it: the trunk comes to it off the
+    // pad's side, 8 degrees off the axis, and the three wires meet at 120 degrees round that.
+    EXPECT_GT(at[0].x, 19.5 * kNmPerMm);
+    EXPECT_LT((at[0] - PinBoard::at(x, 10)).len(), 1.0 * kNmPerMm);
+    const double tree = (x - 5) + 2 * h / std::sin(60 * std::numbers::pi / 180);
+    EXPECT_GT(p.length("N1"), tree);        // the trunk bends round the pad
+    EXPECT_LT(p.length("N1"), tree + 0.3);  // ... by 0.85 mm off the straight line over 10 and 6 mm
+    expectSoundModel(t);
+    EXPECT_EQ(p.violations(), 0);
+  }
+  {
+    PinBoard p;
+    fork(p);
+    p.pad("N2", 15, 10, PadShapeKind::Circle, 1, 1);
+    p.pad("N2", 33, 10, PadShapeKind::Circle, 1, 1);
+    p.track("N2", {{15, 10}, {33, 10}}, 0.3);  // out of the fork between the two pads
+    topo::Topology::assignIds(p.b);
+    topo::Topology t;
+    t.build(p.b);
+    const double before = p.length("N1");
+    auto res = topo::refineModel(p.b, t);
+    ASSERT_TRUE(res.drawn);
+    EXPECT_EQ(res.branches, 1);
+    const std::vector<Vec2> at = branchPointsOf(p.b, "N1");
+    ASSERT_EQ(at.size(), 1u);
+    EXPECT_LT(at[0].x, 14.5 * kNmPerMm);  // before the pad's copper
+    EXPECT_GT(at[0].x, 10.0 * kNmPerMm);  // ... and as far towards it as the rule lets the branches pass
+    EXPECT_LT(p.length("N1"), before - 2.0);
+    EXPECT_NEAR(p.length("N2"), 18.0, 0.05);
+    expectSoundModel(t);
+    EXPECT_EQ(p.violations(), 0);
+  }
 }
 
 // Four pads and two branch points that join them by the wrong pairs (fig. 5): the forces bring the two branch

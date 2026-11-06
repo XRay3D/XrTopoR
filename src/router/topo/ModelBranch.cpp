@@ -98,7 +98,7 @@ BranchResult splitBranches(Board& b, Topology& t, const BranchOptions& o) {
   const double maxClr = double(b.maxClearance());
   // A new segment keeps the rule from the copper of other nets (it lies inside the triangle of the two it
   // replaces, but that triangle may hold a pad).
-  auto clear = [&](Vec2 p, Vec2 q, int net, LayerId layer, double width) {
+  auto clear = [&](Vec2 p, Vec2 q, int net, LayerId layer, double width, ItemRef* hit = nullptr) {
     if ((q - p).len() < 1) return true;
     BBox box;
     box.add(p);
@@ -112,6 +112,7 @@ BranchResult splitBranches(Board& b, Topology& t, const BranchOptions& o) {
       for (const Shape& sh : itemShapes(b, it))
         if (sh.distanceToSegment(p, q) < need) {
           ok = false;
+          if (hit) *hit = it;
           return;
         }
     });
@@ -181,6 +182,7 @@ BranchResult splitBranches(Board& b, Topology& t, const BranchOptions& o) {
     Leg x, y;
     Vec2 p;
     double gain;
+    std::optional<Vec2> round;
   };
   std::vector<Split> splits;
   for (auto& [key, legs] : at) {
@@ -224,6 +226,8 @@ BranchResult splitBranches(Board& b, Topology& t, const BranchOptions& o) {
           return 0;
         };
         Vec2 p = steiner;
+        std::optional<Vec2> round;  // the trunk's vertex beside what it goes round
+        double roundGain = 0;
         int why = wrong(p);
         if (why == 4) {
           // Something of another net stands between the branches (the paper's fig. 6): the trunk ends before
@@ -243,13 +247,42 @@ BranchResult splitBranches(Board& b, Topology& t, const BranchOptions& o) {
             p = n + (steiner - n) * lo;
             why = gainAt(p) >= o.gain ? 0 : 5;
           }
+          // ... or the shared way goes round it, when it is a pad or a via in the trunk's way alone (fig. 6:
+          // one of the two paths that bend round the object is laid the other side of it, which is the trunk
+          // passing it): the branch point stands where it would without the object, the trunk has a vertex
+          // beside the object and the drawing bends it round.
+          ItemRef hit{};
+          if (!clear(n, steiner, net, x.layer, x.width, &hit) && (hit.type == ItemType::Pad || hit.type == ItemType::Via) && clear(steiner, x.to, net, x.layer, x.width) &&
+              clear(steiner, y.to, net, x.layer, x.width) && V.shape.distance(steiner) >= half + kKeepOff && (steiner - x.to).len() >= kNotAtAnEnd &&
+              (steiner - y.to).len() >= kNotAtAnEnd && offOwnCopper(steiner, net, x.layer, half)) {
+            BBox box;
+            for (const Shape& sh : itemShapes(b, hit)) box.add(sh.bbox());
+            const int other = itemNet(b, hit);
+            const double off = std::max(box.width(), box.maxY - box.minY) / 2 + half + double(other >= 0 ? b.clearance(net, other, x.layer) : b.clearance(net, x.layer)) +
+                               0.02 * kNmPerMm;
+            const Vec2 d = (steiner - n).normalized(), side{-d.y, d.x};
+            for (double sign : {1.0, -1.0}) {
+              const Vec2 q = box.center() + side * (sign * off);
+              if ((q - n).dot(d) <= 0 || (steiner - q).dot(d) <= 0) continue;  // beside the trunk, not behind either end
+              if (!clear(n, q, net, x.layer, x.width) || !clear(q, steiner, net, x.layer, x.width)) continue;
+              const double g = all - ((q - n).len() + (steiner - q).len() + (steiner - x.to).len() + (steiner - y.to).len());
+              if (g >= o.gain && (why != 0 || g > gainAt(p)) && (!round || g > roundGain)) {
+                round = q;
+                roundGain = g;
+              }
+            }
+            if (round) {
+              p = steiner;
+              why = 0;
+            }
+          }
         }
         if (why != 0) {
           ++(why == 1 ? dInV : why == 2 ? dEnd : why == 3 ? dOwn : why == 4 ? dClear : dGain);
           continue;
         }
-        const double gain = gainAt(p);
-        here.push_back(Split{owner, x, y, p, gain});
+        const double gain = round ? roundGain : gainAt(p);
+        here.push_back(Split{owner, x, y, p, gain, round});
       }
     // The pair with the most to gain, and the best of the pairs of the other wires there: a vertex of four
     // wires gives two pairs at once (of a branch point nothing is left then but a bend in the way between the
@@ -286,10 +319,15 @@ BranchResult splitBranches(Board& b, Topology& t, const BranchOptions& o) {
       (leg->fromA ? tr.a : tr.b) = Point(s.p);
     }
     Track trunk = eb.tracks[s.x.track];
-    trunk.a = Point(s.x.from);
-    trunk.b = Point(s.p);
     trunk.id = 0;
     trunk.mid.reset();
+    trunk.a = Point(s.x.from);
+    if (s.round) {
+      trunk.b = Point(*s.round);
+      eb.tracks.push_back(trunk);
+      trunk.a = trunk.b;
+    }
+    trunk.b = Point(s.p);
     eb.tracks.push_back(trunk);
   };
   const DrawingScore was = scoreDrawing(b);
