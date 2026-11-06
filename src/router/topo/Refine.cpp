@@ -14,6 +14,8 @@
 #include "core/SpatialIndex.h"
 #include "drc/Drc.h"
 #include "router/topo/Realizer.h"
+#include "topo/Chains.h"
+#include "topo/PadExit.h"
 
 namespace xr::topo {
 
@@ -299,6 +301,42 @@ std::vector<Track> routeConnection(const Board& b, Vec2 from, Vec2 to, LayerId l
   return {trial.tracks.begin() + long(before), trial.tracks.end()};
 }
 
+namespace {
+
+// The lead of the wire that begins at p: the runs of its net inside the pad p lies in, from p back to the
+// pad's centre (the realiser's pattern, topo/PadExit.h, or what was drawn there by hand). The realiser leads
+// a re-laid wire from the centre anew, so the old lead goes with the chain. Empty if p lies in no pad the
+// pattern is drawn in, at its centre already, or no way back is found; `centre` is the pad's.
+std::vector<int> leadOf(const Board& b, const OwnCopper& copper, Vec2 p, int net, LayerId layer, const std::vector<int>& chain, Vec2& centre) {
+  auto in = copper.at(p, net, layer);
+  if (!in || in->type != ItemType::Pad) return {};
+  const Pad& pad = b.pads[size_t(in->index)];
+  const PadFrame f = padFrame(pad);
+  if (f.kind == PadFrame::Kind::Round || f.kind == PadFrame::Kind::Other) return {};
+  centre = f.c;
+  const Shape sh = pad.shapeGeom();
+  std::vector<int> lead;
+  Vec2 cur = p;
+  for (int step = 0; step < 8 && (cur - centre).len() > kJoinTol; ++step) {
+    int next = -1;
+    for (size_t i = 0; i < b.tracks.size() && next < 0; ++i) {
+      const Track& t = b.tracks[i];
+      if (t.net != net || t.layer != layer || t.locked || t.mid) continue;
+      if (std::ranges::contains(chain, int(i)) || std::ranges::contains(lead, int(i))) continue;
+      const bool atA = (t.a.v() - cur).len() <= kJoinTol, atB = (t.b.v() - cur).len() <= kJoinTol;
+      if (atA == atB) continue;
+      if (sh.distance(t.a.v()) > kPadEdgeTol || sh.distance(t.b.v()) > kPadEdgeTol) continue;  // wholly inside only
+      next = int(i);
+      cur = atA ? t.b.v() : t.a.v();
+    }
+    if (next < 0) return {};
+    lead.push_back(next);
+  }
+  return (cur - centre).len() <= kJoinTol ? lead : std::vector<int>{};
+}
+
+}  // namespace
+
 RefineResult refine(Board& b, const RefineOptions& o) {
   auto t0 = std::chrono::steady_clock::now();
   RefineResult r;
@@ -320,10 +358,12 @@ RefineResult refine(Board& b, const RefineOptions& o) {
   for (LayerId l : b.copperLayers())
     if (!b.layers[l].plane && (o.layers.empty() || std::ranges::contains(o.layers, l))) signal.push_back(l);
 
+  const OwnCopper copper(b);  // the pads: they do not change here
   for (size_t ci = 0; ci < chains.size(); ++ci) {
     if (o.cancel && o.cancel->load()) break;
     if (o.progress) o.progress(int(ci), int(chains.size()), "refine");
     Chain& c = chains[ci];
+    if (c.tracks.empty()) continue;  // its tracks went with another chain's lead
     r.lengthBefore += c.length;
     std::vector<char> ignore(b.tracks.size(), 0);
     BBox box;
@@ -354,6 +394,7 @@ RefineResult refine(Board& b, const RefineOptions& o) {
     idx0.build(b);
     int conflicts0 = regionConflicts(b, idx0, judge).count;
     std::optional<Board> best;
+    std::vector<int> bestGone;  // the tracks the best candidate took off the board besides the chain's
     double bestLen = c.length - std::max(0.05 * kNmPerMm, 0.01 * c.length);
     int bestGain = 0;  // conflicts removed by the best candidate over its own region
     LayerId bestLayer = c.layer;
@@ -383,6 +424,21 @@ RefineResult refine(Board& b, const RefineOptions& o) {
         Board trial = b;
         edit::Fragment f;
         f.tracks = c.tracks;
+        // The realiser leads the wire out of its pads from their centres anew (topo/PadExit.h): the leads
+        // the chain had go with it. The grid path as it is begins where the chain began, on its old lead.
+        std::vector<int> leads[2];
+        Vec2 centre[2];
+        double leadLen = 0;
+        if (!raw && l == c.layer)
+          for (int end = 0; end < 2; ++end) {
+            leads[end] = leadOf(b, copper, end ? c.b : c.a, c.net, c.layer, c.tracks, centre[end]);
+            if (end == 1 && !leads[0].empty() && (centre[0] - centre[1]).len() < 1) leads[0].clear(), leads[1].clear();  // one pad
+          }
+        for (int end = 0; end < 2; ++end)
+          for (int ti : leads[end]) {
+            f.tracks.push_back(ti);
+            leadLen += b.tracks[size_t(ti)].length();
+          }
         edit::erase(trial, f);
         size_t before = trial.tracks.size();
         if (raw) {
@@ -407,6 +463,20 @@ RefineResult refine(Board& b, const RefineOptions& o) {
           ro.tracksAsObstacles = true;
           ro.region = region;
           realize(trial, {w}, {}, ro);
+          // A lead that was not drawn anew (the pattern could not be had) comes back.
+          for (int end = 0; end < 2; ++end) {
+            if (leads[end].empty()) continue;
+            bool fromCentre = false;
+            for (size_t i = before; i < trial.tracks.size() && !fromCentre; ++i)
+              fromCentre = (trial.tracks[i].a.v() - centre[end]).len() <= kJoinTol || (trial.tracks[i].b.v() - centre[end]).len() <= kJoinTol;
+            if (fromCentre) continue;
+            for (int ti : leads[end]) {
+              trial.tracks.insert(trial.tracks.begin() + long(before), b.tracks[size_t(ti)]);
+              ++before;
+              leadLen -= b.tracks[size_t(ti)].length();
+            }
+            leads[end].clear();
+          }
         }
         double len = 0;
         BBox judge1 = judge;  // the new path may lie far from the old one: judge both, before and after
@@ -415,6 +485,7 @@ RefineResult refine(Board& b, const RefineOptions& o) {
           for (auto& s : itemShapes(trial, {ItemType::Track, int(i)})) judge1.add(s.bbox().inflated(double(b.maxClearance())));
         }
         if (len <= 0) continue;
+        len -= leadLen;  // the new leads stand for the old ones
         SpatialIndex idx1;
         idx1.build(trial);
         int conflicts1 = regionConflicts(trial, idx1, judge1).count;
@@ -431,6 +502,8 @@ RefineResult refine(Board& b, const RefineOptions& o) {
         bestGain = gain;
         bestLayer = l;
         best = std::move(trial);
+        bestGone = leads[0];
+        bestGone.insert(bestGone.end(), leads[1].begin(), leads[1].end());
         if (conflicts1 == 0 && !raw) break;  // the taut path is clean: no need for the angular one
       }
     }
@@ -438,11 +511,18 @@ RefineResult refine(Board& b, const RefineOptions& o) {
       r.lengthAfter += c.length;
       continue;
     }
-    // The chain's tracks left the list: the indices of the remaining chains move down.
+    // The chain's tracks left the list: the indices of the remaining chains move down. A chain that was
+    // a piece of the lead taken off is no more.
     std::vector<int> gone = c.tracks;
+    gone.insert(gone.end(), bestGone.begin(), bestGone.end());
     std::ranges::sort(gone);
-    for (size_t k = ci + 1; k < chains.size(); ++k)
+    for (size_t k = ci + 1; k < chains.size(); ++k) {
+      if (std::ranges::any_of(chains[k].tracks, [&](int ti) { return std::ranges::binary_search(gone, ti); })) {
+        chains[k].tracks.clear();
+        continue;
+      }
       for (int& ti : chains[k].tracks) ti -= int(std::ranges::lower_bound(gone, ti) - gone.begin());
+    }
     b = std::move(*best);
     ++r.improved;
     if (bestGain > 0) ++r.repaired;

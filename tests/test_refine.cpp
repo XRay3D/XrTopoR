@@ -10,6 +10,7 @@
 #include "router/topo/Optimizer.h"
 #include "router/topo/Wires.h"
 #include "router/topo/Refine.h"
+#include "topo/RelayStats.h"
 
 using namespace xr;
 
@@ -175,4 +176,41 @@ TEST(Optimizer, ModelRelaxDoesNotBreak) {
     EXPECT_LE(Connectivity::compute(b).ratsnest.size(), unrouted) << x.file;
     EXPECT_EQ(t.check(), std::vector<std::string>{}) << x.file;
   }
+}
+
+// F6 keeps what F5 drew at the pads and at the joints (TopoR's F6 touches neither): after F5 on the model
+// and F6 Arcs_standard_routing has its two widths and no neck, every wire at the centre of its pad and no
+// wire's end left inside a pad off the centre (the lead of a re-laid chain goes with it: the realiser
+// draws a new one), one exit through a long side (D1-30, drawn so) and the width joints where they were.
+TEST(Refine, KeepsWidthsAndExits) {
+  auto lb = io::loadBoard(data("topor/Example_04/Arcs_standard_routing.fst"));
+  ASSERT_TRUE(lb.has_value());
+  Board& b = **lb;
+  topo::Topology::assignIds(b);
+  topo::Topology t;
+  t.build(b);
+  ASSERT_TRUE(topo::runF5Model(b, t).drawn);
+  const auto f5 = topo::relayStats(b);
+  const int c5 = conflicts(b);
+  size_t unrouted = Connectivity::compute(b).ratsnest.size();
+  auto r = topo::refine(b);
+  const auto s = topo::relayStats(b);
+  std::println("F5 on the model {} conflicts, F6 {} ({} of {} wires re-laid)\n{}", c5, conflicts(b), r.improved, r.wires, s.text());
+  EXPECT_GT(r.improved, 0);
+  EXPECT_LE(conflicts(b), c5);
+  EXPECT_LE(Connectivity::compute(b).ratsnest.size(), unrouted);
+  EXPECT_EQ(s.widths.size(), 2u) << "0.3 and 0.8 mm and no other";
+  EXPECT_EQ(s.necks, 0);
+  EXPECT_EQ(s.padsAtCentre, s.pads);
+  EXPECT_EQ(s.viasAtCentre, s.vias);
+  EXPECT_EQ(s.deadEnds, 0);
+  EXPECT_EQ(s.exitsSide, f5.exitsSide);
+  EXPECT_EQ(s.exitsBridge, f5.exitsBridge);
+  EXPECT_EQ(s.innerOther, 0);
+  EXPECT_EQ(s.jointVia, f5.jointVia);
+  EXPECT_EQ(s.jointPad, f5.jointPad);
+  EXPECT_EQ(s.jointSeries, f5.jointSeries);
+  EXPECT_EQ(s.jointBranch, f5.jointBranch);
+  EXPECT_EQ(s.jointInCopper, 0);
+  EXPECT_EQ(s.tees, 0);
 }

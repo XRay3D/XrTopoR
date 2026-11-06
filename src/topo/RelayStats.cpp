@@ -70,7 +70,16 @@ RelayStats relayStats(const Board& b) {
       v.centre = (v.p - c).len() <= kAt;
       (pad ? padHas : viaHas)[size_t(v.in->index)] = 1;
       if (v.centre) (pad ? padCentre : viaCentre)[size_t(v.in->index)] = 1;
-      if (v.degree == 1 && !v.centre) ++s.deadEnds;
+      if (v.degree == 1 && !v.centre) {
+        ++s.deadEnds;
+        if (std::getenv("XR_TOPO_DEBUG"))
+          std::println(stderr, "end off the centre: net {} at ({:.3f},{:.3f}) in {} {}, {:.3f} mm from its centre", v.net == kNoNet ? "-" : b.nets[v.net].name,
+                       v.p.x / 1e6, -v.p.y / 1e6, pad ? "pad" : "via",
+                       pad ? std::format("{}-{}", b.pads[size_t(v.in->index)].component >= 0 ? b.components[size_t(b.pads[size_t(v.in->index)].component)].ref : "?",
+                                         b.pads[size_t(v.in->index)].number)
+                           : std::to_string(v.in->index),
+                       (v.p - c).len() / 1e6);
+      }
     }
     // Two widths meeting.
     if (v.widths.size() > 1) {
