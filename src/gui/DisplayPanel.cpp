@@ -128,9 +128,36 @@ class FilterButton : public QToolButton {
       uint32_t f = doc_->selectionFilter();
       doc_->setSelectionFilter(on ? f | bit_ : f & ~bit_);
     });
+    restyle();
   }
 
  protected:
+  // A filter that is on: filled with the panel's violet, white bold text; off: drawn as a disabled button, no fill,
+  // greyed text — the two told apart at a glance in a light or a dark theme.
+  void restyle() {
+    if (restyling_) return;
+    restyling_ = true;
+    // The parent's palette: the button's own is the style sheet's once it has one.
+    QPalette pal = parentWidget() ? parentWidget()->palette() : palette();
+    QColor text = pal.color(QPalette::WindowText), bg = pal.color(QPalette::Window);
+    auto mix = [&](double k) {
+      return QColor::fromRgbF(text.redF() * k + bg.redF() * (1 - k), text.greenF() * k + bg.greenF() * (1 - k),
+                              text.blueF() * k + bg.blueF() * (1 - k));
+    };
+    QColor off = mix(0.45), frame = mix(0.3);
+    setStyleSheet(QString("QToolButton { border: 1px solid %1; border-radius: 3px; padding: 3px 4px; background: transparent;"
+                          " color: %2; }"
+                          "QToolButton:hover { border-color: %3; }"
+                          "QToolButton:checked { background: #7a68a8; border-color: #5b4b8a; color: white; font-weight: bold; }"
+                          "QToolButton:checked:hover { background: #8a78b8; }")
+                      .arg(frame.name(), off.name(), pal.color(QPalette::Highlight).name()));
+    restyling_ = false;
+  }
+  void changeEvent(QEvent* e) override {
+    if (e->type() == QEvent::PaletteChange || e->type() == QEvent::ParentChange) restyle();
+    QToolButton::changeEvent(e);
+  }
+
   void mousePressEvent(QMouseEvent* e) override {
     if (e->button() == Qt::RightButton) {
       doc_->setSelectionFilter(bit_);
@@ -142,6 +169,7 @@ class FilterButton : public QToolButton {
  private:
   uint32_t bit_;
   Document* doc_;
+  bool restyling_ = false;
 };
 
 QWidget* scrollPage(QWidget* content) {

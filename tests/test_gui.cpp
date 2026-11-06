@@ -1715,3 +1715,40 @@ TEST(Gui, SpinBoxSteps) {
   ASSERT_FALSE(spins.empty());
   for (auto* sp : spins) EXPECT_DOUBLE_EQ(sp->singleStep(), 0.01);
 }
+
+// «Фильтр выделения»: a filter that is on looks unlike one that is off (filled and bold against greyed), in a
+// dark theme as in a light one.
+TEST(Gui, SelectionFilterLooks) {
+  Fixture f("tt.kicad_pcb");
+  f.doc.setSelectionFilter(SelComponents | SelWires | SelVias | SelBoard);
+  for (bool dark : {true, false}) {
+    DisplayPanel panel(&f.doc);
+    if (dark) {
+      QPalette pal;
+      pal.setColor(QPalette::Window, QColor(0x2b, 0x2b, 0x2b));
+      pal.setColor(QPalette::Button, QColor(0x3a, 0x3a, 0x3a));
+      pal.setColor(QPalette::ButtonText, QColor(0xe0, 0xe0, 0xe0));
+      pal.setColor(QPalette::WindowText, QColor(0xe0, 0xe0, 0xe0));
+      pal.setColor(QPalette::Disabled, QPalette::ButtonText, QColor(0x80, 0x80, 0x80));
+      pal.setColor(QPalette::Mid, QColor(0x55, 0x55, 0x55));
+      panel.setPalette(pal);
+    }
+    panel.resize(320, 600);
+    panel.show();
+    QTest::qWait(10);
+    QToolButton *on = nullptr, *off = nullptr;
+    for (auto* b : panel.findChildren<QToolButton*>()) {
+      if (b->text() == "Компоненты") on = b;
+      if (b->text() == "Контакты") off = b;
+    }
+    ASSERT_TRUE(on && off);
+    EXPECT_TRUE(on->isChecked());
+    EXPECT_FALSE(off->isChecked());
+    // The middle of each: the fill differs plainly.
+    QImage a = on->grab().toImage(), b = off->grab().toImage();
+    QColor ca = a.pixelColor(4, a.height() / 2), cb = b.pixelColor(4, b.height() / 2);
+    EXPECT_GT(std::abs(ca.lightness() - cb.lightness()) + std::abs(ca.hue() - cb.hue()), 40) << dark;
+    if (const char* dir = std::getenv("XR_SHOT_DIR"))
+      panel.grab().save(QString(dir) + (dark ? "/filter-dark.png" : "/filter-light.png"));
+  }
+}
