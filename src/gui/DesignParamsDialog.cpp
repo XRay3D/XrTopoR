@@ -240,6 +240,39 @@ QWidget* DesignParamsDialog::lengthCell(Coord value, std::function<void(Coord)> 
   return s;
 }
 
+void DesignParamsDialog::orderedCells(QTableWidget* t, int row, int lowColumn, int highColumn, Coord low, Coord high,
+                                      std::function<void(Coord low, Coord high)> set) {
+  Unit u = doc_->unit();
+  auto cell = [&](Coord value) {
+    auto* s = new QDoubleSpinBox;
+    s->setFrame(false);
+    s->setDecimals(u == Unit::Mil ? 3 : 4);
+    s->setRange(0, 1e6);
+    s->setValue(toUnit(double(value), u));
+    // The value counts when it is entered, not at every digit: «0» on the way to «0.15» would pull the other one down.
+    s->setKeyboardTracking(false);
+    // «Применить» wakes up at the first digit, though: a click on it then ends the entry.
+    connect(s, &QDoubleSpinBox::textChanged, this, [this] { changed(); });
+    return s;
+  };
+  QDoubleSpinBox* lo = cell(low);
+  QDoubleSpinBox* hi = cell(high);
+  auto bind = [this, lo, hi, set, u](QDoubleSpinBox* edited, QDoubleSpinBox* other, bool editedIsLow) {
+    connect(edited, &QDoubleSpinBox::valueChanged, this, [this, lo, hi, other, editedIsLow, set, u](double v) {
+      if (editedIsLow ? v > other->value() : v < other->value()) {
+        QSignalBlocker block(other);
+        other->setValue(v);
+      }
+      set(Coord(std::llround(fromUnit(lo->value(), u))), Coord(std::llround(fromUnit(hi->value(), u))));
+      changed();
+    });
+  };
+  bind(lo, hi, true);
+  bind(hi, lo, false);
+  t->setCellWidget(row, lowColumn, lo);
+  t->setCellWidget(row, highColumn, hi);
+}
+
 QWidget* DesignParamsDialog::checkCell(bool value, std::function<void(bool)> set) {
   auto* w = new QWidget;
   auto* h = new QHBoxLayout(w);
@@ -422,15 +455,14 @@ QWidget* DesignParamsDialog::viaTypesPage() {
         });
         t->setCellWidget(r, 1, name);
         t->setItem(r, 2, new QTableWidgetItem(QString::fromUtf8("✓")));
-        auto resize = [this, r](auto field) {
-          return [this, r, field](Coord v) {
-            ViaType before = rules_.viaTypes[size_t(r)];
-            rules_.viaTypes[size_t(r)].*field = v;
-            viaEdits_.push_back({before, rules_.viaTypes[size_t(r)]});
-          };
-        };
-        t->setCellWidget(r, 3, lengthCell(rules_.viaTypes[size_t(r)].diameter, resize(&ViaType::diameter)));
-        t->setCellWidget(r, 4, lengthCell(rules_.viaTypes[size_t(r)].drill, resize(&ViaType::drill)));
+        // The hole never exceeds the pad: one of them edited past the other takes it along, as one resize.
+        orderedCells(t, r, 4, 3, rules_.viaTypes[size_t(r)].drill, rules_.viaTypes[size_t(r)].diameter,
+                     [this, r](Coord drill, Coord diameter) {
+                       ViaType before = rules_.viaTypes[size_t(r)];
+                       rules_.viaTypes[size_t(r)].drill = drill;
+                       rules_.viaTypes[size_t(r)].diameter = diameter;
+                       viaEdits_.push_back({before, rules_.viaTypes[size_t(r)]});
+                     });
       },
       [this] {
         ViaType t = rules_.viaTypes.empty() ? ViaType{"", mmToNm(0.6), mmToNm(0.3)} : rules_.viaTypes.back();
@@ -582,8 +614,10 @@ QWidget* DesignParamsDialog::widthsPage() {
         t->setCellWidget(r, 1, checkCell(w.enabled, [this, r](bool on) { rules_.widths[size_t(r)].enabled = on; }));
         t->setCellWidget(r, 2, layerCell(w.layers, [this, r](auto v) { rules_.widths[size_t(r)].layers = v; }));
         t->setCellWidget(r, 3, netsCell(w.nets, [this, r](RuleNets v) { rules_.widths[size_t(r)].nets = v; }));
-        t->setCellWidget(r, 4, lengthCell(w.min, [this, r](Coord v) { rules_.widths[size_t(r)].min = v; }));
-        t->setCellWidget(r, 5, lengthCell(w.nom, [this, r](Coord v) { rules_.widths[size_t(r)].nom = v; }));
+        orderedCells(t, r, 4, 5, w.min, w.nom, [this, r](Coord min, Coord nom) {
+          rules_.widths[size_t(r)].min = min;
+          rules_.widths[size_t(r)].nom = nom;
+        });
       },
       [this] {
         WidthRule w = rules_.widths.empty() ? WidthRule{true, {}, {}, mmToNm(0.25), mmToNm(0.25)} : rules_.widths.back();
@@ -604,8 +638,10 @@ QWidget* DesignParamsDialog::clearancesPage() {
         t->setCellWidget(r, 2, layerCell(c.layers, [this, r](auto v) { rules_.clearances[size_t(r)].layers = v; }));
         t->setCellWidget(r, 3, netsCell(c.a, [this, r](RuleNets v) { rules_.clearances[size_t(r)].a = v; }));
         t->setCellWidget(r, 4, netsCell(c.b, [this, r](RuleNets v) { rules_.clearances[size_t(r)].b = v; }));
-        t->setCellWidget(r, 5, lengthCell(c.min, [this, r](Coord v) { rules_.clearances[size_t(r)].min = v; }));
-        t->setCellWidget(r, 6, lengthCell(c.nom, [this, r](Coord v) { rules_.clearances[size_t(r)].nom = v; }));
+        orderedCells(t, r, 5, 6, c.min, c.nom, [this, r](Coord min, Coord nom) {
+          rules_.clearances[size_t(r)].min = min;
+          rules_.clearances[size_t(r)].nom = nom;
+        });
       },
       [this] {
         ClearanceRule c = rules_.clearances.empty() ? ClearanceRule{true, {}, {}, {}, mmToNm(0.2), mmToNm(0.25)}

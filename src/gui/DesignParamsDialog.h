@@ -49,6 +49,10 @@ class DesignParamsDialog : public QDialog {
                      std::function<void(int)> remove, std::function<void(int, int)> swap);
   // Cells bound to rule values.
   QWidget* lengthCell(Coord value, std::function<void(Coord)> set);
+  // Two length cells of one row that stay ordered, low ≤ high («Мин.» ≤ «Ном.», hole ≤ pad): raising the low
+  // one over the high one takes the high one along, lowering the high one under the low one takes that along.
+  void orderedCells(QTableWidget* t, int row, int lowColumn, int highColumn, Coord low, Coord high,
+                    std::function<void(Coord low, Coord high)> set);
   QWidget* netsCell(const RuleNets& value, std::function<void(RuleNets)> set);
   QWidget* layerCell(const std::vector<std::string>& value, std::function<void(std::vector<std::string>)> set);
   QWidget* checkCell(bool value, std::function<void(bool)> set);

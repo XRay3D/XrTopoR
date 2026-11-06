@@ -71,6 +71,14 @@ QWidget* PropertiesPanel::message(const QString& text) {
   return w;
 }
 
+// Puts a value (none: the objects differ) into a length box without it counting as an edit.
+static void showLength(QDoubleSpinBox* s, std::optional<double> nm, Unit u) {
+  QSignalBlocker block(s);
+  s->setSpecialValueText(nm ? QString() : QString(" "));
+  s->setValue(nm ? toUnit(*nm, u) : s->minimum());
+  s->setProperty("shown", s->value());
+}
+
 QWidget* PropertiesPanel::length(std::optional<double> nm, std::function<void(double)> set, double min) {
   Unit u = doc_->unit();
   auto* s = new QDoubleSpinBox;
@@ -79,11 +87,12 @@ QWidget* PropertiesPanel::length(std::optional<double> nm, std::function<void(do
   if (min < 0) s->setRange(-1e6, 1e6);
   s->setSuffix(" " + unitName(u));
   s->setKeyboardTracking(false);
-  if (nm) s->setValue(toUnit(*nm, u));
-  else s->setSpecialValueText(" "), s->setValue(s->minimum());
-  double start = s->value();
-  connect(s, &QDoubleSpinBox::editingFinished, this, [s, set, u, start] {
-    if (s->value() != start) set(fromUnit(s->value(), u));
+  showLength(s, nm, u);
+  // An edit is a value other than the one shown last (not the first one: a value put back is an edit too).
+  connect(s, &QDoubleSpinBox::editingFinished, this, [s, set, u] {
+    if (s->value() == s->property("shown").toDouble()) return;
+    s->setProperty("shown", s->value());
+    set(fromUnit(s->value(), u));
   });
   return s;
 }
@@ -429,20 +438,27 @@ QWidget* PropertiesPanel::viaPage(const std::vector<int>& vias) {
       if ((v.layers >> l) & 1) span << QString::fromStdString(b.layers[l].name);
     f->addRow(tr("Диапазон слоев:"), new QLabel(span.isEmpty() ? QString() : span.front() + " – " + span.back()));
   }
-  f->addRow(tr("Площадка:"), length(common<double>(vias, [&](int v) { return double(b.vias[v].diameter); }),
-                                    [this, vias](double d) {
-                                      edit(tr("Изменить переход"), [&](Board& bd) {
-                                        for (int v : vias) bd.vias[v].diameter = Coord(std::llround(d));
-                                      });
-                                    },
-                                    1000));
-  f->addRow(tr("Отверстие:"), length(common<double>(vias, [&](int v) { return double(b.vias[v].drill); }),
-                                     [this, vias](double d) {
-                                       edit(tr("Изменить переход"), [&](Board& bd) {
-                                         for (int v : vias) bd.vias[v].drill = Coord(std::llround(d));
-                                       });
-                                     },
-                                     1000));
+  // The hole never exceeds the pad: one of them edited past the other takes it along, and its box shows it.
+  auto size = [vias](const Board& bd, Coord Via::* m) {
+    return common<double>(vias, [&](int v) { return double(bd.vias[v].*m); });
+  };
+  auto boxes = std::make_shared<std::pair<QDoubleSpinBox*, QDoubleSpinBox*>>();  // pad, hole
+  auto resize = [this, vias, boxes, size, u](bool pad) {
+    return [this, vias, boxes, size, u, pad](double d) {
+      edit(tr("Изменить переход"), [&](Board& bd) {
+        for (int v : vias) {
+          Via& via = bd.vias[v];
+          (pad ? via.diameter : via.drill) = Coord(std::llround(d));
+          if (via.drill > via.diameter) (pad ? via.drill : via.diameter) = Coord(std::llround(d));
+        }
+      });
+      showLength(pad ? boxes->second : boxes->first, size(*doc_->board(), pad ? &Via::drill : &Via::diameter), u);
+    };
+  };
+  boxes->first = static_cast<QDoubleSpinBox*>(length(size(b, &Via::diameter), resize(true), 1000));
+  boxes->second = static_cast<QDoubleSpinBox*>(length(size(b, &Via::drill), resize(false), 1000));
+  f->addRow(tr("Площадка:"), boxes->first);
+  f->addRow(tr("Отверстие:"), boxes->second);
   auto* fixed = new QCheckBox;
   auto lock = common<bool>(vias, [&](int v) { return b.vias[v].locked; });
   fixed->setTristate(!lock);

@@ -778,12 +778,15 @@ QWidget* DisplayPanel::settingsTab() {
   }
   grid->body()->addWidget(boolRow(tr("Сохранять пропорции"), [this] { return doc_->display().saveProportion; },
                                   [this](bool on) { doc_->display().saveProportion = on; }));
+  // The two step boxes show each other's change: with «Сохранять пропорции» one step edited scales the other.
+  auto readSteps = std::make_shared<std::vector<std::function<void()>>>();
   auto step = [&](const QString& symbol, double DisplayControl::* m) {
     auto* row = new QHBoxLayout;
     row->addWidget(new QLabel(symbol));
     auto* spin = new QDoubleSpinBox;
     spin->setDecimals(4);
     spin->setRange(0.0001, 100000);
+    spin->setKeyboardTracking(false);  // Enter takes the step, as in TopoR, not every digit typed
     auto read = [this, spin, m] {
       Unit u = doc_->unit();
       spin->setSuffix(" " + unitName(u));
@@ -791,7 +794,8 @@ QWidget* DisplayPanel::settingsTab() {
     };
     read();
     refreshers_.push_back(read);
-    connect(spin, &QDoubleSpinBox::valueChanged, this, [this, m](double value) {
+    readSteps->push_back(read);
+    connect(spin, &QDoubleSpinBox::valueChanged, this, [this, m, readSteps](double value) {
       if (updating_) return;
       DisplayControl& d = doc_->display();
       double nm = fromUnit(value, doc_->unit());
@@ -804,6 +808,9 @@ QWidget* DisplayPanel::settingsTab() {
         d.*m = nm;
       }
       edited();
+      updating_ = true;
+      for (auto& r : *readSteps) r();
+      updating_ = false;
     });
     row->addWidget(spin, 1);
     grid->body()->addLayout(row);

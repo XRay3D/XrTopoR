@@ -14,6 +14,7 @@
 #include <QMouseEvent>
 #include <QSettings>
 #include <QSignalSpy>
+#include <QStackedWidget>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QToolBar>
@@ -27,6 +28,7 @@
 #include "gui/Document.h"
 #include "gui/AutorouteWindow.h"
 #include "gui/DesignParamsDialog.h"
+#include "gui/DisplayPanel.h"
 #include "gui/DrcDialog.h"
 #include "gui/MainWindow.h"
 #include "gui/MessagesPanel.h"
@@ -1395,4 +1397,97 @@ TEST(Gui, FlexFixTogglesAndUndoes) {
   view.toggleFlexFix();  // all the selected nets have it: off again
   EXPECT_FALSE(doc.board()->nets[size_t(net)].flexFixed);
   EXPECT_TRUE(doc.board()->nets[size_t(net)].route);
+}
+
+// «Параметры дизайна»: «Мин.» never exceeds «Ном.» and a via type's hole its pad — the one edited past the
+// other takes it along.
+TEST(Gui, DesignParametersStayOrdered) {
+  Fixture f("topor/Example_04/Arcs_standard_routing.fst");
+  f.doc.setUnit(Unit::Mm);
+  DesignParamsDialog dlg(&f.doc);
+  auto* stack = dlg.findChild<QStackedWidget*>();
+  ASSERT_TRUE(stack);
+  auto cells = [&](const char* page, int low, int high) {
+    dlg.showPage(page);
+    auto* t = stack->currentWidget()->findChild<QTableWidget*>();
+    EXPECT_TRUE(t && t->rowCount() > 0) << page;
+    return std::pair{qobject_cast<QDoubleSpinBox*>(t->cellWidget(0, low)), qobject_cast<QDoubleSpinBox*>(t->cellWidget(0, high))};
+  };
+  for (auto [page, low, high] : {std::tuple{"Ширина проводников", 4, 5}, std::tuple{"Зазор между проводниками", 5, 6},
+                                 std::tuple{"Переходные отверстия (ПО)", 4, 3}}) {
+    auto [lo, hi] = cells(page, low, high);
+    ASSERT_TRUE(lo && hi) << page;
+    hi->setValue(0.5);
+    lo->setValue(0.3);
+    EXPECT_NEAR(hi->value(), 0.5, 1e-9) << page;  // in order: the other one stays
+    lo->setValue(0.7);
+    EXPECT_NEAR(hi->value(), 0.7, 1e-9) << page;  // the low one over the high one raises it
+    hi->setValue(0.2);
+    EXPECT_NEAR(lo->value(), 0.2, 1e-9) << page;  // the high one under the low one lowers it
+    hi->setValue(0.6);
+    EXPECT_NEAR(lo->value(), 0.2, 1e-9) << page;
+  }
+  for (auto* b : dlg.findChildren<QPushButton*>())
+    if (b->text() == "Применить") b->click();
+  const DesignRules& r = *f.b().rules;
+  EXPECT_EQ(r.widths[0].min, mmToNm(0.2));
+  EXPECT_EQ(r.widths[0].nom, mmToNm(0.6));
+  EXPECT_EQ(r.clearances[0].min, mmToNm(0.2));
+  EXPECT_EQ(r.clearances[0].nom, mmToNm(0.6));
+  EXPECT_EQ(r.viaTypes[0].drill, mmToNm(0.2));
+  EXPECT_EQ(r.viaTypes[0].diameter, mmToNm(0.6));
+}
+
+// «Свойства» of a via: the hole never exceeds the pad, and the other box shows what followed.
+TEST(Gui, ViaPadAndHoleStayOrdered) {
+  Fixture f("topor/Example_04/Arcs_standard_routing.fst");
+  f.doc.setUnit(Unit::Mm);
+  PropertiesPanel props(&f.doc);
+  f.doc.setSelection({{ItemType::Via, 0}}, {});
+  auto spins = props.findChildren<QDoubleSpinBox*>();
+  ASSERT_EQ(spins.size(), 4);  // x, y, pad, hole
+  QDoubleSpinBox *pad = spins[2], *hole = spins[3];
+  double pad0 = pad->value();
+  auto enter = [](QDoubleSpinBox* s, double v) {
+    s->setValue(v);
+    emit s->editingFinished();
+  };
+  enter(hole, pad0 + 0.4);
+  EXPECT_EQ(f.b().vias[0].drill, mmToNm(pad0 + 0.4));
+  EXPECT_EQ(f.b().vias[0].diameter, mmToNm(pad0 + 0.4));
+  EXPECT_NEAR(pad->value(), pad0 + 0.4, 1e-9);
+  enter(pad, pad0);  // the value the box started with is an edit again
+  EXPECT_EQ(f.b().vias[0].diameter, mmToNm(pad0));
+  EXPECT_EQ(f.b().vias[0].drill, mmToNm(pad0));
+  EXPECT_NEAR(hole->value(), pad0, 1e-9);
+  enter(hole, pad0 / 2);
+  EXPECT_EQ(f.b().vias[0].diameter, mmToNm(pad0));  // in order: the pad stays
+  EXPECT_NEAR(pad->value(), pad0, 1e-9);
+}
+
+// «Сохранять пропорции»: one grid step edited scales the other, and its box shows it.
+TEST(Gui, GridStepsKeepProportion) {
+  Fixture f("tt.kicad_pcb");
+  f.doc.setUnit(Unit::Mm);
+  DisplayControl& d = f.doc.display();
+  d.gridX = mmToNm(1.0);
+  d.gridY = mmToNm(2.0);
+  d.saveProportion = true;
+  DisplayPanel panel(&f.doc);
+  std::vector<QDoubleSpinBox*> steps;
+  for (auto* s : panel.findChildren<QDoubleSpinBox*>())
+    if (s->suffix() == " мм" && s->decimals() == 4) steps.push_back(s);
+  ASSERT_EQ(steps.size(), 2u);
+  EXPECT_NEAR(steps[0]->value(), 1.0, 1e-9);
+  EXPECT_NEAR(steps[1]->value(), 2.0, 1e-9);
+  steps[0]->setValue(2.5);
+  EXPECT_NEAR(d.gridY, mmToNm(5.0), 1);
+  EXPECT_NEAR(steps[1]->value(), 5.0, 1e-9);
+  steps[1]->setValue(1.0);
+  EXPECT_NEAR(d.gridX, mmToNm(0.5), 1);
+  EXPECT_NEAR(steps[0]->value(), 0.5, 1e-9);
+  d.saveProportion = false;
+  steps[0]->setValue(3.0);
+  EXPECT_NEAR(d.gridX, mmToNm(3.0), 1);
+  EXPECT_NEAR(steps[1]->value(), 1.0, 1e-9);
 }
