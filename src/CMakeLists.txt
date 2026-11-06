@@ -64,6 +64,7 @@ add_library(xrrouter STATIC
   router/topo/ModelTools.cpp
   router/topo/ModelRelax.cpp
   router/topo/ModelRefine.cpp
+  router/topo/ModelBranch.cpp
   router/topo/Optimizer.cpp
   router/topo/Freestyle.cpp
   router/topo/Refine.cpp

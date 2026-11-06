@@ -16,6 +16,11 @@ namespace xr::topo {
 struct RefineModelOptions {
   bool flips = true;       // Lawson's loop before the first drawing
   bool junctions = true;   // the branch points go to their balance afterwards (the forces of F7, vias standing)
+  // New branch points where two wires of a net leave a vertex at less than 120 degrees, and the branch points
+  // the forces bring together made one and paired anew (ModelBranch.h; the paper's fig. 4 and 5); the wires at
+  // the branch points are then re-laid once more (fig. 6: a branch round a vertex in its way goes the other
+  // side of it).
+  bool branches = true;
   // A wire is tried when it is this much longer than the straight line between its ends, and its new path
   // taken to the drawing when it is shorter than the old by the larger of the two.
   double detour = 0.3 * kNmPerMm;
@@ -30,6 +35,8 @@ struct RefineModelResult {
   int found = 0;      // ... with a shorter path found
   int relaid = 0;     // ... and kept: the drawing was better with it
   int junctionMoves = 0;
+  int branches = 0;        // branch points made
+  int branchesMerged = 0;  // pairs of branch points made one
   int drawings = 0;
   int conflictsBefore = 0, conflictsAfter = 0;
   double lengthBefore = 0, lengthAfter = 0;  // the drawn tracks, nm

@@ -423,6 +423,7 @@ void drawModel(Board& b, Topology& t, bool direct, RealizeStats& stats, int& nWi
         std::println(stderr, "");
       }
   std::erase_if(b.tracks, [&](const Track& tr) { return tr.id && gone.contains(tr.id); });
+  std::erase_if(t.ownerTracks, [&](const std::pair<int, uint32_t>& ot) { return gone.contains(ot.second); });  // or the model saved names tracks that are not there
   for (auto& z : b.zones)
     for (auto& w : wires)
       if (z.layer == w.layer) { z.filled.clear(); break; }

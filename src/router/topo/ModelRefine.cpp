@@ -1,11 +1,14 @@
 #include "router/topo/ModelRefine.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <format>
 #include <print>
+#include <set>
 
 #include "core/Prof.h"
+#include "router/topo/ModelBranch.h"
 #include "router/topo/ModelRelax.h"
 #include "router/topo/ModelTools.h"
 #include "topo/Relay.h"
@@ -38,12 +41,19 @@ RefineModelResult refineModel(Board& b, Topology& t, const RefineModelOptions& o
   size_t wasCrossings = 0;
   if (debug)
     for (const LayerMesh& m : t.layers) wasCrossings += t.findCrossings(m).size();
+  bool first = true;
+  bool counting = true;  // the wires tried are counted in the first pass
+  std::set<std::pair<int, long>> refused;  // (wire, the length of its new path in um): led so, the drawing was no better
+  // One pass of re-laying over the model as it stands: the board and the model are left at the best drawing.
+  auto relay = [&] {
   Drawn best = draw();
-  r.conflictsBefore = best.score.conflicts;
-  r.lengthBefore = best.score.length;
-  r.log.push_back(std::format("start: {} conflict(s) in {} place(s), {:.3f} mm short, {:.1f} mm", best.score.conflicts, best.score.places,
-                              best.score.shortfall / 1e6, best.score.length / 1e6));
-
+  if (first) {
+    r.conflictsBefore = best.score.conflicts;
+    r.lengthBefore = best.score.length;
+    r.log.push_back(std::format("start: {} conflict(s) in {} place(s), {:.3f} mm short, {:.1f} mm", best.score.conflicts, best.score.places,
+                                best.score.shortfall / 1e6, best.score.length / 1e6));
+    first = false;
+  }
   // The wires that go round something: the longest way round first.
   struct Candidate {
     int wire;
@@ -63,7 +73,7 @@ RefineModelResult refineModel(Board& b, Topology& t, const RefineModelOptions& o
   // take the room the via has to step into.
   const std::vector<char> unsettled = viasTooClose(b, t);
   for (const Candidate& c : order) {
-    ++r.wires;
+    if (counting) ++r.wires;
     const double was = tautLength(t, c.wire);
     std::optional<RelayPath> path;
     {
@@ -83,7 +93,9 @@ RefineModelResult refineModel(Board& b, Topology& t, const RefineModelOptions& o
                      bad.size(), bad.empty() ? "" : bad.front(), crossings, wasCrossings);
     }
     const double now = tautLength(t, c.wire);
-    if (now > was - std::max(o.gain, o.gainPart * was)) {
+    // ... and a path the drawing has refused is not drawn again in a later pass.
+    const std::pair<int, long> tried{c.wire, std::lround(now / 1000)};
+    if (now > was - std::max(o.gain, o.gainPart * was) || refused.contains(tried)) {
       t = std::move(saved);
       continue;
     }
@@ -98,6 +110,7 @@ RefineModelResult refineModel(Board& b, Topology& t, const RefineModelOptions& o
       ++r.relaid;
     } else {
       t = std::move(saved);
+      refused.insert(tried);
     }
   }
   t = std::move(best.owning);
@@ -106,8 +119,23 @@ RefineModelResult refineModel(Board& b, Topology& t, const RefineModelOptions& o
   r.drawn = true;
   r.conflictsAfter = best.score.conflicts;
   r.lengthAfter = best.score.length;
-  if (o.junctions) {
-    // The branch points to their balance: TopoR's F6 moves them (8 of 25 on Arcs_standard_routing) and no via.
+  };
+  // A wire re-laid leaves room where it lay and takes none where it could not pass: the passes go on while one
+  // re-lays something (on Arcs_standard_routing the second finds 3 wires more, 4 mm; the third none).
+  auto relayAll = [&] {
+    const int before = r.relaid;
+    for (int pass = 0; pass < 3; ++pass) {
+      const int was = r.relaid;
+      relay();
+      counting = false;
+      if (r.relaid == was) break;
+    }
+    return r.relaid > before;
+  };
+  relayAll();
+  // The branch points to their balance: TopoR's F6 moves them (8 of 25 on Arcs_standard_routing) and no via.
+  auto relax = [&] {
+    if (!o.junctions) return;
     OptimizeModelOptions mo;
     mo.flips = false;
     mo.vias = false;
@@ -116,15 +144,46 @@ RefineModelResult refineModel(Board& b, Topology& t, const RefineModelOptions& o
     mo.decay = 0.6;
     mo.floor = 0.05 * kNmPerMm;
     OptimizeModelResult jr = optimizeModel(b, t, mo);
-    if (jr.drawn) {
-      r.junctionMoves = jr.junctionMoves;
-      r.drawings += jr.drawings;
-      r.conflictsAfter = jr.conflictsAfter;
-      r.lengthAfter = jr.lengthAfter;
-      r.stats = jr.stats;
-      r.log.push_back(std::format("branch points: {} moved; {} conflict(s), {:.1f} mm", jr.junctionMoves, jr.conflictsAfter, jr.lengthAfter / 1e6));
+    if (!jr.drawn) return;
+    r.junctionMoves = std::max(r.junctionMoves, jr.junctionMoves);
+    r.drawings += jr.drawings;
+    r.conflictsAfter = jr.conflictsAfter;
+    r.lengthAfter = jr.lengthAfter;
+    r.stats = jr.stats;
+    r.log.push_back(std::format("branch points: {} moved; {} conflict(s), {:.1f} mm", jr.junctionMoves, jr.conflictsAfter, jr.lengthAfter / 1e6));
+  };
+  auto take = [&](const BranchResult& br, int& count) {
+    count += br.made;
+    if (br.made > 0) refused.clear();  // the model is built anew: other wires under the numbers
+    r.drawings += br.drawings;
+    for (const std::string& l : br.log) r.log.push_back(l);
+  };
+  BranchOptions bo;
+  bo.flips = o.flips;
+  // A vertex with four wires and more gives a pair a pass.
+  auto split = [&] {
+    if (!o.branches) return;
+    for (int pass = 0; pass < 4; ++pass) {
+      const BranchResult br = splitBranches(b, t, bo);
+      take(br, r.branches);
+      if (br.made == 0) break;
+    }
+  };
+  split();
+  relax();
+  if (o.branches && (r.branches > 0 || o.junctions)) {
+    // The branch points the forces brought together are one, and its wires are paired anew.
+    BranchResult merged = mergeBranchPoints(b, t, bo);
+    take(merged, r.branchesMerged);
+    if (merged.made > 0) {
+      split();
+      relax();
     }
   }
+  // A branch round a vertex in its way goes the other side of it, if that is shorter (fig. 6), and a branch
+  // point that moved has opened ways that were not there (on Arcs_standard_routing 2 wires more after the 8
+  // that F6 moves); the branch points follow.
+  if ((r.branches > 0 || r.junctionMoves > 0) && relayAll()) relax();
   return r;
 }
 

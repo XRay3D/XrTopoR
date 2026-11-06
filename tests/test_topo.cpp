@@ -1994,3 +1994,153 @@ TEST(Topo, FlexFixedNetKeepsItsTopology) {
     EXPECT_NEAR(p.length("N1"), 30.0, 0.05);
   }
 }
+
+namespace {
+
+// The points of a net where three track ends and more meet.
+std::vector<Vec2> branchPointsOf(const Board& b, const std::string& net) {
+  std::map<std::pair<long, long>, std::pair<int, Vec2>> ends;
+  for (const Track& t : b.tracks)
+    if (b.nets[t.net].name == net)
+      for (Vec2 e : {t.a.v(), t.b.v()}) {
+        auto& at = ends[{std::lround(e.x / 1000), std::lround(e.y / 1000)}];
+        ++at.first;
+        at.second = e;
+      }
+  std::vector<Vec2> out;
+  for (auto& [key, at] : ends)
+    if (at.first >= 3) out.push_back(at.second);
+  return out;
+}
+
+// The angles (degrees, ascending) between the tracks that end at a point.
+std::vector<double> anglesAt(const Board& b, Vec2 p) {
+  std::vector<double> dirs;
+  for (const Track& t : b.tracks) {
+    if (t.isArc()) continue;
+    if ((t.a.v() - p).len() < 1000) dirs.push_back(std::atan2(t.b.v().y - p.y, t.b.v().x - p.x));
+    if ((t.b.v() - p).len() < 1000) dirs.push_back(std::atan2(t.a.v().y - p.y, t.a.v().x - p.x));
+  }
+  std::ranges::sort(dirs);
+  std::vector<double> out;
+  for (size_t i = 0; i < dirs.size(); ++i) {
+    double d = dirs[(i + 1) % dirs.size()] - dirs[i];
+    if (d <= 0) d += 2 * std::numbers::pi;
+    out.push_back(d * 180 / std::numbers::pi);
+  }
+  std::ranges::sort(out);
+  return out;
+}
+
+void expectSoundModel(const topo::Topology& t) {
+  EXPECT_EQ(t.check(), std::vector<std::string>{});
+  for (const topo::LayerMesh& m : t.layers) EXPECT_TRUE(t.findCrossings(m).empty());
+  EXPECT_EQ(staleCapacities(t), std::vector<std::string>{});
+}
+
+}  // namespace
+
+// Two wires of a net leaving a vertex at less than 120 degrees share their way: F6 makes a branch point at
+// the point of least length (Bessonov, Luzin, Lyachek, Popov 2014, fig. 4), the three wires meet there at 120
+// degrees. A via at (5, 10) and two pads at (25, 10 -+ 7.28): the wires leave at 40 degrees, 42.57 mm; the tree
+// with the branch point at (20.80, 10) is 32.61 mm.
+TEST(Topo, TwoWiresUnder120DegreesGetABranchPoint) {
+  PinBoard p;
+  const double h = 20 * std::tan(20 * std::numbers::pi / 180);
+  p.via("N1", 5, 10, 1.0);
+  p.pad("N1", 25, 10 - h, PadShapeKind::Circle, 1, 1);
+  p.pad("N1", 25, 10 + h, PadShapeKind::Circle, 1, 1);
+  p.track("N1", {{5, 10}, {25, 10 - h}}, 0.3);
+  p.track("N1", {{5, 10}, {25, 10 + h}}, 0.3);
+  topo::Topology::assignIds(p.b);
+  topo::Topology t;
+  t.build(p.b);
+  EXPECT_NEAR(p.length("N1"), 42.57, 0.01);
+  auto res = topo::refineModel(p.b, t);
+  ASSERT_TRUE(res.drawn);
+  EXPECT_EQ(res.branches, 1);
+  const double x = 25 - h / std::tan(60 * std::numbers::pi / 180);
+  EXPECT_NEAR(p.length("N1"), (x - 5) + 2 * h / std::sin(60 * std::numbers::pi / 180), 0.1);
+  const std::vector<Vec2> at = branchPointsOf(p.b, "N1");
+  ASSERT_EQ(at.size(), 1u);
+  EXPECT_LT((at[0] - PinBoard::at(x, 10)).len(), 0.1 * kNmPerMm);
+  for (double a : anglesAt(p.b, at[0])) EXPECT_NEAR(a, 120.0, 2.0);
+  EXPECT_EQ(p.b.vias[0].pos, Point(PinBoard::at(5, 10)));  // F6 moves no via
+  expectSoundModel(t);
+  EXPECT_EQ(p.violations(), 0);
+  // Switched off, the two wires stay as they were.
+  PinBoard q;
+  q.via("N1", 5, 10, 1.0);
+  q.pad("N1", 25, 10 - h, PadShapeKind::Circle, 1, 1);
+  q.pad("N1", 25, 10 + h, PadShapeKind::Circle, 1, 1);
+  q.track("N1", {{5, 10}, {25, 10 - h}}, 0.3);
+  q.track("N1", {{5, 10}, {25, 10 + h}}, 0.3);
+  topo::Topology::assignIds(q.b);
+  topo::Topology tq;
+  tq.build(q.b);
+  topo::RefineModelOptions off;
+  off.branches = false;
+  auto none = topo::refineModel(q.b, tq, off);
+  ASSERT_TRUE(none.drawn);
+  EXPECT_EQ(none.branches, 0);
+  EXPECT_NEAR(q.length("N1"), 42.57, 0.01);
+}
+
+// ... and with a pad of another net between the two wires (fig. 6) the shared way ends before it: the branch
+// point stands in front of the pad, the branches go either side of it, the rule is kept.
+TEST(Topo, BranchPointStopsBeforeWhatStandsBetweenTheBranches) {
+  PinBoard p;
+  const double h = 20 * std::tan(20 * std::numbers::pi / 180);
+  p.via("N1", 5, 10, 1.0);
+  p.pad("N1", 25, 10 - h, PadShapeKind::Circle, 1, 1);
+  p.pad("N1", 25, 10 + h, PadShapeKind::Circle, 1, 1);
+  p.track("N1", {{5, 10}, {25, 10 - h}}, 0.3);
+  p.track("N1", {{5, 10}, {25, 10 + h}}, 0.3);
+  p.pad("N2", 15, 10, PadShapeKind::Circle, 1, 1);  // at x = 15 the two wires pass 3.64 mm above and below
+  topo::Topology::assignIds(p.b);
+  topo::Topology t;
+  t.build(p.b);
+  const double before = p.length("N1");
+  auto res = topo::refineModel(p.b, t);
+  ASSERT_TRUE(res.drawn);
+  EXPECT_EQ(res.branches, 1);
+  const std::vector<Vec2> at = branchPointsOf(p.b, "N1");
+  ASSERT_EQ(at.size(), 1u);
+  EXPECT_LT(at[0].x, 14.5 * kNmPerMm);  // before the pad's copper
+  EXPECT_GT(at[0].x, 10.0 * kNmPerMm);  // ... and as far towards it as the rule lets the branches pass
+  EXPECT_LT(p.length("N1"), before - 2.0);
+  expectSoundModel(t);
+  EXPECT_EQ(p.violations(), 0);
+}
+
+// Four pads and two branch points that join them by the wrong pairs (fig. 5): the forces bring the two branch
+// points together, F6 makes them one and pairs the four wires anew. Pads at (10, 5), (10, 15), (30, 5), (30, 15);
+// the upper two joined at one branch point and the lower two at the other is 4 x 11.2 mm and more, the left two
+// and the right two is 20 + 10 x sqrt(3) = 37.32 mm.
+TEST(Topo, BranchPointsThatComeTogetherArePairedAnew) {
+  PinBoard p;
+  p.pad("N1", 10, 5, PadShapeKind::Circle, 1, 1);
+  p.pad("N1", 10, 15, PadShapeKind::Circle, 1, 1);
+  p.pad("N1", 30, 5, PadShapeKind::Circle, 1, 1);
+  p.pad("N1", 30, 15, PadShapeKind::Circle, 1, 1);
+  p.track("N1", {{10, 5}, {20, 7}, {30, 5}}, 0.3);
+  p.track("N1", {{10, 15}, {20, 13}, {30, 15}}, 0.3);
+  p.track("N1", {{20, 7}, {20, 13}}, 0.3);
+  topo::Topology::assignIds(p.b);
+  topo::Topology t;
+  t.build(p.b);
+  EXPECT_GT(p.length("N1"), 46.0);
+  auto res = topo::refineModel(p.b, t);
+  ASSERT_TRUE(res.drawn);
+  EXPECT_EQ(res.branchesMerged, 1);
+  EXPECT_EQ(res.branches, 2);
+  EXPECT_NEAR(p.length("N1"), 20 + 10 * std::sqrt(3.0), 0.1);
+  const std::vector<Vec2> at = branchPointsOf(p.b, "N1");
+  ASSERT_EQ(at.size(), 2u);
+  for (Vec2 j : at) {
+    EXPECT_NEAR(j.y / kNmPerMm, 10.0, 0.1);  // on the line between the pairs now
+    for (double a : anglesAt(p.b, j)) EXPECT_NEAR(a, 120.0, 2.0);
+  }
+  expectSoundModel(t);
+  EXPECT_EQ(p.violations(), 0);
+}

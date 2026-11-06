@@ -224,13 +224,15 @@ int main(int argc, char** argv) {
     topo::RefineModelOptions ro;
     ro.flips = !a.flag("--no-flips");
     ro.junctions = !a.flag("--no-junctions");
+    ro.branches = !a.flag("--no-branches");
     auto res = topo::refineModel(b, t, ro);
     if (a.flag("--verbose"))
       for (auto& l : res.log) std::println("{}", l);
     if (!res.drawn) return fail("stopped by the model's violations, nothing drawn");
-    std::println("model: {} wire(s) tried, {} with a shorter path, {} re-laid; {} branch point(s) moved; {} drawings; conflicts {} -> {}, length {:.1f} -> {:.1f} mm",
-                 res.wires, res.found, res.relaid, res.junctionMoves, res.drawings, res.conflictsBefore, res.conflictsAfter, res.lengthBefore / 1e6,
-                 res.lengthAfter / 1e6);
+    std::println("model: {} wire(s) tried, {} with a shorter path, {} re-laid; {} branch point(s) made, {} pair(s) made one, {} moved; {} drawings; "
+                 "conflicts {} -> {}, length {:.1f} -> {:.1f} mm",
+                 res.wires, res.found, res.relaid, res.branches, res.branchesMerged, res.junctionMoves, res.drawings, res.conflictsBefore, res.conflictsAfter,
+                 res.lengthBefore / 1e6, res.lengthAfter / 1e6);
     xr::Prof::get().report("refine --model");
     if (auto r = io::saveBoard(b, std::string(a.opt("-o"))); !r) return fail(r.error());
     if (auto r = topo::saveTopology(t, b, topo::sidecarPath(std::string(a.opt("-o")))); !r) return fail(r.error());
