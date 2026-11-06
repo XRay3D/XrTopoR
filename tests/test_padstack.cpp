@@ -7,6 +7,8 @@
 #include <sstream>
 
 #include "core/Padstack.h"
+#include "drc/Drc.h"
+#include "io/gerber/GerberWriter.h"
 #include "io/BoardIO.h"
 #include "io/topor/Fst.h"
 
@@ -244,4 +246,62 @@ TEST(Padstack, BuiltForOtherFormats) {
   for (auto& p : (*pc)->pads) ASSERT_GE(p.padstack, 0);
   // P-CAD pad styles keep their names.
   EXPECT_TRUE(std::ranges::none_of((*pc)->padstacks, [](const Padstack& s) { return s.name.ends_with("_SMD"); }));
+}
+
+// A pad bigger on one copper layer than on the others is checked there by its size there.
+TEST(Padstack, DrcByTheLayersShape) {
+  auto r = io::loadBoard(data("topor/Example_04/Arcs_master_f5.fst"));
+  ASSERT_TRUE(r) << r.error();
+  Board& b = **r;
+  DrcOptions opt;
+  opt.unconnected = false;
+  int round = stackIndex(b, "N150R.PS");
+  // Violations of the round pads layer by layer.
+  auto ofRound = [&](const std::vector<DrcViolation>& vs, LayerId l) {
+    int n = 0;
+    for (auto& v : vs)
+      if (v.layer == l && ((v.a.type == ItemType::Pad && b.pads[v.a.index].padstack == round) ||
+                           (v.hasB && v.b.type == ItemType::Pad && b.pads[v.b.index].padstack == round)))
+        ++n;
+    return n;
+  };
+  auto before = runDrc(b, opt);
+  std::vector<Padstack> stacks = b.padstacks;
+  PadDetail big = *named(stacks[size_t(round)], "Bottom");
+  big.w = big.h = mmToNm(3.5);
+  *std::ranges::find_if(stacks[size_t(round)].details, [](const PadDetail& d) { return d.layer == "Bottom"; }) = big;
+  std::vector<int> origin(stacks.size());
+  for (size_t i = 0; i < origin.size(); ++i) origin[i] = int(i);
+  setPadstacks(b, stacks, origin);
+  auto pi = std::ranges::find_if(b.pads, [&](const Pad& p) { return p.padstack == round; });
+  ASSERT_NE(pi, b.pads.end());
+  EXPECT_FALSE(pi->uniform);
+  EXPECT_EQ(pi->shape.w, mmToNm(1.5));  // the routing still sees the top one
+  auto after = runDrc(b, opt);
+  EXPECT_EQ(ofRound(after, b.topCopper()), ofRound(before, b.topCopper()));
+  EXPECT_GT(ofRound(after, b.bottomCopper()), ofRound(before, b.bottomCopper()));
+}
+
+// The mask Gerber opens a pad by its stack's mask detail; stacks without any mask detail get the old opening.
+TEST(Padstack, GerberMaskFromTheDetails) {
+  auto r = io::loadBoard(data("topor/Example_04/Arcs_master_f5.fst"));
+  ASSERT_TRUE(r) << r.error();
+  Board& b = **r;
+  auto mask = [&] {
+    for (auto& f : io::makeGerbers(b))
+      if (f.name.ends_with("F_Mask.gbr")) return f.content;
+    return std::string();
+  };
+  std::string old = mask();
+  EXPECT_NE(old.find("C,1.6"), std::string::npos);   // 1.5 mm pads + 2 x 0.05
+  EXPECT_EQ(old.find("C,1.7"), std::string::npos);
+  int round = stackIndex(b, "N150R.PS");
+  std::vector<Padstack> stacks = b.padstacks;
+  createLayerDetails(b, stacks, {round}, b.findLayer("TopMask"), mmToNm(0.1), true);
+  std::vector<int> origin(stacks.size());
+  for (size_t i = 0; i < origin.size(); ++i) origin[i] = int(i);
+  setPadstacks(b, stacks, origin);
+  std::string now = mask();
+  EXPECT_NE(now.find("C,1.7"), std::string::npos);
+  EXPECT_NE(now.find("C,1.6"), std::string::npos);  // the other round stacks as before
 }

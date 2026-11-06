@@ -1,5 +1,7 @@
 #include "gui/BoardView.h"
 
+#include "core/Padstack.h"
+
 #include <QApplication>
 #include <QKeyEvent>
 #include <QMenu>
@@ -424,8 +426,11 @@ void BoardView::drawTrack(QPainter& p, const Track& t, const QColor& c, double e
   p.drawPolyline(poly);
 }
 
-void BoardView::drawPad(QPainter& p, const Pad& pad, LayerId, const QColor& c) {
-  Shape s = pad.shapeGeom();
+void BoardView::drawPad(QPainter& p, const Pad& pad, LayerId l, const QColor& c) {
+  // On a layer: the pad's shape there (its stack's detail: another size on an inner layer, the mask, the paste).
+  std::optional<Shape> on = l >= 0 ? padShapeOn(*doc_->board(), pad, l) : std::nullopt;
+  if (l >= 0 && !on) return;
+  Shape s = on ? *on : pad.shapeGeom();
   p.setPen(Qt::NoPen);
   p.setBrush(c);
   if (s.kind == Shape::Kind::Point) {
@@ -539,8 +544,13 @@ void BoardView::drawLayer(QPainter& p, LayerId l) {
         if (t.layer == l) drawText(p, t, details);
     return;
   }
-  // Technical layers: drawings of the board and of visible components.
+  // Technical layers: the pads' details on the mask and paste layers, drawings of the board and of visible
+  // components.
   int group = layerGroup(b, l);
+  bool groupPads = group == 0 ? d.flag("showTopMechPads") : group == 2 ? d.flag("showBotMechPads") : true;
+  if ((L.kind == LayerKind::Mask || L.kind == LayerKind::Paste) && showPads && groupPads)
+    for (auto& pad : b.pads)
+      if (pad.padstack >= 0 && (pad.component < 0 || componentVisible(pad.component))) drawPad(p, pad, l, padColor);
   if (!showDetails || (group == 0 && !d.flag("showTopMechDetails")) || (group == 2 && !d.flag("showBotMechDetails")))
     return;
   auto draw = [&](const Graphic& g) {

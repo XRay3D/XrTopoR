@@ -19,7 +19,9 @@ struct ItemRef {
 };
 
 // Copper shape of an item on one layer (tracks: capsule; arcs: several capsules).
-std::vector<Shape> itemShapes(const Board& b, ItemRef r, double expand = 0);
+// The copper of an item as shapes; `layer` >= 0: a pad's shape on that layer (pads with another shape on some
+// copper layers), else its outer shape.
+std::vector<Shape> itemShapes(const Board& b, ItemRef r, double expand = 0, LayerId layer = -1);
 int itemNet(const Board& b, ItemRef r);
 LayerMask itemLayers(const Board& b, ItemRef r);
 BBox itemBBox(const Board& b, ItemRef r);

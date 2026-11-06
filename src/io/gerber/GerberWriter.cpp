@@ -1,5 +1,7 @@
 #include "io/gerber/GerberWriter.h"
 
+#include "core/Padstack.h"
+
 #include <algorithm>
 #include <cstdio>
 #include <filesystem>
@@ -119,6 +121,16 @@ class Gerber {
     region(p.shapeGeom(expand).outline(5000));
   }
 
+  // Any shape: a round one by a circular aperture, the rest as a region.
+  void shape(const Shape& s) {
+    if (s.kind == Shape::Kind::Point) {
+      select(circle(2 * s.r));
+      flash(s.a);
+      return;
+    }
+    region(s.outline(5000));
+  }
+
   std::string str() const { return out_ + defs_ + body_ + "M02*\n"; }
 
  private:
@@ -225,7 +237,8 @@ std::vector<GerberFile> makeGerbers(const Board& b, const GerberOptions& opt) {
         for (auto& f : z.filled) g.region(f);
     for (auto& p : b.pads) {
       if (!p.onLayer(l)) continue;
-      g.pad(p, 0);
+      if (p.uniform) g.pad(p, 0);
+      else if (auto s = padShapeOn(b, p, l)) g.shape(*s);  // another size on this layer
     }
     for (auto& v : b.vias) {
       if (!v.onLayer(l)) continue;
@@ -249,16 +262,31 @@ std::vector<GerberFile> makeGerbers(const Board& b, const GerberOptions& opt) {
   for (Side side : {Side::Top, Side::Bottom}) {
     LayerId cuL = side == Side::Top ? b.topCopper() : b.bottomCopper();
     std::string sfx = side == Side::Top ? "Top" : "Bot";
+    // A pad's opening in the mask (its paste): its stack's detail on that layer; a stack with no detail on any
+    // mask (paste) layer opens the mask around every pad by maskExpansion (pastes the planar pads), as the
+    // designs from other CADs need.
+    auto technical = [&](Gerber& g, LayerKind kind, auto&& fallback) {
+      auto ls = sideLayers(kind, side);
+      LayerId tl = ls.empty() ? -1 : ls.front();
+      for (auto& p : b.pads) {
+        bool stacked = tl >= 0 && p.padstack >= 0 && size_t(p.padstack) < b.padstacks.size();
+        if (stacked && padstackHasDetails(b, b.padstacks[size_t(p.padstack)], kind)) {
+          if (auto s = padShapeOn(b, p, tl)) g.shape(*s);
+        } else if (p.onLayer(cuL)) {
+          fallback(p);
+        }
+      }
+    };
     if (opt.mask) {
       Gerber g("Soldermask," + sfx, "Negative");
-      for (auto& p : b.pads)
-        if (p.onLayer(cuL)) g.pad(p, double(opt.maskExpansion));
+      technical(g, LayerKind::Mask, [&](const Pad& p) { g.pad(p, double(opt.maskExpansion)); });
       files.push_back({base + "-" + (side == Side::Top ? "F_Mask" : "B_Mask") + ".gbr", g.str()});
     }
     if (opt.paste) {
       Gerber g("Paste," + sfx);
-      for (auto& p : b.pads)
-        if (p.onLayer(cuL) && p.drill == 0) g.pad(p, 0);
+      technical(g, LayerKind::Paste, [&](const Pad& p) {
+        if (p.drill == 0) g.pad(p, 0);
+      });
       files.push_back({base + "-" + (side == Side::Top ? "F_Paste" : "B_Paste") + ".gbr", g.str()});
     }
     if (opt.silk) {

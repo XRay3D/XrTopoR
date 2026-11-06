@@ -409,6 +409,12 @@ void setPadstacks(Board& b, std::vector<Padstack> stacks, const std::vector<int>
   syncPadsFromStacks(b, before);
 }
 
+bool padstackHasDetails(const Board& b, const Padstack& ps, LayerKind kind) {
+  for (LayerId l = 0; l < LayerId(b.layers.size()); ++l)
+    if (b.layers[l].kind == kind && detailOn(b, ps, l, false)) return true;
+  return false;
+}
+
 std::vector<int> padstackUse(const Board& b) {
   std::vector<int> n(b.padstacks.size(), 0);
   for (auto& p : b.pads)

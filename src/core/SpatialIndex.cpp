@@ -1,5 +1,7 @@
 #include "core/SpatialIndex.h"
 
+#include "core/Padstack.h"
+
 #include <boost/geometry.hpp>
 #include <boost/geometry/index/rtree.hpp>
 
@@ -8,10 +10,15 @@ namespace bgi = boost::geometry::index;
 
 namespace xr {
 
-std::vector<Shape> itemShapes(const Board& b, ItemRef r, double expand) {
+std::vector<Shape> itemShapes(const Board& b, ItemRef r, double expand, LayerId layer) {
   std::vector<Shape> out;
   switch (r.type) {
-    case ItemType::Pad: out.push_back(b.pads[r.index].shapeGeom(expand)); break;
+    case ItemType::Pad: {
+      const Pad& p = b.pads[r.index];
+      if (layer < 0 || p.uniform) out.push_back(p.shapeGeom(expand));
+      else if (auto s = padShapeOn(b, p, layer, expand)) out.push_back(*s);
+      break;
+    }
     case ItemType::Via: {
       const Via& v = b.vias[r.index];
       out.push_back(Shape::circle(v.pos.v(), v.diameter / 2.0 + expand));

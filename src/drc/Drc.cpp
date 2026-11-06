@@ -200,32 +200,59 @@ std::vector<DrcViolation> runDrc(const Board& b, const DrcOptions& opt) {
         int ka = gid(a), kc = gid(c);
         if (!seen.insert({std::min(ka, kc), std::max(ka, kc)}).second) return;
         int na = itemNet(b, a), nc = itemNet(b, c);
-        double req = requiredClearance(b, na, nc, lm & itemLayers(b, c));
-        auto cs = itemShapes(b, c);
-        double best = std::numeric_limits<double>::max();
-        Vec2 where;
-        for (auto& s1 : shapes)
-          for (auto& s2 : cs) {
-            double d = s1.distance(s2);
-            if (d < best) {
-              best = d;
-              // Marker near the actual contact: the closest of the shapes' key points to the other shape.
-              auto keyPts = [](const Shape& s) {
-                if (s.kind == Shape::Kind::Point) return Polyline{s.a};
-                if (s.kind == Shape::Kind::Segment) return Polyline{s.a, (s.a + s.b) * 0.5, s.b};
-                return s.poly;
-              };
-              double bd = std::numeric_limits<double>::max();
-              for (auto& p : keyPts(s1)) {
-                double dd = s2.distance(p);
-                if (dd < bd) { bd = dd; where = p; }
-              }
-              for (auto& p : keyPts(s2)) {
-                double dd = s1.distance(p);
-                if (dd < bd) { bd = dd; where = p; }
+        LayerMask common = lm & itemLayers(b, c);
+        // The closest points of two lists of shapes: the distance and a marker near the contact.
+        auto measure = [](const std::vector<Shape>& as, const std::vector<Shape>& cs, Vec2& where) {
+          double best = std::numeric_limits<double>::max();
+          for (auto& s1 : as)
+            for (auto& s2 : cs) {
+              double d = s1.distance(s2);
+              if (d < best) {
+                best = d;
+                // Marker near the actual contact: the closest of the shapes' key points to the other shape.
+                auto keyPts = [](const Shape& s) {
+                  if (s.kind == Shape::Kind::Point) return Polyline{s.a};
+                  if (s.kind == Shape::Kind::Segment) return Polyline{s.a, (s.a + s.b) * 0.5, s.b};
+                  return s.poly;
+                };
+                double bd = std::numeric_limits<double>::max();
+                for (auto& p : keyPts(s1)) {
+                  double dd = s2.distance(p);
+                  if (dd < bd) { bd = dd; where = p; }
+                }
+                for (auto& p : keyPts(s2)) {
+                  double dd = s1.distance(p);
+                  if (dd < bd) { bd = dd; where = p; }
+                }
               }
             }
+          return best;
+        };
+        Vec2 where;
+        double req = 0, best = 0;
+        LayerId worstLayer = -1;
+        auto layered = [&](ItemRef r) { return r.type == ItemType::Pad && !b.pads[r.index].uniform; };
+        if (layered(a) || layered(c)) {
+          // A pad with another shape on some copper layers: layer by layer, the worst one reported.
+          double worst = std::numeric_limits<double>::max();
+          for (LayerId l = 0; l < 64; ++l) {
+            if (!((common >> l) & 1)) continue;
+            Vec2 at;
+            double d = measure(itemShapes(b, a, 0, l), itemShapes(b, c, 0, l), at);
+            double rq = double(b.clearance(na, nc, l));
+            if (d - rq < worst) {
+              worst = d - rq;
+              best = d;
+              req = rq;
+              where = at;
+              worstLayer = l;
+            }
           }
+          if (worstLayer < 0) return;
+        } else {
+          req = requiredClearance(b, na, nc, common);
+          best = measure(shapes, itemShapes(b, c), where);
+        }
         if (best >= req - opt.tolerance) return;
         DrcViolation v;
         v.type = best <= 0 ? DrcViolation::Type::Short : DrcViolation::Type::Clearance;
@@ -233,9 +260,9 @@ std::vector<DrcViolation> runDrc(const Board& b, const DrcOptions& opt) {
         v.b = c;
         v.hasB = true;
         v.pos = where;
-        LayerMask common = lm & itemLayers(b, c);
-        for (LayerId l = 0; l < 64; ++l)
-          if ((common >> l) & 1) { v.layer = l; break; }
+        v.layer = worstLayer;
+        for (LayerId l = 0; l < 64 && v.layer < 0; ++l)
+          if ((common >> l) & 1) v.layer = l;
         v.actual = best;
         v.required = req;
         v.message = std::string(v.type == DrcViolation::Type::Short ? "Short" : "Clearance") + " " + mm(best) +

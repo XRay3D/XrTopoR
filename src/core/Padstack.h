@@ -41,6 +41,8 @@ void buildPadstacksFromPads(Board& b, const std::vector<std::string>& names = {}
 // Replaces the board's stacks; `origin[i]` is the index stack i had on the board (-1: new). Pads are renumbered
 // and follow the stacks (syncPadsFromStacks). Stacks still in use must not be left out.
 void setPadstacks(Board& b, std::vector<Padstack> stacks, const std::vector<int>& origin);
+// Whether a stack has a detail on any layer of a kind (Mask, Paste...), by class or by name.
+bool padstackHasDetails(const Board& b, const Padstack& ps, LayerKind kind);
 // How many pads use each stack.
 std::vector<int> padstackUse(const Board& b);
 // A stack name not taken yet, from `base`.
