@@ -3,6 +3,7 @@
 // taut around the obstacles of other nets (funnel algorithm in a constrained Delaunay
 // triangulation of obstacle points), then thickened into tangent segments + arcs whose
 // radii nest wires that wrap the same obstacle.
+#include <array>
 #include <optional>
 #include <map>
 #include <vector>
@@ -51,6 +52,17 @@ struct RealizeStats {
   // Per board via: the sum, over the edges from it whose wires do not fit with margin, of the unit
   // vectors towards the other end weighted by the deficit (nm) — the direction the crowding comes from.
   std::map<int, Vec2> viaPush;
+  // What the wires as drawn do to the things they hang on and bend round (TopoR's forces: Bessonov, Luzin,
+  // Lyachek, Popov, 2014): a wire pulls the element each of its ends is fixed to along itself, and presses on
+  // an element it bends round with the sum of the unit vectors from the bend towards its neighbours on the
+  // wire — the gain in the wire's length per unit of the element's shift that way. `endDir`: per wire, the
+  // unit vector from its front end and from its back end along the wire (zero for a wire not drawn).
+  // `ownerPush`: per owner of the model (the realiser's input from the model only), the sum over the bends
+  // round its points. `ownerForce`: the two summed per owner, filled by realizeFromModel — minus the gradient
+  // of the drawn length by the owner's position.
+  std::vector<std::array<Vec2, 2>> endDir;
+  std::map<int, Vec2> ownerPush;
+  std::map<int, Vec2> ownerForce;
 };
 
 struct RealizeOptions {

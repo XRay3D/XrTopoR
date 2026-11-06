@@ -15,6 +15,7 @@
 #include "io/gerber/GerberWriter.h"
 #include "io/svg/SvgWriter.h"
 #include "core/Prof.h"
+#include "router/topo/ModelRelax.h"
 #include "router/topo/ModelTools.h"
 #include "topo/RelayStats.h"
 #include "topo/Sidecar.h"
@@ -202,6 +203,7 @@ int main(int argc, char** argv) {
     topo::Topology t = loadModel(b, std::string(a.v[0]));
     topo::OptimizeModelOptions mo;
     mo.flips = !a.flag("--no-flips");
+    mo.contacts = !a.flag("--no-contacts");
     auto res = topo::optimizeModel(b, t, mo);
     if (a.flag("--verbose"))
       for (auto& l : res.log) std::println("{}", l);
@@ -214,10 +216,10 @@ int main(int argc, char** argv) {
                    v.deficit > 0 ? std::format(" by {:.3f} mm", v.deficit / 1e6) : "");
     }
     if (!res.drawn) return fail("stopped by the violations above, nothing drawn");
-    std::println("model: {} iterations ({} undone), {} via move(s), {} junction move(s); model length {:.1f} -> {:.1f} mm, shortfall {:.3f} -> {:.3f} mm; "
-                 "{} checkpoints ({} rolled back), conflicts {} -> {}",
-                 res.iterations, res.undoneIterations, res.viaMoves, res.junctionMoves, res.lengthBefore / 1e6, res.lengthAfter / 1e6,
-                 res.deficitBefore / 1e6, res.deficitAfter / 1e6, res.checkpoints, res.rollbacks, res.conflictsBefore, res.conflictsAfter);
+    std::println("model: {} iterations, {} via(s) and {} branch point(s) moved; {} drawings ({} rolled back); conflicts {} -> {}, shortfall {:.3f} -> {:.3f} mm, "
+                 "length {:.1f} -> {:.1f} mm, forces {:.1f} -> {:.1f}",
+                 res.iterations, res.viaMoves, res.junctionMoves, res.drawings, res.rollbacks, res.conflictsBefore, res.conflictsAfter, res.depthBefore / 1e6,
+                 res.depthAfter / 1e6, res.lengthBefore / 1e6, res.lengthAfter / 1e6, res.forceBefore, res.forceAfter);
     xr::Prof::get().report("optimize --model");
     if (auto r = io::saveBoard(b, std::string(a.opt("-o"))); !r) return fail(r.error());
     if (auto r = topo::saveTopology(t, b, topo::sidecarPath(std::string(a.opt("-o")))); !r) return fail(r.error());

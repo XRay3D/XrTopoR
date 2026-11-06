@@ -24,6 +24,7 @@
 #include "topo/Move.h"
 #include "topo/RelayStats.h"
 #include "topo/Sidecar.h"
+#include "router/topo/ModelRelax.h"
 #include "router/topo/ModelTools.h"
 #include "router/topo/Wires.h"
 #include "topo/Topology.h"

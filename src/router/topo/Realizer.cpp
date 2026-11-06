@@ -1420,6 +1420,9 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
   }  // rounds
 
   phase.emplace("realize: emission");
+  st.endDir.assign(size_t(NW), {});
+  st.ownerPush.clear();
+  st.ownerForce.clear();
   for (int wi = 0; wi < NW; ++wi) {
     const RealWire& w = wires[wi];
     bool narrowedWire = false;
@@ -1578,6 +1581,25 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
       }
     if (cs.size() < 2) continue;
     size_t n = cs.size();
+    {
+      // The forces of this wire: the pull at its ends, the push at its bends (RealizeStats::endDir, ownerPush).
+      auto dir = [](Vec2 a, Vec2 c) {
+        Vec2 d = c - a;
+        double l = d.len();
+        return l > 1 ? d / l : Vec2{};
+      };
+      auto leaves = [&](size_t k) { return k == 0 ? cs[0].c : to[k]; };          // the tangent k -> k + 1 starts here
+      auto arrives = [&](size_t k) { return k == n - 1 ? cs[n - 1].c : ti[k]; };  // the tangent k - 1 -> k ends here
+      st.endDir[wi][0] = dir(leaves(0), arrives(1));
+      st.endDir[wi][1] = dir(arrives(n - 1), leaves(n - 2));
+      const LayerObstacles& obF = obstacles.at(w.layer);
+      for (size_t k = 1; k + 1 < n; ++k) {
+        if (cs[k].obst < 0) continue;
+        const int owner = obF.pts[cs[k].obst].owner;
+        if (owner < 0) continue;
+        st.ownerPush[owner] = st.ownerPush[owner] + dir(leaves(k), arrives(k + 1)) - dir(leaves(k - 1), arrives(k));
+      }
+    }
     Vec2 startAt = cs[0].c, endAt = cs[n - 1].c;
     if (stubs[wi][0].on) {
       const Stub& s0 = stubs[wi][0];

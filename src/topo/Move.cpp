@@ -79,6 +79,9 @@ std::vector<int> starEdges(const LayerMesh& m, int v) {
   return out;
 }
 
+// The least height (nm) a move leaves to a triangle at the owner.
+constexpr double kMinHeight = 1000;
+
 double moveOwner(Topology& t, int owner, Vec2 d, const FlipGate& gate, int rounds) {
   if (d.len2() == 0) return 1;
   Owner& o = t.owners[owner];
@@ -98,7 +101,12 @@ double moveOwner(Topology& t, int owner, Vec2 d, const FlipGate& gate, int round
             q[i] = x.owner == owner ? x.p + d * (1 - done) : x.p;
           }
           double f0 = orient(p[0], p[1], p[2]), f1 = orient(q[0], q[1], q[2]) - f0;
-          if (f1 < 0 && f0 > 0) lam = std::min(lam, 0.9 * f0 / -f1 * (1 - done));
+          // ... and keeps a micron of height: an owner pulled onto a vertex or a side of its own net (a branch
+          // point onto its pad — nothing of another net's rule holds it off) came nine tenths closer with
+          // every step, down to a triangle the rounding turned over.
+          const double base = std::max({(p[1] - p[0]).len(), (p[2] - p[1]).len(), (p[0] - p[2]).len()});
+          const double fmin = kMinHeight * base;
+          if (f1 < 0 && f0 > fmin) lam = std::min(lam, 0.9 * (f0 - fmin) / -f1 * (1 - done));
           else if (f1 < 0) lam = 0;
         }
     }

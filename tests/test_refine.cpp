@@ -6,6 +6,7 @@
 #include "core/Connectivity.h"
 #include "drc/Drc.h"
 #include "io/BoardIO.h"
+#include "router/topo/ModelRelax.h"
 #include "router/topo/ModelTools.h"
 #include "router/topo/Optimizer.h"
 #include "router/topo/Wires.h"
@@ -153,12 +154,15 @@ TEST(Realizer, ModelReshapeIsAFixedPoint) {
   }
 }
 
-// F7 on the model: the vias and branch points relaxed by the model's forces, the drawing judged at the
-// checkpoints. Never worse than F5 from the model (the best drawn state is kept), nothing lost, and on
-// these boards better: Arcs_master 29 -> 15, arz_2L 9 -> 1 (F5 on the tracks then relaxed: 12 and 2).
+// F7 on the model: the vias and branch points go down the gradient of the drawn length (the wires' pull at
+// their ends and their push at their bends, taken from the realiser's drawing), every iteration judged by the
+// drawing. Never worse than F5 from the model (the best drawing is kept), nothing lost, the mesh whole; and
+// the wires are pulled taut: Arcs_master 22 -> 4 violations and 6405.6 -> 6201.4 mm (TopoR's own F7 of that
+// board: 6245.4 mm at its nominal clearance), the forces left on the objects halved (248 -> 121; TopoR's F7
+// leaves 125 by the same measure), arz_2L 9 -> 1 and 53 mm shorter.
 TEST(Optimizer, ModelRelaxDoesNotBreak) {
-  struct Expect { const char* file; int f5; int conflicts; };
-  for (Expect x : {Expect{"topor/Example_04/Arcs_master.pcb", 29, 20}, Expect{"topor/Example_03/arz_2L.fst", 9, 5}}) {
+  struct Expect { const char* file; int f5; int conflicts; double gain; };  // gain: mm the drawing gets shorter by, at least
+  for (Expect x : {Expect{"topor/Example_04/Arcs_master.pcb", 22, 6, 150}, Expect{"topor/Example_03/arz_2L.fst", 9, 3, 30}}) {
     auto lb = io::loadBoard(data(x.file));
     ASSERT_TRUE(lb.has_value()) << x.file;
     Board& b = **lb;
@@ -168,11 +172,14 @@ TEST(Optimizer, ModelRelaxDoesNotBreak) {
     t.build(b);
     auto res = topo::optimizeModel(b, t);
     ASSERT_TRUE(res.drawn) << x.file;
-    std::println("{}: F7 model {} iterations, {} checkpoints ({} rolled back), {} via and {} junction moves, conflicts {} -> {}, length {:.1f} mm", x.file,
-                 res.iterations, res.checkpoints, res.rollbacks, res.viaMoves, res.junctionMoves, res.conflictsBefore, res.conflictsAfter, length(b) / 1e6);
+    std::println("{}: F7 model {} iterations, {} drawings ({} rolled back), {} vias and {} branch points moved, conflicts {} -> {}, length {:.1f} -> {:.1f} mm, forces {:.1f} -> {:.1f}",
+                 x.file, res.iterations, res.drawings, res.rollbacks, res.viaMoves, res.junctionMoves, res.conflictsBefore, res.conflictsAfter, res.lengthBefore / 1e6,
+                 length(b) / 1e6, res.forceBefore, res.forceAfter);
     EXPECT_LE(res.conflictsBefore, x.f5) << x.file;
     EXPECT_LE(conflicts(b), x.conflicts) << x.file;
     EXPECT_LE(conflicts(b), res.conflictsBefore) << x.file;
+    EXPECT_LT(res.lengthAfter, res.lengthBefore - x.gain * kNmPerMm) << x.file;
+    EXPECT_LT(res.forceAfter, res.forceBefore * 0.8) << x.file;
     EXPECT_LE(Connectivity::compute(b).ratsnest.size(), unrouted) << x.file;
     EXPECT_EQ(t.check(), std::vector<std::string>{}) << x.file;
   }

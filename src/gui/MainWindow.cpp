@@ -45,6 +45,7 @@
 #include "io/Report.h"
 #include "io/gerber/GerberWriter.h"
 #include "io/svg/SvgWriter.h"
+#include "router/topo/ModelRelax.h"
 #include "router/topo/ModelTools.h"
 #include "router/topo/Optimizer.h"
 #include "router/topo/Refine.h"
@@ -1337,14 +1338,15 @@ void MainWindow::optimizeModel(bool thenRefine) {
     b.zones = work->zones;
     doc_->commitEdit(before, tr("Подвижка"), false);
     doc_->setTopology(std::make_unique<topo::Topology>(std::move(*topo)));
-    showHint(tr("Подвижка по модели: переходов %1, ветвлений %2; итераций %3, проверок %4 (откатов %5); конфликтов %6 → %7")
+    showHint(tr("Подвижка по модели: переходов %1, ветвлений %2; итераций %3 (откатов %4); конфликтов %5 → %6; длина %7 → %8 мм")
                      .arg(res.viaMoves)
                      .arg(res.junctionMoves)
                      .arg(res.iterations)
-                     .arg(res.checkpoints)
                      .arg(res.rollbacks)
                      .arg(res.conflictsBefore)
-                     .arg(res.conflictsAfter) +
+                     .arg(res.conflictsAfter)
+                     .arg(res.lengthBefore / 1e6, 0, 'f', 1)
+                     .arg(res.lengthAfter / 1e6, 0, 'f', 1) +
                  (res.stats.narrowedWires > 0 ? tr("; заужено проводников: %1").arg(res.stats.narrowedWires) : QString()),
              10000);
     if (thenRefine) refine(true);
