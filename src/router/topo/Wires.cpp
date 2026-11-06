@@ -78,7 +78,8 @@ std::vector<RealWire> sketchesOf(const Board& b, const std::vector<WireChain>& c
     return false;
   });
   // The inner point a wire was led to: back from its end along the dropped runs to the one that begins at
-  // the pad's centre.
+  // the pad's centre. The first step within the glue: a run shorter than that is no chain of its own, it
+  // lies inside the wire's first vertex (the arc that begins at the inner point starts with such a one).
   for (RealWire& w : wires)
     for (int end = 0; end < 2; ++end) {
       Vec2 cur = end ? w.sketch.back() : w.sketch.front();
@@ -89,22 +90,52 @@ std::vector<RealWire> sketchesOf(const Board& b, const std::vector<WireChain>& c
       for (int step = 0; step < 16 && (cur - centre).len() > edit::kJoinTol; ++step) {
         int next = -1;
         bool atA = false;
+        const double tol = step == 0 ? std::max(kWireGlue * double(w.width), double(edit::kJoinTol)) : double(edit::kJoinTol);
         for (size_t i = 0; i < runs.size() && next < 0; ++i) {
           if (used[i] || runs[i].pad != pad || runs[i].layer != w.layer) continue;
-          if ((runs[i].a - cur).len() <= edit::kJoinTol) { next = int(i); atA = true; }
-          else if ((runs[i].b - cur).len() <= edit::kJoinTol) next = int(i);
+          if ((runs[i].a - cur).len() <= tol) { next = int(i); atA = true; }
+          else if ((runs[i].b - cur).len() <= tol) next = int(i);
         }
         if (next < 0) break;
         used[next] = 1;
         const Vec2 other = atA ? runs[next].b : runs[next].a;
         if ((other - centre).len() <= edit::kJoinTol) {
-          w.inner[end] = cur;
+          w.inner[end] = atA ? runs[next].a : runs[next].b;  // the run's own end: the wire's may lie a glue away
           break;
         }
         cur = other;
       }
     }
   return wires;
+}
+
+std::vector<int> leadTracks(const Board& b, const OwnCopper& copper, Vec2 p, int net, LayerId layer, const std::function<bool(int)>& skip,
+                            Vec2& centre) {
+  auto in = copper.at(p, net, layer);
+  if (!in || in->type != ItemType::Pad) return {};
+  const Pad& pad = b.pads[size_t(in->index)];
+  const PadFrame f = padFrame(pad);
+  if (f.kind == PadFrame::Kind::Round || f.kind == PadFrame::Kind::Other) return {};
+  centre = f.c;
+  const Shape sh = pad.shapeGeom();
+  std::vector<int> lead;
+  Vec2 cur = p;
+  for (int step = 0; step < 8 && (cur - centre).len() > edit::kJoinTol; ++step) {
+    int next = -1;
+    for (size_t i = 0; i < b.tracks.size() && next < 0; ++i) {
+      const Track& t = b.tracks[i];
+      if (t.net != net || t.layer != layer || t.locked || t.mid) continue;
+      if (skip(int(i)) || std::ranges::contains(lead, int(i))) continue;
+      const bool atA = (t.a.v() - cur).len() <= edit::kJoinTol, atB = (t.b.v() - cur).len() <= edit::kJoinTol;
+      if (atA == atB) continue;
+      if (sh.distance(t.a.v()) > kPadEdgeTol || sh.distance(t.b.v()) > kPadEdgeTol) continue;  // wholly inside only
+      next = int(i);
+      cur = atA ? t.b.v() : t.a.v();
+    }
+    if (next < 0) return {};
+    lead.push_back(next);
+  }
+  return (cur - centre).len() <= edit::kJoinTol ? lead : std::vector<int>{};
 }
 
 RealizeStats reshapeTracks(Board& b, std::vector<char> chosen, const ReshapeOptions& o) {

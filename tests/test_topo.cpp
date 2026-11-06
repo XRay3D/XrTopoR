@@ -1760,3 +1760,56 @@ TEST(Topo, RectPadPatternOnTheModel) {
   EXPECT_NEAR(p.b.tracksLength(), length, 2000);
   EXPECT_TRUE(p.vertexAt(12.65, 10.35));
 }
+
+// F5 of a selection: the tracks of a wire outside its pad are chosen, the selection grows to the wire and
+// its lead inside the pad. The wire is led through the same inner point again and nothing is doubled: the
+// arc that begins at the inner point starts with a run shorter than the glue, the wire's sketch begins at
+// its far end, and the inner point was looked for from there (it crept 13 um a pass).
+TEST(Topo, SelectedWireTakesItsLead) {
+  // Two wires of the rectangle leave through one inner point (a branch there: the selection does not grow
+  // through it); the pin's wire has a plain vertex at its inner point.
+  PinBoard p;
+  p.pad("A", 10, 10, PadShapeKind::Rect, 5.6, 2);
+  p.pad("A", 30, 16, PadShapeKind::Circle, 1, 1);
+  p.pad("A", 30, 19, PadShapeKind::Circle, 1, 1);
+  p.track("A", {{10, 10}, {14, 10.5}, {30, 16}}, 0.3);
+  p.track("A", {{10, 10}, {14, 10.6}, {30, 19}}, 0.3);
+  p.pad("B", 10, 4, PadShapeKind::Oval, 1.9, 0.3);  // a pin lying along x
+  p.pad("B", 30, 4, PadShapeKind::Circle, 1, 1);
+  p.track("B", {{10, 4}, {14, 4}, {30, 4}}, 0.2);
+  p.f5();
+  const double length = p.b.tracksLength();
+  const auto before = topo::relayStats(p.b);
+  ASSERT_EQ(before.deadEnds, 0) << before.text();
+  // One wire of the rectangle and the pin's: only their tracks that reach outside the pads.
+  auto inside = [&](const Track& t) {
+    for (const Pad& pad : p.b.pads)
+      if (pad.net == t.net && pad.shapeGeom().distance(t.a.v()) <= 1000 && pad.shapeGeom().distance(t.b.v()) <= 1000) return true;
+    return false;
+  };
+  auto reaches = [&](const Track& t, double x, double y) { return (t.a.v() - PinBoard::at(x, y)).len() < 1000 || (t.b.v() - PinBoard::at(x, y)).len() < 1000; };
+  std::vector<char> chosen(p.b.tracks.size(), 0);
+  int picked = 0;
+  for (size_t i = 0; i < p.b.tracks.size(); ++i) {
+    const Track& t = p.b.tracks[i];
+    if (inside(t)) continue;
+    if (reaches(t, 30, 16) || reaches(t, 30, 4)) chosen[i] = 1, ++picked;
+  }
+  ASSERT_GT(picked, 0);
+  // The tracks between two points: the leads from the pads' centres to their inner points.
+  auto between = [&](double x1, double y1, double x2, double y2) {
+    int n = 0;
+    for (const Track& t : p.b.tracks) n += (reaches(t, x1, y1) && reaches(t, x2, y2));
+    return n;
+  };
+  ASSERT_EQ(between(10, 10, 12.65, 10.85), 2) << "a lead for each of the rectangle's two wires";
+  ASSERT_EQ(between(10, 4, 10.8, 4), 1);
+  topo::reshapeTracks(p.b, chosen, {.local = true});
+  EXPECT_EQ(between(10, 10, 12.65, 10.85), 2) << "the wire is led through the same inner point";
+  EXPECT_EQ(between(10, 4, 10.8, 4), 1);
+  const auto s = topo::relayStats(p.b);
+  EXPECT_NEAR(p.b.tracksLength(), length, 0.02 * kNmPerMm);  // laid against the wire beside it as it lies: microns
+  EXPECT_EQ(s.deadEnds, 0) << s.text();
+  EXPECT_EQ(s.padsAtCentre, s.pads) << s.text();
+  EXPECT_EQ(p.violations(), 0);
+}

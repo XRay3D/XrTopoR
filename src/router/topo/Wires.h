@@ -3,6 +3,7 @@
 // layer and width between pads, vias and branch points. F5 re-lays such chains, F6 looks for a new path
 // for each, F7 and F8 re-lay the chains attached to what they move.
 #include <array>
+#include <functional>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -19,6 +20,14 @@ RealWire wireFor(const Board& b, int net, LayerId layer, Coord width, Polyline s
 // What the realiser lays for the chains: split where they run through their own pads and vias, the ends
 // in a via or a round pad at its centre, the ones wholly inside such copper gone.
 std::vector<RealWire> sketchesOf(const Board& b, const std::vector<WireChain>& chains, const OwnCopper& copper);
+
+// The lead of the wire that begins at p: the runs of its net inside the pad p lies in, from p back to the
+// pad's centre (the realiser's pattern, topo/PadExit.h, or what was drawn there by hand). The realiser leads
+// a re-laid wire from the centre anew, so the old lead goes with the wire. Empty if p lies in no pad the
+// pattern is drawn in, at its centre already, or no way back is found; `centre` is the pad's. `skip`:
+// the tracks that are not looked at (the wire's own).
+std::vector<int> leadTracks(const Board& b, const OwnCopper& copper, Vec2 p, int net, LayerId layer, const std::function<bool(int)>& skip,
+                            Vec2& centre);
 
 struct ReshapeOptions {
   // Limits the obstacles to the neighbourhood of the chosen chains (faster, same result).

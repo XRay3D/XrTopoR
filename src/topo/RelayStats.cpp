@@ -112,7 +112,13 @@ RelayStats relayStats(const Board& b) {
     if (t.net == kNoNet) continue;
     auto ia = copper.at(t.a.v(), t.net, t.layer), ic = copper.at(t.b.v(), t.net, t.layer);
     if (ia && ic && ia->type == ic->type && ia->index == ic->index) {
-      if (ia->type == ItemType::Via) ++s.inVia;
+      if (ia->type == ItemType::Via) {
+        ++s.inVia;
+        if (std::getenv("XR_TOPO_DEBUG"))
+          std::println(stderr, "run inside a via: net {} ({:.4f},{:.4f}) - ({:.4f},{:.4f}){}, the via at ({:.4f},{:.4f}) d {:.3f}", b.nets[size_t(t.net)].name,
+                       t.a.x / 1e6, -t.a.y / 1e6, t.b.x / 1e6, -t.b.y / 1e6, t.mid ? " arc" : "", b.vias[size_t(ia->index)].pos.x / 1e6,
+                       -b.vias[size_t(ia->index)].pos.y / 1e6, b.vias[size_t(ia->index)].diameter / 1e6);
+      }
       else
         switch (frames[size_t(ia->index)].kind) {
           case PadFrame::Kind::Round: ++s.inRound; break;
