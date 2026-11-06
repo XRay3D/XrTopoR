@@ -18,6 +18,7 @@
 #include <QStackedWidget>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QWheelEvent>
 #include <QToolBar>
 #include <QToolButton>
 #include <gtest/gtest.h>
@@ -31,6 +32,7 @@
 #include "gui/AutorouteWindow.h"
 #include "gui/DesignParamsDialog.h"
 #include "gui/PadstackDialogs.h"
+#include "gui/SpinBox.h"
 #include "core/Padstack.h"
 #include "gui/DisplayPanel.h"
 #include "gui/DrcDialog.h"
@@ -1679,4 +1681,37 @@ TEST(Gui, MaskLayerShowsDetails) {
   EXPECT_NE(at(*pr) & 0xffffff, bg & 0xffffff);
   EXPECT_EQ(at(*other) & 0xffffff, bg & 0xffffff);
   if (const char* dir = std::getenv("XR_SHOT_DIR")) f.view.grab().save(QString(dir) + "/masklayer.png");
+}
+
+// Every numeric field steps by 0.01, by 0.1 with Ctrl: the arrow keys, the wheel, the buttons.
+TEST(Gui, SpinBoxSteps) {
+  app();
+  DoubleSpinBox s;
+  s.setDecimals(4);
+  s.setRange(-100, 100);
+  s.setValue(1);
+  s.show();
+  QTest::keyClick(&s, Qt::Key_Up);
+  EXPECT_NEAR(s.value(), 1.01, 1e-9);
+  QTest::keyClick(&s, Qt::Key_Up, Qt::ControlModifier);
+  EXPECT_NEAR(s.value(), 1.11, 1e-9);
+  QTest::keyClick(&s, Qt::Key_Down, Qt::ControlModifier);
+  EXPECT_NEAR(s.value(), 1.01, 1e-9);
+  auto wheel = [&](Qt::KeyboardModifiers m) {
+    QPointF at(s.width() / 2.0, s.height() / 2.0);
+    QWheelEvent e(at, s.mapToGlobal(at), {}, QPoint(0, 120), Qt::NoButton, m, Qt::NoScrollPhase, false);
+    QApplication::sendEvent(&s, &e);
+  };
+  s.setFocus();
+  wheel(Qt::NoModifier);
+  EXPECT_NEAR(s.value(), 1.02, 1e-9);
+  wheel(Qt::ControlModifier);
+  EXPECT_NEAR(s.value(), 1.12, 1e-9);
+  // The fields of the dialogs are these.
+  Fixture f("topor/Example_04/Arcs_master_f5.fst");
+  DesignParamsDialog dlg(&f.doc);
+  dlg.showPage("Ширина проводников");
+  auto spins = dlg.findChildren<QDoubleSpinBox*>();
+  ASSERT_FALSE(spins.empty());
+  for (auto* sp : spins) EXPECT_DOUBLE_EQ(sp->singleStep(), 0.01);
 }

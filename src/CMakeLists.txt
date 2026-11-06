@@ -94,6 +94,7 @@ if(XR_BUILD_GUI)
     gui/ProjectPanel.cpp
     gui/PropertiesPanel.cpp
     gui/Schemes.cpp
+    gui/SpinBox.cpp
     gui/SearchPanel.cpp
     gui/SmallDialogs.cpp
     gui/ToporConfig.cpp

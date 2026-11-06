@@ -30,6 +30,7 @@
 #include <set>
 
 #include "core/Padstack.h"
+#include "gui/SpinBox.h"
 
 namespace xr::gui {
 
@@ -43,7 +44,7 @@ const QColor kStackRow(0xff, 0xb8, 0xb8), kThermalRow(0xa8, 0xf0, 0xa8), kClassR
 const char* const kClasses[] = {"Signal", "Plane", "Mechanical", "Silk", "Paste", "Mask"};
 
 QDoubleSpinBox* lengthSpin(Unit u, bool signedValue = false) {
-  auto* s = new QDoubleSpinBox;
+  auto* s = new DoubleSpinBox;
   s->setDecimals(u == Unit::Mil ? 2 : 4);
   s->setRange(signedValue ? -1e5 : 0, 1e5);
   s->setSuffix(" " + unitName(u));
@@ -634,7 +635,7 @@ QWidget* PadstackEditor::thermalPage() {
   spokeWidth_ = lengthSpin(u_);
   spokes_ = new QSpinBox;
   spokes_->setRange(1, 8);
-  spokeAngle_ = new QDoubleSpinBox;
+  spokeAngle_ = new DoubleSpinBox;
   spokeAngle_->setRange(-360, 360);
   spokeAngle_->setDecimals(1);
   spokeAngle_->setSuffix(QString::fromUtf8("°"));

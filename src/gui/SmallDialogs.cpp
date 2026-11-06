@@ -1,4 +1,5 @@
 #include "gui/SmallDialogs.h"
+#include "gui/SpinBox.h"
 
 #include <QCheckBox>
 #include <QComboBox>
@@ -38,7 +39,7 @@ std::optional<Coord> askTrackWidth(QWidget* parent, Document* doc, const std::ve
   dlg.setWindowTitle(QObject::tr("Ширина проводника"));
   auto* v = new QVBoxLayout(&dlg);
   auto* f = new QFormLayout;
-  auto* width = new QDoubleSpinBox;
+  auto* width = new DoubleSpinBox;
   width->setDecimals(u == Unit::Mil ? 2 : 4);
   width->setRange(0.0001, 1e5);
   width->setSuffix(" " + unitName(u));
@@ -90,10 +91,20 @@ std::optional<Coord> askTrackWidth(QWidget* parent, Document* doc, const std::ve
 }
 
 std::optional<double> askRotationAngle(QWidget* parent) {
-  bool ok = false;
-  double a = QInputDialog::getDouble(parent, QObject::tr("Повернуть на угол"), QObject::tr("Угол поворота, °:"), 45, -360,
-                                     360, 3, &ok);
-  return ok ? std::optional<double>(a) : std::nullopt;
+  QDialog dlg(parent);
+  dlg.setWindowTitle(QObject::tr("Повернуть на угол"));
+  auto* f = new QFormLayout(&dlg);
+  auto* angle = new DoubleSpinBox;
+  angle->setRange(-360, 360);
+  angle->setDecimals(3);
+  angle->setValue(45);
+  f->addRow(QObject::tr("Угол поворота, °:"), angle);
+  auto* box = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+  QObject::connect(box, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+  QObject::connect(box, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+  f->addRow(box);
+  if (dlg.exec() != QDialog::Accepted) return std::nullopt;
+  return angle->value();
 }
 
 bool askText(QWidget* parent, Document* doc, Text& t) {
@@ -117,7 +128,7 @@ bool askText(QWidget* parent, Document* doc, Text& t) {
                    i);
   style->setCurrentIndex(std::max(0, style->findData(t.style)));
   f->addRow(QObject::tr("Стиль:"), style);
-  auto* angle = new QDoubleSpinBox;
+  auto* angle = new DoubleSpinBox;
   angle->setRange(-360, 360);
   angle->setDecimals(2);
   angle->setSuffix("°");

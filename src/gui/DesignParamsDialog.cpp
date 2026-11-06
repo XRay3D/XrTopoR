@@ -31,6 +31,7 @@
 #include "gui/PadstackDialogs.h"
 #include "gui/Schemes.h"
 #include "io/BoardIO.h"
+#include "gui/SpinBox.h"
 
 namespace xr::gui {
 
@@ -242,7 +243,7 @@ void DesignParamsDialog::importRules() {
 
 QWidget* DesignParamsDialog::lengthCell(Coord value, std::function<void(Coord)> set) {
   Unit u = doc_->unit();
-  auto* s = new QDoubleSpinBox;
+  auto* s = new DoubleSpinBox;
   s->setFrame(false);
   s->setDecimals(u == Unit::Mil ? 3 : 4);
   s->setRange(0, 1e6);
@@ -258,7 +259,7 @@ std::pair<QDoubleSpinBox*, QDoubleSpinBox*> DesignParamsDialog::orderedSpins(Coo
                                                                        std::function<void(Coord low, Coord high)> set) {
   Unit u = doc_->unit();
   auto cell = [&](Coord value) {
-    auto* s = new QDoubleSpinBox;
+    auto* s = new DoubleSpinBox;
     s->setFrame(false);
     s->setDecimals(u == Unit::Mil ? 3 : 4);
     s->setRange(0, 1e6);

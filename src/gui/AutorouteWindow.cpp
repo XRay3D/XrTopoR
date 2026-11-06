@@ -24,6 +24,7 @@
 
 #include "drc/Drc.h"
 #include "io/BoardIO.h"
+#include "gui/SpinBox.h"
 
 namespace xr::gui {
 
@@ -84,7 +85,7 @@ AutorouteWindow::AutorouteWindow(Document* doc, QWidget* parent) : QDialog(paren
   pv->addWidget(addOpened_);
   auto* cost = new QHBoxLayout;
   cost->addWidget(new QLabel(tr("Стоимость = Длина + Переходов ×")));
-  viaWeight_ = new QDoubleSpinBox;
+  viaWeight_ = new DoubleSpinBox;
   viaWeight_->setRange(0, 1000);
   viaWeight_->setValue(3.0);
   viaWeight_->setSuffix(tr(" мм/переход"));
@@ -161,7 +162,7 @@ AutorouteWindow::AutorouteWindow(Document* doc, QWidget* parent) : QDialog(paren
   passes_ = new QSpinBox;
   passes_->setRange(1, 50);
   av->addRow(tr("Проходов перекладки:"), passes_);
-  viaCost_ = new QDoubleSpinBox;
+  viaCost_ = new DoubleSpinBox;
   viaCost_->setRange(0, 100);
   viaCost_->setSuffix(tr(" мм"));
   av->addRow(tr("Стоимость перехода:"), viaCost_);

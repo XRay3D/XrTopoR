@@ -19,6 +19,7 @@
 
 #include "gui/MessagesPanel.h"
 #include "io/BoardIO.h"
+#include "gui/SpinBox.h"
 
 namespace xr::gui {
 
@@ -102,7 +103,7 @@ DrcDialog::DrcDialog(Document* doc, QWidget* parent) : QDialog(parent), doc_(doc
   auto* tol = new QHBoxLayout;
   tol->addWidget(new QLabel(tr("Допуск:")));
   Unit u = doc_->unit();
-  tolerance_ = new QDoubleSpinBox;
+  tolerance_ = new DoubleSpinBox;
   tolerance_->setDecimals(4);
   tolerance_->setRange(0, 1000);
   tolerance_->setSuffix(" " + unitName(u));

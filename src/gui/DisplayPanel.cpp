@@ -26,6 +26,7 @@
 #include <QVBoxLayout>
 
 #include "gui/Schemes.h"
+#include "gui/SpinBox.h"
 
 namespace xr::gui {
 
@@ -783,7 +784,7 @@ QWidget* DisplayPanel::settingsTab() {
   auto step = [&](const QString& symbol, double DisplayControl::* m) {
     auto* row = new QHBoxLayout;
     row->addWidget(new QLabel(symbol));
-    auto* spin = new QDoubleSpinBox;
+    auto* spin = new DoubleSpinBox;
     spin->setDecimals(4);
     spin->setRange(0.0001, 100000);
     spin->setKeyboardTracking(false);  // Enter takes the step, as in TopoR, not every digit typed

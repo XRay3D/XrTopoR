@@ -18,6 +18,7 @@
 #include "core/Padstack.h"
 #include "core/ZoneFill.h"
 #include "gui/PadstackDialogs.h"
+#include "gui/SpinBox.h"
 
 namespace xr::gui {
 
@@ -85,7 +86,7 @@ static void showLength(QDoubleSpinBox* s, std::optional<double> nm, Unit u) {
 
 QWidget* PropertiesPanel::length(std::optional<double> nm, std::function<void(double)> set, double min) {
   Unit u = doc_->unit();
-  auto* s = new QDoubleSpinBox;
+  auto* s = new DoubleSpinBox;
   s->setDecimals(u == Unit::Mil ? 2 : 4);
   s->setRange(toUnit(min, u), 1e6);
   if (min < 0) s->setRange(-1e6, 1e6);
@@ -225,7 +226,7 @@ QWidget* PropertiesPanel::textPage(int ti) {
     edit(tr("Стиль надписи"), [&](Board& bd) { bd.texts[ti].style = i; });
   });
   f->addRow(tr("Стиль:"), style);
-  auto* angle = new QDoubleSpinBox;
+  auto* angle = new DoubleSpinBox;
   angle->setRange(-360, 360);
   angle->setSuffix("°");
   angle->setValue(t.angle);
@@ -297,7 +298,7 @@ QWidget* PropertiesPanel::componentPage(const std::vector<int>& comps) {
                 for (int c : comps) bd.moveComponent(c, Point(Vec2{double(bd.components[c].pos.x), -v}));
               });
             }, -1));
-  auto* angle = new QDoubleSpinBox;
+  auto* angle = new DoubleSpinBox;
   angle->setRange(-360, 360);
   angle->setSuffix("°");
   angle->setKeyboardTracking(false);
