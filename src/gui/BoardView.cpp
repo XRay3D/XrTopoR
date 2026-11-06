@@ -2187,6 +2187,7 @@ void BoardView::recomputeShapesModel() {
                     .arg(res.wires)
                     .arg(res.stats.arcs)
                     .arg(res.stats.overflowEdges);
+  if (res.junctionMoves > 0) msg += tr("; ветвлений сдвинуто: %1").arg(res.junctionMoves);
   if (res.stats.narrowedWires > 0) msg += tr("; заужено проводников: %1").arg(res.stats.narrowedWires);
   emit status(msg);
 }

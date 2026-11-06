@@ -40,7 +40,7 @@ void usage() {
       "  gerber     <board> <outdir>\n"
       "  svg        <board> <out.svg>\n"
       "  reshape    <board> -o <out> [--nets a,b] [--around MM] [--no-settle] [--again N]  recompute track shapes (TopoR F5); --nets: those chains only\n"
-      "                     [--model [--no-flips] [--again N]]  F5 on the topological model\n"
+      "                     [--model [--no-flips] [--no-junctions] [--again N]]  F5 on the topological model\n"
       "  optimize   <board> -o <out> [--iterations N] [--step MM] [--components]   move vias/parts (F7, trial moves on the tracks)\n"
       "                     [--model [--no-flips] [--verbose]]  F7 on the topological model\n"
       "  refine     <board> -o <out> [--same-layer]   shorter wire paths around the copper as it lies (F6)\n"
@@ -282,6 +282,7 @@ int main(int argc, char** argv) {
     fo.flips = !a.flag("--no-flips");
     fo.direct = !a.flag("--sketch");
     fo.weighted = a.flag("--weighted");
+    fo.junctions = !a.flag("--no-junctions");
     auto res = topo::runF5Model(b, t, fo);
     for (const topo::Violation& v : res.violations) {
       using K = topo::Violation::Kind;

@@ -16,6 +16,10 @@ struct F5ModelOptions {
   bool flips = true;      // Lawson's loop before drawing (the mesh is Delaunay after a conversion already)
   bool weighted = false;  // ... weighted by the edges' loads
   bool direct = true;  // the realiser fed from the model (else from the sketches alone)
+  // The branch points go to their balance after the drawing, by the wires' forces (ModelRelax.h, the vias
+  // standing; TopoR's own F5 moves nothing — its branch points move in F6 and F7 — ours has moved them on the
+  // tracks, settleJunctions, and does so here).
+  bool junctions = true;
 };
 
 struct F5ModelResult {
@@ -23,6 +27,7 @@ struct F5ModelResult {
   std::vector<Violation> violations;  // what stopped it (or the overflows found, when drawn)
   int flips = 0;
   int wires = 0;
+  int junctionMoves = 0;  // branch points moved to their balance
   RealizeStats stats;
 };
 

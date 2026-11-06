@@ -11,6 +11,7 @@
 #include "core/Connectivity.h"
 #include "core/Prof.h"
 #include "core/SpatialIndex.h"
+#include "router/topo/ModelRelax.h"
 #include "router/topo/RealizerInput.h"
 #include "topo/Capacity.h"
 #include "topo/Flip.h"
@@ -450,6 +451,21 @@ F5ModelResult runF5Model(Board& b, Topology& t, const F5ModelOptions& o) {
   if (!prepareModel(t, o.flips, o.weighted, r.flips, r.violations)) return r;
   drawModel(b, t, o.direct, r.stats, r.wires);
   r.drawn = true;
+  if (o.junctions && o.direct && std::ranges::any_of(t.owners, [](const Owner& x) { return x.kind == Owner::Kind::Junction && x.layers != 0 && !x.locked; })) {
+    ProfScope p("F5 model: branch points");
+    OptimizeModelOptions mo;
+    mo.flips = false;
+    mo.vias = false;
+    mo.merge = false;
+    mo.hold = 3;
+    mo.decay = 0.6;
+    mo.floor = 0.05 * kNmPerMm;
+    OptimizeModelResult jr = optimizeModel(b, t, mo);
+    if (jr.drawn) {
+      r.junctionMoves = jr.junctionMoves;
+      r.stats = jr.stats;
+    }
+  }
   for (const Violation& v : t.violations)
     if (v.kind == Violation::Kind::Overflow || v.kind == Violation::Kind::OutsideBoard) r.violations.push_back(v);
   return r;
