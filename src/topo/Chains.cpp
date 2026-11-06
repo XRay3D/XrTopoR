@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <map>
+#include <print>
 #include <set>
 #include <tuple>
 
@@ -63,7 +64,88 @@ WireGraph wireGraph(const Board& b, const std::vector<char>& chosen, double glue
     g.ends[g.vid[i][0]].push_back(int(i));
     g.ends[g.vid[i][1]].push_back(int(i));
   }
+  g.width.resize(b.tracks.size());
+  for (size_t i = 0; i < b.tracks.size(); ++i) g.width[i] = b.tracks[i].width;
   return g;
+}
+
+void effectiveWidths(const Board& b, WireGraph& g, const OwnCopper& copper) {
+  const bool debug = std::getenv("XR_TOPO_DEBUG") != nullptr;
+  // What a vertex is: a node (own copper, a branch, a free end) or a point in series.
+  std::vector<int> degree(size_t(g.count), 0);
+  std::vector<char> node(size_t(g.count), 0), inCopper(size_t(g.count), 0);
+  for (size_t i = 0; i < b.tracks.size(); ++i) {
+    if (!g.relevant[i] || g.tiny[i]) continue;
+    const Track& t = b.tracks[i];
+    for (int e = 0; e < 2; ++e) {
+      int v = g.vid[i][e];
+      ++degree[size_t(v)];
+      if (copper.touches(e ? t.b : t.a, t.net, t.layer)) node[size_t(v)] = inCopper[size_t(v)] = 1;
+      if (t.locked) node[size_t(v)] = 1;
+    }
+  }
+  for (int v = 0; v < g.count; ++v)
+    if (degree[size_t(v)] != 2) node[size_t(v)] = 1;
+  auto otherAt = [&](int v, int ti) {
+    for (int j : g.ends[size_t(v)])
+      if (j != ti && !g.tiny[j]) return j;
+    return -1;
+  };
+  for (int pass = 0; pass < 4; ++pass) {
+    bool changed = false;
+    std::vector<char> seen(b.tracks.size(), 0);
+    for (size_t i0 = 0; i0 < b.tracks.size(); ++i0) {
+      if (!g.relevant[i0] || g.tiny[i0] || seen[i0] || b.tracks[i0].locked) continue;
+      // The run of this width through the points in series.
+      const Coord w = g.width[i0];
+      std::vector<int> run{int(i0)};
+      seen[i0] = 1;
+      int endV[2], beyond[2];  // the run's end vertices and the tracks beyond them (-1 at a node)
+      for (int dir = 0; dir < 2; ++dir) {
+        int ti = int(i0), v = g.vid[i0][dir];
+        while (true) {
+          endV[dir] = v;
+          beyond[dir] = -1;
+          if (node[size_t(v)]) break;
+          int o = otherAt(v, ti);
+          if (o < 0) break;
+          if (g.width[size_t(o)] != w || b.tracks[size_t(o)].locked || seen[size_t(o)]) {
+            beyond[dir] = o;
+            break;
+          }
+          seen[size_t(o)] = 1;
+          run.push_back(o);
+          v = g.vid[size_t(o)][0] == v ? g.vid[size_t(o)][1] : g.vid[size_t(o)][0];
+          ti = o;
+        }
+      }
+      if (endV[0] == endV[1]) continue;  // a loop
+      double len = 0;
+      for (int ti : run) len += b.tracks[size_t(ti)].length();
+      const Coord w0 = beyond[0] >= 0 ? g.width[size_t(beyond[0])] : 0, w1 = beyond[1] >= 0 ? g.width[size_t(beyond[1])] : 0;
+      Coord to = w;
+      if (w0 > w && w1 == w0) {
+        to = w0;  // a neck of the wider wire
+      } else if (len <= kStubAbsorb * double(w)) {
+        const bool thin0 = w0 > 0 && w0 < w, thin1 = w1 > 0 && w1 < w;
+        // A stub at a node (a pad, a via, a branch: not a free end), or a bulge between two thinner runs.
+        auto real = [&](int v) { return degree[size_t(v)] != 1 || inCopper[size_t(v)]; };
+        if (thin0 && thin1) to = std::min(w0, w1);
+        else if (thin0 && beyond[1] < 0 && real(endV[1])) to = w0;
+        else if (thin1 && beyond[0] < 0 && real(endV[0])) to = w1;
+      }
+      if (debug && (w0 > 0 || w1 > 0)) {
+        const Track& t = b.tracks[run.front()];
+        std::println(stderr, "run net {} L{} w{:.3f} len {:.3f} mm near ({:.3f},{:.3f}): beyond {:.3f} / {:.3f}, ends {} / {} -> {:.3f}", b.nets[t.net].name,
+                     int(t.layer), w / 1e6, len / 1e6, t.a.x / 1e6, t.a.y / 1e6, w0 / 1e6, w1 / 1e6, degree[size_t(endV[0])], degree[size_t(endV[1])], to / 1e6);
+      }
+      if (to != w) {
+        for (int ti : run) g.width[size_t(ti)] = to;
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
 }
 
 namespace {
@@ -71,9 +153,8 @@ namespace {
 // Track j goes on the chain of track i. A width change ends the chain too: a 0.8 mm bus and its 0.3 mm
 // branch to a pad are two wires (one wire took the bus width all the way to the pad: 0.1 mm from the
 // neighbouring pads).
-bool sameChain(const Board& b, int i, int j) {
-  return b.tracks[i].net == b.tracks[j].net && b.tracks[i].layer == b.tracks[j].layer && !b.tracks[j].locked &&
-         b.tracks[i].width == b.tracks[j].width;
+bool sameChain(const Board& b, const WireGraph& g, int i, int j) {
+  return b.tracks[i].net == b.tracks[j].net && b.tracks[i].layer == b.tracks[j].layer && !b.tracks[j].locked && g.width[i] == g.width[j];
 }
 
 }  // namespace
@@ -87,7 +168,7 @@ void growChains(const Board& b, std::vector<char>& chosen, const WireGraph& g) {
     stack.pop_back();
     for (int v : g.vid[i])
       for (int j : g.ends[v])
-        if (!chosen[j] && sameChain(b, i, j)) {
+        if (!chosen[j] && sameChain(b, g, i, j)) {
           chosen[j] = 1;
           stack.push_back(j);
         }
@@ -195,7 +276,7 @@ std::vector<WireChain> wireChains(const Board& b, const WireGraph& g, const std:
     const Track& t = b.tracks[ti];
     if (degree[v] != 2 || copper.touches(p, t.net, t.layer)) return true;
     for (int j : ends[v])
-      if (chosen[j] && !g.tiny[j] && j != ti && !sameChain(b, ti, j)) return true;
+      if (chosen[j] && !g.tiny[j] && j != ti && !sameChain(b, g, ti, j)) return true;
     return false;
   };
   std::vector<char> used(b.tracks.size(), 0);
@@ -207,7 +288,7 @@ std::vector<WireChain> wireChains(const Board& b, const WireGraph& g, const std:
     const Track& t0 = b.tracks[start];
     w.net = t0.net;
     w.layer = t0.layer;
-    w.width = t0.width;
+    w.width = g.width[start];
     w.closed = closed;
     int ti = start, curV = vid[start][fromEnd];
     w.vertex[0] = curV;
@@ -229,7 +310,7 @@ std::vector<WireChain> wireChains(const Board& b, const WireGraph& g, const std:
       if (isEnd(curV, next, ti)) break;
       int cont = -1;
       for (int j : ends[curV])
-        if (chosen[j] && !used[j] && j != ti && sameChain(b, ti, j)) cont = j;
+        if (chosen[j] && !used[j] && j != ti && sameChain(b, g, ti, j)) cont = j;
       if (cont < 0) break;
       for (int j : ends[curV])
         if (inner[j] && !std::ranges::contains(w.tracks, j)) w.tracks.push_back(j);

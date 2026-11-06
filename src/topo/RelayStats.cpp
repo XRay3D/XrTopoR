@@ -1,6 +1,7 @@
 #include "topo/RelayStats.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <format>
 #include <set>
 
@@ -27,6 +28,10 @@ RelayStats relayStats(const Board& b) {
   std::vector<char> all(b.tracks.size(), 1);
   const WireGraph g = wireGraph(b, all);
   OwnCopper copper(b);
+  if (std::getenv("XR_TOPO_DEBUG")) {  // what the width rules would do to this board's runs (printed by effectiveWidths)
+    WireGraph probe = g;
+    effectiveWidths(b, probe, copper);
+  }
   std::vector<PadFrame> frames;
   for (const Pad& p : b.pads) frames.push_back(padFrame(p));
   auto endOf = [&](int ti, int e) { return e ? b.tracks[ti].b.v() : b.tracks[ti].a.v(); };

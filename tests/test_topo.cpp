@@ -22,6 +22,7 @@
 #include "topo/Chains.h"
 #include "topo/Flip.h"
 #include "topo/Move.h"
+#include "topo/RelayStats.h"
 #include "topo/Sidecar.h"
 #include "router/topo/ModelTools.h"
 #include "router/topo/Wires.h"
@@ -299,10 +300,11 @@ TEST(Topo, ConvertsReferenceBoards) {
     EXPECT_EQ(t.check(), std::vector<std::string>{}) << x.file;
     std::vector<char> all(b.tracks.size(), 1);
     auto g = topo::wireGraph(b, all);
-    auto chains = topo::wireChains(b, g, all, topo::OwnCopper(b));
+    topo::OwnCopper own(b);
+    topo::effectiveWidths(b, g, own);  // as the conversion builds its chains: stubs with their branches, necks with their wires
+    auto chains = topo::wireChains(b, g, all, own);
     std::erase_if(chains, [](const topo::WireChain& c) { return c.closed; });
     // Chains lying inside the copper they start and end on are that copper, not wires.
-    topo::OwnCopper own(b);
     size_t real = 0;
     for (const topo::WireChain& c : chains) {
       auto r0 = own.at(c.a(), c.net, c.layer), r1 = own.at(c.b(), c.net, c.layer);
@@ -1476,4 +1478,107 @@ TEST(Topo, NarrowingIsTheLastResort) {
       EXPECT_EQ(clearance == 0, c.clean) << name << ": " << clearance << " clearance violation(s)";
       EXPECT_EQ(width, 0) << name;
     }
+}
+
+namespace {
+
+// A one-layer board 40 x 20 mm of round pads and straight tracks of one net, for the width rules.
+struct WidthBoard {
+  Board b;
+  LayerId top = 0;
+  int net = 0;
+  WidthBoard() {
+    top = b.addLayer("Top", LayerKind::Copper, Side::Top);
+    b.layers[top].copperIndex = 0;
+    b.outline.push_back({at(0, 0), at(40, 0), at(40, 20), at(0, 20)});
+    net = b.addNet("A");
+    Component c;
+    c.ref = "U1";
+    b.components.push_back(c);
+  }
+  static Vec2 at(double x, double y) { return {x * kNmPerMm, y * kNmPerMm}; }
+  void pad(double x, double y) {
+    Pad p;
+    p.number = std::to_string(b.pads.size());
+    p.component = 0;
+    p.net = net;
+    p.pos = Point(at(x, y));
+    p.shape.w = p.shape.h = mmToNm(1.0);
+    p.copper = LayerMask(1) << top;
+    b.pads.push_back(p);
+  }
+  void track(double x1, double y1, double x2, double y2, double width) {
+    Track t;
+    t.a = Point(at(x1, y1));
+    t.b = Point(at(x2, y2));
+    t.width = mmToNm(width);
+    t.layer = top;
+    t.net = net;
+    b.tracks.push_back(t);
+  }
+  // The widths of the tracks with an end at the point.
+  std::set<Coord> widthsAt(double x, double y) const {
+    std::set<Coord> out;
+    for (const Track& t : b.tracks)
+      if ((t.a.v() - at(x, y)).len() < 1000 || (t.b.v() - at(x, y)).len() < 1000) out.insert(t.width);
+    return out;
+  }
+  void relay(bool model) {
+    if (model) {
+      topo::Topology::assignIds(b);
+      topo::Topology t;
+      t.build(b);
+      ASSERT_TRUE(topo::runF5Model(b, t).drawn);
+    } else {
+      topo::reshapeTracks(b, std::vector<char>(b.tracks.size(), 1));
+    }
+  }
+};
+
+}  // namespace
+
+// A short wide stub between a node and the point where a thinner wire goes on is that thinner wire's
+// (TopoR's F5 brings the branch up to the node); a long wide piece keeps its joint.
+TEST(Topo, WideStubIsAbsorbed) {
+  for (bool model : {true, false}) {
+    WidthBoard w;
+    w.pad(5, 10), w.pad(20, 18), w.pad(35, 10), w.pad(20, 2);
+    w.track(5, 10, 6.5, 10, 0.8);   // 1.5 mm of bus out of the pad ...
+    w.track(6.5, 10, 20, 18, 0.3);  // ... and the thin branch on from it
+    w.track(35, 10, 23, 10, 0.8);   // 12 mm of bus: stays
+    w.track(23, 10, 20, 2, 0.3);
+    w.relay(model);
+    const char* how = model ? "model" : "tracks";
+    EXPECT_EQ(w.widthsAt(5, 10), (std::set<Coord>{mmToNm(0.3)})) << how << ": the stub took the branch's width";
+    EXPECT_EQ(w.widthsAt(35, 10), (std::set<Coord>{mmToNm(0.8)})) << how << ": the long piece is the bus still";
+    auto s = topo::relayStats(w.b);
+    EXPECT_EQ(s.jointSeries, 1) << how;
+    EXPECT_EQ(s.tees, 0) << how;
+  }
+}
+
+// A neck in series between two pieces of one wider wire is a piece of that wire: laid with its width again
+// where there is room (what the realiser narrowed does not stay narrow). A thin branch from a junction to a
+// pad is a wire of its own and stays thin.
+TEST(Topo, NarrowedPieceRejoinsItsWire) {
+  for (bool model : {true, false}) {
+    const char* how = model ? "model" : "tracks";
+    {
+      WidthBoard w;
+      w.pad(5, 10), w.pad(35, 10);
+      w.track(5, 10, 15, 10, 0.8), w.track(15, 10, 25, 10, 0.3), w.track(25, 10, 35, 10, 0.8);
+      w.relay(model);
+      for (const Track& t : w.b.tracks) EXPECT_EQ(t.width, mmToNm(0.8)) << how << ": the neck is the wire again";
+      EXPECT_EQ(topo::relayStats(w.b).necks, 0) << how;
+    }
+    {
+      WidthBoard w;
+      w.pad(5, 10), w.pad(35, 10), w.pad(20, 18);
+      w.track(5, 10, 20, 10, 0.8), w.track(20, 10, 35, 10, 0.8), w.track(20, 10, 20, 18, 0.3);
+      w.relay(model);
+      EXPECT_EQ(w.widthsAt(20, 18), (std::set<Coord>{mmToNm(0.3)})) << how << ": the branch stays thin";
+      EXPECT_EQ(w.widthsAt(5, 10), (std::set<Coord>{mmToNm(0.8)})) << how;
+      EXPECT_EQ(topo::relayStats(w.b).jointBranch, 1) << how;
+    }
+  }
 }

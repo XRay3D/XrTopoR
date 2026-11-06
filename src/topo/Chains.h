@@ -22,6 +22,10 @@ struct WireGraph {
   std::vector<std::array<int, 2>> vid;  // per track: vertex of a and of b (-1: not relevant)
   std::vector<std::vector<int>> ends;   // per vertex: the tracks ending there
   std::vector<char> tiny;               // per track: both ends glued into one vertex
+  // Per track: the width its wire is laid with. The track's own, until effectiveWidths() has looked at the
+  // runs: a neck goes back to the width of the wire it is a piece of, a short wide stub takes the width
+  // of the thin branch that goes on from it.
+  std::vector<Coord> width;
   int count = 0;
 };
 WireGraph wireGraph(const Board& b, const std::vector<char>& chosen, double glue = kWireGlue);
@@ -55,6 +59,20 @@ struct WireChain {
   Vec2 a() const { return path.front(); }
   Vec2 b() const { return path.back(); }
 };
+
+// A wide piece no longer than this many of its widths, between a node (a pad, a via, a branch) and the point
+// where a thinner wire goes on, is a stub of that thinner wire. Measured on TopoR's F5 of
+// Arcs_standard_routing: 0.8 mm pieces of 1.15, 1.36, 1.85, 2.05, 4.4 and 4.55 mm before a 0.3 mm branch
+// are gone and the branch reaches the node; those of 11.35 and 14.0 mm stay. The limit lies between 5.7
+// and 14 widths; eight is a choice within that.
+constexpr double kStubAbsorb = 8.0;
+
+class OwnCopper;
+// The widths the wires are laid with (WireGraph::width), from the runs of equal width between the nodes:
+// - a neck — a run in series between two runs of one larger width, off the copper — is a piece of that
+//   wire the realiser narrowed, and is laid with the wire's width again (narrowing does not stick);
+// - a stub — a short run between a node and a thinner run in series — is laid with the thin width.
+void effectiveWidths(const Board& b, WireGraph& g, const OwnCopper& copper);
 
 // The chosen tracks grown to whole chains of one net and layer, as a mask over the tracks; no geometry
 // is touched.

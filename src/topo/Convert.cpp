@@ -211,6 +211,7 @@ void Topology::convertWires(const Board& b, BuildScratch& scratch) {
   std::vector<char> all(b.tracks.size(), 1);
   WireGraph g = wireGraph(b, all);
   OwnCopper copper(b);
+  effectiveWidths(b, g, copper);
   std::vector<WireChain> chains = wireChains(b, g, all, copper);
   std::erase_if(chains, [](const WireChain& c) { return c.closed || c.path.size() < 2; });
   ownerTracks.clear();

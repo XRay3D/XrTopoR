@@ -61,7 +61,9 @@ RealizeStats reshapeTracks(Board& b, std::vector<char> chosen, const ReshapeOpti
   std::optional<ProfScope> phase;
   phase.emplace("reshapeTracks: chains");
   chosen.resize(b.tracks.size(), 0);
+  OwnCopper copper(b);  // pads and vias are all the chain building asks about
   WireGraph g = wireGraph(b, chosen, o.glue);
+  effectiveWidths(b, g, copper);
   growChains(b, chosen, g);
   if (o.around > 0) {
     // The neighbourhood: every unlocked track near a chosen one joins, with its whole chain.
@@ -82,10 +84,10 @@ RealizeStats reshapeTracks(Board& b, std::vector<char> chosen, const ReshapeOpti
       if (add[j]) { chosen[j] = 1; any = true; }
     if (any) {
       g = wireGraph(b, chosen, o.glue);
+      effectiveWidths(b, g, copper);
       growChains(b, chosen, g);
     }
   }
-  OwnCopper copper(b);  // pads and vias are all the chain building asks about
   std::vector<RealWire> wires = sketchesOf(b, wireChains(b, g, chosen, copper), copper);
   if (wires.empty()) return {};
   std::vector<Track> keep;
