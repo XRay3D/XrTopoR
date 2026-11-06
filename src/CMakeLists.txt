@@ -48,6 +48,8 @@ add_library(xrtopo STATIC
   topo/Convert.cpp
   topo/Flip.cpp
   topo/Move.cpp
+  topo/PadExit.cpp
+  topo/RelayStats.cpp
   topo/Sidecar.cpp
   topo/Topology.cpp
 )

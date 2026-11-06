@@ -16,6 +16,7 @@
 #include "io/svg/SvgWriter.h"
 #include "core/Prof.h"
 #include "router/topo/ModelTools.h"
+#include "topo/RelayStats.h"
 #include "topo/Sidecar.h"
 #include "router/topo/Optimizer.h"
 #include "router/topo/Refine.h"
@@ -43,6 +44,7 @@ void usage() {
       "  refine     <board> -o <out> [--same-layer]   shorter wire paths around the copper as it lies (F6)\n"
       "  fill       <board> -o <out> [--no-thermals]  pour copper zones\n"
       "  report     <board> [--bom out.csv]          routing statistics per layer and net, BOM\n"
+      "  padstats   <board>                         how the wires meet the pads: widths, exits, runs inside copper, joints\n"
       "boards: .kicad_pcb, .dsn, P-CAD ASCII .pcb");
 }
 
@@ -179,6 +181,10 @@ int main(int argc, char** argv) {
       if (auto r = io::writeFile(std::string(p), io::bomCsv(b)); !r) return fail(r.error());
       std::println("BOM written to {}", p);
     }
+    return 0;
+  }
+  if (cmd == "padstats") {
+    std::print("{}", topo::relayStats(b).text());
     return 0;
   }
   if (cmd == "fill" && !a.opt("-o").empty()) {
