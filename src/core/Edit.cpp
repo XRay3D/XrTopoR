@@ -538,22 +538,31 @@ void changeNet(Board& b, const Fragment& f, const std::vector<int>& pads, int ne
   for (int pi : pads) b.pads[pi].net = net;
 }
 
+LayerMask viaHeldBy(const Board& b, const Via& v) {
+  LayerMask used = 0;
+  for (const Pad& p : b.pads)
+    if (p.net == v.net && p.shapeGeom().contains(v.pos.v())) used |= p.copper;
+  for (const Zone& z : b.zones)
+    if (z.net == v.net && v.onLayer(z.layer) && z.outline.size() >= 3 && pointInPolygon(v.pos.v(), z.outline))
+      used |= LayerMask(1) << z.layer;
+  for (LayerId l : b.copperLayers())
+    if (b.layers[l].plane && b.layers[l].planeNet == v.net && v.onLayer(l)) used |= LayerMask(1) << l;
+  return used & v.layers;
+}
+
+LayerMask viaTrackLayers(const Board& b, const Via& v) {
+  LayerMask used = 0;
+  for (const Track& t : b.tracks)
+    if (onVia(v, t.a.v(), t.layer, t.net) || onVia(v, t.b.v(), t.layer, t.net)) used |= LayerMask(1) << t.layer;
+  return used & v.layers;
+}
+
 int removeExcessVias(Board& b) {
   int n = 0;
   for (int vi = int(b.vias.size()) - 1; vi >= 0; --vi) {
     const Via& v = b.vias[vi];
     if (v.locked || b.flexFixed(v.net)) continue;  // a flexibly fixed net keeps its vias
-    LayerMask used = 0;
-    for (const Track& t : b.tracks)
-      if (onVia(v, t.a.v(), t.layer, t.net) || onVia(v, t.b.v(), t.layer, t.net)) used |= LayerMask(1) << t.layer;
-    for (const Pad& p : b.pads)
-      if (p.net == v.net && p.shapeGeom().contains(v.pos.v())) used |= p.copper;
-    for (const Zone& z : b.zones)
-      if (z.net == v.net && v.onLayer(z.layer) && z.outline.size() >= 3 && pointInPolygon(v.pos.v(), z.outline))
-        used |= LayerMask(1) << z.layer;
-    for (LayerId l : b.copperLayers())
-      if (b.layers[l].plane && b.layers[l].planeNet == v.net && v.onLayer(l)) used |= LayerMask(1) << l;
-    used &= v.layers;
+    const LayerMask used = viaTrackLayers(b, v) | viaHeldBy(b, v);
     if (std::popcount(used) > 1) continue;
     b.vias.erase(b.vias.begin() + vi);
     ++n;

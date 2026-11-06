@@ -6,6 +6,7 @@
 // those forces on an element says which way it goes and how far, and the steps shrink from iteration to
 // iteration. The forces are taken from the drawing itself (RealizeStats::ownerForce: the realiser's bends
 // and tangents are the wire of the paper's figure), so what is descended is the length that is drawn.
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -53,11 +54,24 @@ struct DrawingScore {
   int places = 0, conflicts = 0;       // places; violations as the DRC counts them
   double shortfall = 0;                // the DRC's violations' depth summed, nm
   double depth = 0, length = 0;        // the places' depth; the tracks' length, nm
-  double score() const;                // length + 100 mm per mm of depth + 1 mm per place
+  int vias = 0;
+  double score() const;                // length + 100 mm per mm of depth + 1 mm per place + kViaCost per via
 };
+// What a via is worth in length to the judge (F6 takes a via away when the wires get no longer than this for
+// it; the number of vias changes nowhere else).
+constexpr double kViaCost = 3.0 * kNmPerMm;
 DrawingScore scoreDrawing(const Board& b);
 // A violation is not bought with length: less unrouted, then fewer places shorted, deep, real; then the score.
 bool betterDrawing(const DrawingScore& a, const DrawingScore& than);
+
+// The tracks of a board edited (ends moved, tracks and vias added and taken away), drawn anew through a model
+// built from them. Nothing when the model of the tracks has wires crossing or a wire through another net's pad.
+struct Redrawn {
+  Topology model;
+  Board board;
+  DrawingScore score;
+};
+std::optional<Redrawn> redrawTracks(const Board& edited, bool flips, int& drawings);
 
 // The vias that stand closer to copper of other nets than the rule (per owner; F7's first steps take them off
 // it). F6 leaves the edges at them alone: a wire led past such a via takes the room it has to step into

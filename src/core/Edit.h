@@ -87,6 +87,11 @@ int unlink(Board& b, const Fragment& f);
 void changeNet(Board& b, const Fragment& f, const std::vector<int>& pads, int net);
 // «Удалить избыточные переходы»: unlocked vias connecting nothing or one layer only. Returns the count.
 int removeExcessVias(Board& b);
+// The copper layers a via is needed on by what is not a track: a pad of its net it stands on, a copper area or
+// a plane of its net.
+LayerMask viaHeldBy(const Board& b, const Via& v);
+// ... and the layers of the tracks of its net that end on it.
+LayerMask viaTrackLayers(const Board& b, const Via& v);
 
 // Clipboard contents: wires, vias and copper areas with their nets and layers by name, so that they
 // can be pasted into another design. Components come from the netlist and are not copied.

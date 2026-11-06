@@ -46,7 +46,15 @@ RefineModelResult refineModel(Board& b, Topology& t, const RefineModelOptions& o
   bool first = true;
   bool counting = true;  // the wires tried are counted in the first pass
   std::set<std::pair<int, long>> refused;  // (wire, the length of its new path in um): led so, the drawing was no better
-  std::set<std::pair<int, int>> refusedPairs;  // (wire, the wire taken out for it): the same of a clinch
+  std::set<std::pair<int, std::vector<int>>> refusedPairs;  // (wire, the wires taken out for it): the same of a clinch
+  int clinchesOfMany = 0;  // clinches undone with more than one wire taken out
+  std::vector<char> fixedNets(b.nets.size(), 0);  // the flexibly fixed nets: their wires are not laid anew
+  for (int n = 0; n < int(b.nets.size()); ++n) fixedNets[size_t(n)] = b.flexFixed(n);
+  auto among = [&](const std::vector<int>& ws) {
+    std::string out;
+    for (int x : ws) out += std::format("{} wire {} of {}", out.empty() ? " in a clinch with" : ",", x, b.nets[t.wires[size_t(x)].net].name);
+    return out;
+  };
   // One pass of re-laying over the model as it stands: the board and the model are left at the best drawing.
   auto relay = [&] {
   Drawn best = draw();
@@ -75,35 +83,18 @@ RefineModelResult refineModel(Board& b, Topology& t, const RefineModelOptions& o
   // No wire is led past a via that has yet to step off copper it is too close to (F7 does that): it would
   // take the room the via has to step into.
   const std::vector<char> unsettled = viasTooClose(b, t);
-  // The wires of other nets that may hold a wire in a clinch (Luzin, Popov, Popov 2012: the three signs — a
-  // wire crossing an edge at its own end vertex behind another wire, the edge between its two ends crossed by
-  // others, two wires bent round each other's ends — have this in common): those crossing an edge at a vertex
-  // of the copper the wire ends on.
+  // The wires of other nets that may hold a wire in a clinch: those crossing an edge at a vertex of the copper
+  // the wire ends on (wiresRound).
   auto holders = [&](int wi) {
     const Wire& w = t.wires[size_t(wi)];
-    const LayerMesh& m = *t.mesh(w.layer);
-    std::vector<int> out;
-    for (const Edge& E : m.edges) {
-      if (E.v[0] < 0 || E.cross.empty()) continue;
-      const int o0 = m.verts[E.v[0]].owner, o1 = m.verts[E.v[1]].owner;
-      if (o0 != w.end[0] && o0 != w.end[1] && o1 != w.end[0] && o1 != w.end[1]) continue;
-      for (int cid : E.cross) {
-        const int other = t.crossings[cid].wire;
-        if (other < 0 || other == wi) continue;
-        const Wire& x = t.wires[size_t(other)];
-        if (x.net == w.net || x.locked || b.flexFixed(x.net) || x.end[0] < 0 || x.end[1] < 0) continue;
-        if (std::ranges::find(out, other) == out.end()) out.push_back(other);
-      }
-    }
-    if (out.size() > 8) out.resize(8);
-    return out;
+    return wiresRound(t, w.layer, w.end[0], w.end[1], w.net, wi, &fixedNets);
   };
   for (const Candidate& c : order) {
     if (counting) ++r.wires;
     const double was = tautLength(t, c.wire);
     std::optional<Topology> saved;
     double wasAll = was, now = 0;
-    int partner = -1;
+    std::vector<int> partners;
     bool found = false;
     {
       std::optional<RelayPath> path;
@@ -121,31 +112,27 @@ RefineModelResult refineModel(Board& b, Topology& t, const RefineModelOptions& o
       }
     }
     if (!found && o.clinches) {
-      // No shorter way alone: with one of the wires that hold it taken out, and that wire laid anew after it
-      // (the hindering wire goes the other side of the long one's end). Both shorter in sum, or nothing.
+      // No shorter way alone: with the wires that hold it taken out, and laid anew after it (a hindering wire
+      // goes the other side of the long one's end). All of them shorter in sum, or nothing.
       ProfScope p("F6 model: clinches");
-      for (int other : holders(c.wire)) {
-        if (refusedPairs.contains({c.wire, other})) continue;
-        const std::vector<int> absent{other};
-        const std::optional<RelayPath> first = findRelay(t, c.wire, &unsettled, &absent);
-        if (!first || first->length > was - std::max(o.gain, o.gainPart * was)) continue;
-        const double wasOther = tautLength(t, other);
-        saved = t;
-        takeOut(t, other);
-        applyRelay(t, c.wire, *first);
-        bool ok = false;
-        if (const std::optional<RelayPath> second = findRelay(t, other, &unsettled)) {
-          applyRelay(t, other, *second);
-          now = tautLength(t, c.wire) + tautLength(t, other);
-          ok = now <= was + wasOther - std::max(o.gain, o.gainPart * (was + wasOther));
-        }
-        if (ok) {
+      std::vector<int> hs = holders(c.wire);
+      std::erase_if(hs, [&](int h) { return refusedPairs.contains({c.wire, std::vector<int>{h}}); });
+      while (!found && !hs.empty()) {
+        const std::optional<PastResult> past = relayPast(t, c.wire, hs, was - std::max(o.gain, o.gainPart * was), &unsettled, saved);
+        if (!past) break;
+        std::vector<int> key = past->taken;
+        std::ranges::sort(key);
+        now = past->length + past->othersAfter;
+        wasAll = was + past->othersBefore;
+        if (now <= wasAll - std::max(o.gain, o.gainPart * wasAll) && !refusedPairs.contains({c.wire, key})) {
           found = true;
-          partner = other;
-          wasAll = was + wasOther;
+          partners = std::move(key);
+          if (partners.size() > 1) ++clinchesOfMany;
           break;
         }
         t = std::move(*saved);
+        if (key.size() != 1) break;
+        std::erase(hs, key.front());  // not with this one: the next that holds it
       }
     }
     if (!found) continue;
@@ -163,16 +150,16 @@ RefineModelResult refineModel(Board& b, Topology& t, const RefineModelOptions& o
     const bool kept = betterDrawing(cur.score, best.score);
     r.log.push_back(std::format("wire {} of {}{}: {:.2f} -> {:.2f} mm in the model; {} conflict(s) in {} place(s), {:.3f} mm short, {:.1f} mm: {}", c.wire,
                                 b.nets[t.wires[c.wire].net].name,
-                                partner >= 0 ? std::format(" in a clinch with wire {} of {}", partner, b.nets[t.wires[size_t(partner)].net].name) : "", wasAll / 1e6,
+                                among(partners), wasAll / 1e6,
                                 now / 1e6, cur.score.conflicts, cur.score.places, cur.score.shortfall / 1e6, cur.score.length / 1e6, kept ? "kept" : "left as it was"));
     if (kept) {
       best = std::move(cur);
       ++r.relaid;
-      if (partner >= 0) ++r.clinches;
+      if (!partners.empty()) ++r.clinches;
     } else {
       t = std::move(*saved);
-      if (partner >= 0)
-        refusedPairs.insert({c.wire, partner});
+      if (!partners.empty())
+        refusedPairs.insert({c.wire, partners});
       else
         refused.insert({c.wire, std::lround(now / 1000)});
     }
@@ -251,6 +238,7 @@ RefineModelResult refineModel(Board& b, Topology& t, const RefineModelOptions& o
   // point that moved has opened ways that were not there (on Arcs_standard_routing 2 wires more after the 8
   // that F6 moves); the branch points follow.
   if ((r.branches > 0 || r.junctionMoves > 0) && relayAll()) relax();
+  if (clinchesOfMany > 0) r.log.push_back(std::format("clinches: {} undone with more than one wire taken out", clinchesOfMany));
   return r;
 }
 

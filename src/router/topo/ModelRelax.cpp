@@ -274,7 +274,7 @@ struct Drawn {
 
 }  // namespace
 
-double DrawingScore::score() const { return length + depth * kDepthCost + double(places) * kCountCost; }
+double DrawingScore::score() const { return length + depth * kDepthCost + double(places) * kCountCost + double(vias) * kViaCost; }
 
 DrawingScore scoreDrawing(const Board& b) {
   DrawingScore s;
@@ -292,8 +292,25 @@ DrawingScore scoreDrawing(const Board& b) {
     if (p.shorted || p.depth > kNoise) ++s.real;
   }
   s.length = b.tracksLength();
+  s.vias = int(b.vias.size());
   s.unrouted = Connectivity::compute(b).ratsnest.size();
   return s;
+}
+
+std::optional<Redrawn> redrawTracks(const Board& edited, bool flips, int& drawings) {
+  ProfScope p("tracks edited: redrawing");
+  Redrawn r{{}, edited, {}};
+  Topology::assignIds(r.board);
+  r.model.build(r.board);
+  int nFlips = 0;
+  std::vector<Violation> stop;
+  if (!prepareModel(r.model, flips, false, nFlips, stop)) return std::nullopt;
+  RealizeStats st;
+  int wires = 0;
+  drawModel(r.board, r.model, true, st, wires);
+  r.score = scoreDrawing(r.board);
+  ++drawings;
+  return r;
 }
 
 std::vector<char> viasTooClose(const Board& b, const Topology& t) {

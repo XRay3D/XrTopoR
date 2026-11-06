@@ -23,29 +23,6 @@ constexpr double kAt = 3;                       // nm: two points are one
 constexpr double kKeepOff = 0.05 * kNmPerMm;    // a new branch point stands this far off the copper of its net, beyond its own half width
 constexpr double kNotAtAnEnd = 0.05 * kNmPerMm; // ... and off the far ends of the two segments (there it would be no new vertex)
 
-// The tracks of a board edited (ends moved, tracks added and taken away), drawn anew through a model built from
-// them. Nothing when the model of the tracks has wires crossing or a wire through another net's pad.
-struct Redrawn {
-  Topology model;
-  Board board;
-  DrawingScore score;
-};
-std::optional<Redrawn> redraw(const Board& edited, bool flips, int& drawings) {
-  ProfScope p("branch points: redrawing");
-  Redrawn r{{}, edited, {}};
-  Topology::assignIds(r.board);
-  r.model.build(r.board);
-  int nFlips = 0;
-  std::vector<Violation> stop;
-  if (!prepareModel(r.model, flips, false, nFlips, stop)) return std::nullopt;
-  RealizeStats st;
-  int wires = 0;
-  drawModel(r.board, r.model, true, st, wires);
-  r.score = scoreDrawing(r.board);
-  ++drawings;
-  return r;
-}
-
 // The first straight track of a wire that leaves the copper of the owner the wire ends at.
 struct Leg {
   int wire = -1;
@@ -345,7 +322,7 @@ BranchResult splitBranches(Board& b, Topology& t, const BranchOptions& o) {
         gain += splits[k].gain;
       }
     if (n == 0) break;
-    auto drawn = redraw(eb, o.flips, r.drawings);
+    auto drawn = redrawTracks(eb, o.flips, r.drawings);
     const bool better = drawn && betterDrawing(drawn->score, was);
     r.log.push_back(std::format("new branch points: {} of {} pair(s) under 120 degrees, {:.2f} mm to gain: {}", n, splits.size(), gain / 1e6,
                                 !drawn ? "the model of the tracks does not stand"
@@ -430,7 +407,7 @@ BranchResult mergeBranchPoints(Board& b, Topology& t, const BranchOptions& o) {
     }
   }
   std::erase_if(eb.tracks, [&](const Track& tr) { return (tr.id && gone.contains(tr.id)) || (!tr.isArc() && tr.a == tr.b); });
-  auto drawn = redraw(eb, o.flips, r.drawings);
+  auto drawn = redrawTracks(eb, o.flips, r.drawings);
   // Not by the length (nothing is gained yet: the four wires are paired anew afterwards): no real place of
   // violation more.
   const bool taken2 = drawn && std::tuple(drawn->score.unrouted, drawn->score.shorts, drawn->score.deep, drawn->score.real) <=

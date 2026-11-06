@@ -2235,3 +2235,32 @@ TEST(Topo, ClinchOfTwoWiresIsUndone) {
     EXPECT_GT(p.length("N2"), 15.0);
   }
 }
+
+// A clinch with two hindering wires (the paper: «все мешающие проводники следует переложить по очереди»): two
+// wires of N2 leave its pad at (25, 5) side by side and both go round N1's lower pad; with one of them taken out
+// the other still bars N1's straight way, so neither alone is a clinch F6 would undo. Both are taken out, N1 is
+// laid straight (10 mm), and they are laid anew one after the other.
+TEST(Topo, ClinchWithTwoHinderingWires) {
+  PinBoard p;
+  p.pad("N1", 15, 5, PadShapeKind::Circle, 1, 1);
+  p.pad("N1", 15, 15, PadShapeKind::Circle, 1, 1);
+  p.pad("N2", 25, 5, PadShapeKind::Circle, 1, 1);
+  p.pad("N2", 25, 15, PadShapeKind::Circle, 1, 1);
+  p.pad("N2", 28, 17, PadShapeKind::Circle, 1, 1);
+  p.track("N1", {{15, 5}, {28, 2}, {28, 8}, {20, 10}, {15, 15}}, 0.3);
+  p.track("N2", {{25, 5}, {17, 8}, {13, 10}, {13, 17}, {25, 15}}, 0.3);
+  p.track("N2", {{25, 5}, {17, 7}, {12, 9.5}, {12, 18.5}, {28, 17}}, 0.3);
+  topo::Topology::assignIds(p.b);
+  topo::Topology t;
+  t.build(p.b);
+  EXPECT_EQ(p.violations(), 0);
+  const double was = p.length("N2");
+  auto res = topo::refineModel(p.b, t);
+  ASSERT_TRUE(res.drawn);
+  EXPECT_EQ(res.clinches, 1);
+  EXPECT_TRUE(std::ranges::any_of(res.log, [](const std::string& l) { return l.contains("more than one wire"); }));
+  EXPECT_NEAR(p.length("N1"), 10.0, 0.05);
+  EXPECT_LT(p.length("N2"), 23.0) << "was " << was;
+  expectSoundModel(t);
+  EXPECT_EQ(p.violations(), 0);
+}

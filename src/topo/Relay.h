@@ -41,4 +41,25 @@ void applyRelay(Topology& t, int wire, const RelayPath& path);
 // laid anew by findRelay and applyRelay; till then the model is not whole.
 void takeOut(Topology& t, int wire);
 
+// The wires of other nets that may hold a wire of `net` ending at one of the two owners in a clinch (Luzin,
+// Popov, Popov 2012: the three signs — a wire crossing an edge at its own end vertex behind another wire, the
+// edge between its two ends crossed by others, two wires bent round each other's ends — have this in common):
+// those crossing an edge at a vertex of these owners on the layer. Locked wires and the wires of the nets in
+// `fixed` (per net, may be null) are left out; `self` is the wire asked for; at most `most`.
+std::vector<int> wiresRound(const Topology& t, LayerId layer, int ownerA, int ownerB, int net, int self, const std::vector<char>* fixed, size_t most = 8);
+
+// A wire laid past the wires that hold it: the fewest of `holders` (one, else at most `most`) are found without
+// which the wire has a path no longer than `limit`; they are taken out, the wire is laid, and they are laid
+// anew one after another, the shorter first (the paper: «все мешающие проводники следует переложить по
+// очереди»). Nothing, and the model as it was, when there is no such path or one of them finds no way back.
+// `saved` receives the model as it was before the first change (the caller's way back when it likes the
+// result no better).
+struct PastResult {
+  std::vector<int> taken;  // the wires laid anew after this one
+  double length = 0;       // the wire's taut length
+  double othersBefore = 0, othersAfter = 0;  // ... and theirs, summed
+};
+std::optional<PastResult> relayPast(Topology& t, int wire, const std::vector<int>& holders, double limit, const std::vector<char>* avoid,
+                                    std::optional<Topology>& saved, int most = 3);
+
 }  // namespace xr::topo

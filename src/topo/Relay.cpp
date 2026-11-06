@@ -424,4 +424,74 @@ void takeOut(Topology& t, int wi) {
   applyRelay(t, wi, none);
 }
 
+std::vector<int> wiresRound(const Topology& t, LayerId layer, int ownerA, int ownerB, int net, int self, const std::vector<char>* fixed, size_t most) {
+  const LayerMesh& m = *t.mesh(layer);
+  std::vector<int> out;
+  for (const Edge& E : m.edges) {
+    if (E.v[0] < 0 || E.cross.empty()) continue;
+    const int o0 = m.verts[E.v[0]].owner, o1 = m.verts[E.v[1]].owner;
+    if (o0 != ownerA && o0 != ownerB && o1 != ownerA && o1 != ownerB) continue;
+    for (int cid : E.cross) {
+      const int other = t.crossings[cid].wire;
+      if (other < 0 || other == self) continue;
+      const Wire& x = t.wires[size_t(other)];
+      if (x.net == net || x.locked || x.end[0] < 0 || x.end[1] < 0) continue;
+      if (fixed && x.net >= 0 && x.net < int(fixed->size()) && (*fixed)[size_t(x.net)]) continue;
+      if (std::ranges::find(out, other) == out.end()) out.push_back(other);
+    }
+  }
+  if (out.size() > most) out.resize(most);
+  return out;
+}
+
+std::optional<PastResult> relayPast(Topology& t, int wire, const std::vector<int>& holders, double limit, const std::vector<char>* avoid,
+                                    std::optional<Topology>& saved, int most) {
+  if (holders.empty()) return std::nullopt;
+  auto fits = [&](const std::vector<int>& absent) {
+    const std::optional<RelayPath> p = findRelay(t, wire, avoid, &absent);
+    return p && p->length <= limit;
+  };
+  // With all of them out there is no way either: no clinch, and none of them is tried alone.
+  if (holders.size() > 1 && !fits(holders)) return std::nullopt;
+  std::vector<int> out;
+  for (int h : holders)
+    if (fits({h})) {
+      out = {h};
+      break;
+    }
+  if (out.empty()) {
+    if (holders.size() < 2) return std::nullopt;
+    // Several hold it: those the path does without go back, one by one.
+    out = holders;
+    for (int h : holders) {
+      std::vector<int> less = out;
+      std::erase(less, h);
+      if (!less.empty() && fits(less)) out = std::move(less);
+    }
+    if (int(out.size()) > most) return std::nullopt;
+  }
+  PastResult r;
+  for (int h : out) r.othersBefore += tautLength(t, h);
+  std::ranges::sort(out, [&](int x, int y) { return tautLength(t, x) < tautLength(t, y); });
+  saved = t;
+  auto back = [&] {
+    t = std::move(*saved);
+    saved.reset();
+    return std::nullopt;
+  };
+  for (int h : out) takeOut(t, h);
+  const std::optional<RelayPath> own = findRelay(t, wire, avoid);
+  if (!own || own->length > limit) return back();
+  applyRelay(t, wire, *own);
+  for (int h : out) {
+    const std::optional<RelayPath> p = findRelay(t, h, avoid);
+    if (!p) return back();
+    applyRelay(t, h, *p);
+  }
+  r.taken = out;
+  r.length = tautLength(t, wire);
+  for (int h : out) r.othersAfter += tautLength(t, h);
+  return r;
+}
+
 }  // namespace xr::topo
