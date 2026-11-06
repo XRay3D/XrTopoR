@@ -6,6 +6,7 @@
 #include "core/Connectivity.h"
 #include "drc/Drc.h"
 #include "io/BoardIO.h"
+#include "router/topo/ModelRefine.h"
 #include "router/topo/ModelRelax.h"
 #include "router/topo/ModelTools.h"
 #include "router/topo/Optimizer.h"
@@ -170,6 +171,46 @@ TEST(Optimizer, ModelRelaxDoesNotBreak) {
     EXPECT_LE(Connectivity::compute(b).ratsnest.size(), unrouted) << x.file;
     EXPECT_EQ(t.check(), std::vector<std::string>{}) << x.file;
   }
+}
+
+// F6 on the model: the wires re-laid by cheaper paths over the triangulation (TopoR's re-laying; its own F6 of
+// Arcs_standard_routing takes 63 mm with 28 wires moved to the other side of other nets' pads, 8 branch
+// points moved and no via). Ours after F5 on the model: 20 wires re-laid — the same nets — and the branch points
+// to their balance, 75 mm shorter, no place of violation added; the model whole (its invariants, no wires
+// crossing), and what F5 drew at the pads and the width joints kept.
+TEST(Refine, ModelRelaysTheLongWaysRound) {
+  auto lb = io::loadBoard(data("topor/Example_04/Arcs_standard_routing.fst"));
+  ASSERT_TRUE(lb.has_value());
+  Board& b = **lb;
+  topo::Topology::assignIds(b);
+  topo::Topology t;
+  t.build(b);
+  auto f5 = topo::runF5Model(b, t);
+  ASSERT_TRUE(f5.drawn);
+  const size_t unrouted = Connectivity::compute(b).ratsnest.size();
+  const topo::RelayStats s5 = topo::relayStats(b);
+  const topo::DrawingScore before = topo::scoreDrawing(b);
+  auto res = topo::refineModel(b, t);
+  ASSERT_TRUE(res.drawn);
+  const topo::DrawingScore after = topo::scoreDrawing(b);
+  std::println("F6 model: {} wires tried, {} found, {} re-laid, {} branch points moved, {} drawings; places {} -> {}, length {:.1f} -> {:.1f} mm", res.wires, res.found,
+               res.relaid, res.junctionMoves, res.drawings, before.places, after.places, before.length / 1e6, after.length / 1e6);
+  EXPECT_GE(res.relaid, 15);
+  EXPECT_LT(after.length, before.length - 50 * kNmPerMm);
+  EXPECT_LE(after.real, before.real);
+  EXPECT_LE(after.shorts, before.shorts);
+  EXPECT_LE(Connectivity::compute(b).ratsnest.size(), unrouted);
+  EXPECT_EQ(t.check(), std::vector<std::string>{});
+  for (const topo::LayerMesh& m : t.layers) EXPECT_TRUE(t.findCrossings(m).empty());
+  const topo::RelayStats s = topo::relayStats(b);
+  EXPECT_EQ(s.widths.size(), 2u);
+  EXPECT_EQ(s.necks, 0);
+  EXPECT_EQ(s.deadEnds, 0);
+  EXPECT_EQ(s.padsAtCentre, s.pads);
+  EXPECT_EQ(s.viasAtCentre, s.vias);
+  EXPECT_EQ(s.exitsSide, s5.exitsSide);
+  EXPECT_EQ(s.exitsBridge, s5.exitsBridge);
+  EXPECT_EQ(s.innerOther, 0);
 }
 
 // F6 keeps what F5 drew at the pads and at the joints (TopoR's F6 touches neither): after F5 on the model

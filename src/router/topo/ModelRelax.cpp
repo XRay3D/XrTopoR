@@ -153,14 +153,18 @@ double nominalExcess(const Board& b, int netA, int netB, LayerMask layers) {
 // net's rule holds it off (arz: vias 70 um from the centre of their pad's end after F7; TopoR's F7 of
 // Arcs_standard_routing leaves no via nearer than 1.86 mm to the pad its wire goes to, its F5 had 1.43). What
 // the via keeps from the pad's copper: its own radius (they may touch); -1: no such rule for the two.
-double ownPadRule(const Owner& mover, const Owner& other) {
-  if (mover.kind != Owner::Kind::Via || other.kind != Owner::Kind::Pad || other.net != mover.net || mover.net == kNoNet) return -1;
-  return mover.halfWidth;
+// A branch point is held off the pads and vias of its net the same way when it is not to be merged with them
+// (F6: TopoR's moves its branch points and merges none — 25 before and after on Arcs_standard_routing).
+double ownPadRule(const Owner& mover, const Owner& other, bool holdBranchPoints) {
+  if (other.net != mover.net || mover.net == kNoNet) return -1;
+  if (mover.kind == Owner::Kind::Via && other.kind == Owner::Kind::Pad) return mover.halfWidth;
+  if (holdBranchPoints && mover.kind == Owner::Kind::Junction && (other.kind == Owner::Kind::Pad || other.kind == Owner::Kind::Via)) return mover.halfWidth;
+  return -1;
 }
 
 // What stops the object at p: copper of other nets closer than the rule by more in sum than where it
 // comes from (a step out of a conflict is no conflict). The worst such copper's centre.
-std::optional<Vec2> blockerAt(const Board& b, const Topology& t, const OwnerGrid& grid, int oi, Vec2 p) {
+std::optional<Vec2> blockerAt(const Board& b, const Topology& t, const OwnerGrid& grid, int oi, Vec2 p, bool holdBranchPoints) {
   const Owner& ob = t.owners[oi];
   double maxClr = double(b.maxClearance());
   for (const ClearancePair& p : b.nominalRules) maxClr = std::max(maxClr, double(p.clearance));
@@ -181,7 +185,7 @@ std::optional<Vec2> blockerAt(const Board& b, const Topology& t, const OwnerGrid
     if (oj == oi) return;
     const Owner& o = t.owners[oj];
     if (!(o.layers & ob.layers)) return;
-    double req = ownPadRule(ob, o);
+    double req = ownPadRule(ob, o, holdBranchPoints);
     if (req < 0) {
       if (o.net == ob.net) return;
       req = ob.halfWidth + requiredClearance(b, ob.net, o.net, ob.layers & o.layers) + nominalExcess(b, ob.net, o.net, ob.layers & o.layers);
@@ -269,6 +273,33 @@ struct Drawn {
 };
 
 }  // namespace
+
+double DrawingScore::score() const { return length + depth * kDepthCost + double(places) * kCountCost; }
+
+DrawingScore scoreDrawing(const Board& b) {
+  DrawingScore s;
+  DrcOptions d;
+  d.unconnected = false;
+  const std::vector<DrcViolation> vs = runDrc(b, d);
+  s.conflicts = int(vs.size());
+  for (const DrcViolation& v : vs) s.shortfall += std::max(0.0, v.required - v.actual);
+  const std::vector<Place> places = placesOf(b, vs);
+  s.places = int(places.size());
+  for (const Place& p : places) {
+    s.depth += p.depth;
+    if (p.shorted) ++s.shorts;
+    else if (p.depth > kNarrowDeficitLimit) ++s.deep;
+    if (p.shorted || p.depth > kNoise) ++s.real;
+  }
+  s.length = b.tracksLength();
+  s.unrouted = Connectivity::compute(b).ratsnest.size();
+  return s;
+}
+
+bool betterDrawing(const DrawingScore& a, const DrawingScore& than) {
+  const auto ka = std::tuple(a.unrouted, a.shorts, a.deep, a.real), kb = std::tuple(than.unrouted, than.shorts, than.deep, than.real);
+  return ka < kb || (ka == kb && a.score() < than.score());
+}
 
 OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOptions& o) {
   ProfScope pAll("F7 model total");
@@ -463,7 +494,7 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
           if (oj == oi) return;
           const Owner& x = t.owners[oj];
           if (!(x.layers & ob.layers)) return;
-          double req = ownPadRule(ob, x);
+          double req = ownPadRule(ob, x, !o.merge);
           if (req < 0) {
             if (x.net == ob.net) return;
             req = ob.halfWidth + requiredClearance(b, ob.net, x.net, ob.layers & x.layers) + nominalExcess(b, ob.net, x.net, ob.layers & x.layers);
@@ -521,7 +552,7 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
       bool went = false;
       auto attempt = [&](Vec2 d) {
         if (d.len() < kMinStep) return false;
-        if (blockerAt(b, t, grid, ob.owner, at + d)) return ++why[0], false;
+        if (blockerAt(b, t, grid, ob.owner, at + d, !o.merge)) return ++why[0], false;
         // (A step off copper too close is held to the minimum alone: it may take a spoke's nominal room.)
         if (const Short there = shortAt(ob.owner, at + d); there.least > shortBefore.least + 1 || (!off && there.nominal > 1)) return ++why[2], false;
         if (moveOwner(t, ob.owner, d) <= 0) return ++why[1], false;
@@ -530,7 +561,7 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
       for (double f : {1.0, 0.5, 0.25, 0.125}) {
         if ((went = attempt(delta * f))) break;
         if (f == 1.0) {
-          if (auto blk = blockerAt(b, t, grid, ob.owner, at + delta)) {
+          if (auto blk = blockerAt(b, t, grid, ob.owner, at + delta, !o.merge)) {
             Vec2 n = at + delta - *blk;
             if (n.len() > 1) {
               n = n.normalized();

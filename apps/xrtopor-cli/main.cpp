@@ -15,6 +15,7 @@
 #include "io/gerber/GerberWriter.h"
 #include "io/svg/SvgWriter.h"
 #include "core/Prof.h"
+#include "router/topo/ModelRefine.h"
 #include "router/topo/ModelRelax.h"
 #include "router/topo/ModelTools.h"
 #include "topo/RelayStats.h"
@@ -196,6 +197,25 @@ int main(int argc, char** argv) {
     if (auto r = io::saveBoard(b, std::string(a.opt("-o"))); !r) return fail(r.error());
     return 0;
   }
+  if (cmd == "refine" && !a.opt("-o").empty() && a.flag("--model")) {
+    // F6 on the topological model: the wires re-laid by cheaper paths over the triangulation.
+    topo::Topology::assignIds(b);
+    topo::Topology t = loadModel(b, std::string(a.v[0]));
+    topo::RefineModelOptions ro;
+    ro.flips = !a.flag("--no-flips");
+    ro.junctions = !a.flag("--no-junctions");
+    auto res = topo::refineModel(b, t, ro);
+    if (a.flag("--verbose"))
+      for (auto& l : res.log) std::println("{}", l);
+    if (!res.drawn) return fail("stopped by the model's violations, nothing drawn");
+    std::println("model: {} wire(s) tried, {} with a shorter path, {} re-laid; {} branch point(s) moved; {} drawings; conflicts {} -> {}, length {:.1f} -> {:.1f} mm",
+                 res.wires, res.found, res.relaid, res.junctionMoves, res.drawings, res.conflictsBefore, res.conflictsAfter, res.lengthBefore / 1e6,
+                 res.lengthAfter / 1e6);
+    xr::Prof::get().report("refine --model");
+    if (auto r = io::saveBoard(b, std::string(a.opt("-o"))); !r) return fail(r.error());
+    if (auto r = topo::saveTopology(t, b, topo::sidecarPath(std::string(a.opt("-o")))); !r) return fail(r.error());
+    return 0;
+  }
   if (cmd == "optimize" && !a.opt("-o").empty() && a.flag("--model")) {
     // F7 on the topological model: the vias and branch points relax under the model's forces, the
     // realiser draws once at the end.
@@ -205,6 +225,7 @@ int main(int argc, char** argv) {
     mo.flips = !a.flag("--no-flips");
     mo.contacts = !a.flag("--no-contacts");
     mo.merge = !a.flag("--no-merge");
+    mo.vias = !a.flag("--no-vias");
     auto res = topo::optimizeModel(b, t, mo);
     if (a.flag("--verbose"))
       for (auto& l : res.log) std::println("{}", l);

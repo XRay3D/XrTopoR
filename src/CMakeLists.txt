@@ -49,6 +49,7 @@ add_library(xrtopo STATIC
   topo/Flip.cpp
   topo/Move.cpp
   topo/PadExit.cpp
+  topo/Relay.cpp
   topo/RelayStats.cpp
   topo/Sidecar.cpp
   topo/Topology.cpp
@@ -62,6 +63,7 @@ add_library(xrrouter STATIC
   router/topo/Wires.cpp
   router/topo/ModelTools.cpp
   router/topo/ModelRelax.cpp
+  router/topo/ModelRefine.cpp
   router/topo/Optimizer.cpp
   router/topo/Freestyle.cpp
   router/topo/Refine.cpp

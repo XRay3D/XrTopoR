@@ -86,6 +86,12 @@ void middleOf(const Topology& t, const LayerMesh& m, const Wire& w, int& first, 
   last = int(w.cross.size());
   while (first < last && ownSide(w.cross[first], w.end[0])) ++first;
   while (last > first && ownSide(w.cross[last - 1], w.end[1])) --last;
+  // Out of an oval pad the wire goes on through the edge it left by: its end vertex is the centre of the pad's
+  // rounded end, and a new first edge could take it out sideways (TopoR: a pin is left through its end; two
+  // wires of Arcs_standard_routing came out through the long side after a re-lay).
+  auto oval = [&](int owner) { return t.owners[owner].kind == Owner::Kind::Pad && t.owners[owner].shape.kind == Shape::Kind::Segment; };
+  if (first == 0 && first < last && oval(w.end[0])) ++first;
+  if (last == int(w.cross.size()) && last > first && oval(w.end[1])) --last;
 }
 
 Vec2 pointOn(const LayerMesh& m, const Edge& E, double along, double L) {
@@ -242,7 +248,9 @@ std::optional<RelayPath> findRelay(const Topology& t, int wi) {
     for (int cid : cids) ws.push_back(t.crossings[cid].wire);
     ws.insert(ws.begin() + gap, wi);
     const EdgeCapacity c = capacityOf(t, m, E.v[0], E.v[1], ws, E.along);
-    it->second.ok = c.deficit <= 0 && c.cls < 3;
+    // It fits at the nominal widths: a new path is no reason to narrow a wire (the capacity would narrow one
+    // to make room — the automatic tools narrow only as the last resort).
+    it->second.ok = c.deficit <= 0 && c.cls < 3 && !c.narrowed;
     it->second.p = pointOn(m, E, slotOf(c, gap).mid(), c.L);
     return it->second;
   };
@@ -358,6 +366,7 @@ std::optional<RelayPath> findRelay(const Topology& t, int wi) {
 void applyRelay(Topology& t, int wi, const RelayPath& path) {
   Wire& w = t.wires[wi];
   LayerMesh& m = *t.mesh(w.layer);
+  const int was = int(w.cross.size());
   std::set<int> touched;
   // The middle goes: out of its edges' lists, the records left dead (ids are never reused).
   for (int i = path.first; i < path.last; ++i) {
@@ -390,7 +399,7 @@ void applyRelay(Topology& t, int wi, const RelayPath& path) {
   if (path.along && path.alongEdge >= 0) m.edges[path.alongEdge].along = wi;
   // The wire leaves a vertex end another way now: where the tracks left its copper says nothing any more.
   if (path.first == 0) w.hasExit[0] = false;
-  if (path.last == int(w.cross.size()) - int(fresh.size()) + (path.last - path.first) && path.last == path.first + 0) {}
+  if (path.last == was) w.hasExit[1] = false;
   w.dirty = true;
   for (int e : touched) refreshEdge(t, m, e);
 }

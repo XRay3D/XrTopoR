@@ -45,6 +45,20 @@ struct OptimizeModelResult {
   RealizeStats stats;
 };
 
+// What a drawing is worth to the judge of F6 and F7: the DRC's violations gathered into places (one pair of
+// nets within a millimetre, as deep as the deepest), nothing unrouted counted in.
+struct DrawingScore {
+  size_t unrouted = 0;
+  int shorts = 0, deep = 0, real = 0;  // places shorted; deeper than the limit of a violation; deeper than the noise
+  int places = 0, conflicts = 0;       // places; violations as the DRC counts them
+  double shortfall = 0;                // the DRC's violations' depth summed, nm
+  double depth = 0, length = 0;        // the places' depth; the tracks' length, nm
+  double score() const;                // length + 100 mm per mm of depth + 1 mm per place
+};
+DrawingScore scoreDrawing(const Board& b);
+// A violation is not bought with length: less unrouted, then fewer places shorted, deep, real; then the score.
+bool betterDrawing(const DrawingScore& a, const DrawingScore& than);
+
 // Relaxes the unlocked vias and the branch points of unlocked wires and draws the model: the board gets the
 // best drawing seen. The first one is F5's own, so the result is never worse than F5 by the judge: less
 // unrouted, then fewer places shorted, deeper than the limit of a violation, real at all (a violation is not

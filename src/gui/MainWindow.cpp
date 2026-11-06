@@ -45,6 +45,7 @@
 #include "io/Report.h"
 #include "io/gerber/GerberWriter.h"
 #include "io/svg/SvgWriter.h"
+#include "router/topo/ModelRefine.h"
 #include "router/topo/ModelRelax.h"
 #include "router/topo/ModelTools.h"
 #include "router/topo/Optimizer.h"
@@ -1188,7 +1189,58 @@ void MainWindow::autoroute() {
   w->activateWindow();
 }
 
+// F6. The whole board is re-laid on the topological model (the wires led by cheaper paths over the
+// triangulation, between other wires if need be), and then, when layer changes are asked for, among the copper
+// as it lies — that search moves a wire between through pads and vias to another layer and drops the vias left
+// over. Selected wires go the second way alone.
 void MainWindow::refine(bool changeLayers) {
+  if (!doc_->hasBoard()) return;
+  const bool selected = std::ranges::any_of(doc_->selectedItems(), [](ItemRef r) { return r.type == ItemType::Track; });
+  if (!selected && QSettings().value("topo/model", true).toBool()) refineModel(changeLayers);
+  else refineTracks(changeLayers);
+}
+
+void MainWindow::refineModel(bool thenLayers) {
+  auto topo = std::make_shared<topo::Topology>(doc_->topology());  // a copy, with the ids given
+  auto work = std::make_shared<Board>(*doc_->board());
+  auto* dlg = new QProgressDialog(tr("Перекладка по модели..."), QString(), 0, 0, this);
+  dlg->setCancelButton(nullptr);
+  dlg->setWindowModality(Qt::WindowModal);
+  dlg->setMinimumDuration(300);
+  auto* watcher = new QFutureWatcher<topo::RefineModelResult>(this);
+  connect(watcher, &QFutureWatcher<topo::RefineModelResult>::finished, this, [this, watcher, dlg, work, topo, thenLayers] {
+    topo::RefineModelResult res = watcher->result();
+    dlg->close();
+    dlg->deleteLater();
+    watcher->deleteLater();
+    doc_->clearLog(tr("Перекладка проводников"));
+    for (auto& l : res.log) doc_->addLog({LogMessage::Kind::Info, tr("Перекладка проводников"), QString::fromStdString(l)});
+    if (!res.drawn) {
+      showTopologyViolations(*work, *topo, res.violations, tr("Перекладка"));
+      return;
+    }
+    auto before = doc_->beginEdit();
+    Board& b = *doc_->board();
+    b.tracks = work->tracks;
+    b.vias = work->vias;
+    b.zones = work->zones;
+    doc_->commitEdit(before, tr("Перекладка проводников"), false);
+    doc_->setTopology(std::make_unique<topo::Topology>(std::move(*topo)));
+    showHint(tr("Перекладка по модели: переложено %1 из %2, ветвлений сдвинуто %3; конфликтов %4 → %5; длина %6 → %7 мм")
+                 .arg(res.relaid)
+                 .arg(res.wires)
+                 .arg(res.junctionMoves)
+                 .arg(res.conflictsBefore)
+                 .arg(res.conflictsAfter)
+                 .arg(res.lengthBefore / 1e6, 0, 'f', 1)
+                 .arg(res.lengthAfter / 1e6, 0, 'f', 1),
+             10000);
+    if (thenLayers) refineTracks(true);
+  });
+  watcher->setFuture(QtConcurrent::run([work, topo] { return topo::refineModel(*work, *topo); }));
+}
+
+void MainWindow::refineTracks(bool changeLayers) {
   if (!doc_->hasBoard()) return;
   // The selected wires, or all of them.
   topo::RefineOptions o;

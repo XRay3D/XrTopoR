@@ -79,6 +79,8 @@ class MainWindow : public QMainWindow {
   void showTopologyViolations(const Board& b, const topo::Topology& t, const std::vector<topo::Violation>& vs, const QString& what);
   void saveTopologyFile(const QString& boardPath);
   void refine(bool changeLayers);  // F6 sub-modes
+  void refineTracks(bool changeLayers);                    // ... among the copper as it lies (the selected wires; layer changes)
+  void refineModel(bool thenLayers);                       // ... on the topological model
   void pour(bool fill, bool clear, const QString& title);
   void pourSelected(int how);  // 0 toggle (Z), 1 remove fill, 2 re-pour
   void showContextMenu(QPoint globalPos);

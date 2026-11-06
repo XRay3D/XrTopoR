@@ -24,6 +24,7 @@
 #include "topo/Move.h"
 #include "topo/RelayStats.h"
 #include "topo/Sidecar.h"
+#include "router/topo/ModelRefine.h"
 #include "router/topo/ModelRelax.h"
 #include "router/topo/ModelTools.h"
 #include "router/topo/Wires.h"
@@ -1894,4 +1895,61 @@ TEST(Topo, NominalClearanceIsRead) {
   ASSERT_TRUE(pcb.has_value());
   EXPECT_FALSE((**pcb).hasNominal());
   EXPECT_EQ((**pcb).clearanceNom(0, 1, 0), (**pcb).clearance(0, 1, 0));
+}
+
+// F6 on the model re-lays a wire by a shorter path over the triangulation (TopoR's re-laying). A wire drawn
+// the long way round a pad of another net goes the short way; the model stays whole: no wires crossing, every
+// consecutive pair of crossings on one triangle, the capacities fresh.
+TEST(Topo, RelayTakesTheShortWay) {
+  PinBoard p;
+  p.pad("N2", 20, 10, PadShapeKind::Circle, 1, 1);
+  p.pad("N2", 20, 17, PadShapeKind::Circle, 1, 1);
+  p.track("N2", {{20, 10}, {20, 17}}, 0.3);
+  p.pad("N1", 5, 8, PadShapeKind::Circle, 1, 1);
+  p.pad("N1", 35, 8, PadShapeKind::Circle, 1, 1);
+  p.track("N1", {{5, 8}, {17, 13}, {18.5, 13}, {18.5, 18.5}, {21.5, 18.5}, {21.5, 13}, {23, 13}, {35, 8}}, 0.3);  // over the two pads and their wire
+  topo::Topology::assignIds(p.b);
+  topo::Topology t;
+  t.build(p.b);
+  const double before = p.length("N1");
+  topo::RefineModelOptions o;
+  o.junctions = false;
+  auto res = topo::refineModel(p.b, t, o);
+  ASSERT_TRUE(res.drawn);
+  EXPECT_EQ(res.relaid, 1);
+  EXPECT_GT(before, 40.0);
+  EXPECT_LT(p.length("N1"), 30.3);  // the straight line is 30 mm; it passes 1.5 mm below the first pad's edge
+  EXPECT_EQ(t.check(), std::vector<std::string>{});
+  for (const topo::LayerMesh& m : t.layers) EXPECT_TRUE(t.findCrossings(m).empty());
+  EXPECT_EQ(staleCapacities(t), std::vector<std::string>{});
+  EXPECT_EQ(p.violations(), 0);
+}
+
+// ... and the short way may lie between two wires of other nets: the new path is led between them and crosses
+// neither (the search among the copper as it lies finds such a way only where there is room already).
+TEST(Topo, RelayGoesBetweenTwoWires) {
+  PinBoard p;
+  p.pad("N2", 10, 4, PadShapeKind::Circle, 1, 1);
+  p.pad("N2", 30, 4, PadShapeKind::Circle, 1, 1);
+  p.track("N2", {{10, 4}, {30, 4}}, 0.3);
+  p.pad("N3", 10, 12, PadShapeKind::Circle, 1, 1);
+  p.pad("N3", 30, 12, PadShapeKind::Circle, 1, 1);
+  p.track("N3", {{10, 12}, {30, 12}}, 0.3);
+  p.pad("N1", 5, 8, PadShapeKind::Circle, 1, 1);
+  p.pad("N1", 35, 8, PadShapeKind::Circle, 1, 1);
+  p.track("N1", {{5, 8}, {8, 16}, {32, 16}, {35, 8}}, 0.3);  // round the outside of N3
+  topo::Topology::assignIds(p.b);
+  topo::Topology t;
+  t.build(p.b);
+  topo::RefineModelOptions o;
+  o.junctions = false;
+  auto res = topo::refineModel(p.b, t, o);
+  ASSERT_TRUE(res.drawn);
+  EXPECT_EQ(res.relaid, 1);
+  EXPECT_LT(p.length("N1"), 30.3);
+  EXPECT_NEAR(p.length("N2"), 20.0, 0.01);
+  EXPECT_NEAR(p.length("N3"), 20.0, 0.01);
+  EXPECT_EQ(t.check(), std::vector<std::string>{});
+  for (const topo::LayerMesh& m : t.layers) EXPECT_TRUE(t.findCrossings(m).empty());
+  EXPECT_EQ(p.violations(), 0);
 }
