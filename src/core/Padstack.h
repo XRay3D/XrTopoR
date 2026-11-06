@@ -31,6 +31,8 @@ std::optional<Shape> padShapeOn(const Board& b, const Pad& p, LayerId l, double 
 
 // The via type of a via: the rules' type of its pad and hole sizes; nullptr: none.
 const ViaType* viaTypeOf(const Board& b, const Via& v);
+// The copper layers a via of the type spans: its range from `from` to `to`; all of them when it names none.
+LayerMask viaTypeLayers(const Board& b, const ViaType& t);
 // The diameter of a via's pad on a layer: its copper, or its type's pad on a mask (paste...) layer of a side the
 // via reaches; 0: nothing there.
 Coord viaDiameterOn(const Board& b, const Via& v, LayerId l);

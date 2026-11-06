@@ -2236,6 +2236,267 @@ TEST(Topo, ClinchOfTwoWiresIsUndone) {
   }
 }
 
+// PinBoard with a second copper layer: through pads and vias, tracks on either layer.
+struct TwoLayerBoard : PinBoard {
+  LayerId bottom = 0;
+  TwoLayerBoard() {
+    bottom = b.addLayer("Bottom", LayerKind::Copper, Side::Bottom);
+    b.layers[bottom].copperIndex = 1;
+  }
+  LayerMask both() const { return (LayerMask(1) << top) | (LayerMask(1) << bottom); }
+  void throughPad(const std::string& n, double x, double y, double d) {
+    pad(n, x, y, PadShapeKind::Circle, d, d);
+    b.pads.back().copper = both();
+  }
+  void bottomPad(const std::string& n, double x, double y, double d) {
+    pad(n, x, y, PadShapeKind::Circle, d, d);
+    b.pads.back().copper = LayerMask(1) << bottom;
+  }
+  void throughVia(const std::string& n, double x, double y, double d) {
+    via(n, x, y, d);
+    b.vias.back().layers = both();
+  }
+  void trackOn(LayerId l, const std::string& n, std::initializer_list<std::pair<double, double>> pts, double width) {
+    const size_t from = b.tracks.size();
+    track(n, pts, width);
+    for (size_t i = from; i < b.tracks.size(); ++i) b.tracks[i].layer = l;
+  }
+  double lengthOn(LayerId l, const std::string& n) const {
+    double len = 0;
+    for (const Track& t : b.tracks)
+      if (t.layer == l && b.nets[t.net].name == n) len += t.length();
+    return len / kNmPerMm;
+  }
+  topo::RefineModelResult f6(const topo::RefineModelOptions& o = {}) {
+    topo::Topology::assignIds(b);
+    model = {};
+    model.build(b);
+    return topo::refineModel(b, model, o);
+  }
+  topo::Topology model;
+};
+
+// The local via minimisation (Luzin, Popov, Popov, NTV ITMO 2013 no. 6) as TopoR's F6 does it on Arcs_master's
+// SD3: a via next to a through pin. The pin at (10, 10), a wire on Top to the via at (13, 10), on Bottom to the
+// via at (17, 10), on Top to the pad at (30, 10); a wire of another net crosses on Top between the two vias and
+// has no way round the row, so the pair cannot go. The first via can: its Bottom wire is led on to the pin,
+// which is copper there too.
+TEST(Topo, ViaNextToAThroughPadIsRemoved) {
+  auto board = [](TwoLayerBoard& p) {
+    p.throughPad("S", 10, 10, 1.2);
+    p.pad("S", 30, 10, PadShapeKind::Circle, 1, 1);
+    p.pad("X", 15, 6, PadShapeKind::Circle, 1, 1);
+    p.pad("X", 15, 14, PadShapeKind::Circle, 1, 1);
+    p.throughVia("S", 13, 10, 1.0);
+    p.throughVia("S", 17, 10, 1.0);
+    p.trackOn(p.top, "S", {{10, 10}, {13, 10}}, 0.3);
+    p.trackOn(p.bottom, "S", {{13, 10}, {17, 10}}, 0.3);
+    p.trackOn(p.top, "S", {{17, 10}, {30, 10}}, 0.3);
+    p.trackOn(p.top, "X", {{15, 6}, {15, 14}}, 0.3);
+  };
+  {
+    TwoLayerBoard p;
+    board(p);
+    EXPECT_EQ(p.violations(), 0);
+    auto res = p.f6();
+    ASSERT_TRUE(res.drawn);
+    EXPECT_EQ(res.viasRemoved, 1);
+    ASSERT_EQ(p.b.vias.size(), 1u);
+    EXPECT_NEAR(p.b.vias[0].pos.v().x / kNmPerMm, 17.0, 0.01);
+    EXPECT_NEAR(p.lengthOn(p.bottom, "S"), 7.0, 0.05);  // from the pin now
+    EXPECT_NEAR(p.lengthOn(p.top, "S"), 13.0, 0.05);
+    EXPECT_NEAR(p.length("X"), 8.0, 0.05);
+    EXPECT_EQ(Connectivity::compute(p.b).ratsnest.size(), 0u);
+    expectSoundModel(p.model);
+    EXPECT_EQ(p.violations(), 0);
+  }
+  {
+    TwoLayerBoard p;
+    board(p);
+    topo::RefineModelOptions off;
+    off.vias = false;
+    auto res = p.f6(off);
+    ASSERT_TRUE(res.drawn);
+    EXPECT_EQ(res.viasRemoved, 0);
+    EXPECT_EQ(p.b.vias.size(), 2u);
+  }
+}
+
+// A jump with nothing left to jump over: pad, via, 4 mm on Bottom, via, pad, and nothing on Top between the
+// vias. The Bottom wire is laid on Top, both vias go, the net is one wire on Top.
+TEST(Topo, ViaPairWithNothingToJumpIsRemoved) {
+  TwoLayerBoard p;
+  p.pad("S", 8, 10, PadShapeKind::Circle, 1, 1);
+  p.pad("S", 30, 10, PadShapeKind::Circle, 1, 1);
+  p.throughVia("S", 13, 10, 1.0);
+  p.throughVia("S", 17, 10, 1.0);
+  p.trackOn(p.top, "S", {{8, 10}, {13, 10}}, 0.3);
+  p.trackOn(p.bottom, "S", {{13, 10}, {17, 10}}, 0.3);
+  p.trackOn(p.top, "S", {{17, 10}, {30, 10}}, 0.3);
+  auto res = p.f6();
+  ASSERT_TRUE(res.drawn);
+  EXPECT_EQ(res.viasRemoved, 2);
+  EXPECT_TRUE(p.b.vias.empty());
+  EXPECT_NEAR(p.lengthOn(p.top, "S"), 22.0, 0.05);
+  EXPECT_NEAR(p.lengthOn(p.bottom, "S"), 0.0, 0.001);
+  EXPECT_EQ(Connectivity::compute(p.b).ratsnest.size(), 0u);
+  expectSoundModel(p.model);
+  EXPECT_EQ(p.violations(), 0);
+}
+
+// The paper's fig. 1 and its step 3. A wire of another net crosses on Top between the via and its neighbour.
+// Where it has a short way round the neighbour (a through pin the net ends at) it is led behind it and the via
+// goes; where the net runs on both ways on Top (the pair of the test above) it has none, and the vias stay.
+TEST(Topo, ViaAndTheWireThatCrosses) {
+  {
+    TwoLayerBoard p;
+    p.pad("S", 6, 10, PadShapeKind::Circle, 1, 1);
+    p.throughPad("S", 16, 10, 1.0);
+    p.pad("X", 15, 5, PadShapeKind::Circle, 1, 1);
+    p.pad("X", 15, 15, PadShapeKind::Circle, 1, 1);
+    p.throughVia("S", 12, 10, 1.0);
+    p.trackOn(p.top, "S", {{6, 10}, {12, 10}}, 0.3);
+    p.trackOn(p.bottom, "S", {{12, 10}, {16, 10}}, 0.3);
+    p.trackOn(p.top, "X", {{15, 5}, {15, 15}}, 0.3);
+    EXPECT_EQ(p.violations(), 0);
+    auto res = p.f6();
+    ASSERT_TRUE(res.drawn);
+    EXPECT_EQ(res.viasRemoved, 1);
+    EXPECT_TRUE(p.b.vias.empty());
+    EXPECT_NEAR(p.lengthOn(p.top, "S"), 10.0, 0.05);
+    EXPECT_NEAR(p.lengthOn(p.bottom, "S"), 0.0, 0.001);
+    EXPECT_GT(p.length("X"), 10.2);  // round the pin
+    EXPECT_LT(p.length("X"), 12.5);
+    EXPECT_EQ(Connectivity::compute(p.b).ratsnest.size(), 0u);
+    expectSoundModel(p.model);
+    EXPECT_EQ(p.violations(), 0);
+  }
+  {
+    TwoLayerBoard p;
+    p.pad("S", 8, 10, PadShapeKind::Circle, 1, 1);
+    p.pad("S", 30, 10, PadShapeKind::Circle, 1, 1);
+    p.pad("X", 15, 6, PadShapeKind::Circle, 1, 1);
+    p.pad("X", 15, 14, PadShapeKind::Circle, 1, 1);
+    p.throughVia("S", 13, 10, 1.0);
+    p.throughVia("S", 17, 10, 1.0);
+    p.trackOn(p.top, "S", {{8, 10}, {13, 10}}, 0.3);
+    p.trackOn(p.bottom, "S", {{13, 10}, {17, 10}}, 0.3);
+    p.trackOn(p.top, "S", {{17, 10}, {30, 10}}, 0.3);
+    p.trackOn(p.top, "X", {{15, 6}, {15, 14}}, 0.3);
+    auto res = p.f6();
+    ASSERT_TRUE(res.drawn);
+    EXPECT_EQ(res.viasRemoved, 0);
+    EXPECT_EQ(p.b.vias.size(), 2u);
+    EXPECT_NEAR(p.length("X"), 8.0, 0.05);
+    expectSoundModel(p.model);
+    EXPECT_EQ(p.violations(), 0);
+  }
+}
+
+// The vias that stay: of a flexibly fixed net, locked, and one a pad of its net holds (the pad is copper on
+// Bottom alone: the via is its way to Top).
+TEST(Topo, ViasThatAreHeldStay) {
+  auto board = [](TwoLayerBoard& p) {
+    p.pad("S", 8, 10, PadShapeKind::Circle, 1, 1);
+    p.pad("S", 30, 10, PadShapeKind::Circle, 1, 1);
+    p.throughVia("S", 13, 10, 1.0);
+    p.throughVia("S", 17, 10, 1.0);
+    p.trackOn(p.top, "S", {{8, 10}, {13, 10}}, 0.3);
+    p.trackOn(p.bottom, "S", {{13, 10}, {17, 10}}, 0.3);
+    p.trackOn(p.top, "S", {{17, 10}, {30, 10}}, 0.3);
+  };
+  {
+    TwoLayerBoard p;
+    board(p);
+    p.b.nets[size_t(p.net("S"))].flexFixed = true;
+    auto res = p.f6();
+    ASSERT_TRUE(res.drawn);
+    EXPECT_EQ(res.viasRemoved, 0);
+    EXPECT_EQ(p.b.vias.size(), 2u);
+  }
+  {
+    TwoLayerBoard p;
+    board(p);
+    for (Via& v : p.b.vias) v.locked = true;
+    auto res = p.f6();
+    ASSERT_TRUE(res.drawn);
+    EXPECT_EQ(res.viasRemoved, 0);
+    EXPECT_EQ(p.b.vias.size(), 2u);
+  }
+  {
+    TwoLayerBoard p;
+    board(p);
+    p.bottomPad("S", 13, 10, 1.4);
+    p.bottomPad("S", 17, 10, 1.4);
+    auto res = p.f6();
+    ASSERT_TRUE(res.drawn);
+    EXPECT_EQ(res.viasRemoved, 0);
+    EXPECT_EQ(p.b.vias.size(), 2u);
+  }
+}
+
+// The paper's step 8.2: the neighbour is a blind via that is no copper on the layer the wire is to be copied
+// onto, and becomes a via of a type whose range holds both. Four layers; a via of layers 1-2 at (13, 10) with a
+// wire of layer 1 from a pad, a via of layers 2-3 at (17, 10) with a wire of layer 3 to a pad, 4 mm on layer 2
+// between them. One via of layers 1-3 is left, with the wires of layers 1 and 3 on it, and nothing on layer 2.
+TEST(Topo, ViaGoesAndItsNeighbourTakesAWiderType) {
+  PinBoard p;
+  LayerId l[4] = {p.top, 0, 0, 0};
+  p.b.layers[p.top].name = "L1";
+  for (int k = 1; k < 4; ++k) {
+    l[k] = p.b.addLayer(std::format("L{}", k + 1), LayerKind::Copper, k == 3 ? Side::Bottom : Side::None);
+    p.b.layers[l[k]].copperIndex = k;
+  }
+  auto mask = [&](int from, int to) {
+    LayerMask m = 0;
+    for (int k = from; k <= to; ++k) m |= LayerMask(1) << l[k];
+    return m;
+  };
+  p.b.rules = DesignRules{};
+  for (auto [name, from, to] : {std::tuple("b12", "L1", "L2"), std::tuple("b23", "L2", "L3"), std::tuple("b13", "L1", "L3")}) {
+    ViaType vt;
+    vt.name = name;
+    vt.diameter = mmToNm(1.0);
+    vt.drill = mmToNm(0.5);
+    vt.from = from;
+    vt.to = to;
+    p.b.rules->viaTypes.push_back(vt);
+  }
+  auto on = [&](int k, std::initializer_list<std::pair<double, double>> pts) {
+    const size_t from = p.b.tracks.size();
+    p.track("S", pts, 0.3);
+    for (size_t i = from; i < p.b.tracks.size(); ++i) p.b.tracks[i].layer = l[k];
+  };
+  p.pad("S", 8, 10, PadShapeKind::Circle, 1, 1);
+  p.pad("S", 30, 10, PadShapeKind::Circle, 1, 1);
+  p.b.pads.back().copper = LayerMask(1) << l[2];
+  p.via("S", 13, 10, 1.0);
+  p.b.vias.back().layers = mask(0, 1);
+  p.via("S", 17, 10, 1.0);
+  p.b.vias.back().layers = mask(1, 2);
+  on(0, {{8, 10}, {13, 10}});
+  on(1, {{13, 10}, {17, 10}});
+  on(2, {{17, 10}, {30, 10}});
+  topo::Topology::assignIds(p.b);
+  topo::Topology t;
+  t.build(p.b);
+  auto res = topo::refineModel(p.b, t);
+  ASSERT_TRUE(res.drawn);
+  EXPECT_EQ(res.viasRemoved, 1);
+  ASSERT_EQ(p.b.vias.size(), 1u);
+  EXPECT_EQ(p.b.vias[0].layers, mask(0, 2));
+  double len[4] = {0, 0, 0, 0};
+  for (const Track& tr : p.b.tracks)
+    for (int k = 0; k < 4; ++k)
+      if (tr.layer == l[k]) len[k] += tr.length() / kNmPerMm;
+  EXPECT_NEAR(len[0] + len[2], 22.0, 0.05);
+  EXPECT_NEAR(len[1], 0.0, 0.001);
+  EXPECT_NEAR(len[3], 0.0, 0.001);
+  EXPECT_EQ(Connectivity::compute(p.b).ratsnest.size(), 0u);
+  expectSoundModel(t);
+  EXPECT_EQ(p.violations(), 0);
+}
+
 // A clinch with two hindering wires (the paper: «все мешающие проводники следует переложить по очереди»): two
 // wires of N2 leave its pad at (25, 5) side by side and both go round N1's lower pad; with one of them taken out
 // the other still bars N1's straight way, so neither alone is a clinch F6 would undo. Both are taken out, N1 is

@@ -13,6 +13,7 @@
 #include "router/topo/ModelBranch.h"
 #include "router/topo/ModelRelax.h"
 #include "router/topo/ModelTools.h"
+#include "router/topo/ModelVias.h"
 #include "topo/Relay.h"
 
 namespace xr::topo {
@@ -184,6 +185,24 @@ RefineModelResult refineModel(Board& b, Topology& t, const RefineModelOptions& o
     return r.relaid > before;
   };
   relayAll();
+  // The vias that need not be: a wire re-laid goes on where it did not, and the wires of a via gone are led
+  // anew.
+  auto vias = [&] {
+    if (!o.vias) return false;
+    ViaOptions vo;
+    vo.flips = o.flips;
+    vo.span = o.viaSpan;
+    ViaResult vr = removeVias(b, t, vo);
+    r.viasRemoved += vr.removed;
+    r.drawings += vr.drawings;
+    for (const std::string& l : vr.log) r.log.push_back(l);
+    if (vr.removed > 0) {  // the model is built anew: other wires under the numbers
+      refused.clear();
+      refusedPairs.clear();
+    }
+    return vr.removed > 0;
+  };
+  if (vias()) relayAll();
   // The branch points to their balance: TopoR's F6 moves them (8 of 25 on Arcs_standard_routing) and no via.
   auto relax = [&] {
     if (!o.junctions) return;

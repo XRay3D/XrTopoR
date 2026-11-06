@@ -304,7 +304,15 @@ std::optional<Redrawn> redrawTracks(const Board& edited, bool flips, int& drawin
   r.model.build(r.board);
   int nFlips = 0;
   std::vector<Violation> stop;
-  if (!prepareModel(r.model, flips, false, nFlips, stop)) return std::nullopt;
+  if (!prepareModel(r.model, flips, false, nFlips, stop)) {
+    if (std::getenv("XR_TOPO_DEBUG"))
+      for (const Violation& v : stop)
+        std::println(stderr, "tracks edited: the model does not stand: {} at ({:.3f}, {:.3f}), wires {} of {} and {} of {}",
+                     v.kind == Violation::Kind::Crossing ? "crossing" : v.kind == Violation::Kind::ThroughPad ? "through a pad" : "other", v.pos.x / 1e6, -v.pos.y / 1e6,
+                     v.wireA, v.wireA >= 0 ? r.board.nets[size_t(r.model.wires[size_t(v.wireA)].net)].name : "-", v.wireB,
+                     v.wireB >= 0 ? r.board.nets[size_t(r.model.wires[size_t(v.wireB)].net)].name : "-");
+    return std::nullopt;
+  }
   RealizeStats st;
   int wires = 0;
   drawModel(r.board, r.model, true, st, wires);

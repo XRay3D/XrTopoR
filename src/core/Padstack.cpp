@@ -277,6 +277,16 @@ const ViaType* viaTypeOf(const Board& b, const Via& v) {
   return nullptr;
 }
 
+LayerMask viaTypeLayers(const Board& b, const ViaType& t) {
+  const LayerId a = t.from.empty() ? -1 : b.findLayer(t.from), c = t.to.empty() ? -1 : b.findLayer(t.to);
+  if (a < 0 || c < 0 || b.layers[size_t(a)].copperIndex < 0 || b.layers[size_t(c)].copperIndex < 0) return b.allCopperMask();
+  const int ia = b.layers[size_t(a)].copperIndex, ic = b.layers[size_t(c)].copperIndex;
+  LayerMask m = 0;
+  for (int k = std::min(ia, ic); k <= std::max(ia, ic); ++k)
+    if (const LayerId l = b.copperByIndex(k); l >= 0) m |= LayerMask(1) << l;
+  return m;
+}
+
 Coord viaDiameterOn(const Board& b, const Via& v, LayerId l) {
   if (l < 0 || l >= LayerId(b.layers.size())) return 0;
   const Layer& L = b.layers[l];

@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
+
 #include <cstdio>
 #include <print>
 
@@ -195,9 +197,19 @@ TEST(Refine, ModelRelaysTheLongWaysRound) {
   auto res = topo::refineModel(b, t);
   ASSERT_TRUE(res.drawn);
   const topo::DrawingScore after = topo::scoreDrawing(b);
-  std::println("F6 model: {} wires tried, {} found, {} re-laid, {} branch points moved, {} drawings; places {} -> {}, length {:.1f} -> {:.1f} mm", res.wires, res.found,
-               res.relaid, res.junctionMoves, res.drawings, before.places, after.places, before.length / 1e6, after.length / 1e6);
+  std::println("F6 model: {} wires tried, {} found, {} re-laid ({} in a clinch), {} vias removed, {} branch points made, {} moved, {} drawings; places {} -> {}, "
+               "length {:.1f} -> {:.1f} mm",
+               res.wires, res.found, res.relaid, res.clinches, res.viasRemoved, res.branches, res.junctionMoves, res.drawings, before.places, after.places,
+               before.length / 1e6, after.length / 1e6);
   EXPECT_GE(res.relaid, 15);
+  EXPECT_GE(res.clinches, 1);  // DCLO with RPLY
+  // The vias that need not be (ModelVias.h): the pair of SD3 at (218.55, 46.3) and (221.65, 46.3) — TopoR's own
+  // F6 takes the first of the two — and three more next to through pins.
+  EXPECT_GE(res.viasRemoved, 3);
+  EXPECT_EQ(after.vias, before.vias - res.viasRemoved);
+  const int sd3 = b.findNet("SD3");
+  ASSERT_GE(sd3, 0);
+  EXPECT_EQ(std::ranges::count_if(b.vias, [&](const Via& v) { return v.net == sd3; }), 0);
   EXPECT_LT(after.length, before.length - 35 * kNmPerMm);
   EXPECT_LE(after.real, before.real);
   EXPECT_LE(after.shorts, before.shorts);

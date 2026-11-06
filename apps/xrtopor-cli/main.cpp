@@ -44,6 +44,7 @@ void usage() {
       "  optimize   <board> -o <out> [--iterations N] [--step MM] [--components]   move vias/parts (F7, trial moves on the tracks)\n"
       "                     [--model [--no-flips] [--verbose]]  F7 on the topological model\n"
       "  refine     <board> -o <out> [--same-layer]   shorter wire paths around the copper as it lies (F6)\n"
+      "                     [--model [--no-flips] [--no-junctions] [--no-branches] [--no-clinches] [--no-vias] [--verbose]]  F6 on the topological model\n"
       "  fill       <board> -o <out> [--no-thermals]  pour copper zones\n"
       "  report     <board> [--bom out.csv]          routing statistics per layer and net, BOM\n"
       "  padstats   <board>                         how the wires meet the pads: widths, exits, runs inside copper, joints\n"
@@ -226,14 +227,15 @@ int main(int argc, char** argv) {
     ro.junctions = !a.flag("--no-junctions");
     ro.branches = !a.flag("--no-branches");
     ro.clinches = !a.flag("--no-clinches");
+    ro.vias = !a.flag("--no-vias");
     auto res = topo::refineModel(b, t, ro);
     if (a.flag("--verbose"))
       for (auto& l : res.log) std::println("{}", l);
     if (!res.drawn) return fail("stopped by the model's violations, nothing drawn");
-    std::println("model: {} wire(s) tried, {} with a shorter path, {} re-laid ({} in a clinch); {} branch point(s) made, {} pair(s) made one, {} moved; "
-                 "{} drawings; conflicts {} -> {}, length {:.1f} -> {:.1f} mm",
-                 res.wires, res.found, res.relaid, res.clinches, res.branches, res.branchesMerged, res.junctionMoves, res.drawings, res.conflictsBefore, res.conflictsAfter,
-                 res.lengthBefore / 1e6, res.lengthAfter / 1e6);
+    std::println("model: {} wire(s) tried, {} with a shorter path, {} re-laid ({} in a clinch); {} via(s) removed; {} branch point(s) made, {} pair(s) made one, "
+                 "{} moved; {} drawings; conflicts {} -> {}, length {:.1f} -> {:.1f} mm",
+                 res.wires, res.found, res.relaid, res.clinches, res.viasRemoved, res.branches, res.branchesMerged, res.junctionMoves, res.drawings, res.conflictsBefore,
+                 res.conflictsAfter, res.lengthBefore / 1e6, res.lengthAfter / 1e6);
     xr::Prof::get().report("refine --model");
     if (auto r = io::saveBoard(b, std::string(a.opt("-o"))); !r) return fail(r.error());
     if (auto r = topo::saveTopology(t, b, topo::sidecarPath(std::string(a.opt("-o")))); !r) return fail(r.error());
