@@ -2144,3 +2144,61 @@ TEST(Topo, BranchPointsThatComeTogetherArePairedAnew) {
   expectSoundModel(t);
   EXPECT_EQ(p.violations(), 0);
 }
+
+// A clinch (Luzin, Popov, Popov, NTV ITMO 2012 no. 4, fig. 1 and 5): two wires bent round each other's ends, and
+// no wire alone has a shorter way — the other is in it. F6 takes the hindering wire out, leads the long one
+// straight and lays the other anew. Pads of N1 at (15, 5) and (15, 15), of N2 at (25, 5) and (25, 15): N1 goes
+// round N2's upper pad and N2 round N1's lower one; unhooked, both are 10 mm.
+TEST(Topo, ClinchOfTwoWiresIsUndone) {
+  auto board = [](PinBoard& p) {
+    p.pad("N1", 15, 5, PadShapeKind::Circle, 1, 1);
+    p.pad("N1", 15, 15, PadShapeKind::Circle, 1, 1);
+    p.pad("N2", 25, 5, PadShapeKind::Circle, 1, 1);
+    p.pad("N2", 25, 15, PadShapeKind::Circle, 1, 1);
+    p.track("N1", {{15, 5}, {28, 2}, {28, 8}, {20, 10}, {15, 15}}, 0.3);
+    p.track("N2", {{25, 5}, {17, 8}, {13, 10}, {13, 17}, {25, 15}}, 0.3);
+  };
+  {
+    PinBoard p;
+    board(p);
+    topo::Topology::assignIds(p.b);
+    topo::Topology t;
+    t.build(p.b);
+    EXPECT_EQ(p.violations(), 0);
+    auto res = topo::refineModel(p.b, t);
+    ASSERT_TRUE(res.drawn);
+    EXPECT_EQ(res.clinches, 1);
+    EXPECT_NEAR(p.length("N1"), 10.0, 0.05);
+    EXPECT_NEAR(p.length("N2"), 10.0, 0.05);
+    expectSoundModel(t);
+    EXPECT_EQ(p.violations(), 0);
+  }
+  {
+    // Switched off, each wire is pulled taut round the other's pad and that is all.
+    PinBoard p;
+    board(p);
+    topo::Topology::assignIds(p.b);
+    topo::Topology t;
+    t.build(p.b);
+    topo::RefineModelOptions off;
+    off.clinches = false;
+    auto res = topo::refineModel(p.b, t, off);
+    ASSERT_TRUE(res.drawn);
+    EXPECT_EQ(res.clinches, 0);
+    EXPECT_GT(p.length("N1") + p.length("N2"), 30.0);
+    EXPECT_EQ(p.violations(), 0);
+  }
+  {
+    // A flexibly fixed net is neither the long wire nor the one taken out.
+    PinBoard p;
+    board(p);
+    p.b.nets[size_t(p.net("N2"))].flexFixed = true;
+    topo::Topology::assignIds(p.b);
+    topo::Topology t;
+    t.build(p.b);
+    auto res = topo::refineModel(p.b, t);
+    ASSERT_TRUE(res.drawn);
+    EXPECT_EQ(res.clinches, 0);
+    EXPECT_GT(p.length("N2"), 15.0);
+  }
+}

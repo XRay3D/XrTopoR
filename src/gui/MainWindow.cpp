@@ -1228,9 +1228,10 @@ void MainWindow::refineModel(bool thenLayers) {
     b.zones = work->zones;
     doc_->commitEdit(before, tr("Перекладка проводников"), false);
     doc_->setTopology(std::make_unique<topo::Topology>(std::move(*topo)));
-    showHint(tr("Перекладка по модели: переложено %1 из %2, ветвлений создано %3, слито %4, сдвинуто %5; конфликтов %6 → %7; длина %8 → %9 мм")
+    showHint(tr("Перекладка по модели: переложено %1 из %2 (клинчей %3), ветвлений создано %4, слито %5, сдвинуто %6; конфликтов %7 → %8; длина %9 → %10 мм")
                  .arg(res.relaid)
                  .arg(res.wires)
+                 .arg(res.clinches)
                  .arg(res.branches)
                  .arg(res.branchesMerged)
                  .arg(res.junctionMoves)

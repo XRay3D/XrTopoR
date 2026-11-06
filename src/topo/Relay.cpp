@@ -48,7 +48,7 @@ struct Chord {
   int net;
 };
 // The chords of the wires through a triangle, `skip` left out (the wire being laid: its own run is no bar).
-std::vector<Chord> chordsOf(const Topology& t, const LayerMesh& m, int tri, int skip) {
+std::vector<Chord> chordsOf(const Topology& t, const LayerMesh& m, int tri, int skip, const std::vector<int>* absent) {
   std::vector<Chord> out;
   const Tri& T = m.tris[tri];
   for (int i = 0; i < 3; ++i) {
@@ -56,7 +56,7 @@ std::vector<Chord> chordsOf(const Topology& t, const LayerMesh& m, int tri, int 
     const int n = int(E.cross.size());
     for (int k = 0; k < n; ++k) {
       const Crossing& c = t.crossings[E.cross[k]];
-      if (c.wire < 0 || c.wire == skip) continue;
+      if (c.wire < 0 || c.wire == skip || (absent && std::ranges::find(*absent, c.wire) != absent->end())) continue;
       const Wire& w = t.wires[c.wire];
       const double here = perimeter(m, tri, i, double(k + 1) / (n + 1));
       // To the corner opposite, when the wire ends there.
@@ -166,7 +166,7 @@ double tautLength(const Topology& t, int wi) {
   return len;
 }
 
-std::optional<RelayPath> findRelay(const Topology& t, int wi, const std::vector<char>* avoid) {
+std::optional<RelayPath> findRelay(const Topology& t, int wi, const std::vector<char>* avoid, const std::vector<int>* absent) {
   const Wire& w = t.wires[wi];
   const LayerMesh& m = *t.mesh(w.layer);
   RelayPath out;
@@ -205,6 +205,16 @@ std::optional<RelayPath> findRelay(const Topology& t, int wi, const std::vector<
 
   // The wire's own middle crossings are not there for the search.
   std::set<int> gone(w.cross.begin() + out.first, w.cross.begin() + out.last);
+  // ... nor are those of the wires taken out with it.
+  auto isAbsent = [&](int wire) { return absent && std::ranges::find(*absent, wire) != absent->end(); };
+  if (absent)
+    for (int other : *absent) {
+      const Wire& x = t.wires[size_t(other)];
+      if (x.layer != w.layer) continue;
+      int f = 0, l = 0;
+      middleOf(t, m, x, f, l);
+      gone.insert(x.cross.begin() + f, x.cross.begin() + l);
+    }
   auto present = [&](const Edge& E) {
     std::vector<int> cids;
     for (int cid : E.cross)
@@ -217,7 +227,7 @@ std::optional<RelayPath> findRelay(const Topology& t, int wi, const std::vector<
     if (fresh) {
       // With the middle gone: the chords of the other wires, and of this wire's kept crossings none (their
       // partners are the middle's, or lie in the pad).
-      it->second = chordsOf(t, m, tri, wi);
+      it->second = chordsOf(t, m, tri, wi, absent);
     }
     return it->second;
   };
@@ -250,7 +260,7 @@ std::optional<RelayPath> findRelay(const Topology& t, int wi, const std::vector<
     std::vector<int> ws;
     for (int cid : cids) ws.push_back(t.crossings[cid].wire);
     ws.insert(ws.begin() + gap, wi);
-    const EdgeCapacity c = capacityOf(t, m, E.v[0], E.v[1], ws, E.along);
+    const EdgeCapacity c = capacityOf(t, m, E.v[0], E.v[1], ws, isAbsent(E.along) ? -1 : E.along);
     // It fits at the nominal widths: a new path is no reason to narrow a wire (the capacity would narrow one
     // to make room — the automatic tools narrow only as the last resort).
     it->second.ok = c.deficit <= 0 && c.cls < 3 && !c.narrowed;
@@ -315,7 +325,7 @@ std::optional<RelayPath> findRelay(const Topology& t, int wi, const std::vector<
           // Along the edge between the two end vertices: only a free one.
           const int e = T.e[3 - nd.corner - j];
           const Edge& E = m.edges[e];
-          if (!E.constrained && E.along < 0 && present(E).empty()) {
+          if (!E.constrained && (E.along < 0 || isAbsent(E.along)) && present(E).empty()) {
             out.along = true;
             out.alongEdge = e;
             out.length = (G.p - S.p).len();
@@ -405,6 +415,13 @@ void applyRelay(Topology& t, int wi, const RelayPath& path) {
   if (path.last == was) w.hasExit[1] = false;
   w.dirty = true;
   for (int e : touched) refreshEdge(t, m, e);
+}
+
+void takeOut(Topology& t, int wi) {
+  const Wire& w = t.wires[size_t(wi)];
+  RelayPath none;
+  middleOf(t, *t.mesh(w.layer), w, none.first, none.last);
+  applyRelay(t, wi, none);
 }
 
 }  // namespace xr::topo

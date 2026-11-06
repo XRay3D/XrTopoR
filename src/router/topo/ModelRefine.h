@@ -21,6 +21,9 @@ struct RefineModelOptions {
   // the branch points are then re-laid once more (fig. 6: a branch round a vertex in its way goes the other
   // side of it).
   bool branches = true;
+  // A wire with no shorter way alone is tried with a wire that holds it taken out and laid anew after it (the
+  // clinches of Luzin, Popov, Popov, NTV ITMO 2012 no. 4).
+  bool clinches = true;
   // A wire is tried when it is this much longer than the straight line between its ends, and its new path
   // taken to the drawing when it is shorter than the old by the larger of the two.
   double detour = 0.3 * kNmPerMm;
@@ -35,6 +38,7 @@ struct RefineModelResult {
   int found = 0;      // ... with a shorter path found
   int relaid = 0;     // ... and kept: the drawing was better with it
   int junctionMoves = 0;
+  int clinches = 0;        // pairs of wires re-laid together
   int branches = 0;        // branch points made
   int branchesMerged = 0;  // pairs of branch points made one
   int drawings = 0;

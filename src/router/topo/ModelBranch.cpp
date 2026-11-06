@@ -153,6 +153,28 @@ BranchResult splitBranches(Board& b, Topology& t, const BranchOptions& o) {
   for (const Wire& w : t.wires)
     for (int end = 0; end < 2; ++end)
       if (w.end[end] >= 0) ++wiresAt[size_t(w.end[end])];
+  if (debug) {
+    // What the branch points of three wires stand off their balance by (something holds them): the gain of the
+    // point of least length for the far ends of the three first tracks, obstacles not looked at.
+    int n = 0;
+    double sum = 0;
+    for (auto& [key, legs] : at) {
+      const Owner& V = t.owners[std::get<0>(key)];
+      if (V.kind != Owner::Kind::Junction || legs.size() != 3 || wiresAt[size_t(std::get<0>(key))] != 3) continue;
+      const Vec2 f = geometricMedian(Polyline{legs[0].to, legs[1].to, legs[2].to}, V.c);
+      double now = 0, best = 0;
+      for (const Leg& l : legs) {
+        now += (l.to - l.from).len();
+        best += (l.to - f).len();
+      }
+      if (now - best < o.gain) continue;
+      ++n;
+      sum += now - best;
+      std::println(stderr, "  branch point of {} at ({:.3f}, {:.3f}) off its balance: {:.2f} mm to gain at ({:.3f}, {:.3f})", b.nets[V.net].name, V.c.x / 1e6, -V.c.y / 1e6,
+                   (now - best) / 1e6, f.x / 1e6, -f.y / 1e6);
+    }
+    std::println(stderr, "branch points off their balance: {}, {:.2f} mm to gain", n, sum / 1e6);
+  }
   // The best pair at every vertex.
   struct Split {
     int owner;
