@@ -204,6 +204,7 @@ int main(int argc, char** argv) {
     topo::OptimizeModelOptions mo;
     mo.flips = !a.flag("--no-flips");
     mo.contacts = !a.flag("--no-contacts");
+    mo.merge = !a.flag("--no-merge");
     auto res = topo::optimizeModel(b, t, mo);
     if (a.flag("--verbose"))
       for (auto& l : res.log) std::println("{}", l);
@@ -216,6 +217,8 @@ int main(int argc, char** argv) {
                    v.deficit > 0 ? std::format(" by {:.3f} mm", v.deficit / 1e6) : "");
     }
     if (!res.drawn) return fail("stopped by the violations above, nothing drawn");
+    if (res.junctionsInCopper > 0)
+      std::println("model: {} branch point(s) ended inside copper of their own net, {} merged with the pad or via there", res.junctionsInCopper, res.merged);
     std::println("model: {} iterations, {} via(s) and {} branch point(s) moved; {} drawings ({} rolled back); conflicts {} -> {}, shortfall {:.3f} -> {:.3f} mm, "
                  "length {:.1f} -> {:.1f} mm, forces {:.1f} -> {:.1f}",
                  res.iterations, res.viaMoves, res.junctionMoves, res.drawings, res.rollbacks, res.conflictsBefore, res.conflictsAfter, res.depthBefore / 1e6,

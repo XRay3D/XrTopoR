@@ -25,12 +25,15 @@ struct OptimizeModelOptions {
   int clearRounds = 4;              // at most so many rounds of vias stepping off the copper they are too close to, first
   bool vias = true, junctions = true;
   bool contacts = true;             // a via pressed against another shares its force with it (the pair moves as one)
+  bool merge = true;                // a branch point that ends inside copper of its own net merges with the pad or via
 };
 
 struct OptimizeModelResult {
   bool drawn = false;
   std::vector<Violation> violations;  // what stopped it (or the overflows found, when drawn)
   int iterations = 0, viaMoves = 0, junctionMoves = 0;
+  int junctionsInCopper = 0;  // branch points that ended inside copper of their own net
+  int merged = 0;             // ... and were merged with the pad or via there
   int drawings = 0;    // how many times the model was drawn and judged
   int rollbacks = 0;   // iterations whose drawing was worse and stayed worse without the steps blamed
   int conflictsBefore = 0, conflictsAfter = 0;  // the DRC of the first drawing and of the result

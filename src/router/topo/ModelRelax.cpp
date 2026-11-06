@@ -134,6 +134,15 @@ CopperPush copperPush(const Board& b, const Topology& t, const OwnerGrid& grid, 
   return out;
 }
 
+// A via does not go into a pad of its own net: its wire to that pad pulls it there, and nothing of another
+// net's rule holds it off (arz: vias 70 um from the centre of their pad's end after F7; TopoR's F7 of
+// Arcs_standard_routing leaves no via nearer than 1.86 mm to the pad its wire goes to, its F5 had 1.43). What
+// the via keeps from the pad's copper: its own radius (they may touch); -1: no such rule for the two.
+double ownPadRule(const Owner& mover, const Owner& other) {
+  if (mover.kind != Owner::Kind::Via || other.kind != Owner::Kind::Pad || other.net != mover.net || mover.net == kNoNet) return -1;
+  return mover.halfWidth;
+}
+
 // What stops the object at p: copper of other nets closer than the rule by more in sum than where it
 // comes from (a step out of a conflict is no conflict). The worst such copper's centre.
 std::optional<Vec2> blockerAt(const Board& b, const Topology& t, const OwnerGrid& grid, int oi, Vec2 p) {
@@ -155,8 +164,12 @@ std::optional<Vec2> blockerAt(const Board& b, const Topology& t, const OwnerGrid
   grid.near(p, ob.halfWidth + maxClr + 1000 + (p - ob.c).len(), [&](int oj) {
     if (oj == oi) return;
     const Owner& o = t.owners[oj];
-    if (o.net == ob.net || !(o.layers & ob.layers)) return;
-    double req = ob.halfWidth + requiredClearance(b, ob.net, o.net, ob.layers & o.layers);
+    if (!(o.layers & ob.layers)) return;
+    double req = ownPadRule(ob, o);
+    if (req < 0) {
+      if (o.net == ob.net) return;
+      req = ob.halfWidth + requiredClearance(b, ob.net, o.net, ob.layers & o.layers);
+    }
     double there = std::max(0.0, req - 1000 - o.shape.distance(p)), here = std::max(0.0, req - 1000 - o.shape.distance(ob.c));
     shortThere += there;
     shortHere += here;
@@ -268,6 +281,25 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
   std::map<int, size_t> objOf;
   for (size_t k = 0; k < objs.size(); ++k) objOf[objs[k].owner] = k;
 
+  auto judge = [&](Drawn& c) {
+    ProfScope pj("F7 model: judging");
+    DrcOptions d;
+    d.unconnected = false;
+    const std::vector<DrcViolation> vs = runDrc(c.board, d);
+    c.conflicts = int(vs.size());
+    c.shortfall = c.depth = 0;
+    c.deep = c.shorts = c.real = 0;
+    for (const DrcViolation& v : vs) c.shortfall += std::max(0.0, v.required - v.actual);
+    c.places = placesOf(c.board, vs);
+    for (const Place& p : c.places) {
+      c.depth += p.depth;
+      if (p.shorted) ++c.shorts;
+      else if (p.depth > kNarrowDeficitLimit) ++c.deep;
+      if (p.shorted || p.depth > kNoise) ++c.real;
+    }
+    c.length = c.board.tracksLength();
+    c.unrouted = Connectivity::compute(c.board).ratsnest.size();
+  };
   auto draw = [&] {
     ProfScope p("F7 model: drawing");
     Drawn c{t, t, b, {}, {}, {}};
@@ -278,23 +310,7 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
       if (ow.kind == Owner::Kind::Via && ow.via >= 0 && ow.via < int(c.board.vias.size()))
         c.board.vias[ow.via].pos = Point(Vec2{std::round(ow.c.x / 100) * 100, std::round(ow.c.y / 100) * 100});
     drawModel(c.board, c.owning, true, c.stats, c.wires);
-    {
-      ProfScope pj("F7 model: judging");
-      DrcOptions d;
-      d.unconnected = false;
-      const std::vector<DrcViolation> vs = runDrc(c.board, d);
-      c.conflicts = int(vs.size());
-      for (const DrcViolation& v : vs) c.shortfall += std::max(0.0, v.required - v.actual);
-      c.places = placesOf(c.board, vs);
-      for (const Place& p : c.places) {
-        c.depth += p.depth;
-        if (p.shorted) ++c.shorts;
-        else if (p.depth > kNarrowDeficitLimit) ++c.deep;
-        if (p.shorted || p.depth > kNoise) ++c.real;
-      }
-      c.length = c.board.tracksLength();
-      c.unrouted = Connectivity::compute(c.board).ratsnest.size();
-    }
+    judge(c);
     ++r.drawings;
     return c;
   };
@@ -408,8 +424,12 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
         grid.near(ob.c, ob.halfWidth + maxClr + kContact, [&](int oj) {
           if (oj == oi) return;
           const Owner& x = t.owners[oj];
-          if (x.net == ob.net || !(x.layers & ob.layers)) return;
-          const double req = ob.halfWidth + requiredClearance(b, ob.net, x.net, ob.layers & x.layers);
+          if (!(x.layers & ob.layers)) return;
+          double req = ownPadRule(ob, x);
+          if (req < 0) {
+            if (x.net == ob.net) return;
+            req = ob.halfWidth + requiredClearance(b, ob.net, x.net, ob.layers & x.layers);
+          }
           if (x.shape.distance(ob.c) > req + kContact) return;
           Vec2 n = awayFrom(x.shape, ob.c, x.c) * -1.0;  // towards the other
           if (n.len2() == 0) return;
@@ -572,10 +592,115 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
   if (debug) std::println(stderr, "F7 model: {} iterations, {} drawings, {} rollbacks", r.iterations, r.drawings, r.rollbacks);
   for (size_t k = 0; k < objs.size(); ++k)
     if ((best.pos[k] - objs[k].start).len() > 1000) ++(t.owners[objs[k].owner].kind == Owner::Kind::Via ? r.viaMoves : r.junctionMoves);
+  r.forceAfter = sumOf(forcesOf(best));
+  // A branch point that came to rest inside copper of its own net merges with the pad or via there (TopoR's
+  // F7 of Arcs_standard_routing: 13 of its 25 branch points went so, ten into a pad and three into a via; ours
+  // stood in the copper off its centre, with a wire's end there). On the drawing: the wire between the two
+  // goes, the other wires' ends at the branch point move to the pad's connection point; the model is built
+  // anew from those tracks and drawn (the leads by the pads' pattern), and the drawing is taken when the judge
+  // finds it no worse. A branch point an arc ends at stays.
+  if (o.merge) {
+    struct Merge {
+      int junction, into;
+    };
+    std::vector<Merge> merges;
+    const Topology& bt = best.owning;
+    grid.build(bt);
+    grid.slack = 0;
+    for (const Obj& ob : objs) {
+      const Owner& ow = bt.owners[ob.owner];
+      if (ow.kind != Owner::Kind::Junction || ob.ends < 3) continue;
+      int into = -1;
+      double nearest = 0;
+      grid.near(ow.c, 1000, [&](int oj) {
+        const Owner& x = bt.owners[oj];
+        if (oj == ob.owner || x.net != ow.net || !(x.layers & ow.layers) || x.locked || x.shape.distance(ow.c) > 0) return;
+        if (into < 0 || (x.c - ow.c).len() < nearest) {
+          into = oj;
+          nearest = (x.c - ow.c).len();
+        }
+      });
+      if (into >= 0) merges.push_back({ob.owner, into});
+    }
+    r.junctionsInCopper = int(merges.size());
+    if (!merges.empty()) {
+      Drawn m{bt, bt, best.board, {}, {}, {}};
+      Board& mb = m.board;
+      constexpr double kAt = 3;  // nm: a track's end is the branch point's
+      // One at a time: the wires' ends moved to the pad's centre may cross what lay between (the model of the
+      // tracks then says so: wires crossing, a wire through another net's pad), and that branch point stays.
+      auto stopping = [](const Board& x) {
+        Board c = x;
+        Topology::assignIds(c);
+        Topology m;
+        m.build(c);
+        int n = 0;
+        for (const Violation& v : m.violations) n += v.kind == Violation::Kind::Crossing || v.kind == Violation::Kind::ThroughPad;
+        return n;
+      };
+      int done = 0;
+      for (const Merge& g : merges) {
+        const Owner& j = bt.owners[g.junction];
+        const Point to(bt.owners[g.into].c);
+        bool arc = false;
+        std::vector<size_t> at;
+        for (size_t i = 0; i < mb.tracks.size(); ++i) {
+          const Track& tr = mb.tracks[i];
+          if (tr.net != j.net || !((j.layers >> tr.layer) & 1)) continue;
+          if ((tr.a.v() - j.c).len() > kAt && (tr.b.v() - j.c).len() > kAt) continue;
+          arc |= tr.isArc();
+          at.push_back(i);
+        }
+        if (debug && (arc || at.empty()))
+          std::println(stderr, "merge: branch point of {} at ({:.3f}, {:.3f}) stays: {}", b.nets[j.net].name, j.c.x / 1e6, -j.c.y / 1e6, arc ? "an arc ends at it" : "no track ends at it");
+        if (arc || at.empty()) continue;
+        std::vector<Track> was = mb.tracks;
+        std::set<uint32_t> gone;
+        for (const Wire& w : bt.wires)
+          if ((w.end[0] == g.junction && w.end[1] == g.into) || (w.end[0] == g.into && w.end[1] == g.junction)) gone.insert(w.tracks.begin(), w.tracks.end());
+        for (size_t i : at) {
+          Track& tr = mb.tracks[i];
+          if ((tr.a.v() - j.c).len() <= kAt) tr.a = to;
+          if ((tr.b.v() - j.c).len() <= kAt) tr.b = to;
+        }
+        std::erase_if(mb.tracks, [&](const Track& tr) { return (tr.id && gone.contains(tr.id)) || (!tr.isArc() && tr.a == tr.b); });
+        if (stopping(mb) > 0) {
+          if (debug) std::println(stderr, "merge: branch point of {} at ({:.3f}, {:.3f}) stays: its wires would cross what lies between", b.nets[j.net].name, j.c.x / 1e6, -j.c.y / 1e6);
+          mb.tracks = std::move(was);
+          continue;
+        }
+        ++done;
+      }
+      if (done > 0) {
+        Topology::assignIds(mb);
+        Topology mt;
+        mt.build(mb);
+        int flips = 0;
+        std::vector<Violation> stop;
+        if (!prepareModel(mt, o.flips, false, flips, stop)) {
+          r.log.push_back(std::format("merge: {} branch point(s) into their pads and vias: the model of the merged tracks has {} violation(s), left as it was", done, stop.size()));
+        } else {
+          m.model = mt;
+          m.owning = std::move(mt);
+          drawModel(m.board, m.owning, true, m.stats, m.wires);
+          judge(m);
+          ++r.drawings;
+          // Not by the length: the wires now go by the pad's pattern from its centre, where they cut across its
+          // copper to a point off it.
+          const bool taken = keys(m) <= keys(best);
+          r.log.push_back(std::format("merge: {} branch point(s) into their pads and vias; {} conflict(s) in {} place(s) ({} deep, {} shorted), {:.3f} mm short, {:.1f} mm: {}", done,
+                                      m.conflicts, m.places.size(), m.deep, m.shorts, m.shortfall / 1e6, m.length / 1e6, taken ? "taken" : "left as it was"));
+          if (taken) {
+            r.merged = done;
+            best = std::move(m);
+          }
+        }
+      }
+    }
+  }
   r.conflictsAfter = best.conflicts;
   r.lengthAfter = best.length;
   r.depthAfter = best.shortfall;
-  r.forceAfter = sumOf(forcesOf(best));
   r.stats = best.stats;
   r.wires = best.wires;
   t = std::move(best.owning);
