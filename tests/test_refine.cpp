@@ -214,3 +214,55 @@ TEST(Refine, KeepsWidthsAndExits) {
   EXPECT_EQ(s.jointInCopper, 0);
   EXPECT_EQ(s.tees, 0);
 }
+
+// TopoR's rules at the pads, measured on its own F5, F6 and F7 of Arcs_standard_routing (xrtopor-cli
+// padstats gives the same numbers for its three files): no wire narrower than drawn; every wire at the
+// centre of its pad or via and none ending in copper off the centre; the pins left through their ends
+// (109), but for the one dog-leg another wire runs round (D1-30) and the four bridges to the pin beside;
+// no vertex inside a pad off the pattern; the widths joined end to end — 3 at via centres, 1 at a pad's
+// centre, 2 in series, 5 at branches — and never on a track's inside. Ours after F5 on the tracks, F5 on
+// the model and F7 on the model.
+TEST(Realizer, ArcsFollowsToporPadRules) {
+  auto rules = [](const Board& b, int narrowed, const char* how) {
+    const auto s = topo::relayStats(b);
+    SCOPED_TRACE(std::string(how) + "\n" + s.text());
+    EXPECT_EQ(narrowed, 0);
+    EXPECT_EQ(s.widths.size(), 2u);
+    EXPECT_EQ(s.necks, 0);
+    EXPECT_EQ(s.padsAtCentre, s.pads);
+    EXPECT_EQ(s.viasAtCentre, s.vias);
+    EXPECT_EQ(s.deadEnds, 0);
+    EXPECT_EQ(s.exitsEnd, 109);
+    EXPECT_EQ(s.exitsSide, 1);
+    EXPECT_EQ(s.exitsBridge, 4);
+    EXPECT_EQ(s.innerOther, 0);
+    EXPECT_EQ(s.jointVia, 3);
+    EXPECT_EQ(s.jointPad, 1);
+    EXPECT_EQ(s.jointSeries, 2);
+    EXPECT_EQ(s.jointBranch, 5);
+    EXPECT_EQ(s.jointInCopper, 0);
+    EXPECT_EQ(s.tees, 0);
+  };
+  {
+    auto lb = io::loadBoard(data("topor/Example_04/Arcs_standard_routing.fst"));
+    ASSERT_TRUE(lb.has_value());
+    Board& b = **lb;
+    auto st = topo::reshapeTracks(b, std::vector<char>(b.tracks.size(), 1));
+    rules(b, st.narrowedWires, "F5 on the tracks");
+  }
+  {
+    auto lb = io::loadBoard(data("topor/Example_04/Arcs_standard_routing.fst"));
+    ASSERT_TRUE(lb.has_value());
+    Board& b = **lb;
+    topo::Topology::assignIds(b);
+    topo::Topology t;
+    t.build(b);
+    auto f5 = topo::runF5Model(b, t);
+    ASSERT_TRUE(f5.drawn);
+    rules(b, f5.stats.narrowedWires, "F5 on the model");
+    auto f7 = topo::optimizeModel(b, t);
+    ASSERT_TRUE(f7.drawn);
+    rules(b, 0, "F7 on the model");
+    for (const Track& tr : b.tracks) EXPECT_TRUE(tr.width == mmToNm(0.3) || tr.width == mmToNm(0.8)) << "F7 narrowed a track to " << tr.width;
+  }
+}

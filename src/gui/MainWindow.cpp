@@ -1338,13 +1338,14 @@ void MainWindow::optimizeModel(bool thenRefine) {
     doc_->commitEdit(before, tr("Подвижка"), false);
     doc_->setTopology(std::make_unique<topo::Topology>(std::move(*topo)));
     showHint(tr("Подвижка по модели: переходов %1, ветвлений %2; итераций %3, проверок %4 (откатов %5); конфликтов %6 → %7")
-                 .arg(res.viaMoves)
-                 .arg(res.junctionMoves)
-                 .arg(res.iterations)
-                 .arg(res.checkpoints)
-                 .arg(res.rollbacks)
-                 .arg(res.conflictsBefore)
-                 .arg(res.conflictsAfter),
+                     .arg(res.viaMoves)
+                     .arg(res.junctionMoves)
+                     .arg(res.iterations)
+                     .arg(res.checkpoints)
+                     .arg(res.rollbacks)
+                     .arg(res.conflictsBefore)
+                     .arg(res.conflictsAfter) +
+                 (res.stats.narrowedWires > 0 ? tr("; заужено проводников: %1").arg(res.stats.narrowedWires) : QString()),
              10000);
     if (thenRefine) refine(true);
   });

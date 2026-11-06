@@ -2146,6 +2146,8 @@ void BoardView::recomputeShapes() {
   doc_->clearSelection();
   doc_->commitEdit(before, tr("Расчёт формы проводников"), false);
   QString msg = tr("Расчёт формы проводников: %1 проводник(ов), %2 дуг, ветвлений стянуто %3").arg(st.wires).arg(st.arcs).arg(settled);
+  // Narrowing is the last resort (topo/Narrowing.h): said when it was taken.
+  if (st.narrowedWires > 0) msg += tr("; заужено проводников: %1").arg(st.narrowedWires);
   if (!st.crossingNets.empty()) {
     QStringList pairs;
     for (auto [n1, n2] : st.crossingNets)
@@ -2181,10 +2183,12 @@ void BoardView::recomputeShapesModel() {
   doc_->clearSelection();
   doc_->commitEdit(before, tr("Расчёт формы проводников"), false);
   doc_->markTopologyFresh();
-  emit status(tr("Расчёт формы проводников по модели: %1 проводник(ов), %2 дуг, переполненных рёбер %3")
-                  .arg(res.wires)
-                  .arg(res.stats.arcs)
-                  .arg(res.stats.overflowEdges));
+  QString msg = tr("Расчёт формы проводников по модели: %1 проводник(ов), %2 дуг, переполненных рёбер %3")
+                    .arg(res.wires)
+                    .arg(res.stats.arcs)
+                    .arg(res.stats.overflowEdges);
+  if (res.stats.narrowedWires > 0) msg += tr("; заужено проводников: %1").arg(res.stats.narrowedWires);
+  emit status(msg);
 }
 
 void BoardView::cancelTool() {
