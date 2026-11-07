@@ -2377,6 +2377,14 @@ void BoardView::recomputeShapes() {
   // rest of the copper as it lies), when the setting says so and there are any; else everything.
   bool local = any;
   const bool model = QSettings().value("topo/model", true).toBool();
+  // A zipped pair among the selected: the model draws the selected wires (and the edited ones), the pair as one
+  // wire. The tracks' sketch path knows no pairs: the first F5 after the pair's axis was edited only took the
+  // selection off, with the handles, and the second drew it.
+  if (any && model && r::any_of(doc_->selectedItems(), [&](ItemRef r) { return r.type == ItemType::Track && b.tracks[r.index].zip >= 0; })) {
+    for (ItemRef r : doc_->selectedItems())
+      if (r.type == ItemType::Track && !b.tracks[r.index].locked) b.tracks[r.index].edited = true;
+    if (recomputeShapesModel(true)) return;
+  }
   if (!any && QSettings().value("f5/editedOnly", true).toBool()) {
     for (size_t i = 0; i < b.tracks.size(); ++i)
       if (b.tracks[i].edited && !b.tracks[i].locked) { chosen[i] = 1; any = true; }

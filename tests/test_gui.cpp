@@ -740,6 +740,18 @@ TEST(Gui, ZippedPairEditedByItsAxis) {
     EXPECT_LT(offsetMiss(), 2000);
     EXPECT_EQ(Connectivity::compute(f.b()).ratsnest.size(), 0u);
   }
+  // F5 at once, the section still selected: drawn by the model (the first press only took the selection off).
+  {
+    QSignalSpy said(&f.view, &BoardView::status);
+    ASSERT_FALSE(f.doc.selectedItems().empty());
+    f.view.recomputeShapes();
+    ASSERT_FALSE(said.isEmpty());
+    EXPECT_TRUE(said.last().at(0).toString().contains("по модели")) << said.last().at(0).toString().toStdString();
+    EXPECT_EQ(f.b().zips.size(), 1u);
+    EXPECT_EQ(Connectivity::compute(f.b()).ratsnest.size(), 0u);
+    for (const Track& t : f.b().tracks) EXPECT_FALSE(t.edited);
+    f.doc.undoStack()->undo();
+  }
   f.doc.undoStack()->undo();
   f.doc.undoStack()->undo();
   EXPECT_EQ(f.b().zips[0].axis[0].b.v(), a1) << "undone";
