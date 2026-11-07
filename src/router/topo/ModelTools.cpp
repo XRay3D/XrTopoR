@@ -55,7 +55,6 @@ RealWire sketchOf(const Board& b, const Topology& t, int wi) {
   }
   if (w.hasExit[1]) pts.push_back({w.exit[1]});
   pts.push_back({m.verts[w.endVertex[1]].p});
-  const double rule = double(w.clr) + w.width / 2.0 + kRealizeMargin;
   auto triOf = [&](const Pt& x, const Pt& y, int endVertex) {  // the triangle the chord x -> y lies in
     if (x.edge < 0 && y.edge < 0) return -1;  // an end and its exit point
     if (x.edge >= 0 && y.edge >= 0) {
@@ -82,6 +81,7 @@ RealWire sketchOf(const Board& b, const Topology& t, int wi) {
       const Owner& o = t.owners[m.verts[v].owner];
       if (o.net == w.net && w.net != kNoNet) continue;
       Vec2 P = m.verts[v].p;
+      const double rule = ownerClearance(t, m, m.verts[v].owner, w) + w.width / 2.0 + kRealizeMargin;
       // Only where the chord comes within the rule of the vertex's copper. The stack radius is the
       // realiser's business: samples on it rounded neighbouring vertices into one another (a via row,
       // arcs of 2 mm overlapping, the sketch crossing itself).
@@ -198,7 +198,7 @@ RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int
           ob.pts[id].round = true;
           break;
         case Owner::Kind::Outline: id = ob.add(x.p, 0, clr, kBoardEdge); break;
-        case Owner::Kind::Keepout: id = ob.add(x.p, 0, 0, kBoardEdge); break;
+        case Owner::Kind::Keepout: id = ob.add(x.p, 0, 0, kKeepout); break;
       }
       if (id >= 0) ob.pts[id].owner = x.owner;
     }

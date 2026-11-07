@@ -1665,9 +1665,121 @@ struct PinBoard {
       if (b.nets[t.net].name == n) l += t.length();
     return l / kNmPerMm;
   }
+  // A second copper layer; pads and vias made after it are on both layers unless told otherwise.
+  LayerId bottom = -1;
+  void twoLayers() {
+    bottom = b.addLayer("Bottom", LayerKind::Copper, Side::Bottom);
+    b.layers[bottom].copperIndex = 1;
+  }
+  // A routing keepout: an area (a polygon) or a line, for wires and/or vias, on all copper layers (0) or
+  // the given ones.
+  void keepout(std::initializer_list<std::pair<double, double>> poly, bool wires = true, bool vias = true, LayerMask layers = 0) {
+    Keepout k;
+    k.wires = wires;
+    k.vias = vias;
+    k.layers = layers;
+    Graphic g;
+    g.kind = GraphicKind::Poly;
+    for (const auto& q : poly) g.pts.push_back(at(q.first, q.second));
+    k.shape.push_back(g);
+    b.keepouts.push_back(k);
+  }
+  void keepoutLine(std::pair<double, double> a, std::pair<double, double> c, bool wires = true, bool vias = true, LayerMask layers = 0) {
+    Keepout k;
+    k.wires = wires;
+    k.vias = vias;
+    k.layers = layers;
+    Graphic g;
+    g.kind = GraphicKind::Line;
+    g.a = at(a.first, a.second);
+    g.b = at(c.first, c.second);
+    k.shape.push_back(g);
+    b.keepouts.push_back(k);
+  }
+  // A cutout in the board: a hole in the outline.
+  void cutout(std::initializer_list<std::pair<double, double>> poly) {
+    std::vector<Vec2> loop;
+    for (const auto& q : poly) loop.push_back(at(q.first, q.second));
+    b.outline.push_back(loop);
+  }
+  // A copper area of the net on the top layer; poured (the fill is its whole outline) unless told otherwise.
+  int zone(const std::string& n, std::initializer_list<std::pair<double, double>> poly, bool filled = true, double clearance = 0) {
+    Zone z;
+    z.net = net(n);
+    z.layer = top;
+    z.clearance = mmToNm(clearance);
+    for (const auto& q : poly) z.outline.push_back(at(q.first, q.second));
+    if (filled) z.filled.push_back(z.outline);
+    b.zones.push_back(z);
+    return int(b.zones.size() - 1);
+  }
+  int drcOf(DrcViolation::Type kind) const {
+    DrcOptions d;
+    d.unconnected = false;
+    d.widths = false;
+    int n = 0;
+    for (const DrcViolation& v : runDrc(b, d)) n += v.type == kind;
+    return n;
+  }
+  // F5 on the model, built from the tracks as they lie; the model is kept for the checks.
+  struct F5 {
+    topo::Topology t;
+    topo::F5ModelResult res;
+  };
+  F5 f5Model() {
+    topo::Topology::assignIds(b);
+    F5 f;
+    f.t.build(b);
+    f.res = topo::runF5Model(b, f.t);
+    return f;
+  }
+  topo::RefineModelResult f6(const topo::RefineModelOptions& o = {}) {
+    topo::Topology::assignIds(b);
+    topo::Topology t;
+    t.build(b);
+    return topo::refineModel(b, t, o);
+  }
+  // The least distance from the net's tracks (their centre lines) to a point / a segment, in mm.
+  double centreLineTo(const std::string& n, Vec2 a, Vec2 c) const {
+    double best = 1e18;
+    for (const Track& t : b.tracks) {
+      if (b.nets[t.net].name != n) continue;
+      Polyline p = t.path();
+      for (size_t i = 0; i + 1 < p.size(); ++i) best = std::min(best, distSegmentSegment(p[i], p[i + 1], a, c));
+    }
+    return best / kNmPerMm;
+  }
 };
 
 }  // namespace
+
+// A wire keeps no clearance from a routing keepout: its copper may touch the keepout's boundary (TopoR has
+// no rule for the distance, only the error of a wire across). Between a pad's edge and a keepout's wall
+// 0.6 mm apart a 0.3 mm wire with the clearance 0.2 needs 0.5: it fits, its centre line from 9.9 to 10.0.
+// With the wire's own clearance kept from the wall it needed 0.7 and the edge overflowed.
+TEST(Topo, KeepoutClearanceIsZero) {
+  PinBoard p;
+  p.pad("N", 5, 10, PadShapeKind::Circle, 1, 1);
+  p.pad("N", 35, 10, PadShapeKind::Circle, 1, 1);
+  p.pad("M", 20, 9.3, PadShapeKind::Rect, 16, 0.5);  // its top edge at y = 9.55
+  p.keepout({{12, 10.15}, {28, 10.15}, {28, 15}, {12, 15}});  // the wall at y = 10.15
+  p.track("N", {{5, 10}, {35, 10}}, 0.3);
+  auto f = p.f5Model();
+  ASSERT_TRUE(f.res.drawn);
+  EXPECT_EQ(f.res.stats.overflowEdges, 0);
+  EXPECT_EQ(p.drcOf(DrcViolation::Type::Keepout), 0);
+  EXPECT_EQ(p.drcOf(DrcViolation::Type::Clearance), 0);
+  const Vec2 wall0 = PinBoard::at(12, 10.15), wall1 = PinBoard::at(28, 10.15);
+  EXPECT_GE(p.centreLineTo("N", wall0, wall1), 0.15 - 0.001) << "half the width from the wall";
+  for (const Track& t : p.b.tracks) {
+    if (p.b.nets[t.net].name != "N") continue;
+    for (Vec2 q : t.path()) {
+      if (q.x < PinBoard::at(14, 0).x || q.x > PinBoard::at(26, 0).x) continue;
+      EXPECT_GE(q.y, PinBoard::at(0, 9.9).y - 1000) << "the pad's rule";
+      EXPECT_LE(q.y, PinBoard::at(0, 10.0).y + 1000) << "the wall";
+    }
+  }
+}
 
 // The pins of a row are left through their ends only (TopoR's F5: 109 of the 110 exits of
 // Arcs_standard_routing, the one left is a dog-leg another wire runs round): a wire drawn out of the long

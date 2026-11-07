@@ -224,7 +224,7 @@ LayerObstacles collect(const Board& b, LayerId layer, const std::vector<RealVia>
   for (auto& loop : b.outline) {
     int first = int(ob.pts.size());
     int n = int(loop.size());
-    for (auto& p : loop) ob.add(p, 0, double(b.edgeClearance), -2);  // -2: belongs to no net, blocks all
+    for (auto& p : loop) ob.add(p, 0, double(b.edgeClearance), kBoardEdge);
     for (int k = 0; k < n; ++k) ob.link(first + k, first + (k + 1) % n, 0);
   }
   // Routing keepouts of the layer: their boundaries, kept by every net (no clearance).
@@ -243,14 +243,14 @@ LayerObstacles collect(const Board& b, LayerId layer, const std::vector<RealVia>
         Vec2 a = pts[i], c = pts[(i + 1) % n];
         int parts = std::max(1, int(std::ceil((c - a).len() / (0.5 * kNmPerMm))));
         for (int q = 0; q < parts; ++q) {
-          int o = ob.add(a + (c - a) * (double(q) / parts), 0, 0, -2);
+          int o = ob.add(a + (c - a) * (double(q) / parts), 0, 0, kKeepout);
           if (prev >= 0) ob.link(prev, o, 0);
           else first = o;
           prev = o;
         }
       }
       if (closed) ob.link(prev, first, 0);
-      else ob.link(prev, ob.add(pts.back(), 0, 0, -2), 0);
+      else ob.link(prev, ob.add(pts.back(), 0, 0, kKeepout), 0);
     }
   }
   if (opt.tracksAsObstacles)
@@ -321,7 +321,7 @@ LayerObstacles collectFromMesh(const Board& b, LayerId layer, const TopoMesh& m,
       case VKind::Outline: ob.add(v.p, 0, double(b.edgeClearance), kBoardEdge); break;
       case VKind::Keepout: {
         const Keepout& k = b.keepouts[v.keepout];
-        if (k.onLayer(layer) && k.wires) ob.add(v.p, 0, 0, kBoardEdge);
+        if (k.onLayer(layer) && k.wires) ob.add(v.p, 0, 0, kKeepout);
         else ob.add(v.p, 0, 0, kTransparent);
         break;
       }
@@ -346,7 +346,7 @@ LayerObstacles collectFromMesh(const Board& b, LayerId layer, const TopoMesh& m,
   for (const MEdge& e : m.edges) {
     if (!(e.constrained || e.blocked) || e.v[0] == e.v[1]) continue;
     ob.constraints.push_back({e.v[0], e.v[1]});
-    if (ob.pts[e.v[0]].net == kBoardEdge && ob.pts[e.v[1]].net == kBoardEdge) ob.side(e.v[0], e.v[1], 0);
+    if (isWall(ob.pts[e.v[0]].net) && isWall(ob.pts[e.v[1]].net)) ob.side(e.v[0], e.v[1], 0);
   }
   return ob;
 }
@@ -861,6 +861,7 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
   // The clearance between a wire and an obstacle, between two wires: the pair's rule when the board has
   // such rules (clearances between net groups), else the larger of their own.
   auto clrTo = [&](const OPt& o, const RealWire& w) {
+    if (o.net == kKeepout) return 0.0;  // a wall with no clearance: the wire's copper may touch it
     double c = std::max(o.clr, double(w.clearance));
     if (o.net >= 0 && w.net >= 0 && !b.pairRules.empty())
       if (Coord p = pairClearance(b.pairRules, o.net, w.net, w.layer); p > 0) c = double(p);

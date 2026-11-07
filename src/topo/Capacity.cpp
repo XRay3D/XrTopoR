@@ -13,6 +13,13 @@ bool foreign(const Owner& o, const Wire& w) { return o.net != w.net || w.net == 
 
 }  // namespace
 
+double ownerClearance(const Topology& t, const LayerMesh& m, int owner, const Wire& w) {
+  const Owner& o = t.owners[owner];
+  if (o.kind == Owner::Kind::Keepout) return 0.0;
+  if (Coord p = pairClearance(t.pairRules, o.net, w.net, m.layer); p > 0) return double(p);
+  return std::max(m.ownerClr[owner], double(w.clr));
+}
+
 EdgeCapacity edgeCapacity(const Topology& t, const LayerMesh& m, int e) {
   const Edge& E = m.edges[e];
   std::vector<int> ws;
@@ -64,14 +71,9 @@ EdgeCapacity capacityOf(const Topology& t, const LayerMesh& m, int va, int vb, c
     c.cls = 0;
     return c;
   }
-  const double clrU = m.ownerClr[U.owner], clrV = m.ownerClr[V.owner];
   auto wireOf = [&](int k) -> const Wire& { return t.wires[ws[k]]; };
-  // The clearance between a wire and an owner, between two wires: the pair's rule when the board has
-  // such rules, else the larger of their own.
-  auto clrTo = [&](const Owner& o, double clrO, const Wire& w) {
-    if (Coord p = pairClearance(t.pairRules, o.net, w.net, m.layer); p > 0) return double(p);
-    return std::max(clrO, double(w.clr));
-  };
+  // The clearance between two wires: the pair's rule when the board has such rules, else the larger of
+  // their own (to an owner: ownerClearance).
   auto clrBetween = [&](const Wire& x, const Wire& y) {
     if (Coord p = pairClearance(t.pairRules, x.net, y.net, m.layer); p > 0) return double(p);
     return std::max(double(x.clr), double(y.clr));
@@ -79,13 +81,13 @@ EdgeCapacity capacityOf(const Topology& t, const LayerMesh& m, int va, int vb, c
   // The stack from each end: the k-th wire sits on the (k-1)-th, never nearer the owner than its own
   // rule allows.
   auto pack = [&](double margin) {
-    auto need = [&](const Owner& o, double reach, double clrO, const Wire& w, double width) {
+    auto need = [&](const Owner& o, int owner, double reach, const Wire& w, double width) {
       if (!foreign(o, w)) return 0.0;
-      return reach + clrTo(o, clrO, w) + margin + width / 2.0;
+      return reach + ownerClearance(t, m, owner, w) + margin + width / 2.0;
     };
     for (int k = 0; k < n; ++k) {
       const Wire& w = wireOf(k);
-      double own = need(ou, c.reachU, clrU, w, c.width[k]);
+      double own = need(ou, U.owner, c.reachU, w, c.width[k]);
       if (k == 0) c.a[k] = own;
       else {
         double spacing = c.width[k - 1] / 2 + clrBetween(wireOf(k - 1), w) + margin + c.width[k] / 2;
@@ -94,7 +96,7 @@ EdgeCapacity capacityOf(const Topology& t, const LayerMesh& m, int va, int vb, c
     }
     for (int k = n - 1; k >= 0; --k) {
       const Wire& w = wireOf(k);
-      double own = need(ov, c.reachV, clrV, w, c.width[k]);
+      double own = need(ov, V.owner, c.reachV, w, c.width[k]);
       if (k == n - 1) c.b[k] = own;
       else {
         double spacing = c.width[k + 1] / 2 + clrBetween(wireOf(k + 1), w) + margin + c.width[k] / 2;

@@ -16,6 +16,11 @@
 namespace xr::topo {
 
 constexpr int kTransparent = -3;  // a point that constrains nothing (via site, pad of another layer)
+// A routing keepout's point: a wall every net keeps out of, with no clearance of its own (TopoR has no
+// such rule, only the error of a wire across the keepout). The outline's points are kBoardEdge, with the
+// clearance to the board edge.
+constexpr int kKeepout = -4;
+inline bool isWall(int net) { return net == kBoardEdge || net == kKeepout; }
 
 struct OPt {
   Vec2 p;
