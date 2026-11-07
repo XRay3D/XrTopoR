@@ -271,7 +271,29 @@ RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int
           tb.add(tr.a.v());
           tb.add(tr.b.v());
           if (tr.mid) tb.add(tr.mid->v());
-          if (region.intersects(tb.inflated(tr.width))) ob.addTrack(tr, double(b.clearance(tr.net, layer)));
+          if (!region.intersects(tb.inflated(tr.width))) continue;
+          // An arc as its chain of points made a wire hugging it from outside bend round every point (a zipped
+          // pair along a wide bend: 27 pieces of axis for 9). From outside it is one round obstacle, its circle to
+          // the copper's outer edge, when no wire drawn goes inside that circle (the bend's inner side); its points
+          // then are no more (on that circle, a path round it grazed them and bent round each again).
+          // (Only for a wire not drawn this time: a locked one, a serpent, stays points, as F5 of the whole board
+          // always had it — as discs they made AMK310's F5 34 violations worse.)
+          if (tr.isArc() && !w.locked) {
+            const ArcGeom g = ArcGeom::fromThreePoints(tr.a.v(), tr.mid->v(), tr.b.v());
+            // (No wire drawn may run anywhere into that circle: its sketch's pieces nearer the centre than the
+            // copper's outer edge — a disc round a serpent's loop or a short bend pushed the wires passing by.)
+            const double outer = g.radius + tr.width / 2.0;
+            bool inside = !g.valid;
+            for (int k = 0; k < NW && !inside; ++k)
+              if (wires[k].layer == layer)
+                for (size_t q = 1; q < wires[k].sketch.size() && !inside; ++q)
+                  inside = distPointSegment(g.center, wires[k].sketch[q - 1], wires[k].sketch[q]) < outer;
+            if (!inside) {
+              ob.add(g.center, outer, double(b.clearance(tr.net, layer)), tr.net);
+              continue;
+            }
+          }
+          ob.addTrack(tr, double(b.clearance(tr.net, layer)));
         }
     }
     // The stubs' copper, as the realiser adds it.
@@ -533,6 +555,27 @@ void drawModel(Board& b, Topology& t, bool direct, RealizeStats& stats, int& nWi
     for (uint32_t id : w.tracks) gone.insert(id);
     redrawnAt.insert(w.end[0]);
     redrawnAt.insert(w.end[1]);
+  }
+  // Drawn part of the board: with them the wires sharing an edge with one (their stack on that edge is packed with
+  // them, as F5 of the whole board packs it; left as they lay, they were obstacles of points the drawn wires
+  // bent round one by one — a zipped pair along a bend: 18 pieces of axis for 9).
+  if (editedOnly || only) {
+    std::set<int> mine(chosen.begin(), chosen.end());
+    std::vector<int> ring;
+    for (int wi : chosen)
+      for (int cid : t.wires[size_t(wi)].cross) {
+        const Edge& E = t.mesh(t.wires[size_t(wi)].layer)->edges[size_t(t.crossings[size_t(cid)].edge)];
+        for (int other : E.cross)
+          if (const int wj = t.crossings[size_t(other)].wire; wj >= 0 && !t.wires[size_t(wj)].locked && mine.insert(wj).second) ring.push_back(wj);
+      }
+    for (int wi : ring) {
+      chosen.push_back(wi);
+      const Wire& w = t.wires[size_t(wi)];
+      for (uint32_t id : w.tracks) gone.insert(id);
+      redrawnAt.insert(w.end[0]);
+      redrawnAt.insert(w.end[1]);
+    }
+    r::sort(chosen);
   }
   for (auto [owner, id] : t.ownerTracks)
     if (redrawnAt.contains(owner)) gone.insert(id);

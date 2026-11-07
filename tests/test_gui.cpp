@@ -30,6 +30,7 @@
 #include <set>
 
 #include "core/Connectivity.h"
+#include "core/DiffPairs.h"
 #include "core/Edit.h"
 #include "gui/BoardView.h"
 #include "gui/Commands.h"
@@ -209,7 +210,8 @@ TEST(Gui, RecomputeShapesKeepsConnectivityAndClearance) {
 }
 
 // A hand edit marks exactly the tracks it changed (by content: the edit renumbers the tracks), and F5 without a
-// selection re-lays those chains only, leaving the rest of the board as it was. An edit that drags a wire across
+// selection re-lays those chains and the wires sharing their edges (those near it may move, further off by little),
+// leaving the rest of the board as it was. An edit that drags a wire across
 // another (AD9 over AD11) stops F5 instead, as in TopoR: the crossing in the messages, its wires selected, nothing
 // laid as drawn.
 TEST(Gui, RecomputeShapesEditedOnly) {
@@ -270,13 +272,27 @@ TEST(Gui, RecomputeShapesEditedOnly) {
   Board unchanged = bd;
   view.recomputeShapes();
   const Board& nb = *doc.board();
-  // Tracks of other nets are exactly as they were.
-  int othersChanged = 0, ad9Changed = 0;
+  // Tracks of other nets are as they were but next to AD9 (the wires sharing its edges are packed with it again).
+  int farChanged = 0, ad9Changed = 0;
   std::set<std::tuple<Coord, Coord, Coord, Coord>> was;
   for (auto& x : unchanged.tracks) was.insert({x.a.x, x.a.y, x.b.x, x.b.y});
+  auto nearAd9 = [&](const Track& x) {
+    for (const Track& y : nb.tracks)
+      if (y.net == ad9 && distSegmentSegment(x.a.v(), x.b.v(), y.a.v(), y.b.v()) < 3 * kNmPerMm) return true;
+    return false;
+  };
   for (auto& x : nb.tracks)
-    if (!was.contains({x.a.x, x.a.y, x.b.x, x.b.y})) ++(x.net == ad9 ? ad9Changed : othersChanged);
-  EXPECT_EQ(othersChanged, 0);
+    if (!was.contains({x.a.x, x.a.y, x.b.x, x.b.y})) {
+      if (x.net == ad9) ++ad9Changed;
+      else if (!nearAd9(x)) {
+        // Further off, a wire sharing AD9's edges laid again whole: it may shift a little, no more.
+        double d = 1e300;
+        for (const Track& y : unchanged.tracks)
+          if (y.net == x.net && y.layer == x.layer) d = std::min(d, std::max(distPointSegment(x.a.v(), y.a.v(), y.b.v()), distPointSegment(x.b.v(), y.a.v(), y.b.v())));
+        if (d > 0.6 * kNmPerMm) ++farChanged;
+      }
+    }
+  EXPECT_EQ(farChanged, 0);
   EXPECT_GT(ad9Changed, 0) << "the AD9 chain laid again";
   for (auto& x : nb.tracks) EXPECT_FALSE(x.edited);
   if (const char* out = std::getenv("XR_TEST_OUT")) (void)io::saveBoard(nb, std::string(out) + "/edited_only.fst");
@@ -2645,4 +2661,32 @@ TEST(Gui, TextStylesEditor) {
   setTextStyles(b, got, origin);
   EXPECT_EQ(b.texts[0].style, 1) << "GOST_B_4 is the second now";
   EXPECT_EQ(b.textStyles[1].name, "GOST_B_4");
+}
+
+// F5 of a selected zipped pair (or after an edit) draws its axis as F5 of the whole board does: the arcs round the
+// bends of its neighbours, not a chain of small bends round their points (AMK310's pair along +5V's wide bend: 27
+// pieces of axis for 9). With the pair are drawn the wires sharing its edges, packed with it.
+TEST(Gui, ZippedPairF5KeepsItsArcs) {
+  Fixture f("topor/AMK310/AMK310_MCU_V2.fst");
+  auto shape = [&] {
+    int arcs = 0;
+    for (const Track& t : f.b().zips[0].axis) arcs += t.isArc();
+    return std::pair(f.b().zips[0].axis.size(), arcs);
+  };
+  f.view.recomputeShapes();
+  const auto whole = shape();
+  std::vector<ItemRef> sel;
+  for (int i = 0; i < int(f.b().tracks.size()); ++i)
+    if (f.b().tracks[size_t(i)].zip == 0) sel.push_back({ItemType::Track, i});
+  f.doc.setSelection(sel, {});
+  f.view.recomputeShapes();
+  EXPECT_EQ(shape(), whole) << "the selected pair";
+  {
+    Board& b = *f.doc.board();
+    auto before = f.doc.beginEdit();
+    xr::moveAxisVertex(b, 0, 1, b.zips[0].axis[0].b.v() + Vec2{20000, 0});
+    f.doc.commitEdit(before, "axis");
+    f.view.recomputeShapes();
+  }
+  EXPECT_EQ(shape(), whole) << "after the axis edited";
 }
