@@ -132,8 +132,8 @@ class FilterButton : public QToolButton {
   }
 
  protected:
-  // A filter that is on: filled with the panel's violet, white bold text; off: drawn as a disabled button, no fill,
-  // greyed text — the two told apart at a glance in a light or a dark theme.
+  // A filter that is on: filled with the panel's violet, bold; off: no fill, a faint frame. The text keeps the
+  // theme's colour either way.
   void restyle() {
     if (restyling_) return;
     restyling_ = true;
@@ -144,13 +144,12 @@ class FilterButton : public QToolButton {
       return QColor::fromRgbF(text.redF() * k + bg.redF() * (1 - k), text.greenF() * k + bg.greenF() * (1 - k),
                               text.blueF() * k + bg.blueF() * (1 - k));
     };
-    QColor off = mix(0.45), frame = mix(0.3);
     setStyleSheet(QString("QToolButton { border: 1px solid %1; border-radius: 3px; padding: 3px 4px; background: transparent;"
                           " color: %2; }"
                           "QToolButton:hover { border-color: %3; }"
-                          "QToolButton:checked { background: #7a68a8; border-color: #5b4b8a; color: white; font-weight: bold; }"
+                          "QToolButton:checked { background: #7a68a8; border-color: #5b4b8a; font-weight: bold; }"
                           "QToolButton:checked:hover { background: #8a78b8; }")
-                      .arg(frame.name(), off.name(), pal.color(QPalette::Highlight).name()));
+                      .arg(mix(0.3).name(), text.name(), pal.color(QPalette::Highlight).name()));
     restyling_ = false;
   }
   void changeEvent(QEvent* e) override {
