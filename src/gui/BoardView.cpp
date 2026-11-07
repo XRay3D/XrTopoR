@@ -330,10 +330,22 @@ void BoardView::drawTools(QPainter& p) {
       QPointF c = toScreen(markerPos(m));
       if (m.kind == Marker::End) p.drawRect(QRectF(c - QPointF(3, 3), QSizeF(6, 6)));
       else if (m.kind == Marker::Middle) p.drawEllipse(c, 3.5, 3.5);
-      else {  // an arc's centre: a cross in a ring
-        p.drawEllipse(c, 4.5, 4.5);
-        p.drawLine(c - QPointF(4.5, 0), c + QPointF(4.5, 0));
-        p.drawLine(c - QPointF(0, 4.5), c + QPointF(0, 4.5));
+      else {  // an arc's centre: a cross in a ring, the radii to the arc's ends dashed (it may lie far off the arc)
+        Vec2 ends[2];
+        if (m.item.type == ItemType::Track) {
+          ends[0] = doc_->board()->tracks[m.item.index].a.v();
+          ends[1] = doc_->board()->tracks[m.item.index].b.v();
+        } else if (auto f = edit::figureOf(*doc_->board(), m.item, m.part)) {
+          ends[0] = f->a;
+          ends[1] = f->b;
+        }
+        const QPen keep = p.pen();
+        p.setPen(QPen(QColor(0xf0, 0xf0, 0xf0), 1, Qt::DashLine));
+        for (Vec2 e : ends) p.drawLine(c, toScreen(e));
+        p.setPen(keep);
+        p.drawEllipse(c, 6, 6);
+        p.drawLine(c - QPointF(6, 0), c + QPointF(6, 0));
+        p.drawLine(c - QPointF(0, 6), c + QPointF(0, 6));
       }
     }
   }
@@ -1826,11 +1838,11 @@ Vec2 BoardView::markerPos(const Marker& m) const {
 
 std::optional<BoardView::Marker> BoardView::markerAt(QPointF screen) const {
   std::optional<Marker> best;
-  double bd = 6;  // px
+  double bd = 8;  // px (an arc's centre is the larger one; the others within 6)
   for (const Marker& m : markers()) {
     QPointF d = toScreen(markerPos(m)) - screen;
     double dist = std::hypot(d.x(), d.y());
-    if (dist <= bd) {
+    if (dist <= (m.kind == Marker::Centre ? bd : std::min(bd, 6.0))) {
       bd = dist;
       best = m;
     }
