@@ -250,6 +250,9 @@ class BoardView : public QWidget {
   std::vector<Vec2> drawPts_;
   // Freestyle: the board changes step by step (wires re-shaped), so a drag goes on from where it is.
   topo::Push push_ = topo::Push::None;
+  // This Freestyle drag went on the live model (its steps moved the model and the board together), or also by the
+  // tracks (a turn, pushing), or left the model and the board apart: the model is then stale after it.
+  bool fsByModel_ = false, fsByTracks_ = false, fsApart_ = false;
   topo::FreestyleTarget fsTarget_;
   Vec2 fsLast_;
   std::optional<EditSnapshot> pasteBefore_;

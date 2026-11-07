@@ -1508,11 +1508,22 @@ TEST(Gui, CopyPaste) {
   EXPECT_EQ(b.vias.size(), vias - 1);
 }
 
-// F8: a component dragged in Freestyle keeps its routing whole; one undo step takes it back.
+// F8: a component dragged in Freestyle keeps its routing whole; one undo step takes it back. Without pushing it goes
+// on the live model: its pads' owners move in the model, the wires round them are drawn from it — the model is the
+// same one after, as one built anew from the board; the undo brings the model back too. (Without pushing nothing
+// keeps the clearances: the move may make shorts, by the tracks as by the model.)
 TEST(Gui, FreestyleDrag) {
   Fixture f("topor/Example_05/MinVia_standard_routing.fst");
   const Board& b = f.b();
   size_t unrouted = Connectivity::compute(b).ratsnest.size();
+  const topo::Topology* live = &f.doc.topology();
+  auto likeBuilt = [&](const char* how) {
+    topo::Topology fresh;
+    Board c = f.b();
+    topo::Topology::assignIds(c);
+    fresh.build(c);
+    EXPECT_EQ(f.doc.topology().wires.size(), fresh.wires.size()) << how;
+  };
   size_t tracks = b.tracks.size();
   int ci = -1;
   for (int c = 0; c < int(b.components.size()) && ci < 0; ++c)
@@ -1530,9 +1541,12 @@ TEST(Gui, FreestyleDrag) {
   QTest::mouseRelease(&f.view, Qt::LeftButton, {}, to);
   EXPECT_NEAR(f.b().components[ci].pos.x, pos.x + 1.5 * kNmPerMm, 0.05 * kNmPerMm);
   EXPECT_EQ(Connectivity::compute(f.b()).ratsnest.size(), unrouted);
+  EXPECT_EQ(&f.doc.topology(), live) << "moved in the model, not built anew";
+  likeBuilt("after the drag");
   f.doc.undoStack()->undo();
   EXPECT_EQ(f.b().components[ci].pos.v(), pos);
   EXPECT_EQ(f.b().tracks.size(), tracks);
+  likeBuilt("after the undo");
   f.view.cancelTool();
   EXPECT_EQ(f.view.mode(), Mode::Select);
 }

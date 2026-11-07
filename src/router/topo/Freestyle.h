@@ -7,6 +7,7 @@
 #include <optional>
 
 #include "core/Edit.h"
+#include "topo/Topology.h"
 
 namespace xr::topo {
 
@@ -28,6 +29,12 @@ struct FreestyleResult {
 // Moves the target by `shift` and turns it by `rotate` about `pivot`, step by step; a vertex target
 // follows its new position.
 FreestyleResult freestyle(Board& b, FreestyleTarget& t, Vec2 shift, double rotate, Vec2 pivot, Push push);
+// Freestyle on the live model, a shift without pushing: the target's owners (its vias, its components' pads, the
+// branch point) moved in the model step by step (moveOwner: the mesh flips round them, the wires keep their
+// topology), the vias and components with them on the board (no track stretched), and the wires at them and across
+// the edges round them drawn again from the model, the rest as they lie. Stops where the mesh refuses a step;
+// `inStep` false when the model and the board no longer agree (a component's pads moved apart): build it anew.
+FreestyleResult freestyleModel(Board& b, Topology& t, FreestyleTarget& tg, Vec2 shift, bool& inStep);
 
 // A branch point of a wire near `p` (where three or more track ends meet, off pads and vias).
 std::optional<FreestyleTarget> branchPointAt(const Board& b, Vec2 p, double tol);

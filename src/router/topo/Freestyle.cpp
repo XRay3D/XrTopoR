@@ -2,11 +2,14 @@
 
 #include <algorithm>
 #include <cmath>
+#include <set>
 
 #include "core/Edit.h"
 #include "core/SpatialIndex.h"
 #include "drc/Drc.h"
+#include "router/topo/ModelTools.h"
 #include "router/topo/Wires.h"
+#include "topo/Move.h"
 
 namespace xr::topo {
 
@@ -199,6 +202,92 @@ FreestyleResult freestyle(Board& b, FreestyleTarget& t, Vec2 shift, double rotat
     }
     r.moved += m.shift;
     r.turned += m.rotate;
+  }
+  return r;
+}
+
+FreestyleResult freestyleModel(Board& b, Topology& t, FreestyleTarget& tg, Vec2 shift, bool& inStep) {
+  FreestyleResult r;
+  inStep = true;
+  // The owners moved: the vias, the components' pads, the branch point at the vertex.
+  std::vector<int> owners;
+  for (int vi : tg.fragment.vias)
+    if (vi >= 0 && vi < int(t.viaOwner.size()) && t.viaOwner[size_t(vi)] >= 0) owners.push_back(t.viaOwner[size_t(vi)]);
+  for (int ci : tg.fragment.components)
+    for (int pi : b.components[size_t(ci)].pads)
+      if (pi >= 0 && pi < int(t.padOwner.size()) && t.padOwner[size_t(pi)] >= 0) owners.push_back(t.padOwner[size_t(pi)]);
+  if (tg.vertex) {
+    int junction = -1;
+    for (int oi = 0; oi < int(t.owners.size()) && junction < 0; ++oi) {
+      const Owner& o = t.owners[size_t(oi)];
+      if (o.kind == Owner::Kind::Junction && o.net == tg.vertexNet && ((o.layers >> tg.vertexLayer) & 1) && (o.c - *tg.vertex).len() <= 2 * edit::kJoinTol)
+        junction = oi;
+    }
+    if (junction < 0) {
+      r.blocked = true;
+      return r;
+    }
+    owners.push_back(junction);
+  }
+  if (owners.empty()) return r;
+  if (r::any_of(owners, [&](int oi) { return t.owners[size_t(oi)].locked; })) {
+    r.blocked = true;
+    return r;
+  }
+  const int n = std::min(200, std::max(1, int(std::ceil(shift.len() / stepLength(b)))));
+  const Vec2 d = shift / n;
+  // A wire's way through the mesh: the edges it crosses, in order.
+  auto edgesOf = [&](const Wire& w) {
+    std::vector<int> out;
+    for (int cid : w.cross) out.push_back(t.crossings[size_t(cid)].edge);
+    return out;
+  };
+  for (int i = 0; i < n; ++i) {
+    std::vector<Vec2> was;
+    for (int oi : owners) was.push_back(t.owners[size_t(oi)].c);
+    std::vector<std::vector<int>> wayBefore;
+    for (const Wire& w : t.wires) wayBefore.push_back(edgesOf(w));
+    bool whole = true;
+    for (int oi : owners) whole &= moveOwner(t, oi, d) >= 1 - 1e-9;
+    // The board after the model: the vias where their owners are, the components by their pads' move.
+    for (int vi : tg.fragment.vias)
+      if (vi >= 0 && vi < int(t.viaOwner.size()) && t.viaOwner[size_t(vi)] >= 0) b.vias[size_t(vi)].pos = Point(t.owners[size_t(t.viaOwner[size_t(vi)])].c);
+    size_t k = tg.fragment.vias.size();
+    for (int ci : tg.fragment.components) {
+      std::optional<Vec2> moved;
+      for (int pi : b.components[size_t(ci)].pads) {
+        if (pi < 0 || pi >= int(t.padOwner.size()) || t.padOwner[size_t(pi)] < 0) continue;
+        const Vec2 m = t.owners[size_t(t.padOwner[size_t(pi)])].c - was[k++];
+        if (moved && (m - *moved).len() > 1) inStep = false;  // the pads went apart
+        if (!moved) moved = m;
+      }
+      if (moved) b.moveComponent(ci, Point(b.components[size_t(ci)].pos.v() + *moved));
+    }
+    if (tg.vertex) tg.vertex = t.owners[size_t(owners.back())].c;
+    // Drawn again: the wires at the moved owners, those across the edges round them, and every wire whose way the
+    // flips changed (they spread beyond the star: a wire left as drawn crossed one laid anew, PB6 over D3).
+    std::set<int> mine(owners.begin(), owners.end());
+    std::vector<int> draw;
+    for (int wi = 0; wi < int(t.wires.size()); ++wi)
+      if (mine.contains(t.wires[size_t(wi)].end[0]) || mine.contains(t.wires[size_t(wi)].end[1]) ||
+          edgesOf(t.wires[size_t(wi)]) != wayBefore[size_t(wi)])
+        draw.push_back(wi);
+    for (LayerMesh& m : t.layers)
+      for (int oi : owners) {
+        if (oi >= int(m.ownerVerts.size())) continue;
+        for (int v : m.ownerVerts[size_t(oi)])
+          for (int e : starEdges(m, v))
+            for (int cid : m.edges[size_t(e)].cross)
+              if (const int wi = t.crossings[size_t(cid)].wire; wi >= 0 && !r::contains(draw, wi)) draw.push_back(wi);
+      }
+    RealizeStats st;
+    int nWires = 0;
+    drawModel(b, t, true, st, nWires, false, &draw);
+    r.moved += t.owners[size_t(owners.front())].c - was.front();
+    if (!whole) {
+      r.blocked = true;
+      break;
+    }
   }
   return r;
 }

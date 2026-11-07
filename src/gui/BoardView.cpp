@@ -1823,6 +1823,7 @@ std::optional<BoardView::Marker> BoardView::markerAt(QPointF screen) const {
 
 void BoardView::startDrag(Drag kind, Vec2 at, std::optional<Marker> marker) {
   drag_ = kind;
+  fsByModel_ = fsByTracks_ = fsApart_ = false;
   dragMoved_ = false;
   dragScreen_ = lastMouse_;
   dragStart_ = at;
@@ -2218,7 +2219,17 @@ void BoardView::freestyleBy(Vec2 shift, double rotate) {
   if (shift.len2() == 0 && rotate == 0) return;
   Board& b = *doc_->board();
   Vec2 pivot = fsTarget_.vertex ? *fsTarget_.vertex : edit::pivotOf(b, fsTarget_.fragment);
-  auto r = topo::freestyle(b, fsTarget_, shift, rotate, pivot, push_);
+  topo::FreestyleResult r;
+  if (rotate == 0 && push_ == topo::Push::None && QSettings().value("topo/model", true).toBool()) {
+    // On the live model: the target's owners move in it, the wires round them are drawn from it.
+    bool inStep = true;
+    r = topo::freestyleModel(b, doc_->topology(), fsTarget_, shift, inStep);
+    fsByModel_ = true;
+    fsApart_ |= !inStep;
+  } else {
+    r = topo::freestyle(b, fsTarget_, shift, rotate, pivot, push_);
+    fsByTracks_ = true;
+  }
   fsLast_ += r.moved;
   if (r.blocked) emit status(tr("Перемещение ограничено зазорами: объекты, которые нельзя подтолкнуть"));
   doc_->invalidate();
@@ -2262,7 +2273,15 @@ void BoardView::finishDrag() {
                   : kind == Drag::AxisPiece || dragMarker_.zip >= 0 ? tr("Изменить форму дифф. пары")
                   : dragMarker_.item.type == ItemType::Track ? tr("Изменить форму проводника")
                                                              : tr("Изменить форму");
-  doc_->commitEdit(*dragBefore_, title);
+  if (kind == Drag::Freestyle && fsByModel_ && !fsByTracks_ && !fsApart_) {
+    // The model moved with the board: handed back as it is (followed again, it would move twice).
+    doc_->commitEdit(*dragBefore_, title, false);
+    doc_->markTopologyFresh();
+  } else {
+    if (kind == Drag::Freestyle && fsByModel_) doc_->invalidateModel();  // moved in part by the tracks: built anew
+    doc_->commitEdit(*dragBefore_, title);
+  }
+  fsByModel_ = fsByTracks_ = fsApart_ = false;
   dragBefore_.reset();
   doc_->setSelection(std::move(items), doc_->selectedComponents());
   update();
@@ -2285,7 +2304,9 @@ void BoardView::cancelDrag() {
   if (dragMoved_ && dragBefore_) {
     dragBefore_->apply(*doc_->board());
     doc_->invalidate();
+    if (fsByModel_) doc_->invalidateModel();  // the steps moved the model too
   }
+  fsByModel_ = fsByTracks_ = fsApart_ = false;
   drag_ = Drag::None;
   dragMoved_ = false;
   dragBefore_.reset();
