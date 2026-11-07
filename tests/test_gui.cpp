@@ -770,6 +770,55 @@ TEST(Gui, ZippedPairEditedByItsAxis) {
   EXPECT_EQ(f.b().zips.size(), 1u);
 }
 
+// The axis of a zipped section is drawn without a selection (between the conductors, unlike the background), and a
+// wire of a net under the flexible fixation has a dashed centre line (pixels of the background's colour along
+// it); each goes with its display flag.
+TEST(Gui, ZipAxisAndFlexFixDrawn) {
+  Fixture f("tt.kicad_pcb");
+  layPairByClicks(f);
+  auto at = [](double x, double y) { return Vec2{x * kNmPerMm, y * kNmPerMm}; };
+  Board& b = *f.doc.board();
+  ASSERT_EQ(b.zips.size(), 1u);
+  Track t;
+  t.a = Point(at(10, 4));
+  t.b = Point(at(30, 4));
+  t.width = mmToNm(0.5);
+  t.layer = b.topCopper();
+  t.net = b.addNet("F");
+  b.tracks.push_back(t);
+  b.nets[size_t(t.net)].flexFixed = true;
+  f.doc.invalidate();
+  f.doc.clearSelection();
+  f.view.show();
+  const QColor bg = f.doc.color("background", 0x030b10);
+  auto isBg = [&](QColor c) { return std::abs(c.red() - bg.red()) + std::abs(c.green() - bg.green()) + std::abs(c.blue() - bg.blue()) < 40; };
+  auto grab = [&] {
+    f.view.update();
+    QTest::qWait(10);
+    return f.view.grab().toImage();
+  };
+  // The axis halfway along the first piece, 0.2 mm between the conductors: 16 px at 10 mm across the view.
+  const Vec2 a0 = b.zips[0].axis[0].a.v(), a1 = b.zips[0].axis[0].b.v();
+  f.look((a0 + a1) * 0.5, 10);
+  const QPoint onAxis = f.at((a0 + a1) * 0.5);
+  EXPECT_FALSE(isBg(grab().pixelColor(onAxis))) << "the axis drawn";
+  if (const char* dir = std::getenv("XR_SHOT_DIR")) grab().save(QString(dir) + "/zipaxis.png");
+  f.doc.display().show["showZipAxis"] = false;
+  EXPECT_TRUE(isBg(grab().pixelColor(onAxis))) << "the axis off";
+  // The flexibly fixed wire: along its centre line some pixels are the background's (the dashes' gaps are not).
+  f.look(at(20, 4), 10);
+  auto gaps = [&] {
+    QImage img = grab();
+    int n = 0;
+    for (int dx = -40; dx <= 40; ++dx) n += isBg(img.pixelColor(f.at(at(20, 4)) + QPoint(dx, 0)));
+    return n;
+  };
+  if (const char* dir = std::getenv("XR_SHOT_DIR")) grab().save(QString(dir) + "/flexfix.png");
+  EXPECT_GT(gaps(), 10) << "dashed";
+  f.doc.display().show["showFlexFix"] = false;
+  EXPECT_EQ(gaps(), 0) << "solid";
+}
+
 // The same with a change of layer (V): the section ends at a clasp, two vias abreast of it as far apart as the
 // vias and the gap need, the next section starts there on the other layer. Two sections, two vias, every
 // connection made, no violation.

@@ -167,6 +167,7 @@ class BoardView : public QWidget {
   std::vector<ItemRef> wireOf(int track) const;  // the chain of one layer up to a pad, a via or a junction
   void measureClick(const Pick& pk, Vec2 w);
   void drawTools(QPainter& p);  // selection frame, ruler
+  void drawCentreline(QPainter& p, const Track& t);  // a track's centre line in the current pen
   void drawTrack(QPainter& p, const Track& t, const QColor& c, double extra = 0);
   void drawPad(QPainter& p, const Pad& pad, LayerId l, const QColor& c);
   void drawVia(QPainter& p, const Via& v, const QColor& c);

@@ -736,6 +736,8 @@ QWidget* DisplayPanel::settingsTab() {
   general->body()->addWidget(flagRow(tr("Контур платы"), "showBoardOutline", "board"));
   general->body()->addWidget(flagRow(tr("Проводники тонкими линиями"), "showThinWires", {}, false));
   general->body()->addWidget(flagRow(tr("Области змеек"), "showSerpentArea"));
+  general->body()->addWidget(flagRow(tr("Гибкая фиксация пунктиром по оси"), "showFlexFix"));
+  general->body()->addWidget(flagRow(tr("Оси застёгнутых пар"), "showZipAxis"));
   v->addWidget(general);
 
   auto* bright = new Section(tr("Яркость"), page);

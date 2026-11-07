@@ -321,15 +321,7 @@ void BoardView::drawTools(QPainter& p) {
     p.setPen(QPen(QColor(0xff, 0xff, 0xff), 1));
     p.setBrush(Qt::NoBrush);
     for (int z : selectedZips())
-      for (const Track& t : b.zips[size_t(z)].axis) {
-        if (!t.mid) {
-          p.drawLine(toScreen(t.a.v()), toScreen(t.b.v()));
-          continue;
-        }
-        QPolygonF pl;
-        for (Vec2 v : ArcGeom::fromThreePoints(t.a.v(), t.mid->v(), t.b.v()).tessellate(std::max(500.0, 0.3 / scale_))) pl << toScreen(v);
-        p.drawPolyline(pl);
-      }
+      for (const Track& t : b.zips[size_t(z)].axis) drawCentreline(p, t);
   }
   if (drag_ == Drag::None || !dragMoved_) {
     p.setPen(QPen(QColor(0x20, 0x20, 0x20), 1));
@@ -391,18 +383,30 @@ void BoardView::drawGrid(QPainter& p) {
   }
 }
 
-void BoardView::drawTrack(QPainter& p, const Track& t, const QColor& c, double extra) {
-  bool thin = doc_->display().flag("showThinWires", false);
-  QPen pen(c, thin ? 1.0 : px(double(t.width) + extra), Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
-  p.setPen(pen);
-  p.setBrush(Qt::NoBrush);
+void BoardView::drawCentreline(QPainter& p, const Track& t) {
   if (!t.isArc()) {
     p.drawLine(toScreen(t.a.v()), toScreen(t.b.v()));
     return;
   }
-  auto pts = t.path(std::max(500.0, 0.3 / scale_));
-  QPolygonF poly = toPoly(pts, [&](Vec2 v) { return toScreen(v); });
-  p.drawPolyline(poly);
+  p.drawPolyline(toPoly(t.path(std::max(500.0, 0.3 / scale_)), [&](Vec2 v) { return toScreen(v); }));
+}
+
+void BoardView::drawTrack(QPainter& p, const Track& t, const QColor& c, double extra) {
+  const DisplayControl& d = doc_->display();
+  bool thin = d.flag("showThinWires", false);
+  QPen pen(c, thin ? 1.0 : px(double(t.width) + extra), Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+  p.setPen(pen);
+  p.setBrush(Qt::NoBrush);
+  drawCentreline(p, t);
+  // The flexible fixation («гибкая фиксация»): a dashed centre line in the background's colour (over a thin
+  // line the line itself comes out dashed).
+  if (doc_->hasBoard() && doc_->board()->flexFixed(t.net) && d.flag("showFlexFix")) {
+    // (2 px: a 1 px line between two rows of pixels came out half as dark.)
+    QPen dash(doc_->color("background", 0x030b10), thin ? 1.0 : std::min(2.0, px(double(t.width)) / 3), Qt::CustomDashLine, Qt::FlatCap);
+    dash.setDashPattern({2, 2});
+    p.setPen(dash);
+    drawCentreline(p, t);
+  }
 }
 
 void BoardView::drawPad(QPainter& p, const Pad& pad, LayerId l, const QColor& c) {
@@ -527,6 +531,14 @@ void BoardView::drawLayer(QPainter& p, LayerId l) {
           const Vec2 n = dir.normalized().perp() * (double(z.width()) / 2.0);
           p.drawLine(toScreen(at - n), toScreen(at + n));
         }
+      }
+      // The axes of the zipped sections, thin between their conductors (a selected one's is drawn again, white,
+      // with its handles: drawTools).
+      if (d.flag("showZipAxis")) {
+        p.setPen(QPen(details.lighter(170), 1));
+        for (const ZippedWire& z : b.zips)
+          if (z.layer == l)
+            for (const Track& t : z.axis) drawCentreline(p, t);
       }
     }
     if (d.flag("showMetalPads") && showPads) {
