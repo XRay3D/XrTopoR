@@ -331,17 +331,10 @@ void BoardView::drawTools(QPainter& p) {
       if (m.kind == Marker::End) p.drawRect(QRectF(c - QPointF(3, 3), QSizeF(6, 6)));
       else if (m.kind == Marker::Middle) p.drawEllipse(c, 3.5, 3.5);
       else {  // an arc's centre: a cross in a ring, the radii to the arc's ends dashed (it may lie far off the arc)
-        Vec2 ends[2];
-        if (m.item.type == ItemType::Track) {
-          ends[0] = doc_->board()->tracks[m.item.index].a.v();
-          ends[1] = doc_->board()->tracks[m.item.index].b.v();
-        } else if (auto f = edit::figureOf(*doc_->board(), m.item, m.part)) {
-          ends[0] = f->a;
-          ends[1] = f->b;
-        }
         const QPen keep = p.pen();
         p.setPen(QPen(QColor(0xf0, 0xf0, 0xf0), 1, Qt::DashLine));
-        for (Vec2 e : ends) p.drawLine(c, toScreen(e));
+        if (auto arc = markerArc(m))
+          for (int e = 0; e < 2; ++e) p.drawLine(c, toScreen((*arc)[size_t(e)]));
         p.setPen(keep);
         p.drawEllipse(c, 6, 6);
         p.drawLine(c - QPointF(6, 0), c + QPointF(6, 0));
@@ -1766,6 +1759,11 @@ std::vector<BoardView::Marker> BoardView::markers() const {
   auto figure = [&](ItemRef r, int part, const Graphic& g) {
     auto vs = edit::figureVertices(g);
     for (int k = 0; k < int(vs.size()); ++k) out.push_back({r, part, Marker::End, k});
+    // The centres of its arcs: a drawn arc's, a polygon's arc sides' (any figure: a detail, a keepout, an area).
+    if (g.kind == GraphicKind::Arc) out.push_back({r, part, Marker::Centre, 0});
+    if (g.kind == GraphicKind::Poly)
+      for (int k = 0; k < int(g.pts.size()); ++k)
+        if (g.arcOf(size_t(k)) != 0) out.push_back({r, part, Marker::Centre, k});
     for (int k = 0; Vec2 m : edit::figureMiddles(g)) {
       double near = std::numeric_limits<double>::max();
       for (Vec2 v : vs) near = std::min(near, (v - m).len());
@@ -1785,7 +1783,6 @@ std::vector<BoardView::Marker> BoardView::markers() const {
       out.push_back({r, 0, Marker::End, 0});
       out.push_back({r, 0, Marker::End, 1});
       if (roomy(t.a.v(), t.b.v())) out.push_back({r, 0, Marker::Middle, 0});
-      if (t.isArc()) out.push_back({r, 0, Marker::Centre, 0});
     } else if (r.type == ItemType::Keepout) {
       const auto& sh = b.keepouts[r.index].shape;
       for (int k = 0; k < int(sh.size()); ++k) figure(r, k, sh[k]);
@@ -1793,7 +1790,6 @@ std::vector<BoardView::Marker> BoardView::markers() const {
       continue;  // TopoR: a poured area's shape is not edited
     } else if (auto g = edit::figureOf(b, r)) {
       figure(r, 0, *g);
-      if (g->kind == GraphicKind::Arc) out.push_back({r, 0, Marker::Centre, 0});
     }
   }
   for (int z : zips) {
@@ -1816,14 +1812,8 @@ Vec2 BoardView::markerPos(const Marker& m) const {
     return t.mid ? t.mid->v() : (t.a.v() + t.b.v()) * 0.5;
   }
   if (m.kind == Marker::Centre) {
-    std::optional<ArcGeom> g;
-    if (m.item.type == ItemType::Track) {
-      const Track& t = b.tracks[m.item.index];
-      if (t.mid) g = ArcGeom::fromThreePoints(t.a.v(), t.mid->v(), t.b.v());
-    } else if (auto f = edit::figureOf(b, m.item, m.part); f && f->kind == GraphicKind::Arc) {
-      g = ArcGeom::fromThreePoints(f->a, f->m, f->b);
-    }
-    return g && g->valid ? g->center : Vec2{};
+    auto arc = markerArc(m);
+    return arc ? (*arc)[2] : Vec2{};
   }
   if (m.item.type == ItemType::Track) {
     const Track& t = b.tracks[m.item.index];
@@ -1834,6 +1824,35 @@ Vec2 BoardView::markerPos(const Marker& m) const {
   if (!g) return {};
   auto pts = m.kind == Marker::End ? edit::figureVertices(*g) : edit::figureMiddles(*g);
   return m.vertex < int(pts.size()) ? pts[m.vertex] : Vec2{};
+}
+
+std::optional<std::array<Vec2, 3>> BoardView::markerArc(const Marker& m) const {
+  const Board& b = *doc_->board();
+  Vec2 a, c, mid;
+  if (m.item.type == ItemType::Track) {
+    if (m.item.index < 0 || m.item.index >= int(b.tracks.size()) || !b.tracks[m.item.index].mid) return std::nullopt;
+    const Track& t = b.tracks[m.item.index];
+    a = t.a.v();
+    c = t.b.v();
+    mid = t.mid->v();
+  } else {
+    auto f = edit::figureOf(b, m.item, m.part);
+    if (!f) return std::nullopt;
+    if (f->kind == GraphicKind::Arc) {
+      a = f->a;
+      c = f->b;
+      mid = f->m;
+    } else if (f->kind == GraphicKind::Poly && m.vertex >= 0 && m.vertex < int(f->pts.size()) && f->arcOf(size_t(m.vertex)) != 0) {
+      a = f->pts[size_t(m.vertex)];
+      c = f->pts[(size_t(m.vertex) + 1) % f->pts.size()];
+      mid = arcMiddle(a, c, f->arcOf(size_t(m.vertex)));
+    } else {
+      return std::nullopt;
+    }
+  }
+  const ArcGeom g = ArcGeom::fromThreePoints(a, mid, c);
+  if (!g.valid) return std::nullopt;
+  return std::array<Vec2, 3>{a, c, g.center};
 }
 
 std::optional<BoardView::Marker> BoardView::markerAt(QPointF screen) const {
@@ -1914,6 +1933,11 @@ void BoardView::applyDrag() {
         editMarked([&](std::vector<Graphic>& list, int i) {
           Graphic& g = list[i];
           if (g.kind == GraphicKind::Arc) g.m = arcMiddle(g.a, g.b, arcAngleAbout(g.a, g.b, to, arcAngle(g.a, g.m, g.b)));
+          const size_t k = size_t(dragMarker_.vertex);
+          if (g.kind == GraphicKind::Poly && k < g.pts.size() && g.arcOf(k) != 0) {
+            g.arcs.resize(g.pts.size(), 0);
+            g.arcs[k] = arcAngleAbout(g.pts[k], g.pts[(k + 1) % g.pts.size()], to, g.arcs[k]);
+          }
         });
       }
       break;

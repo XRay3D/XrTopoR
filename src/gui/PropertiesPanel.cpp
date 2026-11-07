@@ -871,26 +871,6 @@ QWidget* PropertiesPanel::wirePage(const std::vector<int>& tracks) {
     double clr = double(b.clearance(*net, *cl));
     f->addRow(tr("Зазор:"), new QLabel(formatLength(clr, u, 3) + " " + unitName(u)));
   }
-  // One arc: its centre (the ends are the wire's: it does not move) and its radius (the ends stay).
-  if (tracks.size() == 1 && b.tracks[size_t(tracks[0])].isArc()) {
-    const Track& t = b.tracks[size_t(tracks[0])];
-    const ArcGeom g = ArcGeom::fromThreePoints(t.a.v(), t.mid->v(), t.b.v());
-    if (g.valid) {
-      auto* centre = new QLabel(QString("X %1, Y %2 %3").arg(formatLength(g.center.x, u), formatLength(-g.center.y, u), unitName(u)));
-      centre->setObjectName("arcCentre");
-      f->addRow(tr("Центр дуги:"), centre);
-      auto* radius = length(g.radius, [this, ti = tracks[0]](double r) {
-        edit(tr("Изменить радиус"), [&](Board& bd) {
-          Track& tr = bd.tracks[size_t(ti)];
-          if (!tr.mid) return;
-          if (const double deg = arcAngleForRadius(tr.a.v(), tr.b.v(), r, arcAngle(tr.a.v(), tr.mid->v(), tr.b.v())); deg != 0)
-            tr.mid = Point(arcMiddle(tr.a.v(), tr.b.v(), deg));
-        });
-      }, 1000);
-      radius->setObjectName("arcRadius");
-      f->addRow(tr("Радиус дуги:"), radius);
-    }
-  }
   return w;
 }
 

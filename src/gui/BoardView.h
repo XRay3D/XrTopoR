@@ -129,6 +129,8 @@ class BoardView : public QWidget {
   std::optional<Marker> markerAt(QPointF screen) const;  // markers of the selected objects
   std::vector<Marker> markers() const;
   Vec2 markerPos(const Marker& m) const;
+  // The arc a Centre marker is of: its ends and its centre (a track's, a drawn arc's, a polygon's arc side `vertex`).
+  std::optional<std::array<Vec2, 3>> markerArc(const Marker& m) const;
 
   edit::Fragment selectedFragment() const;
   // Moves the selection by an edit::Motion built around its pivot (rotations and flips).

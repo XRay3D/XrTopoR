@@ -2787,10 +2787,9 @@ TEST(Gui, F5TakesDoubleCrossingsApart) {
   EXPECT_EQ(Connectivity::compute(f.b()).ratsnest.size(), 0u);
 }
 
-// An arc's centre: a handle of a selected arc track, dragged along the chord's bisector (the ends stay, the radius
-// follows), and in «Свойства» its centre and radius (the radius edited with the ends kept); a drawn arc's table has
-// its centre (edited: the arc moves whole) and radius rows.
-TEST(Gui, ArcCentreHandleAndProperties) {
+// An arc's centre has a handle on the mechanical and the helper drawings — a keepout drawn as an arc, a polygon's
+// arc side — dragged along the chord's bisector (the ends stay, the arc bends); none on a track (its arcs are F5's).
+TEST(Gui, ArcCentreHandle) {
   Fixture f("tt.kicad_pcb");
   auto board = std::make_unique<Board>();
   Board& b = *board;
@@ -2806,35 +2805,44 @@ TEST(Gui, ArcCentreHandleAndProperties) {
   t.layer = top;
   t.net = b.addNet("N");
   b.tracks.push_back(t);
-  f.doc.setBoard(std::move(board), "arc");
-  PropertiesPanel props(&f.doc);
-  auto radiusOf = [&] {
-    const Track& x = f.b().tracks[0];
-    return ArcGeom::fromThreePoints(x.a.v(), x.mid->v(), x.b.v()).radius;
-  };
-  const double r0 = radiusOf();
+  Keepout k;
+  Graphic arc;
+  arc.kind = GraphicKind::Arc;
+  arc.a = at(5, 4);
+  arc.b = at(15, 4);
+  arc.m = arcMiddle(arc.a, arc.b, 120);
+  k.shape.push_back(arc);
+  b.keepouts.push_back(k);
+  Keepout k2;
+  Graphic poly;
+  poly.kind = GraphicKind::Poly;
+  poly.pts = {at(25, 3), at(35, 3), at(35, 7), at(25, 7)};
+  poly.arcs = {0, 0, 60, 0};
+  k2.shape.push_back(poly);
+  b.keepouts.push_back(k2);
+  f.doc.setBoard(std::move(board), "arcs");
+  // No handle on a track's centre: a drag from there changes nothing.
   f.look(at(20, 10), 30);
   f.doc.setSelection({{ItemType::Track, 0}}, {});
-  ASSERT_TRUE(props.findChild<QLabel*>("arcCentre"));
-  auto* radius = props.findChild<QDoubleSpinBox*>("arcRadius");
-  ASSERT_TRUE(radius);
-  EXPECT_NEAR(radius->value(), r0 / kNmPerMm, 1e-3);
-  // The centre handle, dragged 3 mm down the bisector: the ends stay, the arc is flatter (a larger radius).
   const Vec2 c0 = ArcGeom::fromThreePoints(t.a.v(), t.mid->v(), t.b.v()).center;
   f.drag(f.at(c0), f.at(c0 + at(0, -3)));
-  EXPECT_EQ(f.b().tracks[0].a, t.a);
-  EXPECT_EQ(f.b().tracks[0].b, t.b);
-  EXPECT_GT(radiusOf(), r0 + 1.5 * kNmPerMm);
-  const Vec2 c1 = ArcGeom::fromThreePoints(f.b().tracks[0].a.v(), f.b().tracks[0].mid->v(), f.b().tracks[0].b.v()).center;
-  EXPECT_NEAR(c1.x, c0.x, 1000);
-  EXPECT_NEAR(c1.y, c0.y - 3 * kNmPerMm, 0.15 * kNmPerMm);  // (to the grid)
-  // The radius set to 12 mm in «Свойства»: the ends stay.
-  f.doc.setSelection({{ItemType::Track, 0}}, {});
-  radius = props.findChild<QDoubleSpinBox*>("arcRadius");
-  ASSERT_TRUE(radius);
-  radius->setValue(12);
-  emit radius->editingFinished();
-  EXPECT_NEAR(radiusOf(), 12 * kNmPerMm, 1000);
-  EXPECT_EQ(f.b().tracks[0].a, t.a);
-  EXPECT_EQ(f.b().tracks[0].b, t.b);
+  EXPECT_EQ(f.b().tracks[0].mid, t.mid);
+  for (int ki : {0, 1}) {
+    f.doc.setSelection({{ItemType::Keepout, ki}}, {});
+    const Graphic g = f.b().keepouts[size_t(ki)].shape[0];
+    Vec2 c;
+    if (g.kind == GraphicKind::Arc) c = ArcGeom::fromThreePoints(g.a, g.m, g.b).center;
+    else c = ArcGeom::fromThreePoints(g.pts[2], arcMiddle(g.pts[2], g.pts[3], 60), g.pts[3]).center;
+    f.look(c, 30);
+    f.drag(f.at(c), f.at(c + (ki == 0 ? at(0, -2) : at(0, 2))));
+    const Graphic& n = f.b().keepouts[size_t(ki)].shape[0];
+    if (ki == 0) {
+      EXPECT_EQ(n.a, g.a);
+      EXPECT_EQ(n.b, g.b);
+      EXPECT_NE(arcAngle(n.a, n.m, n.b), arcAngle(g.a, g.m, g.b)) << "the keepout's arc bent";
+    } else {
+      EXPECT_EQ(n.pts, g.pts);
+      EXPECT_NE(n.arcOf(2), 60.0) << "the polygon's arc side bent";
+    }
+  }
 }
