@@ -431,7 +431,9 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
   };
   auto draw = [&] {
     ProfScope p("F7 model: drawing");
+    std::optional<ProfScope> pc(std::in_place, "F7 model: copies");
     Drawn c{t, t, b, {}, {}, {}};
+    pc.reset();
     for (const Obj& ob : objs) c.pos.push_back(t.owners[ob.owner].c);
     // The vias on the 0.1 um grid the board's files keep (a position between two of its points would be
     // written either way, and the model next to the board would not hash the same).

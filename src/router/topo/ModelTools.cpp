@@ -595,6 +595,7 @@ void drawModel(Board& b, Topology& t, bool direct, RealizeStats& stats, int& nWi
   }
   // The single wires at a clasp that turned were drawn round its ends as they were: drawn again from the turned
   // ones, the rest as they lie (a single of SCL at AMK310's clasp came 0.02 mm inside the rule from SDA's end).
+  std::optional<ProfScope> ps(std::in_place, "draw: settle clasps");
   std::vector<int> again = settleClasps(b, t, chosen);
   r::sort(again);
   again.erase(std::unique(again.begin(), again.end()), again.end());
@@ -609,6 +610,7 @@ void drawModel(Board& b, Topology& t, bool direct, RealizeStats& stats, int& nWi
     for (int wi : again) t.wires[size_t(wi)].tracks.clear();
     for (size_t k = 0; k < st2.trackWire.size(); ++k) t.wires[size_t(again[st2.trackWire[k]])].tracks.push_back(b.tracks[from + k].id);
   }
+  ps.reset();
   nWires = int(chosen.size());
 }
 

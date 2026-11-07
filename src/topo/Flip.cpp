@@ -271,6 +271,19 @@ int flipLoop(Topology& t, LayerMesh& m, std::vector<int> seed, const FlipGate& g
     int e = queue.front();
     queue.pop_front();
     queued[e] = 0;
+    if (!weighted) {
+      // The circle first: the plan of the wires across the quad is the dear part (a sixth of F7, nearly every
+      // edge planned and then left by the circle), and flip() makes it, false where planFlip would be.
+      Quad Q;
+      if (!quadOf(m, e, Q) || !inCircle(m.verts[Q.a].p, m.verts[Q.p].p, m.verts[Q.q].p, m.verts[Q.b].p)) continue;
+      const int t1 = m.edges[e].t[0], t2 = m.edges[e].t[1];
+      if (!flip(t, m, e, gate)) continue;
+      ++flips;
+      for (int tt : {t1, t2})
+        for (int i = 0; i < 3; ++i)
+          if (m.tris[tt].e[i] != e) push(m.tris[tt].e[i]);
+      continue;
+    }
     FlipPlan plan;
     if (!planFlip(t, m, e, plan, gate)) continue;
     bool go = false;
