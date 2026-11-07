@@ -20,7 +20,8 @@ WireGraph wireGraph(const Board& b, const std::vector<char>& chosen, double glue
     std::set<int> nets;
     for (size_t i = 0; i < b.tracks.size(); ++i)
       if (chosen[i]) nets.insert(b.tracks[i].net);
-    for (size_t i = 0; i < b.tracks.size(); ++i) g.relevant[i] = nets.contains(b.tracks[i].net);
+    // (The conductors of a zipped pair are not wires of their nets: the pair's axis is the wire, Convert.cpp.)
+    for (size_t i = 0; i < b.tracks.size(); ++i) g.relevant[i] = nets.contains(b.tracks[i].net) && b.tracks[i].zip < 0;
   }
   double maxTol = edit::kJoinTol;
   for (const auto& t : b.tracks) maxTol = std::max(maxTol, glue * t.width);
@@ -161,8 +162,10 @@ bool sameChain(const Board& b, const WireGraph& g, int i, int j) {
 
 void growChains(const Board& b, std::vector<char>& chosen, const WireGraph& g) {
   std::vector<int> stack;
-  for (size_t i = 0; i < b.tracks.size(); ++i)
+  for (size_t i = 0; i < b.tracks.size(); ++i) {
+    if (chosen[i] && !g.relevant[i]) chosen[i] = 0;  // a pair's conductor: no chain of its own
     if (chosen[i]) stack.push_back(int(i));
+  }
   while (!stack.empty()) {
     int i = stack.back();
     stack.pop_back();
@@ -246,8 +249,11 @@ std::vector<Vec2> OwnCopper::crossedBetween(Vec2 p, Vec2 q, int net, LayerId lay
   return out;
 }
 
-std::vector<WireChain> wireChains(const Board& b, const WireGraph& g, const std::vector<char>& chosen,
+std::vector<WireChain> wireChains(const Board& b, const WireGraph& g, const std::vector<char>& chosenIn,
                                   const OwnCopper& copper) {
+  // (A track the graph does not hold, a pair's conductor, is no part of any chain however chosen.)
+  std::vector<char> chosen(chosenIn);
+  for (size_t i = 0; i < chosen.size() && i < g.relevant.size(); ++i) chosen[i] = chosen[i] && g.relevant[i];
   const auto& vid = g.vid;
   const auto& ends = g.ends;
   // Degree of each vertex among the chosen tracks (vertices are per layer and net already: wires of

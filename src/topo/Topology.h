@@ -21,7 +21,10 @@ struct Owner {
   // Zone: a poured copper area, from outside a pad of its net (its boundary ring is its vertices, no centre;
   // the wires of its net may end anywhere on the ring, other nets keep the zone's clearance); what lies
   // inside is locked (TopoR touches nothing in a pour). An unpoured zone is nothing to the model.
-  enum class Kind { Pad, Via, Junction, Outline, Keepout, Zone };
+  // Clasp («замок»): the end of a zipped section of a differential pair, three vertices in a line across the
+  // pair: the two conductors' ends (t = -1 the negative net's, +1 the positive's) where the single wires to
+  // the pads start, and the centre (t = 0) where the pair's one wire ends. Moves with F7 as a junction.
+  enum class Kind { Pad, Via, Junction, Outline, Keepout, Zone, Clasp };
   Kind kind = Kind::Pad;
   Vec2 c;             // centre
   Vec2 axis;          // half-vector along the long axis; 0 for round owners
@@ -34,6 +37,10 @@ struct Owner {
   uint32_t viaId = 0;
   int junction = -1;
   int zone = -1;
+  int net2 = kNoNet;   // a clasp: the negative net (net is the positive)
+  int pair = -1;       // a clasp: the differential signal (Board::hispeed.diffSignals)
+  int zip = -1;        // a clasp: the zipped section (Board::zips) it ends
+  int claspEnd = -1;   // ... at the section's start (0) or end (1)
   bool locked = false;
 };
 
@@ -120,6 +127,8 @@ struct Wire {
   bool locked = false;
   bool dirty = true;        // converted from hand-drawn tracks since it was last drawn
   int zone = -1;            // the zone owner that locked it: its tracks lie in a pour (any net), or cross into one (another net)
+  int pair = -1;            // a pair's wire: the differential signal; net is the positive net, width the pair's (2w + gap), tracks the conductors
+  int zip = -1;             // ... and the zipped section it is
 };
 
 struct Violation {
@@ -164,7 +173,13 @@ struct Topology {
   std::vector<Coord> classClr;  // per net
   std::vector<LayerRule> layerRules;
   std::vector<ClearancePair> pairRules;
+  std::vector<int> netPair;  // per net: its differential signal, -1 none
   void takeRules(const Board& b);
+  // The net of a vertex (a clasp's negative end has the pair's other net).
+  int netAt(const LayerMesh& m, int v) const;
+  // Whether the vertex's copper is the wire's own: of its net, or of its pair (the clasp's three vertices to
+  // the pair's wire and to the two single wires that start there).
+  bool own(const LayerMesh& m, int v, const Wire& w) const;
   // The clearance two nets keep on a layer: the pair's rule, else the larger of their own.
   double clearance(int netA, int netB, LayerId layer) const { return double(clearanceBetween(classClr, layerRules, pairRules, netA, netB, layer)); }
 

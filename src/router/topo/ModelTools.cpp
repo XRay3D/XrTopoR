@@ -79,9 +79,9 @@ RealWire sketchOf(const Board& b, const Topology& t, int wi) {
       int v = m.tris[tri].v[i];
       if (v == w.endVertex[0] || v == w.endVertex[1]) continue;
       const Owner& o = t.owners[m.verts[v].owner];
-      if (o.net == w.net && w.net != kNoNet) continue;
+      if (t.own(m, v, w)) continue;
       Vec2 P = m.verts[v].p;
-      const double rule = ownerClearance(t, m, m.verts[v].owner, w) + w.width / 2.0 + kRealizeMargin;
+      const double rule = vertexClearance(t, m, v, w) + w.width / 2.0 + kRealizeMargin;
       const Shape shape = o.kind == Owner::Kind::Zone ? Shape::circle(P, 0) : o.shape;  // a zone's ring vertex: a bare point
       // Only where the chord comes within the rule of the vertex's copper. The stack radius is the
       // realiser's business: samples on it rounded neighbouring vertices into one another (a via row,
@@ -201,6 +201,10 @@ RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int
         case Owner::Kind::Outline: id = ob.add(x.p, 0, clr, kBoardEdge); break;
         case Owner::Kind::Keepout: id = ob.add(x.p, 0, 0, kBoardEdge); break;
         case Owner::Kind::Zone: id = ob.add(x.p, 0, clr, o.net); break;  // a bare point of the ring; the ring's pieces are sides
+        case Owner::Kind::Clasp:  // the conductors' ends and the centre, round copper of their nets
+          id = ob.add(x.p, o.halfWidth, clr, x.t < 0 ? o.net2 : o.net);
+          ob.pts[id].round = true;
+          break;
       }
       if (id >= 0) ob.pts[id].owner = x.owner;
     }
@@ -407,7 +411,7 @@ void drawModel(Board& b, Topology& t, bool direct, RealizeStats& stats, int& nWi
       if (tr.edited && tr.id) edited.insert(tr.id);
   for (int wi = 0; wi < int(t.wires.size()); ++wi) {
     const Wire& w = t.wires[wi];
-    if (w.locked) continue;
+    if (w.locked || w.pair >= 0) continue;  // (a pair's wire is not drawn yet: its conductors stay as they lie)
     if (editedOnly && r::none_of(w.tracks, [&](uint32_t id) { return edited.contains(id); })) continue;
     chosen.push_back(wi);
     for (uint32_t id : w.tracks) gone.insert(id);

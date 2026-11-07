@@ -7,16 +7,20 @@ namespace xr::topo {
 
 namespace {
 
-// The crossing wire sees the owner as copper to keep away from: another net's (own copper is
-// transparent, the centre line may pass through the point itself).
-bool foreign(const Owner& o, const Wire& w) { return o.net != w.net || w.net == kNoNet; }
-
 }  // namespace
 
 double ownerClearance(const Topology& t, const LayerMesh& m, int owner, const Wire& w) {
   const Owner& o = t.owners[owner];
   if (o.kind == Owner::Kind::Outline || o.kind == Owner::Kind::Keepout) return m.ownerClr[owner];  // a wall: its own alone
   if (Coord p = pairClearance(t.pairRules, o.net, w.net, m.layer); p > 0) return double(p);
+  return std::max(m.ownerClr[owner], double(w.clr));
+}
+
+double vertexClearance(const Topology& t, const LayerMesh& m, int v, const Wire& w) {
+  const int owner = m.verts[size_t(v)].owner;
+  const Owner& o = t.owners[owner];
+  if (o.kind == Owner::Kind::Outline || o.kind == Owner::Kind::Keepout) return m.ownerClr[owner];
+  if (Coord p = pairClearance(t.pairRules, t.netAt(m, v), w.net, m.layer); p > 0) return double(p);
   return std::max(m.ownerClr[owner], double(w.clr));
 }
 
@@ -84,13 +88,15 @@ EdgeCapacity capacityOf(const Topology& t, const LayerMesh& m, int va, int vb, c
   // The stack from each end: the k-th wire sits on the (k-1)-th, never nearer the owner than its own
   // rule allows.
   auto pack = [&](double margin) {
-    auto need = [&](const Owner& o, int owner, double reach, const Wire& w, double width) {
-      if (!foreign(o, w)) return 0.0;
-      return reach + ownerClearance(t, m, owner, w) + margin + width / 2.0;
+    // The crossing wire keeps off the owner's copper unless it is its own (its net's, or its pair's at a
+    // clasp): own copper is transparent, the centre line may pass through the point itself.
+    auto need = [&](int v, double reach, const Wire& w, double width) {
+      if (t.own(m, v, w)) return 0.0;
+      return reach + vertexClearance(t, m, v, w) + margin + width / 2.0;
     };
     for (int k = 0; k < n; ++k) {
       const Wire& w = wireOf(k);
-      double own = need(ou, U.owner, c.reachU, w, c.width[k]);
+      double own = need(va, c.reachU, w, c.width[k]);
       if (k == 0) c.a[k] = own;
       else {
         double spacing = c.width[k - 1] / 2 + clrBetween(wireOf(k - 1), w) + margin + c.width[k] / 2;
@@ -99,7 +105,7 @@ EdgeCapacity capacityOf(const Topology& t, const LayerMesh& m, int va, int vb, c
     }
     for (int k = n - 1; k >= 0; --k) {
       const Wire& w = wireOf(k);
-      double own = need(ov, V.owner, c.reachV, w, c.width[k]);
+      double own = need(vb, c.reachV, w, c.width[k]);
       if (k == n - 1) c.b[k] = own;
       else {
         double spacing = c.width[k + 1] / 2 + clrBetween(wireOf(k + 1), w) + margin + c.width[k] / 2;

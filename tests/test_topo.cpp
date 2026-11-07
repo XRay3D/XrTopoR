@@ -1751,6 +1751,78 @@ struct PinBoard {
     compileRules(b);
     return int(b.hispeed.diffSignals.size() - 1);
   }
+  // A zipped section of the pair on the top layer along the axis (straight pieces): the axis as the board
+  // keeps it, the two conductors at the offset either side (P on the left of the travel), and a straight
+  // single track from each conductor end to the nearest pad of its net.
+  int zip(const std::string& P, const std::string& N, std::initializer_list<std::pair<double, double>> axis) {
+    const int d = b.pairOfNet(net(P));
+    Coord w = 0, g = 0;
+    if (!b.pairRule(d, top, w, g)) return -1;
+    ZippedWire z;
+    z.layer = top;
+    z.pair = d;
+    z.netP = net(P);
+    z.netN = net(N);
+    z.pSide = 1;
+    z.condWidth = w;
+    z.gap = g;
+    std::vector<Vec2> pts;
+    for (const auto& q : axis) pts.push_back(at(q.first, q.second));
+    for (size_t i = 0; i + 1 < pts.size(); ++i) {
+      Track t;
+      t.a = Point(pts[i]);
+      t.b = Point(pts[i + 1]);
+      t.width = z.width();
+      t.layer = top;
+      t.net = kNoNet;
+      z.axis.push_back(t);
+    }
+    const int zi = int(b.zips.size());
+    b.zips.push_back(z);
+    // The conductors: the axis's points offset along the bisector of the normals at the corners.
+    auto offsetPoint = [&](size_t i, double side) {
+      Vec2 n;
+      if (i > 0) n = n + (pts[i] - pts[i - 1]).normalized().perp();
+      if (i + 1 < pts.size()) n = n + (pts[i + 1] - pts[i]).normalized().perp();
+      n = n.normalized();
+      // (At a corner the offset along the bisector is the offset over the cosine of the half angle.)
+      double k = 1;
+      if (i > 0 && i + 1 < pts.size()) k = 1.0 / std::max(0.2, n.dot((pts[i] - pts[i - 1]).normalized().perp()));
+      return pts[i] + n * (side * double(z.offset()) * k);
+    };
+    Vec2 ends[2][2];
+    for (int side = 0; side < 2; ++side) {
+      const double sg = side ? 1.0 : -1.0;  // P (+perp) left, N right
+      const int nt = side ? z.netP : z.netN;
+      for (size_t i = 0; i + 1 < pts.size(); ++i) {
+        Track t;
+        t.a = Point(offsetPoint(i, sg));
+        t.b = Point(offsetPoint(i + 1, sg));
+        t.width = w;
+        t.layer = top;
+        t.net = nt;
+        t.zip = zi;
+        b.tracks.push_back(t);
+      }
+      ends[side][0] = offsetPoint(0, sg);
+      ends[side][1] = offsetPoint(pts.size() - 1, sg);
+      // The single tracks to the nearest pads of the net at each end.
+      for (int e = 0; e < 2; ++e) {
+        const Pad* best = nullptr;
+        for (const Pad& p : b.pads)
+          if (p.net == nt && (!best || (p.pos.v() - ends[side][e]).len() < (best->pos.v() - ends[side][e]).len())) best = &p;
+        if (!best) continue;
+        Track t;
+        t.a = Point(ends[side][e]);
+        t.b = best->pos;
+        t.width = w;
+        t.layer = top;
+        t.net = nt;
+        b.tracks.push_back(t);
+      }
+    }
+    return zi;
+  }
   int drcOf(DrcViolation::Type kind) const {
     DrcOptions d;
     d.unconnected = false;
@@ -1818,6 +1890,126 @@ TEST(Topo, PairRuleGivesTheGapAndTheWidth) {
   EXPECT_EQ(p.drcOf(DrcViolation::Type::Width), 0);
   p.track("X", {{8, 11.0}, {30, 11.0}}, 0.4);  // 0.15 from N: a violation of the ordinary rule
   EXPECT_EQ(p.drcOf(DrcViolation::Type::Clearance), 1);
+}
+
+namespace {
+
+// A pair P/N (0.3 wide, 0.2 apart) zipped from (8,10) to (32,10) with a kink, its four pads outside the
+// section, and a third net X with a pad above.
+PinBoard pairBoard() {
+  PinBoard p;
+  p.b.netClasses[0].clearance = mmToNm(0.2);
+  p.pad("P", 4, 11, PadShapeKind::Circle, 1, 1);
+  p.pad("N", 4, 9, PadShapeKind::Circle, 1, 1);
+  p.pad("P", 36, 11, PadShapeKind::Circle, 1, 1);
+  p.pad("N", 36, 9, PadShapeKind::Circle, 1, 1);
+  p.pad("X", 20, 16, PadShapeKind::Circle, 1, 1);
+  p.pair("P", "N", 0.3, 0.2);
+  p.zip("P", "N", {{8, 10}, {20, 12}, {32, 10}});
+  return p;
+}
+
+}  // namespace
+
+// A zipped section of a differential pair is one wire of the model, as wide as the pair (2w + gap), between
+// two clasps: owners with three vertices across the pair, the conductors' ends (where the single wires of
+// the two nets to their pads start) and the centre (where the pair's wire ends).
+TEST(Topo, PairIsOneWireBetweenClasps) {
+  PinBoard p = pairBoard();
+  ASSERT_EQ(p.b.zips.size(), 1u);
+  topo::Topology::assignIds(p.b);
+  topo::Topology t;
+  t.build(p.b);
+  int pairWires = 0, clasps = 0, singlesAtClasps = 0;
+  for (const topo::Wire& w : t.wires) {
+    if (w.pair >= 0) {
+      ++pairWires;
+      EXPECT_EQ(w.width, mmToNm(0.8));
+      EXPECT_EQ(w.widthMin, w.width) << "never narrowed";
+      EXPECT_EQ(w.zip, 0);
+      for (int e = 0; e < 2; ++e) {
+        const topo::Owner& o = t.owners[w.end[e]];
+        EXPECT_EQ(o.kind, topo::Owner::Kind::Clasp);
+        EXPECT_EQ(t.mesh(w.layer)->verts[w.endVertex[e]].t, 0.0) << "at the clasp's centre";
+      }
+      EXPECT_FALSE(w.locked);
+    } else {
+      for (int e = 0; e < 2; ++e)
+        if (t.owners[w.end[e]].kind == topo::Owner::Kind::Clasp) {
+          ++singlesAtClasps;
+          const topo::Vertex& v = t.mesh(w.layer)->verts[w.endVertex[e]];
+          EXPECT_NE(v.t, 0.0) << "a single wire starts at a conductor's end";
+          EXPECT_EQ(t.netAt(*t.mesh(w.layer), w.endVertex[e]), w.net) << "the end of its own net";
+        }
+    }
+  }
+  for (const topo::Owner& o : t.owners)
+    if (o.kind == topo::Owner::Kind::Clasp) {
+      ++clasps;
+      EXPECT_EQ(o.net, p.net("P"));
+      EXPECT_EQ(o.net2, p.net("N"));
+      EXPECT_EQ(o.pair, 0);
+      EXPECT_EQ(t.mesh(p.top)->ownerVerts[int(&o - t.owners.data())].size(), 3u);
+      EXPECT_NEAR(o.axis.len(), mmToNm(0.25), 2000) << "half of w + gap";
+    }
+  EXPECT_EQ(pairWires, 1);
+  EXPECT_EQ(clasps, 2);
+  EXPECT_EQ(singlesAtClasps, 4);
+  EXPECT_TRUE(t.violations.empty());
+  EXPECT_TRUE(t.check().empty());
+}
+
+// The clasp's copper is the pair wire's own and each single wire's own at its end: the capacity of an edge at
+// the clasp takes no clearance from it for them, and does for a wire of another net.
+TEST(Topo, ClaspIsOwnToItsThreeWires) {
+  PinBoard p = pairBoard();
+  topo::Topology::assignIds(p.b);
+  topo::Topology t;
+  t.build(p.b);
+  const topo::LayerMesh& m = *t.mesh(p.top);
+  int pairWire = -1, xWire = -1;
+  for (int wi = 0; wi < int(t.wires.size()); ++wi) {
+    if (t.wires[wi].pair >= 0) pairWire = wi;
+    if (t.wires[wi].net == p.net("X")) xWire = wi;
+  }
+  ASSERT_GE(pairWire, 0);
+  int claspVertex = -1;
+  for (int v = 0; v < int(m.verts.size()); ++v)
+    if (t.owners[m.verts[v].owner].kind == topo::Owner::Kind::Clasp && m.verts[v].t < 0) claspVertex = v;
+  ASSERT_GE(claspVertex, 0);
+  EXPECT_TRUE(t.own(m, claspVertex, t.wires[pairWire]));
+  EXPECT_EQ(t.netAt(m, claspVertex), p.net("N"));
+  for (const topo::Wire& w : t.wires)
+    if (w.pair < 0 && w.net == p.net("N") && (w.endVertex[0] == claspVertex || w.endVertex[1] == claspVertex)) EXPECT_TRUE(t.own(m, claspVertex, w));
+  for (const topo::Wire& w : t.wires)
+    if (w.pair < 0 && w.net == p.net("P")) EXPECT_FALSE(t.own(m, claspVertex, w)) << "the N end is not P's";
+  if (xWire >= 0) EXPECT_FALSE(t.own(m, claspVertex, t.wires[xWire]));
+}
+
+// The sidecar keeps the clasps and the pair wires.
+TEST(Topo, SidecarKeepsClasps) {
+  PinBoard p = pairBoard();
+  topo::Topology::assignIds(p.b);
+  topo::Topology t;
+  t.build(p.b);
+  const std::string path = (std::filesystem::temp_directory_path() / "xr_clasps.xrtopo").string();
+  ASSERT_TRUE(topo::saveTopology(t, p.b, path));
+  auto back = topo::loadTopology(p.b, path);
+  ASSERT_TRUE(back) << back.error();
+  ASSERT_EQ(back->owners.size(), t.owners.size());
+  for (size_t i = 0; i < t.owners.size(); ++i) {
+    EXPECT_EQ(back->owners[i].kind, t.owners[i].kind);
+    EXPECT_EQ(back->owners[i].net2, t.owners[i].net2);
+    EXPECT_EQ(back->owners[i].pair, t.owners[i].pair);
+    EXPECT_EQ(back->owners[i].zip, t.owners[i].zip);
+    EXPECT_EQ(back->owners[i].claspEnd, t.owners[i].claspEnd);
+  }
+  ASSERT_EQ(back->wires.size(), t.wires.size());
+  for (size_t i = 0; i < t.wires.size(); ++i) {
+    EXPECT_EQ(back->wires[i].pair, t.wires[i].pair);
+    EXPECT_EQ(back->wires[i].zip, t.wires[i].zip);
+  }
+  std::filesystem::remove(path);
 }
 
 // A wire keeps no clearance from a routing keepout: its copper may touch the keepout's boundary (TopoR has

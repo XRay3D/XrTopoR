@@ -26,6 +26,9 @@ QString netsText(const RuleNets& n) {
     case RuleNets::Kind::All: return QObject::tr("Все цепи");
     case RuleNets::Kind::Net: return QString::fromStdString(n.name);
     case RuleNets::Kind::Group: return QObject::tr("Группа: %1").arg(QString::fromStdString(n.name));
+    case RuleNets::Kind::Signal: return QObject::tr("Сигнал: %1").arg(QString::fromStdString(n.name));
+    case RuleNets::Kind::DiffSignal: return QObject::tr("Дифф. сигнал: %1").arg(QString::fromStdString(n.name));
+    case RuleNets::Kind::SignalGroup: return QObject::tr("Группа сигналов: %1").arg(QString::fromStdString(n.name));
   }
   return {};
 }

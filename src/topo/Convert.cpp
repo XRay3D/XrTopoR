@@ -141,15 +141,14 @@ std::vector<Violation> Topology::findCrossings(const LayerMesh& m) const {
         if (ta >= 0 && (ta == B.t[0] || ta == B.t[1])) return ta;
       return -1;
     };
-    auto endTri = [&](int cid, int owner, double& coord) {  // the triangle of a wire's first/last crossing at its end owner
+    auto endTri = [&](int cid, int vertex, double& coord) {  // the triangle of a wire's first/last crossing at its end vertex
       const Edge& E = m.edges[crossings[cid].edge];
       for (int t : E.t) {
         if (t < 0) continue;
-        for (int i = 0; i < 3; ++i)
-          if (m.verts[m.tris[t].v[i]].owner == owner) {
-            coord = i;
-            return t;
-          }
+        if (int i = m.localVertex(t, vertex); i >= 0) {
+          coord = i;
+          return t;
+        }
       }
       return -1;
     };
@@ -161,8 +160,8 @@ std::vector<Violation> Topology::findCrossings(const LayerMesh& m) const {
         if (t >= 0) chordsOf[t].push_back({wi, coordOf(t, w.cross[k]), coordOf(t, w.cross[k + 1])});
       }
       double c0, c1;
-      if (int t = endTri(w.cross.front(), w.end[0], c0); t >= 0) chordsOf[t].push_back({wi, c0, coordOf(t, w.cross.front())});
-      if (int t = endTri(w.cross.back(), w.end[1], c1); t >= 0) chordsOf[t].push_back({wi, coordOf(t, w.cross.back()), c1});
+      if (int t = endTri(w.cross.front(), w.endVertex[0], c0); t >= 0) chordsOf[t].push_back({wi, c0, coordOf(t, w.cross.front())});
+      if (int t = endTri(w.cross.back(), w.endVertex[1], c1); t >= 0) chordsOf[t].push_back({wi, coordOf(t, w.cross.back()), c1});
     }
     auto inside = [](double x, double a, double b) {  // x strictly between a and b along the circular perimeter
       if (a > b) std::swap(a, b);
@@ -220,6 +219,75 @@ void Topology::convertWires(const Board& b, BuildScratch& scratch) {
   effectiveWidths(b, g, copper);
   std::vector<WireChain> chains = wireChains(b, g, all, copper);
   std::erase_if(chains, [](const WireChain& c) { return c.closed || c.path.size() < 2; });
+  // The zipped sections of the differential pairs: one chain each, the axis as its path (the pair's one wire,
+  // as wide as the pair), the conductors as its tracks.
+  std::vector<int> chainZip(chains.size(), -1);
+  for (int z = 0; z < int(b.zips.size()); ++z) {
+    const ZippedWire& zip = b.zips[size_t(z)];
+    if (zip.axis.empty() || zip.netP < 0 || zip.netN < 0) continue;
+    WireChain c;
+    c.layer = zip.layer;
+    c.net = zip.netP;
+    c.width = zip.width();
+    for (const Track& t : zip.axis)
+      for (Vec2 p : t.path(20000))
+        if (c.path.empty() || (p - c.path.back()).len2() >= 1) c.path.push_back(p);
+    for (size_t i = 0; i < b.tracks.size(); ++i)
+      if (b.tracks[i].zip == z) c.tracks.push_back(int(i));
+    if (c.path.size() < 2) continue;
+    chains.push_back(std::move(c));
+    chainZip.push_back(z);
+  }
+  // The clasps («замки») at the sections' ends: three vertices across the pair, the conductors' free ends
+  // nearest the axis end (where the single wires to the pads start, exactly as the tracks have them) and the
+  // centre between them (where the pair's wire ends).
+  std::map<int, std::array<int, 2>> claspOf;  // zip -> owners at its start and end
+  for (size_t ci = 0; ci < chains.size(); ++ci) {
+    if (chainZip[ci] < 0) continue;
+    const WireChain& c = chains[ci];
+    const ZippedWire& zip = b.zips[size_t(chainZip[ci])];
+    for (int end = 0; end < 2; ++end) {
+      const Vec2 at = end ? c.b() : c.a();
+      Vec2 pt[2] = {at, at};  // [0]: the negative net's conductor end, [1]: the positive's
+      for (int side = 0; side < 2; ++side) {
+        const int net = side ? zip.netP : zip.netN;
+        double best = 1e300;
+        for (int ti : c.tracks) {
+          const Track& t = b.tracks[size_t(ti)];
+          if (t.net != net) continue;
+          for (Vec2 q : {t.a.v(), t.b.v()})
+            if (double d = (q - at).len(); d < best) best = d, pt[side] = q;
+        }
+      }
+      Owner o;
+      o.kind = Owner::Kind::Clasp;
+      o.c = (pt[0] + pt[1]) * 0.5;
+      o.axis = (pt[1] - pt[0]) * 0.5;
+      o.halfWidth = zip.condWidth / 2.0;
+      o.shape = Shape::capsule(pt[0], pt[1], o.halfWidth);
+      o.net = zip.netP;
+      o.net2 = zip.netN;
+      o.layers = LayerMask(1) << zip.layer;
+      o.pair = zip.pair;
+      o.zip = chainZip[ci];
+      o.claspEnd = end;
+      owners.push_back(std::move(o));
+      scratch.corners.emplace_back();
+      claspOf[chainZip[ci]][size_t(end)] = int(owners.size() - 1);
+    }
+  }
+  // A single wire's end at a clasp: the conductor end of its net, within the join tolerance.
+  auto claspAt = [&](Vec2 p, int net, LayerId layer, Coord width) {
+    const double tol = std::max(edit::kJoinTol, 0.1 * double(width));
+    for (auto& [z, ends2] : claspOf)
+      for (int oi : ends2) {
+        const Owner& o = owners[size_t(oi)];
+        if (!((o.layers >> layer) & 1)) continue;
+        if (o.net == net && (o.c + o.axis - p).len() <= tol) return oi;
+        if (o.net2 == net && (o.c - o.axis - p).len() <= tol) return oi;
+      }
+    return -1;
+  };
   ownerTracks.clear();
   // The ends: a pad or via of the net, or else a branch point or free end — a junction owner there.
   struct End {
@@ -241,10 +309,19 @@ void Topology::convertWires(const Board& b, BuildScratch& scratch) {
   };
   for (size_t ci = 0; ci < chains.size(); ++ci) {
     const WireChain& c = chains[ci];
+    if (chainZip[ci] >= 0) {
+      ends[ci][0].owner = claspOf[chainZip[ci]][0];
+      ends[ci][1].owner = claspOf[chainZip[ci]][1];
+      continue;
+    }
     for (int end = 0; end < 2; ++end) {
       Vec2 p = end ? c.b() : c.a();
       if (auto r = copper.at(p, c.net, c.layer)) {
         ends[ci][end].owner = r->type == ItemType::Pad ? padOwner[r->index] : viaOwner[r->index];
+        continue;
+      }
+      if (int co = claspAt(p, c.net, c.layer, c.width); co >= 0) {
+        ends[ci][end].owner = co;
         continue;
       }
       if (int zo = zoneAt(p, c.net, c.layer); zo >= 0) {
@@ -312,8 +389,15 @@ void Topology::convertWires(const Board& b, BuildScratch& scratch) {
     w.end[0] = ends[ci][0].owner;
     w.end[1] = ends[ci][1].owner;
     for (int ti : c.tracks) w.tracks.push_back(b.tracks[ti].id);
-    w.locked = r::any_of(c.tracks, &Track::locked, of(b.tracks));
+    w.locked = std::ranges::any_of(c.tracks, [&](int ti) { return b.tracks[ti].locked || b.tracks[ti].serp >= 0; });
     w.dirty = true;
+    if (chainZip[ci] >= 0) {  // the pair's wire: as wide as the pair, never narrower
+      const ZippedWire& zip = b.zips[size_t(chainZip[ci])];
+      w.pair = zip.pair;
+      w.zip = chainZip[ci];
+      w.widthMin = w.width;
+      w.locked |= zip.fixed || std::ranges::any_of(zip.axis, [](const Track& t) { return t.serp >= 0; });
+    }
     if (w.end[0] < 0 || w.end[1] < 0 || m.ownerVerts[w.end[0]].empty() || m.ownerVerts[w.end[1]].empty()) {
       ++noEnd;
       continue;
@@ -347,7 +431,7 @@ void Topology::convertWires(const Board& b, BuildScratch& scratch) {
     // first outside.
     for (int end = 0; end < 2; ++end) {
       const Owner& o = end ? o1 : o0;
-      if (o.kind == Owner::Kind::Zone) continue;  // the wire ends on the zone's ring, where the realiser puts it
+      if (o.kind == Owner::Kind::Zone || o.kind == Owner::Kind::Clasp) continue;  // the wire ends on the zone's ring / at the clasp's vertex
       const Polyline& path = c.path;
       size_t n = path.size();
       for (size_t k = 1; k < n; ++k) {
@@ -369,6 +453,9 @@ void Topology::convertWires(const Board& b, BuildScratch& scratch) {
     // the next, when the drawn wire started at the right end).
     auto endVertexOf = [&](int owner, int end) {
       const Owner& o = owners[owner];
+      if (o.kind == Owner::Kind::Clasp && w.pair >= 0)  // the pair's wire ends at the clasp's centre
+        for (int v : m.ownerVerts[owner])
+          if (m.verts[v].t == 0) return v;
       if (o.shape.kind == Shape::Kind::Polygon && o.kind != Owner::Kind::Zone)
         for (int v : m.ownerVerts[owner])
           if (m.verts[v].t == 0 && m.verts[v].off.len2() < 1) return v;
@@ -647,7 +734,7 @@ void Topology::convertWires(const Board& b, BuildScratch& scratch) {
         if (w.zone >= 0) continue;  // locked in a pour: the zone's interior edges have no room by rule, it lies there all the same
         for (int end = 0; end < 2; ++end) {
           const Owner& o = owners[m.verts[E.v[end]].owner];
-          if (o.net == w.net || o.kind == Owner::Kind::Junction) continue;
+          if (own(m, E.v[end], w) || o.kind == Owner::Kind::Junction) continue;
           // At a wall (the board edge, a keepout) no room is an overflow, not a wire through copper: F5
           // goes on and lays the wire tight, the DRC names the clearance to the edge (a board moved whole
           // against its outline stopped at three such places).

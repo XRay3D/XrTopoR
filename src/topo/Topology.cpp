@@ -169,6 +169,24 @@ void Topology::takeRules(const Board& b) {
   classClr = b.classClearances();
   layerRules = b.layerRules;
   pairRules = b.pairRules;
+  netPair = b.netPair;
+}
+
+int Topology::netAt(const LayerMesh& m, int v) const {
+  const Vertex& x = m.verts[size_t(v)];
+  const Owner& o = owners[size_t(x.owner)];
+  return o.kind == Owner::Kind::Clasp && x.t < 0 ? o.net2 : o.net;
+}
+
+bool Topology::own(const LayerMesh& m, int v, const Wire& w) const {
+  const Vertex& x = m.verts[size_t(v)];
+  const Owner& o = owners[size_t(x.owner)];
+  if (o.kind == Owner::Kind::Clasp) {
+    if (w.pair >= 0) return w.pair == o.pair;
+    return netAt(m, v) == w.net && w.net != kNoNet;
+  }
+  if (w.pair >= 0 && o.net >= 0 && o.net < int(netPair.size()) && netPair[size_t(o.net)] == w.pair) return true;
+  return o.net == w.net && w.net != kNoNet;
 }
 
 void Topology::buildOwners(const Board& b, BuildScratch& scratch) {
@@ -319,6 +337,14 @@ void Topology::buildMeshes(const Board& b, BuildScratch& scratch) {
       if (o.kind == Owner::Kind::Pad && o.axis.len2() > 0 && !hasCorners && o.shape.kind == Shape::Kind::Segment) {
         int a = vertex(oi, -1, {}), c = vertex(oi, 1, {});
         in.constraints.push_back({a, c});
+        in.border.push_back(2);
+        continue;
+      }
+      if (o.kind == Owner::Kind::Clasp) {  // the two conductors' ends and the centre between, rigid
+        int a = vertex(oi, -1, {}), m0 = vertex(oi, 0, {}), c = vertex(oi, 1, {});
+        in.constraints.push_back({a, m0});
+        in.border.push_back(2);
+        in.constraints.push_back({m0, c});
         in.border.push_back(2);
         continue;
       }
