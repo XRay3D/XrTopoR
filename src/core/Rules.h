@@ -11,9 +11,10 @@ namespace xr {
 
 struct Board;
 
-// Nets a rule affects: all, one net or a net group.
+// Nets a rule affects: all, one net, a net group, or a signal, a differential signal or a signal group
+// (their nets, HiSpeed).
 struct RuleNets {
-  enum class Kind { All, Net, Group } kind = Kind::All;
+  enum class Kind { All, Net, Group, Signal, DiffSignal, SignalGroup } kind = Kind::All;
   std::string name;
   bool operator==(const RuleNets&) const = default;
 };

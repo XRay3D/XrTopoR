@@ -228,12 +228,19 @@ RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int
     // A round wall (a hole, a round keepout) as one obstacle at its centre: round it as one arc.
     for (const RoundWall& rw : roundWalls(b, layer)) ob.pts[ob.add(rw.c, rw.r, rw.clr, kBoardEdge)].round = true;
     // A wire locked without crossings (through a keepout with no way round, one the mesh does not hold)
-    // is in no slot: its tracks are obstacles, as on the sketch path.
+    // is in no slot, and a serpent's copper reaches far beyond its slot: their tracks are obstacles, as on
+    // the sketch path.
+    std::map<uint32_t, const Track*> trackById;
+    for (const Track& tr : b.tracks)
+      if (tr.id && tr.layer == layer) trackById[tr.id] = &tr;
     for (const Wire& w : t.wires) {
-      if (w.layer != layer || !w.locked || !w.cross.empty() || localOf.contains(int(&w - t.wires.data()))) continue;
+      if (w.layer != layer || !w.locked || localOf.contains(int(&w - t.wires.data()))) continue;
+      bool serpent = false;
       for (uint32_t id : w.tracks)
-        for (const Track& tr : b.tracks)
-          if (tr.id == id && tr.layer == layer) ob.addTrack(tr, double(b.clearance(tr.net, layer)));
+        if (auto it = trackById.find(id); it != trackById.end()) serpent |= it->second->serp >= 0;
+      if (!w.cross.empty() && !serpent) continue;
+      for (uint32_t id : w.tracks)
+        if (auto it = trackById.find(id); it != trackById.end()) ob.addTrack(*it->second, double(b.clearance(it->second->net, layer)));
     }
     // The stubs' copper, as the realiser adds it.
     for (int k = 0; k < NW; ++k)

@@ -905,7 +905,141 @@ struct Writer {
       case RuleNets::Kind::All: x.empty("AllNets"); break;
       case RuleNets::Kind::Net: x.empty("NetRef", {{"name", o.name}}); break;
       case RuleNets::Kind::Group: x.empty("NetGroupRef", {{"name", o.name}}); break;
+      case RuleNets::Kind::Signal: x.empty("SignalRef", {{"name", o.name}}); break;
+      case RuleNets::Kind::DiffSignal: x.empty("DiffSignalRef", {{"name", o.name}}); break;
+      case RuleNets::Kind::SignalGroup: x.empty("SignalGroupRef", {{"name", o.name}}); break;
     }
+  }
+  void objectSignal(const ObjectSignal& o) {
+    switch (o.kind) {
+      case ObjectSignal::Kind::Signal: x.empty("SignalRef", {{"name", o.name}}); break;
+      case ObjectSignal::Kind::DiffSignal: x.empty("DiffSignalRef", {{"name", o.name}}); break;
+      case ObjectSignal::Kind::SignalGroup: x.empty("SignalGroupRef", {{"name", o.name}}); break;
+    }
+  }
+  void pinRef(const char* tag, const PinRef& p) { x.empty(tag, {{"compName", p.comp}, {"pinName", p.pin}}); }
+
+  // HiSpeedRules as the board keeps them (HiSpeed.h): the sections it has, in the format's order.
+  void writeHiSpeed() {
+    const HiSpeed& h = b.hispeed;
+    x.open("HiSpeedRules", {{"version", "3.0"}});
+    if (!h.impedances.empty()) {
+      x.open("RulesImpedances");
+      for (const Impedance& z : h.impedances) {
+        x.open(z.diff ? "ImpedanceDiff" : "Impedance", {{"name", z.name}, {"Z0", num(z.z0)}});
+        for (const ImpedanceLayerRule& r : z.rules) {
+          if (z.diff) x.open("LayerRule", {{"width", mm(r.width)}, {"gap", mm(r.gap)}});
+          else x.open("LayerRule", {{"width", mm(r.width)}});
+          x.empty("LayerRef", {{"name", r.layer}});
+          x.close();
+        }
+        x.close();
+      }
+      x.close();
+    }
+    if (!h.clusters.empty()) {
+      x.open("SignalClusters");
+      for (const SignalCluster& c : h.clusters) {
+        x.open("SignalCluster");
+        if (!c.impedance.empty()) x.empty("ImpedanceRef", {{"name", c.impedance}});
+        pinRef("SourcePinRef", c.source);
+        x.open("Nets");
+        for (const std::string& n : c.nets) x.empty("NetRef", {{"name", n}});
+        x.close();
+        x.open("PinPairs");
+        for (const auto& [p1, p2] : c.pinPairs) {
+          x.open("PinPair");
+          pinRef("PinRef", p1);
+          pinRef("PinRef", p2);
+          x.close();
+        }
+        x.close();
+        for (const Signal& sg : c.signalList) {
+          x.open("Signal", {{"name", sg.name}});
+          pinRef("ReceiverPinRef", sg.receiver);
+          if (sg.components.empty()) x.empty("Components");
+          else {
+            x.open("Components");
+            for (const std::string& cr : sg.components) x.empty("CompInstanceRef", {{"name", cr}});
+            x.close();
+          }
+          x.close();
+        }
+        x.close();
+      }
+      x.close();
+    }
+    if (!h.diffSignals.empty()) {
+      x.open("DiffSignals");
+      for (const DiffSignal& d : h.diffSignals) {
+        x.open("DiffSignal", {{"name", d.name}, {"mismatch", mm(d.mismatch)}});
+        if (!d.impedance.empty()) x.empty("ImpedanceRef", {{"name", d.impedance}});
+        x.empty("SignalRef", {{"name", d.signalA}});
+        x.empty("SignalRef", {{"name", d.signalB}});
+        x.close();
+      }
+      x.close();
+    }
+    if (!h.groups.empty()) {
+      x.open("SignalGroups");
+      for (const SignalGroup& g : h.groups) {
+        x.open("SignalGroup", {{"name", g.name}});
+        for (const ObjectSignal& m : g.members) objectSignal(m);
+        x.close();
+      }
+      x.close();
+    }
+    if (!h.delays.empty()) {
+      x.open("RulesDelay");
+      for (const DelayRule& d : h.delays) {
+        const char* onoff = d.enabled ? "on" : "off";
+        const char* vt = d.time ? "Time" : "Dist";
+        switch (d.kind) {
+          case DelayRule::Kind::Equal:
+            x.open("DelayEqual", {{"enabled", onoff}, {"valueType", vt}, {"tolerance", num(d.tolerance)}});
+            x.open("ObjectsAffected");
+            for (const ObjectSignal& o : d.objects) objectSignal(o);
+            x.close();
+            break;
+          case DelayRule::Kind::Constant:
+            x.open("DelayConstant", {{"enabled", onoff}, {"valueType", vt}, {"constant", num(d.constant)}, {"toleranceUnder", num(d.toleranceUnder)}, {"toleranceOver", num(d.toleranceOver)}});
+            x.open("ObjectsAffected");
+            for (const ObjectSignal& o : d.objects) objectSignal(o);
+            x.close();
+            break;
+          case DelayRule::Kind::Relation:
+            x.open("DelayRelation", {{"enabled", onoff}, {"valueType", vt}, {"constant", num(d.constant)}, {"toleranceUnder", num(d.toleranceUnder)}, {"toleranceOver", num(d.toleranceOver)}});
+            x.open("ObjectLeft");
+            for (const ObjectSignal& o : d.left) objectSignal(o);
+            x.close();
+            x.open("ObjectRight");
+            for (const ObjectSignal& o : d.right) objectSignal(o);
+            x.close();
+            break;
+        }
+        x.close();
+      }
+      x.close();
+    }
+    if (h.search.present) {
+      const SignalSearch& q = h.search;
+      x.open("SignalSearchSettings", {{"maxNetsInCluster", std::to_string(q.maxNetsInCluster)}, {"createPinPairs", q.createPinPairs ? "on" : "off"}});
+      if (!q.names.empty()) {
+        x.open("RulesDiffSignalNetsNames");
+        for (const DiffNamesRule& r : q.names) {
+          std::vector<std::pair<std::string, std::string>> attrs{{"enabled", r.enabled ? "on" : "off"}};
+          if (!r.pos.empty()) attrs.push_back({"posStr", r.pos});
+          if (!r.neg.empty()) attrs.push_back({"negStr", r.neg});
+          x.emptyList("RuleDiffSignalNetsNames", attrs);
+        }
+        x.close();
+      }
+      x.open("ExcludedNets", {{"minPinsNumber", std::to_string(q.minPinsNumber)}});
+      for (const std::string& n : q.excludedNets) x.empty("NetRef", {{"name", n}});
+      x.close();
+      x.close();
+    }
+    x.close();
   }
 
   void ruleLayers(const std::vector<std::string>& names) {
@@ -1021,6 +1155,29 @@ struct Writer {
       x.close();
     }
     x.close();
+    if (!b.serpents.empty()) {
+      x.open("Serpents");
+      for (size_t i = 0; i < b.serpents.size(); ++i) {
+        const Serpent& sp = b.serpents[i];
+        x.empty("Serpent", {{"id", serpentId(int(i))}, {"length", num(sp.length, 8)}, {"gap", num(sp.gap)}, {"h1", num(sp.h1, 8)}, {"h2", num(sp.h2, 8)}, {"h3", num(sp.h3, 8)}, {"h4", num(sp.h4, 8)}});
+      }
+      x.close();
+    }
+    if (!b.zips.empty()) {
+      x.open("ZippedWires");
+      for (size_t i = 0; i < b.zips.size(); ++i) {
+        const ZippedWire& z = b.zips[i];
+        if (z.layer < 0 || z.layer >= int(b.layers.size()) || layerName[z.layer].empty() || z.axis.empty()) continue;
+        if (z.fixed) x.open("ZippedWire", {{"id", zipId(int(i))}, {"fixed", "on"}});
+        else x.open("ZippedWire", {{"id", zipId(int(i))}});
+        x.empty("LayerRef", {{"name", layerName[z.layer]}});
+        if (z.pair >= 0 && z.pair < int(b.hispeed.diffSignals.size())) x.empty("DiffSignalRef", {{"name", b.hispeed.diffSignals[size_t(z.pair)].name}});
+        xy("Start", toFst(z.axis.front().a));
+        for (const Track& t : z.axis) writeTrackPiece(t, false);
+        x.close();
+      }
+      x.close();
+    }
     x.open("Wires");
     writeWires();
     x.close();
@@ -1029,6 +1186,31 @@ struct Writer {
       for (auto& z : b.zones) writeCopper(z);
       x.close();
     }
+    x.close();
+  }
+
+  static std::string serpentId(int i) { return "serp_" + std::to_string(i); }
+  static std::string zipId(int i) { return "zwire_" + std::to_string(i); }
+
+  // One piece of a Subwire or an axis: TrackLine, TrackArc or TrackArcCW to the piece's far end, with the
+  // serpent it carries.
+  void writeTrackPiece(const Track& t, bool reversed) {
+    Point from = reversed ? t.b : t.a, to = reversed ? t.a : t.b;
+    std::vector<std::pair<std::string, std::string>> attrs;
+    if (t.serp >= 0 && t.serp < int(b.serpents.size())) attrs.push_back({"serpRef", serpentId(t.serp)});
+    if (t.mid) {
+      Vec2 s = toFst(from), m = toFst(*t.mid), e = toFst(to);
+      auto arc = ArcGeom::fromThreePoints(s, m, e);
+      if (arc.valid) {
+        x.openList(arc.sweep >= 0 ? "TrackArc" : "TrackArcCW", attrs);
+        xy("Center", arc.center);
+        xy("End", e);
+        x.close();
+        return;
+      }
+    }
+    x.openList("TrackLine", attrs);
+    xy("End", toFst(to));
     x.close();
   }
 
@@ -1058,7 +1240,7 @@ struct Writer {
         for (auto it = range.first; it != range.second; ++it) {
           if (used.count(it->second)) continue;
           const Track& t = b.tracks[it->second];
-          if (t.width != ref.width || t.locked != ref.locked) continue;
+          if (t.width != ref.width || t.locked != ref.locked || t.zip != ref.zip) continue;
           found = it->second;
           ++count;
         }
@@ -1087,27 +1269,13 @@ struct Writer {
         }
         const Track& first = b.tracks[chain.front().track];
         const Track& ref = b.tracks[start];
-        if (ref.locked) x.open("Subwire", {{"fixed", "on"}, {"width", mm(ref.width)}});
-        else x.open("Subwire", {{"width", mm(ref.width)}});
+        std::vector<std::pair<std::string, std::string>> attrs;
+        if (ref.locked) attrs.push_back({"fixed", "on"});
+        attrs.push_back({"width", mm(ref.width)});
+        if (ref.zip >= 0 && ref.zip < int(b.zips.size())) attrs.push_back({"zipwireRef", zipId(ref.zip)});
+        x.openList("Subwire", attrs);
         xy("Start", toFst(chain.front().reversed ? first.b : first.a));
-        for (auto& sg : chain) {
-          const Track& t = b.tracks[sg.track];
-          Point from = sg.reversed ? t.b : t.a, to = sg.reversed ? t.a : t.b;
-          if (t.mid) {
-            Vec2 s = toFst(from), m = toFst(*t.mid), e = toFst(to);
-            auto arc = ArcGeom::fromThreePoints(s, m, e);
-            if (arc.valid) {
-              x.open(arc.sweep >= 0 ? "TrackArc" : "TrackArcCW");
-              xy("Center", arc.center);
-              xy("End", e);
-              x.close();
-              continue;
-            }
-          }
-          x.open("TrackLine");
-          xy("End", toFst(to));
-          x.close();
-        }
+        for (auto& sg : chain) writeTrackPiece(b.tracks[sg.track], sg.reversed);
         x.close();
       }
       x.close();
@@ -1215,8 +1383,7 @@ struct Writer {
     x.blank();
     writeGroups();
     x.blank();
-    x.open("HiSpeedRules", {{"version", "3.0"}});
-    x.close();
+    writeHiSpeed();
     x.blank();
     writeRules();
     x.blank();

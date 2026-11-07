@@ -907,12 +907,120 @@ struct Reader {
     return m;
   }
 
-  // Rule objects: AllNets, NetRef or NetGroupRef.
+  // Rule objects: AllNets, NetRef, NetGroupRef, or a signal, a differential signal or a signal group.
   RuleNets ruleNets(const Element& o) {
     if (o.is("NetRef")) return {RuleNets::Kind::Net, std::string(o.attr("name"))};
     if (o.is("NetGroupRef")) return {RuleNets::Kind::Group, std::string(o.attr("name"))};
+    if (o.is("SignalRef")) return {RuleNets::Kind::Signal, std::string(o.attr("name"))};
+    if (o.is("DiffSignalRef") || o.is("DiffPairRef")) return {RuleNets::Kind::DiffSignal, std::string(o.attr("name"))};
+    if (o.is("SignalGroupRef")) return {RuleNets::Kind::SignalGroup, std::string(o.attr("name"))};
     if (o.is("AllNets")) return {};
-    return {RuleNets::Kind::Net, {}};  // signals and the like: no net
+    return {RuleNets::Kind::Net, {}};  // the unknown: no net
+  }
+  std::optional<ObjectSignal> objectSignal(const Element& o) {
+    if (o.is("SignalRef")) return ObjectSignal{ObjectSignal::Kind::Signal, std::string(o.attr("name"))};
+    if (o.is("DiffSignalRef") || o.is("DiffPairRef")) return ObjectSignal{ObjectSignal::Kind::DiffSignal, std::string(o.attr("name"))};
+    if (o.is("SignalGroupRef")) return ObjectSignal{ObjectSignal::Kind::SignalGroup, std::string(o.attr("name"))};
+    return std::nullopt;
+  }
+  PinRef pinRef(const Element& e) { return {std::string(e.attr("compName")), std::string(e.attr("pinName"))}; }
+
+  // HiSpeedRules, kept as the file has them (HiSpeed.h); the differential signals make the pairs.
+  void readHiSpeed(const Element& hs) {
+    HiSpeed& h = b.hispeed;
+    if (auto* ri = hs.find("RulesImpedances"))
+      for (auto& z : ri->kids) {
+        if (!z.is("Impedance") && !z.is("ImpedanceDiff")) continue;
+        Impedance imp;
+        imp.name = z.attr("name");
+        imp.z0 = z.num("Z0");
+        imp.diff = z.is("ImpedanceDiff");
+        for (auto* lr : z.findAll("LayerRule")) {
+          ImpedanceLayerRule r;
+          if (auto* l = lr->find("LayerRef")) r.layer = l->attr("name");
+          r.width = len(lr->num("width"));
+          r.gap = len(lr->num("gap"));
+          imp.rules.push_back(std::move(r));
+        }
+        h.impedances.push_back(std::move(imp));
+      }
+    if (auto* scs = hs.find("SignalClusters"))
+      for (auto* sc : scs->findAll("SignalCluster")) {
+        SignalCluster c;
+        if (auto* z = sc->find("ImpedanceRef")) c.impedance = z->attr("name");
+        if (auto* sp = sc->find("SourcePinRef")) c.source = pinRef(*sp);
+        if (auto* ns = sc->find("Nets"))
+          for (auto* n : ns->findAll("NetRef")) c.nets.emplace_back(n->attr("name"));
+        if (auto* pps = sc->find("PinPairs"))
+          for (auto* pp : pps->findAll("PinPair")) {
+            auto refs = pp->findAll("PinRef");
+            if (refs.size() == 2) c.pinPairs.push_back({pinRef(*refs[0]), pinRef(*refs[1])});
+          }
+        for (auto* sg : sc->findAll("Signal")) {
+          Signal sig;
+          sig.name = sg->attr("name");
+          if (auto* rp = sg->find("ReceiverPinRef")) sig.receiver = pinRef(*rp);
+          if (auto* cs = sg->find("Components"))
+            for (auto* cr : cs->findAll("CompInstanceRef")) sig.components.emplace_back(cr->attr("name"));
+          c.signalList.push_back(std::move(sig));
+        }
+        h.clusters.push_back(std::move(c));
+      }
+    if (auto* ds = hs.find("DiffSignals"))
+      for (auto* d : ds->findAll("DiffSignal")) {
+        DiffSignal x;
+        x.name = d->attr("name");
+        x.mismatch = len(d->num("mismatch"));
+        if (auto* z = d->find("ImpedanceRef")) x.impedance = z->attr("name");
+        auto refs = d->findAll("SignalRef");
+        if (!refs.empty()) x.signalA = refs[0]->attr("name");
+        if (refs.size() > 1) x.signalB = refs[1]->attr("name");
+        h.diffSignals.push_back(std::move(x));
+      }
+    if (auto* gs = hs.find("SignalGroups"))
+      for (auto* g : gs->findAll("SignalGroup")) {
+        SignalGroup sg;
+        sg.name = g->attr("name");
+        for (auto& k : g->kids)
+          if (auto o = objectSignal(k)) sg.members.push_back(*o);
+        h.groups.push_back(std::move(sg));
+      }
+    if (auto* rd = hs.find("RulesDelay"))
+      for (auto& r : rd->kids) {
+        DelayRule d;
+        if (r.is("DelayEqual")) d.kind = DelayRule::Kind::Equal;
+        else if (r.is("DelayConstant")) d.kind = DelayRule::Kind::Constant;
+        else if (r.is("DelayRelation")) d.kind = DelayRule::Kind::Relation;
+        else continue;
+        d.enabled = r.flag("enabled", true);
+        d.time = r.attr("valueType", "Dist") == "Time";
+        d.constant = r.num("constant");
+        d.tolerance = r.num("tolerance");
+        d.toleranceUnder = r.num("toleranceUnder");
+        d.toleranceOver = r.num("toleranceOver");
+        auto objects = [&](const Element* parent, std::vector<ObjectSignal>& out) {
+          if (!parent) return;
+          for (auto& k : parent->kids)
+            if (auto o = objectSignal(k)) out.push_back(*o);
+        };
+        objects(r.find("ObjectsAffected"), d.objects);
+        objects(r.find("ObjectLeft"), d.left);
+        objects(r.find("ObjectRight"), d.right);
+        h.delays.push_back(std::move(d));
+      }
+    if (auto* ss = hs.find("SignalSearchSettings")) {
+      SignalSearch& q = h.search;
+      q.present = true;
+      q.maxNetsInCluster = int(ss->num("maxNetsInCluster", 5));
+      q.createPinPairs = ss->flag("createPinPairs", true);
+      if (auto* rn = ss->find("RulesDiffSignalNetsNames"))
+        for (auto* r : rn->findAll("RuleDiffSignalNetsNames"))
+          q.names.push_back({r->flag("enabled", true), std::string(r->attr("posStr")), std::string(r->attr("negStr"))});
+      if (auto* ex = ss->find("ExcludedNets")) {
+        q.minPinsNumber = int(ex->num("minPinsNumber", 20));
+        for (auto* n : ex->findAll("NetRef")) q.excludedNets.emplace_back(n->attr("name"));
+      }
+    }
   }
 
   void readRules(const Element& rules) {
@@ -1037,9 +1145,12 @@ struct Reader {
     std::vector<std::string> out;
     for (auto& k : e.kids) {
       if (k.is("NetRef")) out.emplace_back(k.attr("name"));
-      else if (k.is("NetGroupRef"))
+      else if (k.is("NetGroupRef")) {
         if (auto it = netGroups.find(k.attr("name")); it != netGroups.end())
           for (int n : it->second) out.push_back(b.nets[n].name);
+      } else if (auto o = objectSignal(k)) {
+        for (auto& n : b.hispeed.netsOf(*o)) out.push_back(n);
+      }
     }
     return out;
   }
@@ -1131,10 +1242,116 @@ struct Reader {
         if (auto* nr = v->find("NetRef")) via.net = b.addNet(std::string(nr->attr("name")));
         b.vias.push_back(via);
       }
+    if (auto* ss = cn.find("Serpents"))
+      for (auto* sp : ss->findAll("Serpent")) {
+        Serpent x;
+        x.id = sp->attr("id");
+        x.length = sp->num("length");
+        x.gap = sp->num("gap");
+        x.h1 = sp->num("h1");
+        x.h2 = sp->num("h2");
+        x.h3 = sp->num("h3");
+        x.h4 = sp->num("h4");
+        serpentIndex[x.id] = int(b.serpents.size());
+        b.serpents.push_back(std::move(x));
+      }
+    if (auto* zs = cn.find("ZippedWires"))
+      for (auto* zw : zs->findAll("ZippedWire")) readZippedWire(*zw);
     if (auto* wires = cn.find("Wires"))
       for (auto* w : wires->findAll("Wire")) readWire(*w);
+    // Each zipped section's nets from its conductors (the positive one is the first signal's), and the side
+    // the positive conductor runs on.
+    for (int z = 0; z < int(b.zips.size()); ++z) {
+      ZippedWire& zip = b.zips[size_t(z)];
+      std::vector<int> nets;
+      std::map<int, Vec2> firstPoint;
+      for (const Track& t : b.tracks)
+        if (t.zip == z) {
+          if (!std::ranges::contains(nets, t.net)) nets.push_back(t.net);
+          if (!firstPoint.contains(t.net)) firstPoint[t.net] = t.a.v();
+        }
+      if (nets.empty()) continue;
+      int p = -1;
+      if (zip.pair >= 0)
+        if (const SignalCluster* c = b.hispeed.clusterOf(b.hispeed.diffSignals[size_t(zip.pair)].signalA))
+          for (const std::string& n : c->nets)
+            if (int ni = b.findNet(n); std::ranges::contains(nets, ni)) p = ni;
+      if (p < 0) p = nets.front();
+      zip.netP = p;
+      for (int n : nets)
+        if (n != p) zip.netN = n;
+      if (!zip.axis.empty()) {
+        const Track& a0 = zip.axis.front();
+        Vec2 dir = (a0.mid ? a0.mid->v() : a0.b.v()) - a0.a.v();
+        if (dir.len2() > 0) {
+          // The conductor's point nearest the axis start, either end of it.
+          Vec2 best = firstPoint[p];
+          double bd = 1e300;
+          for (const Track& t : b.tracks)
+            if (t.zip == z && t.net == p)
+              for (Vec2 q : {t.a.v(), t.b.v()})
+                if (double d = (q - a0.a.v()).len(); d < bd) bd = d, best = q;
+          const double cr = dir.cross(best - a0.a.v());
+          zip.pSide = cr > 0 ? 1 : cr < 0 ? -1 : 0;
+        }
+      }
+      Coord w = 0, g = 0;
+      if (b.pairRule(zip.pair, zip.layer, w, g)) {
+        zip.condWidth = w;
+        zip.gap = g;
+      } else {
+        for (const Track& t : b.tracks)
+          if (t.zip == z) { zip.condWidth = t.width; break; }
+        if (zip.axis.size() > 0 && zip.axis.front().width > 2 * zip.condWidth) zip.gap = zip.axis.front().width - 2 * zip.condWidth;
+      }
+      for (Track& t : zip.axis) t.width = zip.width();
+    }
     if (auto* coppers = cn.find("Coppers"))
       for (auto* c : coppers->findAll("Copper")) readCopper(*c);
+  }
+
+  std::map<std::string, int, std::less<>> serpentIndex, zipIndex;
+
+  // The pieces of a Subwire or a ZippedWire's axis from `cur`: tracks of the layer, net and width.
+  void readTracks(const Element& sw, Vec2 cur, LayerId layer, int net, Coord width, bool fixed, std::vector<Track>& out) {
+    for (auto& seg : sw.kids) {
+      if (!seg.name.starts_with("Track")) continue;
+      Vec2 end = pt(seg.find("End"));
+      Track t;
+      t.layer = layer;
+      t.net = net;
+      t.width = width;
+      t.locked = fixed;
+      t.a = Point(toBoard(cur));
+      t.b = Point(toBoard(end));
+      if (!seg.is("TrackLine")) {
+        auto arc = segmentArc(seg, cur, end);
+        if (arc.valid) t.mid = Point(toBoard(arc.mid()));
+      }
+      if (seg.has("serpRef"))
+        if (auto it = serpentIndex.find(seg.attr("serpRef")); it != serpentIndex.end()) {
+          t.serp = it->second;
+          t.locked = true;  // a serpent is kept as drawn
+        }
+      cur = end;
+      if (t.a != t.b || t.mid.has_value()) out.push_back(t);
+    }
+  }
+
+  void readZippedWire(const Element& zw) {
+    const Element* lr = zw.find("LayerRef");
+    const Element* st = zw.find("Start");
+    if (!lr || !st) return;
+    LayerId layer = copperByName(lr->attr("name"));
+    if (layer < 0) return;
+    ZippedWire z;
+    z.layer = layer;
+    z.fixed = zw.flag("fixed");
+    if (auto* ds = zw.find("DiffSignalRef")) z.pair = b.hispeed.diffSignal(ds->attr("name"));
+    else if (auto* dp = zw.find("DiffPairRef")) z.pair = b.hispeed.diffSignal(dp->attr("name"));
+    readTracks(zw, pt(st), layer, kNoNet, 0, z.fixed, z.axis);
+    zipIndex[std::string(zw.attr("id"))] = int(b.zips.size());
+    b.zips.push_back(std::move(z));
   }
 
   void readWire(const Element& w) {
@@ -1149,24 +1366,12 @@ struct Reader {
       if (!st) continue;
       Coord width = len(sw->num("width"));
       bool fixed = sw->flag("fixed");
-      Vec2 cur = pt(st);
-      for (auto& seg : sw->kids) {
-        if (!seg.name.starts_with("Track")) continue;
-        Vec2 end = pt(seg.find("End"));
-        Track t;
-        t.layer = layer;
-        t.net = net;
-        t.width = width;
-        t.locked = fixed;
-        t.a = Point(toBoard(cur));
-        t.b = Point(toBoard(end));
-        if (!seg.is("TrackLine")) {
-          auto arc = segmentArc(seg, cur, end);
-          if (arc.valid) t.mid = Point(toBoard(arc.mid()));
-        }
-        cur = end;
-        if (t.a != t.b || t.mid.has_value()) b.tracks.push_back(t);
-      }
+      int zip = -1;
+      if (sw->has("zipwireRef"))
+        if (auto it = zipIndex.find(sw->attr("zipwireRef")); it != zipIndex.end()) zip = it->second;
+      const size_t first = b.tracks.size();
+      readTracks(*sw, pt(st), layer, net, width, fixed || (zip >= 0 && b.zips[size_t(zip)].fixed), b.tracks);
+      for (size_t i = first; i < b.tracks.size(); ++i) b.tracks[i].zip = zip;
     }
   }
 
@@ -1271,6 +1476,7 @@ Result<BoardPtr> readFst(const std::string& text, const std::string& path) {
   syncPadsFromStacks(*b);  // shape, hole and layers as the stacks say
   if (auto* nl = root.find("NetList")) r.readNetList(*nl);
   if (auto* groups = root.find("Groups")) r.readGroups(*groups);
+  if (auto* hs = root.find("HiSpeedRules")) r.readHiSpeed(*hs);
   if (auto* cn = root.find("Connectivity"))
     if (auto* vias = cn->find("Vias")) {
       std::map<std::string, int> use;

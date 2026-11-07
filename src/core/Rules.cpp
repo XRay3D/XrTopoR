@@ -28,6 +28,18 @@ std::optional<std::vector<int>> netsOf(const Board& b, const DesignRules& r, con
             if (int n = b.findNet(name); n >= 0) out.push_back(n);
       return out;
     }
+    case RuleNets::Kind::Signal:
+    case RuleNets::Kind::DiffSignal:
+    case RuleNets::Kind::SignalGroup: {
+      std::vector<int> out;
+      ObjectSignal os{o.kind == RuleNets::Kind::Signal       ? ObjectSignal::Kind::Signal
+                      : o.kind == RuleNets::Kind::DiffSignal ? ObjectSignal::Kind::DiffSignal
+                                                             : ObjectSignal::Kind::SignalGroup,
+                      o.name};
+      for (auto& name : b.hispeed.netsOf(os))
+        if (int n = b.findNet(name); n >= 0) out.push_back(n);
+      return out;
+    }
   }
   return std::vector<int>{};
 }

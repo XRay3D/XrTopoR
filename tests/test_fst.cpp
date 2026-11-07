@@ -508,6 +508,154 @@ TEST(FsProj, ReadResolveWrite) {
 }
 
 // Keepouts (Placement, Arcs), texts with their styles (MinVia) and copper cutouts survive a round trip.
+// The high-speed rules (impedances, signal clusters, differential signals, groups, delay rules, the search
+// settings), the serpents and the zipped sections of the differential pairs are read as the file has them and
+// written back: Signals.fst (Example_06) has a pair SDCLK_U2 of Rule0 (0.15 wide, 0.25 apart) zipped on Int 1
+// with a serpent inside, three signal groups with delay rules, 61 serpents.
+TEST(FstIO, HiSpeedRoundTrip) {
+  auto r = io::loadBoard(data("topor/Example_06/Signals.fst"));
+  ASSERT_TRUE(r) << r.error();
+  auto check = [](const Board& b, const char* how) {
+    const HiSpeed& h = b.hispeed;
+    ASSERT_EQ(h.impedances.size(), 3u) << how;
+    const Impedance* rule0 = h.impedance("Rule0");
+    ASSERT_TRUE(rule0) << how;
+    EXPECT_TRUE(rule0->diff);
+    EXPECT_EQ(rule0->z0, 90);
+    ASSERT_TRUE(rule0->on("Int 1"));
+    EXPECT_EQ(rule0->on("Int 1")->width, mmToNm(0.15));
+    EXPECT_EQ(rule0->on("Int 1")->gap, mmToNm(0.25));
+    EXPECT_FALSE(h.impedance("Z0_50")->diff);
+    EXPECT_EQ(h.clusters.size(), 41u) << how;
+    ASSERT_EQ(h.diffSignals.size(), 1u) << how;
+    EXPECT_EQ(h.diffSignals[0].name, "SDCLK_U2");
+    EXPECT_EQ(h.diffSignals[0].mismatch, mmToNm(0.01));
+    EXPECT_EQ(h.diffSignals[0].impedance, "Rule0");
+    EXPECT_EQ(h.diffSignals[0].signalA, "SDCLK_B");
+    EXPECT_EQ(h.diffSignals[0].signalB, "SDCLK");
+    EXPECT_EQ(h.groups.size(), 3u) << how;
+    int equal = 0, relation = 0;
+    for (const DelayRule& d : h.delays) {
+      equal += d.kind == DelayRule::Kind::Equal;
+      relation += d.kind == DelayRule::Kind::Relation;
+      EXPECT_TRUE(d.time) << how;
+    }
+    EXPECT_EQ(equal, 3) << how;
+    EXPECT_EQ(relation, 3) << how;
+    EXPECT_TRUE(h.search.present) << how;
+    EXPECT_EQ(b.serpents.size(), 61u) << how;
+    ASSERT_EQ(b.zips.size(), 1u) << how;
+    const ZippedWire& z = b.zips[0];
+    EXPECT_EQ(b.layers[z.layer].name, "Int 1");
+    EXPECT_EQ(z.pair, 0);
+    EXPECT_EQ(b.nets[z.netP].name, "SDCLK_B");
+    EXPECT_EQ(b.nets[z.netN].name, "SDCLK");
+    EXPECT_NE(z.pSide, 0);
+    ASSERT_EQ(z.axis.size(), 5u) << how;
+    EXPECT_EQ(z.axis[2].serp, 0) << "the serpent inside the pair";
+    EXPECT_EQ(z.condWidth, mmToNm(0.15));
+    EXPECT_EQ(z.gap, mmToNm(0.25));
+    EXPECT_EQ(z.width(), mmToNm(0.55));
+    int conductors = 0, serpTracks = 0;
+    std::set<int> nets;
+    double nearest = 1e18;
+    for (const Track& t : b.tracks) {
+      serpTracks += t.serp >= 0;
+      if (t.zip != 0) continue;
+      ++conductors;
+      nets.insert(t.net);
+      EXPECT_EQ(t.width, mmToNm(0.15));
+      nearest = std::min(nearest, (t.a.v() - z.axis.front().a.v()).len());
+    }
+    EXPECT_GT(conductors, 2) << how;
+    EXPECT_EQ(nets.size(), 2u) << how;
+    EXPECT_NEAR(nearest, z.offset(), 2000) << how << ": the conductor at the offset off the axis";
+    EXPECT_GT(serpTracks, 1000) << how;
+    for (const Track& t : b.tracks)
+      if (t.serp >= 0) {
+        EXPECT_TRUE(t.locked) << how << ": a serpent is kept as drawn";
+        break;
+      }
+  };
+  check(**r, "read");
+  std::string text = io::writeFst(**r);
+  auto count = [&](const char* needle) {
+    size_t n = 0;
+    for (size_t p = text.find(needle); p != std::string::npos; p = text.find(needle, p + 1)) ++n;
+    return n;
+  };
+  EXPECT_EQ(count("<ZippedWire id=\"zwire_0\""), 1u);
+  EXPECT_EQ(count("zipwireRef=\"zwire_0\""), 2u);
+  EXPECT_EQ(count("<Serpent "), 61u);
+  EXPECT_EQ(count("serpRef="), 1989u);
+  auto again = io::readFst(text, "rt.fst");
+  ASSERT_TRUE(again) << again.error();
+  check(**again, "written and read again");
+}
+
+// AMK310_MCU_V2 (TopoR 7.0): two pairs, USB and i2c, of ZDiff_100 (0.3 wide, 0.3 apart), three zipped sections,
+// zwire_2 fixed with its conductors.
+TEST(FstIO, AMK310PairsRoundTrip) {
+  auto r = io::loadBoard(data("topor/AMK310/AMK310_MCU_V2.fst"));
+  ASSERT_TRUE(r) << r.error();
+  auto check = [](const Board& b, const char* how) {
+    ASSERT_EQ(b.hispeed.diffSignals.size(), 2u) << how;
+    EXPECT_EQ(b.hispeed.diffSignals[0].name, "USB");
+    EXPECT_EQ(b.hispeed.diffSignals[1].name, "i2c");
+    ASSERT_EQ(b.zips.size(), 3u) << how;
+    EXPECT_FALSE(b.zips[0].fixed);
+    EXPECT_TRUE(b.zips[2].fixed) << how;
+    EXPECT_EQ(b.zips[2].pair, 0);
+    EXPECT_EQ(b.nets[b.zips[2].netP].name, "USBDM");
+    EXPECT_EQ(b.nets[b.zips[2].netN].name, "USBDP");
+    for (const ZippedWire& z : b.zips) {
+      EXPECT_EQ(z.condWidth, mmToNm(0.3)) << how;
+      EXPECT_EQ(z.gap, mmToNm(0.3)) << how;
+      EXPECT_NE(z.pSide, 0) << how;
+    }
+    for (const Track& t : b.tracks)
+      if (t.zip == 2) EXPECT_TRUE(t.locked) << how << ": the conductors of a fixed section";
+    // Every conductor's ends lie at the offset off the axis.
+    for (const Track& t : b.tracks) {
+      if (t.zip < 0) continue;
+      const ZippedWire& z = b.zips[size_t(t.zip)];
+      for (Vec2 p : {t.a.v(), t.b.v()}) {
+        double d = 1e18;
+        for (const Track& a : z.axis) {
+          const Polyline path = a.path();
+          for (size_t i = 0; i + 1 < path.size(); ++i) d = std::min(d, distPointSegment(p, path[i], path[i + 1]));
+        }
+        EXPECT_NEAR(d, z.offset(), 5000) << how;
+      }
+    }
+  };
+  check(**r, "read");
+  auto again = io::readFst(io::writeFst(**r), "rt.fst");
+  ASSERT_TRUE(again) << again.error();
+  check(**again, "written and read again");
+}
+
+// A rule naming a signal object keeps it (it used to come back as an empty NetRef).
+TEST(FstIO, SignalRulesRoundTrip) {
+  auto r = io::loadBoard(data("topor/AMK310/AMK310_MCU_V2.fst"));
+  ASSERT_TRUE(r) << r.error();
+  Board& b = **r;
+  ClearanceRule cr;
+  cr.a = {RuleNets::Kind::DiffSignal, "USB"};
+  cr.b = {RuleNets::Kind::All, ""};
+  cr.min = mmToNm(0.25);
+  cr.nom = mmToNm(0.25);
+  b.rules->clearances.push_back(cr);
+  std::string text = io::writeFst(b);
+  EXPECT_NE(text.find("<DiffSignalRef name=\"USB\"/>"), std::string::npos);
+  auto again = io::readFst(text, "rt.fst");
+  ASSERT_TRUE(again) << again.error();
+  bool found = false;
+  for (const ClearanceRule& c : (*again)->rules->clearances) found |= c.a.kind == RuleNets::Kind::DiffSignal && c.a.name == "USB";
+  EXPECT_TRUE(found);
+  EXPECT_EQ((*again)->hispeed.netsOf({ObjectSignal::Kind::DiffSignal, "USB"}).size(), 2u);
+}
+
 TEST(FstIO, KeepoutsTextsCutouts) {
   auto p = io::loadBoard(data("topor/Example_02/Placement.fst"));
   ASSERT_TRUE(p) << p.error();

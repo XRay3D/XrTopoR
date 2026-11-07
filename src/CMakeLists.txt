@@ -8,6 +8,7 @@ add_library(xrcore STATIC
   core/Board.cpp
   core/Connectivity.cpp
   core/Edit.cpp
+  core/HiSpeed.cpp
   core/Padstack.cpp
   core/Rules.cpp
   core/SpatialIndex.cpp

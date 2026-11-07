@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "core/Display.h"
+#include "core/HiSpeed.h"
 #include "core/Rules.h"
 #include "geom/Shape.h"
 
@@ -20,11 +21,9 @@ namespace xr {
 
 namespace sexpr { struct Node; }
 
-using LayerId = int;
 using LayerMask = std::uint64_t;
 // Copper layer lists are bounded by the 64-bit layer mask: no heap allocation needed.
 using LayerList = std::inplace_vector<LayerId, 64>;
-constexpr int kNoNet = -1;
 
 enum class LayerKind { Copper, Silk, Mask, Paste, Fab, Courtyard, Edge, Other };
 enum class Side { Top, Bottom, None };
@@ -217,6 +216,8 @@ struct Track {
   bool locked = false;
   bool edited = false;  // changed by hand since the last shape computation (F5 re-lays these first)
   uint32_t id = 0;      // stable identity across edits and undo (0: not assigned yet); see topo::Topology
+  int zip = -1;         // the zipped pair (Board::zips) this track is a conductor of
+  int serp = -1;        // the serpent (Board::serpents) this track is a piece of: kept as drawn
   bool isArc() const { return mid.has_value(); }
   Polyline path(double tol = 2000) const;  // centreline points
   double length() const;                   // along the centreline, nm
@@ -334,6 +335,16 @@ struct Board {
   std::vector<Zone> zones;
   std::vector<Graphic> graphics;           // board-level drawings (board outline, details)
   std::vector<Keepout> keepouts;
+  // High-speed: the rules as the file has them, the serpents, the zipped sections of the differential pairs.
+  HiSpeed hispeed;
+  std::vector<Serpent> serpents;
+  std::vector<ZippedWire> zips;
+  std::vector<int> netPair;  // per net: the differential signal it belongs to (HiSpeed::diffSignals), -1 none; set by compileRules
+  int pairOfNet(int net) const { return net >= 0 && net < int(netPair.size()) ? netPair[size_t(net)] : -1; }
+  // The pair's rule on a copper layer: the conductor width and the gap; false without one.
+  bool pairRule(int pair, LayerId layer, Coord& width, Coord& gap) const;
+  // Takes a zipped section away: its conductors stay as tracks, renumbered.
+  void removeZip(int z);
   std::vector<TextStyle> textStyles{TextStyle{}};
   std::vector<Text> texts;
   std::vector<std::vector<Vec2>> outline;  // closed board contours (first = outer)
