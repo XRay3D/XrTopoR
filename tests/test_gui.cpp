@@ -1822,8 +1822,9 @@ TEST(Gui, F5AbortsOnCrossing) {
   EXPECT_NE(doc.board()->tracks.size(), 6u);
 }
 
-// The model follows the board through a tool, an undo and a save: after F5 it is the board's, after
-// an undo it is built again (the same wires), and the file next to the board is written and read back.
+// The model follows the board through a tool, an undo, a hand edit and a save: after F5 it is the board's, after
+// an undo and after a segment dragged it follows the board (the wires of a model built anew from it), and the
+// file next to the board is written and read back.
 TEST(Gui, UndoKeepsTopologyInSync) {
   app();
   QSettings().setValue("topo/model", true);
@@ -1841,12 +1842,29 @@ TEST(Gui, UndoKeepsTopologyInSync) {
   EXPECT_EQ(doc.topology().boardHash, topo::boardHashOf(*doc.board())) << "the model is the drawn board's";
   const topo::Topology* drawn = &doc.topology();
   EXPECT_EQ(&doc.topology(), drawn) << "not rebuilt while the board stands";
+  // The live model against one built anew from the board: the same wires, by their tracks.
+  auto likeBuilt = [&](const char* how) {
+    topo::Topology fresh;
+    fresh.build(*doc.board());
+    auto sets = [](const topo::Topology& t) {
+      std::multiset<std::vector<uint32_t>> out;
+      for (const topo::Wire& w : t.wires) {
+        std::vector<uint32_t> ids = w.tracks;
+        r::sort(ids);
+        out.insert(ids);
+      }
+      return out;
+    };
+    EXPECT_TRUE(sets(doc.topology()) == sets(fresh)) << how;
+  };
   doc.undoStack()->undo();
-  EXPECT_NE(&doc.topology(), drawn) << "built from the tracks again after the undo";
+  EXPECT_EQ(&doc.topology(), drawn) << "followed through the undo, not built again";
   EXPECT_EQ(doc.topology().wires.size(), wires);
+  likeBuilt("after the undo");
   doc.undoStack()->redo();
-  // A segment dragged by hand (the track count unchanged, as the hash sees it): the model is built again
-  // and follows the drag — F7 after a hand edit must not put the wire back.
+  likeBuilt("after the redo");
+  // A segment dragged by hand (the track count unchanged, as the hash sees it): the model follows the drag — F7
+  // after a hand edit must not put the wire back.
   const topo::Topology* before = &doc.topology();
   {
     auto snap = doc.beginEdit();
@@ -1858,7 +1876,8 @@ TEST(Gui, UndoKeepsTopologyInSync) {
     bd.tracks[moved].a.x += Coord(0.5 * kNmPerMm);
     doc.commitEdit(snap, "drag");
   }
-  EXPECT_NE(&doc.topology(), before) << "a drag makes the model stale";
+  EXPECT_EQ(&doc.topology(), before) << "the model follows the drag";
+  likeBuilt("after the drag");
   doc.undoStack()->undo();
   ASSERT_TRUE(io::saveBoard(*doc.board(), path.toStdString()).has_value());
   ASSERT_TRUE(doc.saveTopologyFile(path).has_value());

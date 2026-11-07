@@ -1011,6 +1011,15 @@ bool Topology::relayTracks(const Board& b, const std::vector<uint32_t>& changedI
       }
     if (!more) break;
   }
+  // The tracks of the chains laid again are no owner's any more (a chain inside its own copper is laid as the
+  // owner's again).
+  {
+    std::unordered_set<uint32_t> laidAgain;
+    for (size_t ci = 0; ci < chains.size(); ++ci)
+      if (take[ci])
+        for (int ti : chains[ci].tracks) laidAgain.insert(b.tracks[size_t(ti)].id);
+    std::erase_if(ownerTracks, [&](const std::pair<int, uint32_t>& ot) { return laidAgain.contains(ot.second); });
+  }
   // Out: their crossings off the edges, their ends' branch points one wire fewer.
   std::set<int> endsOut;  // the branch points the wires taken out ended at
   for (int wi : out) {
@@ -1199,6 +1208,8 @@ bool Topology::relayTracks(const Board& b, const std::vector<uint32_t>& changedI
     if (!degree.contains(oi) && owners[size_t(oi)].layers) removeOwner(*this, oi);
   for (Junction& j : junctions) j.degree = degree.contains(j.owner) ? degree[j.owner] : 0;
   std::erase_if(ownerTracks, [&](const std::pair<int, uint32_t>& ot) { return !trackOf.contains(ot.second); });
+  r::sort(ownerTracks);
+  ownerTracks.erase(std::unique(ownerTracks.begin(), ownerTracks.end()), ownerTracks.end());
   return true;
 }
 

@@ -108,7 +108,7 @@ constexpr int kVersion = 3;  // 2: the zones (owners, wires and triangles name t
 
 }  // namespace
 
-uint64_t boardHashOf(const Board& b) {
+uint64_t boardHashOf(const Board& b, bool places) {
   // Per item a hash, summed: the order of the items is the file's business.
   uint64_t sum = 0;
   const bool debug = std::getenv("XR_TOPO_HASHDEBUG");
@@ -157,7 +157,7 @@ uint64_t boardHashOf(const Board& b) {
   report("rules");
   for (const Pad& p : b.pads)
     item([&](Fnv& f) {
-      f.pt(p.pos);
+      if (places) f.pt(p.pos);
       f.i(std::llround(p.angle * 100));
       f.s(netName(b, p.net));
       f.i(int(p.shape.kind));
@@ -172,7 +172,7 @@ uint64_t boardHashOf(const Board& b) {
   report("pads");
   for (const Via& v : b.vias)
     item([&](Fnv& f) {
-      f.pt(v.pos);
+      if (places) f.pt(v.pos);
       f.i(q(double(v.diameter)));
       for (const std::string& l : maskNames(b, v.layers)) f.s(l);
       f.s(netName(b, v.net));
@@ -182,7 +182,7 @@ uint64_t boardHashOf(const Board& b) {
   // The tracks by their numbers per layer, net and width only: the realiser's nanometres round either
   // way at the file's four decimals, no grid is stable at its boundaries. A wire's tracks are matched
   // within a tolerance when the model is read.
-  {
+  if (places) {
     std::map<std::tuple<std::string, std::string, int64_t, bool, bool>, int> counts;
     for (const Track& t : b.tracks) ++counts[{layerName(b, t.layer), netName(b, t.net), q(double(t.width)), t.mid.has_value(), t.locked}];
     for (const auto& [k, n] : counts)

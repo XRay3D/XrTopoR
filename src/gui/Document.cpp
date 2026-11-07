@@ -1,9 +1,12 @@
 #include "gui/Document.h"
 
 #include <set>
+#include <unordered_map>
+#include <unordered_set>
 
 #include "gui/Schemes.h"
 #include "gui/TextFont.h"
+#include "topo/Move.h"
 #include "topo/Sidecar.h"
 
 namespace xr::gui {
@@ -14,20 +17,21 @@ class SnapshotCommand : public QUndoCommand {
  public:
   SnapshotCommand(Document* doc, EditSnapshot before, EditSnapshot after, const QString& title)
       : QUndoCommand(title), doc_(doc), before_(std::move(before)), after_(std::move(after)) {}
-  void undo() override { apply(before_); }
+  void undo() override { apply(before_, after_); }
   void redo() override {
     if (first_) {  // the edit is already applied when the command is pushed
       first_ = false;
       return;
     }
-    apply(after_);
+    apply(after_, before_);
   }
 
  private:
-  void apply(const EditSnapshot& s) {
+  void apply(const EditSnapshot& s, const EditSnapshot& from) {
     if (!doc_->hasBoard()) return;
     s.apply(*doc_->board());
     doc_->invalidate();
+    doc_->followModel(from);
     doc_->validateSelection();
     emit doc_->boardChanged();
   }
@@ -104,7 +108,50 @@ const Connectivity& Document::connectivity() {
 void Document::invalidate() {
   index_.reset();
   conn_.reset();
-  topoStale_ = true;
+}
+
+EditSnapshot Document::beginEdit() {
+  topo::Topology::assignIds(*board_);  // (an edit is followed by the tracks' and vias' ids)
+  return EditSnapshot::take(*board_);
+}
+
+void Document::followModel(const EditSnapshot& was, bool follow) {
+  if (follow && topo_ && !topoStale_ && syncModelFrom(was)) markTopologyFresh();
+  else topoStale_ = true;
+}
+
+bool Document::syncModelFrom(const EditSnapshot& was) {
+  Board& b = *board_;
+  topo::Topology::assignIds(b);
+  Board old = b;  // the board as the model has it: this one with the snapshot's items (the rest is the same)
+  was.apply(old);
+  if (old.vias.size() != b.vias.size() || old.pads.size() != b.pads.size()) return false;
+  if (topo::boardHashOf(old, false) != topo::boardHashOf(b, false)) return false;  // zones, keepouts, the outline, nets, pairs...
+  topo::Topology& t = *topo_;
+  // The vias and pads moved: their owners with them (the pads turned are no move: the hash has their angle).
+  auto moved = [&](int owner, Vec2 d) { return owner < 0 || d.len2() < 1 || topo::moveOwner(t, owner, d) >= 1 - 1e-9; };
+  for (size_t i = 0; i < b.vias.size(); ++i) {
+    if (old.vias[i].id != b.vias[i].id) return false;
+    if (!moved(i < t.viaOwner.size() ? t.viaOwner[i] : -1, b.vias[i].pos.v() - old.vias[i].pos.v())) return false;
+  }
+  for (size_t i = 0; i < b.pads.size(); ++i)
+    if (!moved(i < t.padOwner.size() ? t.padOwner[i] : -1, b.pads[i].pos.v() - old.pads[i].pos.v())) return false;
+  // The tracks changed, added or gone: their wires laid again.
+  std::unordered_map<uint32_t, const Track*> before;
+  for (const Track& tr : old.tracks) before[tr.id] = &tr;
+  std::vector<uint32_t> changed;
+  std::unordered_set<uint32_t> now;
+  for (const Track& tr : b.tracks) {
+    now.insert(tr.id);
+    auto it = before.find(tr.id);
+    const Track* o = it == before.end() ? nullptr : it->second;
+    if (!o || o->a != tr.a || o->b != tr.b || o->mid != tr.mid || o->width != tr.width || o->layer != tr.layer || o->net != tr.net ||
+        o->locked != tr.locked || o->zip != tr.zip || o->serp != tr.serp)
+      changed.push_back(tr.id);
+  }
+  for (const Track& tr : old.tracks)
+    if (!now.contains(tr.id)) changed.push_back(tr.id);
+  return changed.empty() || t.relayTracks(b, changed);
 }
 
 topo::Topology& Document::topology() {
@@ -230,6 +277,7 @@ void Document::clearLog(const QString& group) {
 }
 
 void Document::commitEdit(const EditSnapshot& before, const QString& title, bool markEdited) {
+  topo::Topology::assignIds(*board_);
   if (markEdited) {
     // By content, not by index: an edit may drop degenerate tracks and renumber the rest.
     auto key = [](const Track& t) {
@@ -242,6 +290,8 @@ void Document::commitEdit(const EditSnapshot& before, const QString& title, bool
       if (!old.contains(key(t))) t.edited = true;
   }
   invalidate();
+  // An edit by hand is followed by the model; a tool that draws from it (F5, F6, F7) hands it back itself.
+  followModel(before, markEdited);
   undo_.push(new SnapshotCommand(this, before, EditSnapshot::take(*board_), title));
   emit boardChanged();
 }

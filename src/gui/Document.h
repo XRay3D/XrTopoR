@@ -108,7 +108,12 @@ class Document : public QObject {
   // Derived data, rebuilt lazily after edits.
   const SpatialIndex& index();
   const Connectivity& connectivity();
-  void invalidate();  // call after any board edit
+  void invalidate();  // call after any board edit (the index and the connections; the model follows commitEdit)
+  void invalidateModel() { topoStale_ = true; }  // a change the model cannot follow (the rules, the stack)
+  // The model brought to the board as it is now from `was`, the board it matched (an edit, an undo): the vias and
+  // pads moved, the wires of the changed tracks laid again; else, or when `follow` is false, stale (built anew
+  // when asked for).
+  void followModel(const EditSnapshot& was, bool follow = true);
 
   // The topological model of the board as it is (F5 and F7 work in it): the one a tool left when the
   // board has not changed since, else the file next to the board when that is fresh, else built from
@@ -141,7 +146,7 @@ class Document : public QObject {
   void clearLog(const QString& group = {});  // empty: all
 
   // Edits: snapshot-based undo. Call begin, edit the board, then commit with a title.
-  EditSnapshot beginEdit() { return EditSnapshot::take(*board_); }
+  EditSnapshot beginEdit();
   // `markEdited`: tracks that are new or changed since `before` get Track::edited (F5 re-lays those
   // first); the shape computation itself commits without it.
   void commitEdit(const EditSnapshot& before, const QString& title, bool markEdited = true);
@@ -166,7 +171,8 @@ class Document : public QObject {
   std::optional<SpatialIndex> index_;
   std::optional<Connectivity> conn_;
   std::unique_ptr<topo::Topology> topo_;
-  bool topoStale_ = true;  // the board was edited since the model was the board's (the hash is too coarse for a drag)
+  bool topoStale_ = true;  // the model is not the board's (built anew when asked for)
+  bool syncModelFrom(const EditSnapshot& was);
   std::vector<ItemRef> selection_;
   std::vector<int> selComponents_;
   int highlightNet_ = kNoNet;

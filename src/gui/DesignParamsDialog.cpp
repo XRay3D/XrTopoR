@@ -220,6 +220,7 @@ bool DesignParamsDialog::apply() {
   for (size_t z = before; z < b.zones.size(); ++z) fill.only.push_back(int(z));
   if (!fill.only.empty()) fillZones(b, fill);
   doc_->invalidate();
+  doc_->invalidateModel();
   // As in TopoR: applying parameters clears the undo history; the design is modified.
   doc_->undoStack()->clear();
   doc_->undoStack()->resetClean();

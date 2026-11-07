@@ -13,7 +13,8 @@ namespace xr::topo {
 
 // FNV-1a over what the model depends on: the nets, the pads, the vias, the tracks, the outline, the
 // keepouts, the rules.
-uint64_t boardHashOf(const Board& b);
+// places false: without the pads' and vias' positions and the tracks (what the live model follows an edit of).
+uint64_t boardHashOf(const Board& b, bool places = true);
 
 std::string sidecarPath(const std::string& boardPath);
 
