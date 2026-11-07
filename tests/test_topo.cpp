@@ -1945,6 +1945,51 @@ TEST(Topo, UnpouredZoneIsNothing) {
   EXPECT_FALSE(p.vertexAt(20, 12));
 }
 
+// A wire of the zone's own net lying wholly in its pour is copper twice over: F6 takes it out, where the
+// pour connects what it did. With the fill in two halves (the wire bridging them) it stays; so with the
+// option off.
+TEST(Topo, OwnNetTrackInsideTheFillIsRemoved) {
+  auto board = [] {
+    PinBoard p;
+    p.pad("G", 14, 10, PadShapeKind::Circle, 1, 1);
+    p.pad("G", 26, 10, PadShapeKind::Circle, 1, 1);
+    p.track("G", {{14, 10}, {26, 10}}, 0.3);
+    p.zone("G", {{10, 5}, {30, 5}, {30, 15}, {10, 15}}, false);
+    return p;
+  };
+  auto gTracks = [](const PinBoard& p) {
+    int n = 0;
+    for (const Track& t : p.b.tracks) n += p.b.nets[t.net].name == "G";
+    return n;
+  };
+  {
+    PinBoard p = board();
+    p.b.zones[0].filled.push_back(p.b.zones[0].outline);  // one solid piece (the pads are of its net: no relief)
+    ASSERT_EQ(Connectivity::compute(p.b).ratsnest.size(), 0u);
+    auto r = p.f6();
+    EXPECT_EQ(r.zoneTracksRemoved, 1);
+    EXPECT_EQ(gTracks(p), 0);
+    EXPECT_EQ(Connectivity::compute(p.b).ratsnest.size(), 0u) << "the pour connects the pads";
+  }
+  {
+    PinBoard p = board();
+    p.b.zones[0].filled.push_back({PinBoard::at(10, 5), PinBoard::at(19, 5), PinBoard::at(19, 15), PinBoard::at(10, 15)});
+    p.b.zones[0].filled.push_back({PinBoard::at(21, 5), PinBoard::at(30, 5), PinBoard::at(30, 15), PinBoard::at(21, 15)});
+    auto r = p.f6();
+    EXPECT_EQ(r.zoneTracksRemoved, 0) << "the wire bridges the two halves";
+    EXPECT_EQ(gTracks(p), 1);
+  }
+  {
+    PinBoard p = board();
+    p.b.zones[0].filled.push_back(p.b.zones[0].outline);
+    topo::RefineModelOptions o;
+    o.zoneTracks = false;
+    auto r = p.f6(o);
+    EXPECT_EQ(r.zoneTracksRemoved, 0);
+    EXPECT_EQ(gTracks(p), 1);
+  }
+}
+
 // From outside a poured zone is a pad of its net: a wire of another net along its edge keeps the zone's
 // clearance (0.5 here, above the net's 0.2) and is not locked.
 TEST(Topo, ForeignWireKeepsTheZoneClearance) {

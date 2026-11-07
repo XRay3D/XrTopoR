@@ -28,6 +28,9 @@ struct RefineModelOptions {
   // (ModelVias.h: the local via minimisation of Luzin, Popov, Popov, NTV ITMO 2013 no. 6).
   bool vias = true;
   double viaSpan = 10.0 * kNmPerMm;  // ... the wire between the two being shorter than this
+  // A wire of a zone's net lying wholly in its pour goes: the copper connects what it did (checked by the
+  // connectivity: it goes only if no connection of its net comes undone).
+  bool zoneTracks = true;
   // A wire is tried when it is this much longer than the straight line between its ends, and its new path
   // taken to the drawing when it is shorter than the old by the larger of the two.
   double detour = 0.3 * kNmPerMm;
@@ -46,6 +49,7 @@ struct RefineModelResult {
   int branches = 0;        // branch points made
   int branchesMerged = 0;  // pairs of branch points made one
   int viasRemoved = 0;
+  int zoneTracksRemoved = 0;  // wires of a zone's net taken out of its pour
   int reattached = 0;      // branches moved to a nearer wire of their net
   int drawings = 0;
   int conflictsBefore = 0, conflictsAfter = 0;

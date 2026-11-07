@@ -9,6 +9,7 @@
 #include <set>
 #include <string>
 
+#include "core/Connectivity.h"
 #include "core/Prof.h"
 #include "router/topo/ModelBranch.h"
 #include "router/topo/ModelRelax.h"
@@ -184,6 +185,63 @@ RefineModelResult refineModel(Board& b, Topology& t, const RefineModelOptions& o
     }
     return r.relaid > before;
   };
+  // The wires of a zone's net lying wholly in its pour are copper twice over: they go, where the pour
+  // connects what they did (a track from a pad through a thermal relief into the pour stays: its ends
+  // are not in one polygon of the fill). The model is built anew after.
+  auto zoneTracks = [&] {
+    if (!o.zoneTracks) return false;
+    int removed = 0;
+    std::vector<int> candidates;
+    for (int wi = 0; wi < int(t.wires.size()); ++wi) {
+      const Wire& w = t.wires[size_t(wi)];
+      if (!w.locked || w.zone < 0 || t.owners[w.zone].net != w.net || w.tracks.empty() || fixedNets[size_t(w.net)]) continue;
+      const Zone& z = b.zones[t.owners[w.zone].zone];
+      std::vector<const Track*> tracks;
+      bool handLocked = false;
+      for (uint32_t id : w.tracks)
+        for (const Track& tr : b.tracks)
+          if (tr.id == id) {
+            tracks.push_back(&tr);
+            handLocked |= tr.locked;
+          }
+      if (handLocked || tracks.size() != w.tracks.size()) continue;
+      bool inOne = false;
+      for (const auto& poly : z.filled) {
+        const Shape fill = Shape::polygon(poly);
+        bool all = true;
+        for (const Track* tr : tracks)
+          for (Vec2 p : tr->path())
+            if (fill.distance(p) > 0) all = false;
+        if (all) inOne = true;
+      }
+      if (inOne) candidates.push_back(wi);
+    }
+    if (candidates.empty()) return false;
+    auto linesOf = [&](const Board& board, int net) {
+      size_t n = 0;
+      for (const RatsLine& l : Connectivity::compute(board).ratsnest) n += l.net == net;
+      return n;
+    };
+    for (int wi : candidates) {
+      const Wire& w = t.wires[size_t(wi)];
+      const size_t was = linesOf(b, w.net);
+      Board trial = b;
+      std::erase_if(trial.tracks, [&](const Track& tr) { return tr.id && std::ranges::contains(w.tracks, tr.id); });
+      if (linesOf(trial, w.net) > was) continue;  // the pour does not connect what it did
+      b = std::move(trial);
+      ++removed;
+      r.log.push_back(std::format("wire of {} in the pour of its net taken out ({} tracks)", b.nets[size_t(w.net)].name, w.tracks.size()));
+    }
+    if (removed == 0) return false;
+    r.zoneTracksRemoved += removed;
+    Topology::assignIds(b);
+    t.build(b);
+    if (!prepareModel(t, o.flips, false, nFlips, r.violations)) return false;
+    refused.clear();
+    refusedPairs.clear();
+    return true;
+  };
+  zoneTracks();
   relayAll();
   // The vias that need not be: a wire re-laid goes on where it did not, and the wires of a via gone are led
   // anew.
