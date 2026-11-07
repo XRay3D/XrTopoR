@@ -9,6 +9,7 @@
 
 #include "core/Connectivity.h"
 #include "io/BoardIO.h"
+#include "io/Report.h"
 #include "io/topor/Fst.h"
 #include "io/topor/FsProj.h"
 #include "io/xml/Xml.h"
@@ -633,6 +634,26 @@ TEST(FstIO, AMK310PairsRoundTrip) {
   auto again = io::readFst(io::writeFst(**r), "rt.fst");
   ASSERT_TRUE(again) << again.error();
   check(**again, "written and read again");
+}
+
+// The routing report lists the differential pairs: the lengths of the two nets, their difference, the allowed
+// one (AMK310: USB 2.144 mm apart against 0.2 allowed; TopoR measures 1.981 by the signal's path, from its
+// source to its receiver, where this sums the net's tracks).
+TEST(FstIO, ReportListsThePairs) {
+  auto r = io::loadBoard(data("topor/Example_06/Signals.fst"));
+  ASSERT_TRUE(r) << r.error();
+  const std::string rep = io::routingReport(**r);
+  const size_t at = rep.find("SDCLK_U2");
+  ASSERT_NE(at, std::string::npos);
+  const std::string line = rep.substr(at, rep.find('\n', at) - at);
+  EXPECT_NE(line.find("SDCLK_B"), std::string::npos);
+  EXPECT_EQ(line.find("exceeds"), std::string::npos) << line;
+  auto a = io::loadBoard(data("topor/AMK310/AMK310_MCU_V2.fst"));
+  ASSERT_TRUE(a) << a.error();
+  const std::string rep2 = io::routingReport(**a);
+  const size_t usb = rep2.find("\nUSB ");
+  ASSERT_NE(usb, std::string::npos);
+  EXPECT_NE(rep2.substr(usb, rep2.find('\n', usb + 1) - usb).find("exceeds"), std::string::npos);
 }
 
 // A rule naming a signal object keeps it (it used to come back as an empty NetRef).

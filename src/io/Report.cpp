@@ -77,6 +77,23 @@ std::string routingReport(const Board& b) {
     out += std::format("{:<32}{:>4}{:>13.1f}{:>7}{:>11}\n", b.nets[i].name, s.pads, s.length / 1e6, s.vias,
                        s.unrouted ? std::to_string(s.unrouted) : std::string("-"));
   }
+  // The differential pairs: the lengths of the two nets' tracks, their difference against the allowed one.
+  if (!b.hispeed.diffSignals.empty()) {
+    out += "\nDifferential pair       Positive        Length, mm   Negative        Length, mm   Difference   Allowed\n";
+    for (const DiffSignal& d : b.hispeed.diffSignals) {
+      double len[2] = {0, 0};
+      std::string names[2];
+      for (int k = 0; k < 2; ++k)
+        if (const SignalCluster* c = b.hispeed.clusterOf(k ? d.signalB : d.signalA))
+          for (const std::string& n : c->nets) {
+            names[k] += (names[k].empty() ? "" : ",") + n;
+            if (int ni = b.findNet(n); ni >= 0) len[k] += nets[size_t(ni)].length;
+          }
+      const double diff = std::abs(len[0] - len[1]);
+      out += std::format("{:<24}{:<16}{:>10.3f}   {:<16}{:>10.3f}{:>13.3f}{:>10.3f}{}\n", d.name, names[0], len[0] / 1e6, names[1], len[1] / 1e6,
+                         diff / 1e6, double(d.mismatch) / 1e6, d.mismatch > 0 && diff > double(d.mismatch) ? "  exceeds" : "");
+    }
+  }
   return out;
 }
 
