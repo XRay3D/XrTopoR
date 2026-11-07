@@ -516,7 +516,7 @@ std::vector<int> settleClasps(Board& b, Topology& t, const std::vector<int>& cho
 
 // Draws every unlocked wire of the model: their tracks go, and the hand-drawn runs inside the pads they
 // end at (the wire is drawn to the pad's connection point); the locked ones stay as obstacles.
-void drawModel(Board& b, Topology& t, bool direct, RealizeStats& stats, int& nWires, bool editedOnly) {
+void drawModel(Board& b, Topology& t, bool direct, RealizeStats& stats, int& nWires, bool editedOnly, const std::vector<int>* only) {
   std::vector<int> chosen;
   std::set<uint32_t> gone;
   std::set<int> redrawnAt;
@@ -528,6 +528,7 @@ void drawModel(Board& b, Topology& t, bool direct, RealizeStats& stats, int& nWi
     const Wire& w = t.wires[wi];
     if (w.locked) continue;
     if (editedOnly && r::none_of(w.tracks, [&](uint32_t id) { return edited.contains(id); })) continue;
+    if (only && !r::contains(*only, wi)) continue;
     chosen.push_back(wi);
     for (uint32_t id : w.tracks) gone.insert(id);
     redrawnAt.insert(w.end[0]);
@@ -618,11 +619,25 @@ F5ModelResult runF5Model(Board& b, Topology& t, const F5ModelOptions& o) {
   ProfScope pAll("F5 model total");
   F5ModelResult r;
   if (!prepareModel(t, o.flips, o.weighted, r.flips, r.violations)) return r;
+  // Edited only: the branch points at the edited wires' ends balance, their wires alone drawn (the rest of the
+  // board stays as it lies).
+  std::vector<int> balanced;
+  if (o.editedOnly) {
+    std::set<uint32_t> edited;
+    for (const Track& tr : b.tracks)
+      if (tr.edited && tr.id) edited.insert(tr.id);
+    for (const Wire& w : t.wires)
+      if (!w.locked && r::any_of(w.tracks, [&](uint32_t id) { return edited.contains(id); }))
+        for (int e : w.end)
+          if (e >= 0 && t.owners[size_t(e)].kind == Owner::Kind::Junction && !r::contains(balanced, e)) balanced.push_back(e);
+  }
   drawModel(b, t, o.direct, r.stats, r.wires, o.editedOnly);
   r.drawn = true;
-  if (o.junctions && o.direct && r::any_of(t.owners, [](const Owner& x) { return x.kind == Owner::Kind::Junction && x.layers != 0 && !x.locked; })) {
+  if (o.junctions && o.direct && (!o.editedOnly || !balanced.empty()) &&
+      r::any_of(t.owners, [](const Owner& x) { return x.kind == Owner::Kind::Junction && x.layers != 0 && !x.locked; })) {
     ProfScope p("F5 model: branch points");
     OptimizeModelOptions mo;
+    mo.owners = balanced;
     mo.flips = false;
     mo.vias = false;
     mo.clasps = false;

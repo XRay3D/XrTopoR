@@ -401,12 +401,18 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
       // points move: where they are is the shape of its wires.
       if (ow.kind == Owner::Kind::Via && b.flexFixed(ow.net)) continue;
       // (A clasp moves as a branch point: the pair's wire and its two single wires pull it.)
+      if (!o.owners.empty() && !r::contains(o.owners, oi)) continue;
       if ((ow.kind == Owner::Kind::Via && o.vias) || (ow.kind == Owner::Kind::Junction && o.junctions) || (ow.kind == Owner::Kind::Clasp && o.junctions && o.clasps))
         objs.push_back({oi, {}, 1.0, ends[oi], ow.c});
     }
   }
   std::map<int, size_t> objOf;
   for (size_t k = 0; k < objs.size(); ++k) objOf[objs[k].owner] = k;
+  // With the owners named, the wires at them alone are drawn.
+  std::vector<int> drawOnly;
+  if (!o.owners.empty())
+    for (int wi = 0; wi < int(t.wires.size()); ++wi)
+      if (objOf.contains(t.wires[size_t(wi)].end[0]) || objOf.contains(t.wires[size_t(wi)].end[1])) drawOnly.push_back(wi);
 
   auto judge = [&](Drawn& c) {
     ProfScope pj("F7 model: judging");
@@ -440,7 +446,7 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
     for (const Owner& ow : t.owners)
       if (ow.kind == Owner::Kind::Via && ow.via >= 0 && ow.via < int(c.board.vias.size()))
         c.board.vias[ow.via].pos = Point(Vec2{std::round(ow.c.x / 100) * 100, std::round(ow.c.y / 100) * 100});
-    drawModel(c.board, c.owning, true, c.stats, c.wires);
+    drawModel(c.board, c.owning, true, c.stats, c.wires, false, o.owners.empty() ? nullptr : &drawOnly);
     judge(c);
     ++r.drawings;
     return c;

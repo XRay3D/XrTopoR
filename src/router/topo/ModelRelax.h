@@ -28,6 +28,8 @@ struct OptimizeModelOptions {
   bool clasps = true;               // the clasps of the differential pairs move as branch points (F5 leaves them: TopoR's does)
   bool contacts = true;             // a via pressed against another shares its force with it (the pair moves as one)
   bool merge = true;                // a branch point that ends inside copper of its own net merges with the pad or via
+  // These owners alone move (empty: all the options name), and their wires alone are drawn (the rest as they lie).
+  std::vector<int> owners;
 };
 
 struct OptimizeModelResult {

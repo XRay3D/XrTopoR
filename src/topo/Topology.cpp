@@ -81,6 +81,25 @@ void Topology::assignIds(Board& b) {
     if (!v.id || !seen.insert(v.id).second) v.id = next++;
 }
 
+void Topology::translate(Vec2 d) {
+  auto shift = [&](Shape& sh) {
+    sh.a = sh.a + d;
+    sh.b = sh.b + d;
+    for (Vec2& p : sh.poly) p = p + d;
+  };
+  for (Owner& o : owners) {
+    o.c = o.c + d;
+    shift(o.shape);
+  }
+  for (LayerMesh& m : layers)
+    for (Vertex& v : m.verts) v.p = v.p + d;
+  for (Junction& j : junctions) j.pos = j.pos + d;
+  for (Wire& w : wires)
+    for (Vec2& e : w.exit) e = e + d;
+  for (Violation& v : violations) v.pos = v.pos + d;
+  for (ViaBar& vb : viaBars) shift(vb.shape);
+}
+
 const LayerMesh* Topology::mesh(LayerId layer) const {
   for (const LayerMesh& m : layers)
     if (m.layer == layer) return &m;

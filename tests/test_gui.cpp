@@ -208,8 +208,10 @@ TEST(Gui, RecomputeShapesKeepsConnectivityAndClearance) {
   EXPECT_EQ(doc.board()->tracks.size(), tracksBefore) << "after undo";
 }
 
-// A hand edit marks exactly the tracks it changed (by content: the edit renumbers the tracks), and
-// F5 without a selection re-lays those chains only, leaving the rest of the board as it was.
+// A hand edit marks exactly the tracks it changed (by content: the edit renumbers the tracks), and F5 without a
+// selection re-lays those chains only, leaving the rest of the board as it was. An edit that drags a wire across
+// another (AD9 over AD11) stops F5 instead, as in TopoR: the crossing in the messages, its wires selected, nothing
+// laid as drawn.
 TEST(Gui, RecomputeShapesEditedOnly) {
   app();
   Document doc;
@@ -221,46 +223,61 @@ TEST(Gui, RecomputeShapesEditedOnly) {
   view.recomputeShapes();  // everything: nothing is marked yet
   Board& bd = *doc.board();
   for (auto& t : bd.tracks) EXPECT_FALSE(t.edited);
-  // Move the end of the AD9 bottom track that enters the via at (186.9, 82.15), as a drag does:
-  // the segment gets a new far end, a joining track leads on to the via, degenerate tracks go.
   int ad9 = -1;
   for (size_t i = 0; i < bd.nets.size(); ++i)
     if (bd.nets[i].name == "AD9") ad9 = int(i);
   ASSERT_GE(ad9, 0);
-  Point via{Coord(186.9 * kNmPerMm), Coord(-82.15 * kNmPerMm)};
-  int moved = -1;
-  for (size_t i = 0; i < bd.tracks.size(); ++i) {
-    const Track& t = bd.tracks[i];
-    if (t.net == ad9 && !t.isArc() && (t.b == via || t.a == via) && (t.a.v() - t.b.v()).len() > 3 * kNmPerMm) moved = int(i);
+  // Move the end of the AD9 bottom track that enters the via at (186.9, 82.15), as a drag does: the segment gets
+  // a new far end, a joining track leads on to the via, degenerate tracks go.
+  const Point via{Coord(186.9 * kNmPerMm), Coord(-82.15 * kNmPerMm)};
+  auto drag = [&](Vec2 to) {
+    int moved = -1;
+    for (size_t i = 0; i < bd.tracks.size(); ++i) {
+      const Track& t = bd.tracks[i];
+      if (t.net == ad9 && !t.isArc() && (t.b == via || t.a == via) && (t.a.v() - t.b.v()).len() > 3 * kNmPerMm) moved = int(i);
+    }
+    ASSERT_GE(moved, 0);
+    auto before = doc.beginEdit();
+    Track& t = bd.tracks[moved];
+    if (t.a == via) std::swap(t.a, t.b);
+    const Point far(to);
+    t.b = far;
+    Track join = t;
+    join.a = far;
+    join.b = via;
+    join.id = 0;
+    bd.tracks.insert(bd.tracks.begin(), join);  // at the front: every index shifts
+    edit::removeDegenerate(bd);
+    doc.commitEdit(before, "drag");
+    int marked = 0;
+    for (auto& x : bd.tracks) marked += x.edited;
+    EXPECT_EQ(marked, 2) << "the moved segment and the joining track only";
+  };
+  // Across AD11: F5 stops.
+  {
+    drag(Vec2{189.47 * kNmPerMm, -85.57 * kNmPerMm});
+    const Board was = bd;
+    view.recomputeShapes();
+    EXPECT_EQ(bd.tracks.size(), was.tracks.size()) << "nothing laid";
+    EXPECT_FALSE(doc.selectedItems().empty()) << "the crossing wires selected";
+    EXPECT_TRUE(r::any_of(doc.drc(), [](const DrcViolation& v) { return v.type == DrcViolation::Type::Topology; }));
+    doc.undoStack()->undo();
+    doc.clearSelection();
+    for (auto& x : bd.tracks) x.edited = false;
   }
-  ASSERT_GE(moved, 0);
-  auto before = doc.beginEdit();
-  Track& t = bd.tracks[moved];
-  if (t.a == via) std::swap(t.a, t.b);
-  Point far{Coord(189.47 * kNmPerMm), Coord(-85.57 * kNmPerMm)};
-  t.b = far;
-  Track join = t;
-  join.a = far;
-  join.b = via;
-  bd.tracks.insert(bd.tracks.begin(), join);  // at the front: every index shifts
-  edit::removeDegenerate(bd);
-  doc.commitEdit(before, "drag");
-  int marked = 0;
-  for (auto& x : bd.tracks) marked += x.edited;
-  EXPECT_EQ(marked, 2) << "the moved segment and the joining track only";
-  size_t n = bd.tracks.size();
+  // Off to the side, clear of the others: the AD9 chain only.
+  drag(via.v() + Vec2{0.35 * kNmPerMm, -0.35 * kNmPerMm});
   Board unchanged = bd;
-  view.recomputeShapes();  // the AD9 chain only
+  view.recomputeShapes();
   const Board& nb = *doc.board();
   // Tracks of other nets are exactly as they were.
-  int othersChanged = 0;
+  int othersChanged = 0, ad9Changed = 0;
   std::set<std::tuple<Coord, Coord, Coord, Coord>> was;
-  for (auto& x : unchanged.tracks)
-    if (x.net != ad9) was.insert({x.a.x, x.a.y, x.b.x, x.b.y});
+  for (auto& x : unchanged.tracks) was.insert({x.a.x, x.a.y, x.b.x, x.b.y});
   for (auto& x : nb.tracks)
-    if (x.net != ad9 && !was.contains({x.a.x, x.a.y, x.b.x, x.b.y})) ++othersChanged;
+    if (!was.contains({x.a.x, x.a.y, x.b.x, x.b.y})) ++(x.net == ad9 ? ad9Changed : othersChanged);
   EXPECT_EQ(othersChanged, 0);
-  EXPECT_NE(nb.tracks.size(), n);
+  EXPECT_GT(ad9Changed, 0) << "the AD9 chain laid again";
   for (auto& x : nb.tracks) EXPECT_FALSE(x.edited);
   if (const char* out = std::getenv("XR_TEST_OUT")) (void)io::saveBoard(nb, std::string(out) + "/edited_only.fst");
 }
@@ -1527,6 +1544,9 @@ TEST(Gui, FreestyleDrag) {
 TEST(Gui, MovedBoardThenF5) {
   Fixture f("topor/Example_01/SingleLayer.fst");
   Board& b = *f.doc.board();
+  // The model live before the move: it moves with the board (not built anew from the moved tracks).
+  const topo::Topology* live = &f.doc.topology();
+  const Vec2 owner0 = live->owners.front().c;
   {
     edit::Fragment fr;
     for (int i = 0; i < int(b.components.size()); ++i) fr.components.push_back(i);
@@ -1540,6 +1560,13 @@ TEST(Gui, MovedBoardThenF5) {
     if (fr.touchesOutline(b)) io::rebuildOutline(b);
     f.doc.commitEdit(before, "move");
     ASSERT_EQ(b.outline.size(), 2u) << "the hole moved along";
+  }
+  EXPECT_EQ(&f.doc.topology(), live) << "moved, not built anew";
+  EXPECT_LT((f.doc.topology().owners.front().c - owner0 - Vec2{0.3167 * kNmPerMm, 1.1179 * kNmPerMm}).len(), 1.0);
+  {
+    topo::Topology fresh;
+    fresh.build(b);
+    EXPECT_EQ(f.doc.topology().wires.size(), fresh.wires.size());
   }
   int edited = 0;
   for (const Track& t : b.tracks) edited += t.edited;

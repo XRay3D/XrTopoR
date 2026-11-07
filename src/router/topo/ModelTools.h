@@ -46,7 +46,9 @@ F5ModelResult runF5Model(Board& b, Topology& t, const F5ModelOptions& o = {});
 bool prepareModel(Topology& t, bool flips, bool weighted, int& nFlips, std::vector<Violation>& stopping);
 // Draws every unlocked wire of the model on the board: their tracks go, and the hand-drawn runs inside the
 // pads they end at; the model's wires then own the new tracks.
-void drawModel(Board& b, Topology& t, bool direct, RealizeStats& stats, int& nWires, bool editedOnly = false);
+// `only` (with editedOnly false): these wires alone, the rest as they lie.
+void drawModel(Board& b, Topology& t, bool direct, RealizeStats& stats, int& nWires, bool editedOnly = false,
+               const std::vector<int>* only = nullptr);
 
 // The model's violations as DRC violations (Type::Topology) for the message list and the selection: `a`
 // and `b` are tracks of the wires concerned (or the pad a wire runs through).

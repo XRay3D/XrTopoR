@@ -2389,13 +2389,15 @@ void BoardView::recomputeShapes() {
   // rest of the copper as it lies), when the setting says so and there are any; else everything.
   bool local = any;
   const bool model = QSettings().value("topo/model", true).toBool();
-  // A zipped pair among the selected: the model draws the selected wires (and the edited ones), the pair as one
-  // wire. The tracks' sketch path knows no pairs: the first F5 after the pair's axis was edited only took the
-  // selection off, with the handles, and the second drew it.
-  if (any && model && r::any_of(doc_->selectedItems(), [&](ItemRef r) { return r.type == ItemType::Track && b.tracks[r.index].zip >= 0; })) {
+  // By the model (the live one: it has followed every edit): the selected wires, else the edited ones, else all of
+  // them; the rest as they lie. What the model cannot take (wires an edit made cross, a wire through another net's
+  // copper) stops it, the wires concerned selected, as in TopoR — no sketch path laying them as drawn.
+  if (model) {
     for (ItemRef r : doc_->selectedItems())
       if (r.type == ItemType::Track && !b.tracks[r.index].locked) b.tracks[r.index].edited = true;
-    if (recomputeShapesModel(true)) return;
+    const bool edited = r::any_of(b.tracks, [](const Track& t) { return t.edited && !t.locked; });
+    recomputeShapesModel(any || (edited && QSettings().value("f5/editedOnly", true).toBool()));
+    return;
   }
   if (!any && QSettings().value("f5/editedOnly", true).toBool()) {
     for (size_t i = 0; i < b.tracks.size(); ++i)
@@ -2444,7 +2446,6 @@ bool BoardView::recomputeShapesModel(bool editedOnly) {
   topo::F5ModelOptions o;
   o.editedOnly = editedOnly;
   auto res = topo::runF5Model(b, t, o);
-  if (!res.drawn && editedOnly) return false;  // nothing changed: the edit made a crossing, the sketch path takes the chains as drawn
   if (!res.drawn) {
     auto drc = topo::topologyViolations(b, t, res.violations);
     std::vector<ItemRef> sel;

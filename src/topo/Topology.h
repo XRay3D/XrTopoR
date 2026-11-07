@@ -207,6 +207,8 @@ struct Topology {
   // walks and edge order as the build; branch points made and taken out as the ends need them). False when the
   // model cannot be kept (a zipped pair among them, a branch point the mesh refuses): build it anew.
   bool relayTracks(const Board& b, const std::vector<uint32_t>& changed);
+  // Everything moved by d (the board moved whole): the owners, their copper, the meshes' points, the wires' exits.
+  void translate(Vec2 d);
   // Checks the invariants: the meshes (orientation, neighbours, edges, vertex lists) and the wires (every
   // consecutive pair of crossings on one triangle, the ends at their owners, the edge lists and the wires'
   // lists agreeing). Returns what is wrong.

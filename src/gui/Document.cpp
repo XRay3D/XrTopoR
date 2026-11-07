@@ -6,6 +6,8 @@
 
 #include "gui/Schemes.h"
 #include "gui/TextFont.h"
+#include "core/Edit.h"
+#include "io/BoardIO.h"
 #include "topo/Move.h"
 #include "topo/Sidecar.h"
 
@@ -126,8 +128,28 @@ bool Document::syncModelFrom(const EditSnapshot& was) {
   Board old = b;  // the board as the model has it: this one with the snapshot's items (the rest is the same)
   was.apply(old);
   if (old.vias.size() != b.vias.size() || old.pads.size() != b.pads.size()) return false;
-  if (topo::boardHashOf(old, false) != topo::boardHashOf(b, false)) return false;  // zones, keepouts, the outline, nets, pairs...
   topo::Topology& t = *topo_;
+  if (topo::boardHashOf(old, false) != topo::boardHashOf(b, false)) {  // zones, keepouts, the outline, nets, pairs...
+    // ... unless the board moved whole: the model moves with it (built anew from the moved tracks, it walked them
+    // through a mesh of its own, and F5 laid wires out of the way and left tails).
+    if (old.outline.empty() || b.outline.empty() || old.outline[0].empty() || b.outline[0].empty()) return false;
+    const Vec2 d = b.outline[0][0] - old.outline[0][0];
+    if (d.len2() < 1) return false;
+    edit::Fragment all;
+    for (int i = 0; i < int(old.components.size()); ++i) all.components.push_back(i);
+    for (int i = 0; i < int(old.tracks.size()); ++i) all.tracks.push_back(i);
+    for (int i = 0; i < int(old.vias.size()); ++i) all.vias.push_back(i);
+    for (int i = 0; i < int(old.zones.size()); ++i) all.zones.push_back(i);
+    for (int i = 0; i < int(old.keepouts.size()); ++i) all.keepouts.push_back(i);
+    for (int i = 0; i < int(old.texts.size()); ++i) all.texts.push_back(i);
+    for (int i = 0; i < int(old.graphics.size()); ++i) all.details.push_back(i);
+    edit::Motion m;
+    m.shift = d;
+    edit::move(old, all, m);
+    io::rebuildOutline(old);
+    if (topo::boardHashOf(old, false) != topo::boardHashOf(b, false)) return false;
+    t.translate(d);
+  }
   // The vias and pads moved: their owners with them (the pads turned are no move: the hash has their angle).
   auto moved = [&](int owner, Vec2 d) { return owner < 0 || d.len2() < 1 || topo::moveOwner(t, owner, d) >= 1 - 1e-9; };
   for (size_t i = 0; i < b.vias.size(); ++i) {
