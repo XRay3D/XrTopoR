@@ -58,8 +58,13 @@ enum class Val { X, Y, Len, Deg, None };
 // The point a row of the shape table stands for.
 Vec2 rowPoint(const Graphic& f, int row) {
   switch (f.kind) {
-    case GraphicKind::Line:
     case GraphicKind::Arc:
+      if (row == 3) {  // the centre
+        const ArcGeom g = ArcGeom::fromThreePoints(f.a, f.m, f.b);
+        return g.valid ? g.center : (f.a + f.b) * 0.5;
+      }
+      return row == 0 ? f.a : f.b;
+    case GraphicKind::Line:
     case GraphicKind::Rect: return row == 0 ? f.a : f.b;
     case GraphicKind::Circle: return f.a;
     case GraphicKind::Poly: return row < int(f.pts.size()) ? f.pts[row] : Vec2{};
@@ -71,7 +76,12 @@ QString cellText(const Graphic& g, int row, Val val, Unit u) {
   switch (val) {
     case Val::X: return formatLength(rowPoint(g, row).x, u);
     case Val::Y: return formatLength(-rowPoint(g, row).y, u);
-    case Val::Len: return formatLength((g.b - g.a).len(), u);
+    case Val::Len:
+      if (g.kind == GraphicKind::Arc) {  // the radius
+        const ArcGeom a = ArcGeom::fromThreePoints(g.a, g.m, g.b);
+        return a.valid ? formatLength(a.radius, u) : QString();
+      }
+      return formatLength((g.b - g.a).len(), u);
     case Val::Deg: {
       double deg = g.kind == GraphicKind::Arc ? arcAngle(g.a, g.m, g.b) : g.arcOf(size_t(row));
       return deg == 0 && g.kind == GraphicKind::Poly ? QString() : QString::number(deg, 'g', 8);
@@ -551,7 +561,8 @@ QWidget* PropertiesPanel::shapePage(ItemRef r, int part) {
   switch (g.kind) {
     case GraphicKind::Line: rows = {{tr("Начало"), Val::X, Val::Y}, {tr("Конец"), Val::X, Val::Y}}; break;
     case GraphicKind::Arc:
-      rows = {{tr("Начало"), Val::X, Val::Y}, {tr("Конец"), Val::X, Val::Y}, {tr("Угол дуги"), Val::Deg, Val::None}};
+      rows = {{tr("Начало"), Val::X, Val::Y}, {tr("Конец"), Val::X, Val::Y}, {tr("Угол дуги"), Val::Deg, Val::None},
+              {tr("Центр"), Val::X, Val::Y}, {tr("Радиус"), Val::Len, Val::None}};
       break;
     case GraphicKind::Circle: rows = {{tr("Центр"), Val::X, Val::Y}, {tr("Радиус"), Val::Len, Val::None}}; break;
     case GraphicKind::Rect: rows = {{tr("Угол 1"), Val::X, Val::Y}, {tr("Угол 2"), Val::X, Val::Y}}; break;
@@ -607,6 +618,13 @@ QWidget* PropertiesPanel::shapePage(ItemRef r, int part) {
           switch (f.kind) {
             case GraphicKind::Line: (row == 0 ? f.a : f.b) = p; break;
             case GraphicKind::Arc: {
+              if (row == 3) {  // the centre: the arc moves whole
+                const Vec2 d = p - rowPoint(f, 3);
+                f.a += d;
+                f.b += d;
+                f.m += d;
+                break;
+              }
               // The arc keeps its angle.
               double deg = arcAngle(f.a, f.m, f.b);
               (row == 0 ? f.a : f.b) = p;
@@ -618,7 +636,13 @@ QWidget* PropertiesPanel::shapePage(ItemRef r, int part) {
             case GraphicKind::Poly: f.pts[row] = p; break;
           }
           break;
-        case Val::Len: f.b = f.a + Vec2{fromUnit(x, u), 0}; break;
+        case Val::Len:
+          if (f.kind == GraphicKind::Arc) {  // the radius: the ends stay, the arc turns as far as it takes
+            if (const double deg = arcAngleForRadius(f.a, f.b, fromUnit(x, u), arcAngle(f.a, f.m, f.b)); deg != 0) f.m = arcMiddle(f.a, f.b, deg);
+          } else {
+            f.b = f.a + Vec2{fromUnit(x, u), 0};
+          }
+          break;
         case Val::Deg:
           if (f.kind == GraphicKind::Arc) {
             if (x == 0) f.kind = GraphicKind::Line;
@@ -846,6 +870,26 @@ QWidget* PropertiesPanel::wirePage(const std::vector<int>& tracks) {
   if (net && cl) {
     double clr = double(b.clearance(*net, *cl));
     f->addRow(tr("Зазор:"), new QLabel(formatLength(clr, u, 3) + " " + unitName(u)));
+  }
+  // One arc: its centre (the ends are the wire's: it does not move) and its radius (the ends stay).
+  if (tracks.size() == 1 && b.tracks[size_t(tracks[0])].isArc()) {
+    const Track& t = b.tracks[size_t(tracks[0])];
+    const ArcGeom g = ArcGeom::fromThreePoints(t.a.v(), t.mid->v(), t.b.v());
+    if (g.valid) {
+      auto* centre = new QLabel(QString("X %1, Y %2 %3").arg(formatLength(g.center.x, u), formatLength(-g.center.y, u), unitName(u)));
+      centre->setObjectName("arcCentre");
+      f->addRow(tr("Центр дуги:"), centre);
+      auto* radius = length(g.radius, [this, ti = tracks[0]](double r) {
+        edit(tr("Изменить радиус"), [&](Board& bd) {
+          Track& tr = bd.tracks[size_t(ti)];
+          if (!tr.mid) return;
+          if (const double deg = arcAngleForRadius(tr.a.v(), tr.b.v(), r, arcAngle(tr.a.v(), tr.mid->v(), tr.b.v())); deg != 0)
+            tr.mid = Point(arcMiddle(tr.a.v(), tr.b.v(), deg));
+        });
+      }, 1000);
+      radius->setObjectName("arcRadius");
+      f->addRow(tr("Радиус дуги:"), radius);
+    }
   }
   return w;
 }

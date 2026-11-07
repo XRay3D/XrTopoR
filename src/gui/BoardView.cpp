@@ -329,7 +329,12 @@ void BoardView::drawTools(QPainter& p) {
     for (const Marker& m : markers()) {
       QPointF c = toScreen(markerPos(m));
       if (m.kind == Marker::End) p.drawRect(QRectF(c - QPointF(3, 3), QSizeF(6, 6)));
-      else p.drawEllipse(c, 3.5, 3.5);
+      else if (m.kind == Marker::Middle) p.drawEllipse(c, 3.5, 3.5);
+      else {  // an arc's centre: a cross in a ring
+        p.drawEllipse(c, 4.5, 4.5);
+        p.drawLine(c - QPointF(4.5, 0), c + QPointF(4.5, 0));
+        p.drawLine(c - QPointF(0, 4.5), c + QPointF(0, 4.5));
+      }
     }
   }
   if (frameStart_) {
@@ -952,7 +957,7 @@ void BoardView::mousePressEvent(QMouseEvent* e) {
       // A marker of a selected segment edits it; the segment itself moves in parallel.
       if (!add)
         if (auto mk = markerAt(e->position())) {
-          startDrag(mk->kind == Marker::End ? Drag::Vertex : Drag::Bend, w, mk);
+          startDrag(mk->kind == Marker::End ? Drag::Vertex : mk->kind == Marker::Middle ? Drag::Bend : Drag::Centre, w, mk);
           if (pk.item || pk.component >= 0) pendingClick_ = pk;  // a click there still selects
           break;
         }
@@ -1768,6 +1773,7 @@ std::vector<BoardView::Marker> BoardView::markers() const {
       out.push_back({r, 0, Marker::End, 0});
       out.push_back({r, 0, Marker::End, 1});
       if (roomy(t.a.v(), t.b.v())) out.push_back({r, 0, Marker::Middle, 0});
+      if (t.isArc()) out.push_back({r, 0, Marker::Centre, 0});
     } else if (r.type == ItemType::Keepout) {
       const auto& sh = b.keepouts[r.index].shape;
       for (int k = 0; k < int(sh.size()); ++k) figure(r, k, sh[k]);
@@ -1775,6 +1781,7 @@ std::vector<BoardView::Marker> BoardView::markers() const {
       continue;  // TopoR: a poured area's shape is not edited
     } else if (auto g = edit::figureOf(b, r)) {
       figure(r, 0, *g);
+      if (g->kind == GraphicKind::Arc) out.push_back({r, 0, Marker::Centre, 0});
     }
   }
   for (int z : zips) {
@@ -1795,6 +1802,16 @@ Vec2 BoardView::markerPos(const Marker& m) const {
     if (m.kind == Marker::End) return m.vertex < n ? axis[size_t(m.vertex)].a.v() : axis.back().b.v();
     const Track& t = axis[size_t(std::min(m.vertex, n - 1))];
     return t.mid ? t.mid->v() : (t.a.v() + t.b.v()) * 0.5;
+  }
+  if (m.kind == Marker::Centre) {
+    std::optional<ArcGeom> g;
+    if (m.item.type == ItemType::Track) {
+      const Track& t = b.tracks[m.item.index];
+      if (t.mid) g = ArcGeom::fromThreePoints(t.a.v(), t.mid->v(), t.b.v());
+    } else if (auto f = edit::figureOf(b, m.item, m.part); f && f->kind == GraphicKind::Arc) {
+      g = ArcGeom::fromThreePoints(f->a, f->m, f->b);
+    }
+    return g && g->valid ? g->center : Vec2{};
   }
   if (m.item.type == ItemType::Track) {
     const Track& t = b.tracks[m.item.index];
@@ -1876,6 +1893,18 @@ void BoardView::applyDrag() {
       selectSection(dragZip_);
       break;
     }
+    case Drag::Centre:
+      // The centre along the chord's bisector: the ends stay, the arc bends round it the way it turned.
+      if (dragMarker_.item.type == ItemType::Track) {
+        Track& t = b.tracks[dragMarker_.item.index];
+        if (t.mid) t.mid = Point(arcMiddle(t.a.v(), t.b.v(), arcAngleAbout(t.a.v(), t.b.v(), to, arcAngle(t.a.v(), t.mid->v(), t.b.v()))));
+      } else {
+        editMarked([&](std::vector<Graphic>& list, int i) {
+          Graphic& g = list[i];
+          if (g.kind == GraphicKind::Arc) g.m = arcMiddle(g.a, g.b, arcAngleAbout(g.a, g.b, to, arcAngle(g.a, g.m, g.b)));
+        });
+      }
+      break;
     case Drag::Vertex:
       if (dragMarker_.zip >= 0) {
         // A vertex of the axis (an end: the clasp), held to its neighbour in the angle mode.

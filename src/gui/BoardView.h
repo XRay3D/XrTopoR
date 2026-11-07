@@ -122,7 +122,7 @@ class BoardView : public QWidget {
   struct Marker {
     ItemRef item{ItemType::Track, -1};
     int part = 0;  // a keepout's figure
-    enum Kind { End, Middle } kind = End;
+    enum Kind { End, Middle, Centre } kind = End;  // Centre: an arc's (dragged along the chord's bisector)
     int vertex = 0;  // End: a track's end (0 = a, 1 = b) or a figure's vertex; Middle: a figure's side
     int zip = -1;    // the axis of a zipped section (item unused): End its vertex k, Middle the middle of piece k
   };
@@ -133,7 +133,7 @@ class BoardView : public QWidget {
   edit::Fragment selectedFragment() const;
   // Moves the selection by an edit::Motion built around its pivot (rotations and flips).
   void transformSelection(double rotate, bool mirror, const QString& title);
-  enum class Drag { None, Fragment, Segment, Vertex, Bend, Freestyle, AxisPiece };
+  enum class Drag { None, Fragment, Segment, Vertex, Bend, Freestyle, AxisPiece, Centre };
   void freestyleBy(Vec2 shift, double rotate);  // one Freestyle move of fsTarget_
   void startDrag(Drag kind, Vec2 at, std::optional<Marker> marker = {});
   void applyDrag();

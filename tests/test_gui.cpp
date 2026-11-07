@@ -1025,6 +1025,39 @@ TEST(Gui, ShapeEditor) {
   table()->item(1, 1)->setText("3");
   EXPECT_NEAR(f.b().zones[zi].outline.front().x - f.b().zones[zi].shape->a.x, 3 * kNmPerMm, 1000);
   EXPECT_EQ(f.b().zones[zi].shape->kind, GraphicKind::Circle);
+
+  // A drawn arc: its centre (edited, the arc moves whole) and its radius (edited, the ends stay).
+  {
+    LayerId mech = -1;
+    for (LayerId l = 0; l < LayerId(f.b().layers.size()) && mech < 0; ++l)
+      if (f.b().layers[size_t(l)].kind != LayerKind::Copper && !f.b().isEdge(l)) mech = l;
+    ASSERT_GE(mech, 0);
+    auto snap = f.doc.beginEdit();
+    Graphic g;
+    g.kind = GraphicKind::Arc;
+    g.layer = mech;
+    g.a = pts[0] + Vec2{2 * kNmPerMm, 2 * kNmPerMm};
+    g.b = g.a + Vec2{8 * kNmPerMm, 0};
+    g.m = arcMiddle(g.a, g.b, 90);
+    f.doc.board()->graphics.push_back(g);
+    f.doc.commitEdit(snap, "arc");
+  }
+  const int gi = int(f.b().graphics.size()) - 1;
+  f.doc.setSelection({{ItemType::Detail, gi}}, {});
+  ASSERT_TRUE(table());
+  ASSERT_EQ(table()->rowCount(), 5) << "start, end, angle, centre, radius";
+  EXPECT_EQ(table()->item(3, 0)->text(), "Центр");
+  const Graphic arc0 = f.b().graphics[size_t(gi)];
+  const double r0 = ArcGeom::fromThreePoints(arc0.a, arc0.m, arc0.b).radius;
+  EXPECT_NEAR(table()->item(4, 1)->text().toDouble(), r0 / kNmPerMm, 1e-3);
+  table()->item(4, 1)->setText("10");
+  const Graphic& arc1 = f.b().graphics[size_t(gi)];
+  EXPECT_NEAR(ArcGeom::fromThreePoints(arc1.a, arc1.m, arc1.b).radius, 10 * kNmPerMm, 1000);
+  EXPECT_EQ(arc1.a, arc0.a);
+  EXPECT_EQ(arc1.b, arc0.b);
+  const double cx = table()->item(3, 1)->text().toDouble();
+  table()->item(3, 1)->setText(QString::number(cx + 1));
+  EXPECT_NEAR(f.b().graphics[size_t(gi)].a.x, arc0.a.x + kNmPerMm, 1000) << "moved whole";
 }
 
 // «Окно сообщений»: unrouted nets and DRC results are listed by kind.
@@ -2752,4 +2785,56 @@ TEST(Gui, F5TakesDoubleCrossingsApart) {
   d.widths = false;
   EXPECT_TRUE(runDrc(f.b(), d).empty());
   EXPECT_EQ(Connectivity::compute(f.b()).ratsnest.size(), 0u);
+}
+
+// An arc's centre: a handle of a selected arc track, dragged along the chord's bisector (the ends stay, the radius
+// follows), and in «Свойства» its centre and radius (the radius edited with the ends kept); a drawn arc's table has
+// its centre (edited: the arc moves whole) and radius rows.
+TEST(Gui, ArcCentreHandleAndProperties) {
+  Fixture f("tt.kicad_pcb");
+  auto board = std::make_unique<Board>();
+  Board& b = *board;
+  const LayerId top = b.addLayer("Top", LayerKind::Copper, Side::Top);
+  b.layers[top].copperIndex = 0;
+  auto at = [](double x, double y) { return Vec2{x * kNmPerMm, y * kNmPerMm}; };
+  b.outline.push_back({at(0, 0), at(40, 0), at(40, 20), at(0, 20)});
+  Track t;
+  t.a = Point(at(10, 10));
+  t.b = Point(at(30, 10));
+  t.mid = Point(at(20, 14));
+  t.width = mmToNm(0.3);
+  t.layer = top;
+  t.net = b.addNet("N");
+  b.tracks.push_back(t);
+  f.doc.setBoard(std::move(board), "arc");
+  PropertiesPanel props(&f.doc);
+  auto radiusOf = [&] {
+    const Track& x = f.b().tracks[0];
+    return ArcGeom::fromThreePoints(x.a.v(), x.mid->v(), x.b.v()).radius;
+  };
+  const double r0 = radiusOf();
+  f.look(at(20, 10), 30);
+  f.doc.setSelection({{ItemType::Track, 0}}, {});
+  ASSERT_TRUE(props.findChild<QLabel*>("arcCentre"));
+  auto* radius = props.findChild<QDoubleSpinBox*>("arcRadius");
+  ASSERT_TRUE(radius);
+  EXPECT_NEAR(radius->value(), r0 / kNmPerMm, 1e-3);
+  // The centre handle, dragged 3 mm down the bisector: the ends stay, the arc is flatter (a larger radius).
+  const Vec2 c0 = ArcGeom::fromThreePoints(t.a.v(), t.mid->v(), t.b.v()).center;
+  f.drag(f.at(c0), f.at(c0 + at(0, -3)));
+  EXPECT_EQ(f.b().tracks[0].a, t.a);
+  EXPECT_EQ(f.b().tracks[0].b, t.b);
+  EXPECT_GT(radiusOf(), r0 + 1.5 * kNmPerMm);
+  const Vec2 c1 = ArcGeom::fromThreePoints(f.b().tracks[0].a.v(), f.b().tracks[0].mid->v(), f.b().tracks[0].b.v()).center;
+  EXPECT_NEAR(c1.x, c0.x, 1000);
+  EXPECT_NEAR(c1.y, c0.y - 3 * kNmPerMm, 0.15 * kNmPerMm);  // (to the grid)
+  // The radius set to 12 mm in «Свойства»: the ends stay.
+  f.doc.setSelection({{ItemType::Track, 0}}, {});
+  radius = props.findChild<QDoubleSpinBox*>("arcRadius");
+  ASSERT_TRUE(radius);
+  radius->setValue(12);
+  emit radius->editingFinished();
+  EXPECT_NEAR(radiusOf(), 12 * kNmPerMm, 1000);
+  EXPECT_EQ(f.b().tracks[0].a, t.a);
+  EXPECT_EQ(f.b().tracks[0].b, t.b);
 }

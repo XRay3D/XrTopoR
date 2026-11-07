@@ -206,6 +206,12 @@ struct Graphic {
 // through m turns by (0: m on the chord).
 Vec2 arcMiddle(Vec2 a, Vec2 b, double deg);
 double arcAngle(Vec2 a, Vec2 m, Vec2 b);
+// The angle of the arc from a to b of radius r turning the way `deg` does, as far round as it (past a half turn
+// stays past it); 0 when r is under half the chord.
+double arcAngleForRadius(Vec2 a, Vec2 b, double r, double deg);
+// The angle of the arc from a to b about the centre c (taken onto the chord's perpendicular bisector: the ends stay)
+// turning the way `deg` does.
+double arcAngleAbout(Vec2 a, Vec2 b, Vec2 c, double deg);
 
 struct Component {
   std::string ref;

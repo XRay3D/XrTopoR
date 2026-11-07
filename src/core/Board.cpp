@@ -302,6 +302,23 @@ double arcAngle(Vec2 a, Vec2 m, Vec2 b) {
   return arc.valid ? -radToDeg(arc.sweep) : 0;
 }
 
+double arcAngleForRadius(Vec2 a, Vec2 b, double r, double deg) {
+  const double half = (b - a).len() / 2;
+  if (half <= 0 || r < half) return 0;
+  double t = radToDeg(2 * std::asin(std::min(1.0, half / r)));
+  if (std::abs(deg) > 180) t = 360 - t;
+  return deg < 0 ? -t : t;
+}
+
+double arcAngleAbout(Vec2 a, Vec2 b, Vec2 c, double deg) {
+  const Vec2 m = (a + b) * 0.5, n = (b - a).perp().normalized();
+  if (n.len2() == 0) return deg;
+  const Vec2 o = m + n * (c - m).dot(n);
+  const double angA = std::atan2(a.y - o.y, a.x - o.x), angB = std::atan2(b.y - o.y, b.x - o.x);
+  // (deg + is a board sweep -: the board frame is Y down, arcAngle.)
+  return deg > 0 ? radToDeg(normalizeAngle(angA - angB)) : -radToDeg(normalizeAngle(angB - angA));
+}
+
 bool Graphic::hasArcs() const {
   return r::any_of(arcs, [](double x) { return x != 0; });
 }
