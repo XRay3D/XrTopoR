@@ -274,6 +274,28 @@ bool move(Board& b, const Fragment& f, const Motion& m) {
       stretch(t, ca ? m.apply(t.a.v()) : t.a.v(), cb ? m.apply(t.b.v()) : t.b.v());
     }
   }
+  // A zipped section whose conductors all go goes with them (its axis; a mirror takes it to the other side,
+  // its positive conductor to the other side of the axis).
+  for (int z = 0; z < int(b.zips.size()); ++z) {
+    bool any = false, all = true;
+    for (size_t ti = 0; ti < b.tracks.size(); ++ti)
+      if (b.tracks[ti].zip == z) {
+        any = true;
+        all &= ti < selT.size() && selT[ti];
+      }
+    if (!any || !all) continue;
+    ZippedWire& zw = b.zips[size_t(z)];
+    for (Track& t : zw.axis) {
+      t.a = m.apply(t.a);
+      t.b = m.apply(t.b);
+      if (t.mid) t.mid = m.apply(*t.mid);
+      if (m.mirror) t.layer = mirrorLayer(b, t.layer);
+    }
+    if (m.mirror) {
+      zw.layer = mirrorLayer(b, zw.layer);
+      zw.pSide = -zw.pSide;
+    }
+  }
   for (int ti : f.tracks) {
     Track& t = b.tracks[ti];
     t.a = m.apply(t.a);

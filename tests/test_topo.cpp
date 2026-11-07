@@ -13,6 +13,8 @@
 #include <string>
 
 #include "core/Connectivity.h"
+#include "core/DiffPairs.h"
+#include "core/Edit.h"
 #include "core/Rules.h"
 #include "core/SpatialIndex.h"
 #include "core/ZoneFill.h"
@@ -2093,6 +2095,63 @@ TEST(Topo, ClaspMovesWithF7) {
   EXPECT_EQ(p.b.zips.size(), 1u);
   EXPECT_EQ(Connectivity::compute(p.b).ratsnest.size(), 0u);
   EXPECT_EQ(p.violations(), 0);
+}
+
+// The editing of a section: two runs of the pair's nets zipped (the axis between them, the conductors from it,
+// nothing moves when the runs lie at the rule already), swapped where the single wires cross at both clasps
+// (each conductor takes the other net, the singles go over: no short after), unzipped (the conductors stay).
+TEST(Topo, ZipSwapUnzip) {
+  PinBoard p;
+  p.b.netClasses[0].clearance = mmToNm(0.2);
+  p.pad("P", 4, 9, PadShapeKind::Circle, 1, 1);
+  p.pad("N", 4, 11, PadShapeKind::Circle, 1, 1);
+  p.pad("P", 36, 9, PadShapeKind::Circle, 1, 1);
+  p.pad("N", 36, 11, PadShapeKind::Circle, 1, 1);
+  p.pair("P", "N", 0.3, 0.2);
+  p.track("P", {{4, 9}, {8, 10.25}, {32, 10.25}, {36, 9}}, 0.3);
+  p.track("N", {{4, 11}, {8, 9.75}, {32, 9.75}, {36, 11}}, 0.3);
+  std::vector<int> sel;
+  for (int i = 0; i < int(p.b.tracks.size()); ++i)
+    if (p.b.tracks[i].a.v().x == PinBoard::at(8, 0).x) sel.push_back(i);
+  ASSERT_EQ(sel.size(), 2u);
+  EXPECT_FALSE(zipTracks(p.b, {sel[0]}).has_value()) << "one net only";
+  auto z = zipTracks(p.b, sel);
+  ASSERT_TRUE(z.has_value()) << z.error();
+  ASSERT_EQ(p.b.zips.size(), 1u);
+  const ZippedWire& zw = p.b.zips[0];
+  for (const Track& t : zw.axis) {
+    EXPECT_NEAR(t.a.v().y, PinBoard::at(0, 10).y, 1000);
+    EXPECT_NEAR(t.b.v().y, PinBoard::at(0, 10).y, 1000);
+  }
+  int conductors = 0;
+  for (const Track& t : p.b.tracks) conductors += t.zip == 0;
+  EXPECT_EQ(conductors, 2);
+  EXPECT_EQ(Connectivity::compute(p.b).ratsnest.size(), 0u);
+  EXPECT_GT(p.drcOf(DrcViolation::Type::Short), 0) << "the singles cross at the clasps";
+  swapZipNets(p.b, 0);
+  EXPECT_EQ(Connectivity::compute(p.b).ratsnest.size(), 0u);
+  EXPECT_EQ(p.drcOf(DrcViolation::Type::Short), 0) << "swapped, the singles no longer cross";
+  EXPECT_EQ(p.drcOf(DrcViolation::Type::Clearance), 0);
+  for (const Track& t : p.b.tracks)
+    if (t.zip == 0 && t.net == p.net("P")) EXPECT_NEAR(t.a.v().y, PinBoard::at(0, 9.75).y, 1000) << "P below now";
+  auto f = p.f5Model();
+  ASSERT_TRUE(f.res.drawn);
+  EXPECT_EQ(Connectivity::compute(p.b).ratsnest.size(), 0u);
+  EXPECT_EQ(p.violations(), 0);
+  // Moved whole, the section goes with its conductors.
+  {
+    edit::Fragment fr;
+    for (int i = 0; i < int(p.b.tracks.size()); ++i) fr.tracks.push_back(i);
+    edit::Motion m;
+    m.shift = PinBoard::at(0, 1);
+    const Vec2 a0 = p.b.zips[0].axis.front().a.v();
+    ASSERT_TRUE(edit::move(p.b, fr, m));
+    EXPECT_EQ(p.b.zips[0].axis.front().a.v(), a0 + PinBoard::at(0, 1));
+  }
+  unzip(p.b, 0);
+  EXPECT_TRUE(p.b.zips.empty());
+  for (const Track& t : p.b.tracks) EXPECT_EQ(t.zip, -1);
+  EXPECT_EQ(Connectivity::compute(p.b).ratsnest.size(), 0u);
 }
 
 // The clasp's copper is the pair wire's own and each single wire's own at its end: the capacity of an edge at

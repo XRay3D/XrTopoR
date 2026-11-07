@@ -7,6 +7,7 @@ target_include_directories(xrgeom PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 add_library(xrcore STATIC
   core/Board.cpp
   core/Connectivity.cpp
+  core/DiffPairs.cpp
   core/Edit.cpp
   core/HiSpeed.cpp
   core/Padstack.cpp

@@ -142,8 +142,11 @@ DesignParamsDialog::DesignParamsDialog(Document* doc, QWidget* parent) : QDialog
   page(rules, tr("Назначение цепей на слои"), [this] { return layerNetsPage(); },
        tr("Цепи, предназначенные для трассировки на слое (сохраняются в дизайне)."));
   auto* hs = header(tr("High-speed правила"));
-  for (const QString& t : {tr("Волновое сопротивление"), tr("Сигналы"), tr("Выравнивание в группе"),
-                           tr("Взаимное выравнивание"), tr("Абсолютное значение")})
+  page(hs, tr("Волновое сопротивление"), [this] { return impedancesPage(); },
+       tr("Ширины проводников по слоям (и зазор внутри пары для дифференциальных сигналов). Ширины и зазор "
+          "застёгнутой пары проводников задаются только здесь."));
+  page(hs, tr("Сигналы"), [this] { return diffSignalsPage(); }, tr("Дифференциальные сигналы: пары цепей, правило и допустимый разброс длин."));
+  for (const QString& t : {tr("Выравнивание в группе"), tr("Взаимное выравнивание"), tr("Абсолютное значение")})
     page(hs, t, [this, t] { return notSupported(t); }, {});
   nav_->expandAll();
   connect(nav_, &QTreeWidget::currentItemChanged, this, [this](QTreeWidgetItem* it) {
@@ -1068,6 +1071,55 @@ QWidget* DesignParamsDialog::clearancesPage() {
       },
       [this](int r) { rules_.clearances.erase(rules_.clearances.begin() + r); },
       [this](int a, int b) { std::swap(rules_.clearances[size_t(a)], rules_.clearances[size_t(b)]); });
+}
+
+// The impedance rules as the file has them (read only): a row per rule and layer.
+QWidget* DesignParamsDialog::impedancesPage() {
+  const Board& b = *doc_->board();
+  auto* t = new QTableWidget;
+  t->setColumnCount(5);
+  t->setHorizontalHeaderLabels({tr("Имя"), tr("Z0, Ом"), tr("Слой"), tr("Ширина"), tr("Зазор")});
+  int row = 0;
+  for (const Impedance& z : b.hispeed.impedances)
+    for (const ImpedanceLayerRule& r : z.rules) {
+      t->insertRow(row);
+      auto cell = [&](int c, const QString& v) {
+        auto* it = new QTableWidgetItem(v);
+        it->setFlags(it->flags() & ~Qt::ItemIsEditable);
+        t->setItem(row, c, it);
+      };
+      cell(0, QString::fromStdString(z.name) + (z.diff ? tr(" (дифф.)") : QString()));
+      cell(1, QString::number(z.z0));
+      cell(2, QString::fromStdString(r.layer));
+      cell(3, formatLength(double(r.width), doc_->unit(), 3));
+      cell(4, z.diff ? formatLength(double(r.gap), doc_->unit(), 3) : QString());
+      ++row;
+    }
+  t->resizeColumnsToContents();
+  return t;
+}
+
+// The differential signals (read only): the pair's nets, its rule and the allowed difference of lengths.
+QWidget* DesignParamsDialog::diffSignalsPage() {
+  const Board& b = *doc_->board();
+  auto* t = new QTableWidget;
+  t->setColumnCount(4);
+  t->setHorizontalHeaderLabels({tr("Дифф. сигнал"), tr("Цепи"), tr("Волновое сопротивление"), tr("Допустимый разброс")});
+  for (const DiffSignal& d : b.hispeed.diffSignals) {
+    const int row = t->rowCount();
+    t->insertRow(row);
+    QStringList nets;
+    for (const std::string& n : b.hispeed.netsOf({ObjectSignal::Kind::DiffSignal, d.name})) nets << QString::fromStdString(n);
+    const QString v[4] = {QString::fromStdString(d.name), nets.join(", "), QString::fromStdString(d.impedance),
+                          formatLength(double(d.mismatch), doc_->unit(), 3)};
+    for (int c = 0; c < 4; ++c) {
+      auto* it = new QTableWidgetItem(v[c]);
+      it->setFlags(it->flags() & ~Qt::ItemIsEditable);
+      t->setItem(row, c, it);
+    }
+  }
+  t->resizeColumnsToContents();
+  return t;
 }
 
 QWidget* DesignParamsDialog::edgePage() {

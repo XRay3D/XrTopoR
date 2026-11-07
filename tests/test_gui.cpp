@@ -546,6 +546,48 @@ TEST(Gui, RulerMeasuresPoints) {
   EXPECT_EQ(f.view.mode(), Mode::Select);
 }
 
+// A conductor of a zipped pair (Signals.fst, the pair SDCLK_U2 on Int 1): X takes the whole section, both
+// conductors; «Свойства» shows the section (TopoR's «Свойства застёгнутой пары проводников»), its button swaps
+// the nets as one undoable step; «Расстегнуть» takes the section away, the conductors stay, undo brings it back.
+TEST(Gui, ZippedPairSelectionAndProperties) {
+  Fixture f("topor/Example_06/Signals.fst");
+  PropertiesPanel props(&f.doc);
+  const Board& b = f.b();
+  ASSERT_EQ(b.zips.size(), 1u);
+  int seed = -1, conductors = 0;
+  for (int i = 0; i < int(b.tracks.size()); ++i)
+    if (b.tracks[i].zip == 0) {
+      ++conductors;
+      if (seed < 0) seed = i;
+    }
+  ASSERT_GE(seed, 0);
+  f.doc.setSelection({{ItemType::Track, seed}}, {});
+  f.view.cycleSelection();
+  EXPECT_EQ(int(f.doc.selectedItems().size()), conductors) << "the whole section";
+  bool titled = false;
+  for (QLabel* l : props.findChildren<QLabel*>()) titled |= l->text().contains("Застёгнутая пара");
+  EXPECT_TRUE(titled);
+  QPushButton* swap = nullptr;
+  for (QPushButton* p : props.findChildren<QPushButton*>())
+    if (p->text().contains("Поменять цепи")) swap = p;
+  ASSERT_TRUE(swap);
+  const int pSide = b.zips[0].pSide;
+  const int netOfSeed = b.tracks[seed].net;
+  swap->click();
+  EXPECT_EQ(f.b().zips[0].pSide, -pSide);
+  EXPECT_NE(f.b().tracks[seed].net, netOfSeed);
+  f.doc.undoStack()->undo();
+  EXPECT_EQ(f.b().tracks[seed].net, netOfSeed);
+  f.doc.setSelection({{ItemType::Track, seed}}, {});
+  f.view.unzipSelection();
+  EXPECT_TRUE(f.b().zips.empty());
+  int left = 0;
+  for (const Track& t : f.b().tracks) left += t.net == netOfSeed;
+  EXPECT_GT(left, 0);
+  f.doc.undoStack()->undo();
+  EXPECT_EQ(f.b().zips.size(), 1u);
+}
+
 // «Свойства»: the width of the selected wires is edited in place, as one undoable step.
 TEST(Gui, PropertiesEditWireWidth) {
   Fixture f("tt.kicad_pcb");

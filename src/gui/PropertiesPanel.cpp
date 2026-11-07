@@ -1,5 +1,7 @@
 #include "gui/PropertiesPanel.h"
 
+#include "core/DiffPairs.h"
+
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDoubleSpinBox>
@@ -182,7 +184,13 @@ void PropertiesPanel::rebuild() {
     if (kinds == 0) page = message(tr("Нет выделенных объектов"));
     else if (kinds > 1) page = message(tr("Выделены объекты разных типов (%1)").arg(items.size() + comps.size()));
     else if (!comps.empty()) page = componentPage(comps);
-    else if (!tracks.empty()) page = wirePage(tracks);
+    else if (!tracks.empty()) {
+      // All of one zipped section: the section's page (TopoR's «Свойства застёгнутой пары проводников»).
+      const Board& bd = *doc_->board();
+      const int z = bd.tracks[size_t(tracks.front())].zip;
+      const bool oneZip = z >= 0 && std::ranges::all_of(tracks, [&](int t) { return bd.tracks[size_t(t)].zip == z; });
+      page = oneZip ? zipPage(z) : wirePage(tracks);
+    }
     else if (!vias.empty()) page = viaPage(vias);
     else if (!zones.empty()) page = zones.size() == 1 ? zonePage(zones[0]) : message(tr("Области металлизации (%1)").arg(zones.size()));
     else if (!keepouts.empty()) page = keepouts.size() == 1 ? keepoutPage(keepouts[0]) : message(tr("Запреты (%1)").arg(keepouts.size()));
@@ -839,6 +847,48 @@ QWidget* PropertiesPanel::wirePage(const std::vector<int>& tracks) {
     double clr = double(b.clearance(*net, *cl));
     f->addRow(tr("Зазор:"), new QLabel(formatLength(clr, u, 3) + " " + unitName(u)));
   }
+  return w;
+}
+
+QWidget* PropertiesPanel::zipPage(int zip) {
+  const Board& b = *doc_->board();
+  const ZippedWire& z = b.zips[size_t(zip)];
+  Unit u = doc_->unit();
+  auto* w = new QWidget;
+  auto* f = new QFormLayout(w);
+  f->addRow(title(tr("Застёгнутая пара проводников")));
+  auto netName = [&](int n) { return n >= 0 ? QString::fromStdString(b.nets[size_t(n)].name) : QString(); };
+  auto* nets = new QWidget;
+  auto* nl = new QHBoxLayout(nets);
+  nl->setContentsMargins(0, 0, 0, 0);
+  nl->addWidget(new QLabel(netName(z.netP) + ", " + netName(z.netN)));
+  auto* swap = new QPushButton(tr("Поменять цепи местами"));
+  connect(swap, &QPushButton::clicked, this, [this, zip] { edit(tr("Поменять цепи местами"), [&](Board& bd) { swapZipNets(bd, zip); }); });
+  nl->addWidget(swap);
+  f->addRow(tr("Цепи:"), nets);
+  f->addRow(tr("Слой:"), new QLabel(QString::fromStdString(b.layers[size_t(z.layer)].name)));
+  if (z.pair >= 0 && z.pair < int(b.hispeed.diffSignals.size())) {
+    const DiffSignal& d = b.hispeed.diffSignals[size_t(z.pair)];
+    const Impedance* imp = b.hispeed.impedance(d.impedance);
+    f->addRow(tr("Дифф. сигнал:"), new QLabel(QString::fromStdString(d.name)));
+    f->addRow(tr("Имя/Импеданс:"), new QLabel(QString::fromStdString(d.impedance) + (imp ? QString(" (%1 Ohm)").arg(imp->z0) : QString())));
+    f->addRow(tr("Допустимый разброс длин:"), new QLabel(formatLength(double(d.mismatch), u, 3) + " " + unitName(u)));
+  }
+  f->addRow(tr("Ширина проводника / зазор:"),
+            new QLabel(formatLength(double(z.condWidth), u, 3) + " / " + formatLength(double(z.gap), u, 3) + " " + unitName(u)));
+  double axis = 0;
+  for (const Track& t : z.axis) axis += t.length();
+  f->addRow(tr("Длина:"), new QLabel(formatLength(axis, u, 3) + " " + unitName(u)));
+  auto* fixed = new QCheckBox;
+  fixed->setChecked(z.fixed);
+  connect(fixed, &QCheckBox::clicked, this, [this, zip](bool on) {
+    edit(on ? tr("Фиксировать") : tr("Расфиксировать"), [&](Board& bd) {
+      bd.zips[size_t(zip)].fixed = on;
+      for (Track& t : bd.tracks)
+        if (t.zip == zip) t.locked = on;
+    });
+  });
+  f->addRow(tr("Фиксация:"), fixed);
   return w;
 }
 

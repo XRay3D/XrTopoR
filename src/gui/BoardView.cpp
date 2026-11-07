@@ -1,5 +1,6 @@
 #include "gui/BoardView.h"
 
+#include "core/DiffPairs.h"
 #include "core/Padstack.h"
 
 #include <QApplication>
@@ -489,9 +490,29 @@ void BoardView::drawLayer(QPainter& p, LayerId l) {
           for (auto& cut : z.cutouts) p.drawPolygon(toPoly(cut, [&](Vec2 v) { return toScreen(v); }));
         }
     }
-    if (d.flag("showWires") && showDetails)
+    if (d.flag("showWires") && showDetails) {
       for (auto& t : b.tracks)
         if (t.layer == l) drawTrack(p, t, netColor(t.net, d.colorizeWire).value_or(t.locked ? fixColor : details));
+      // The clasps («замки») of the zipped sections: a bar across the pair at each end of its axis.
+      p.setPen(QPen(details.lighter(170), 2));
+      for (const ZippedWire& z : b.zips) {
+        if (z.layer != l || z.axis.empty()) continue;
+        for (int end = 0; end < 2; ++end) {
+          const Track& piece = end ? z.axis.back() : z.axis.front();
+          const Vec2 at = end ? piece.b.v() : piece.a.v();
+          Vec2 dir;
+          if (piece.mid) {
+            const ArcGeom g = ArcGeom::fromThreePoints(piece.a.v(), piece.mid->v(), piece.b.v());
+            dir = (at - g.center).perp();
+          } else {
+            dir = piece.b.v() - piece.a.v();
+          }
+          if (dir.len2() < 1) continue;
+          const Vec2 n = dir.normalized().perp() * (double(z.width()) / 2.0);
+          p.drawLine(toScreen(at - n), toScreen(at + n));
+        }
+      }
+    }
     if (d.flag("showMetalPads") && showPads) {
       bool special = d.flag("throughPad", false);
       QColor through = doc_->color("clrThroughPads", 0xc0c0c0);
@@ -1095,9 +1116,16 @@ void BoardView::selectInFrame(QRectF screenRect, bool crossing, bool add) {
 
 std::vector<ItemRef> BoardView::wireOf(int track) const {
   // A wire as TopoR selects it: same-net tracks of one layer joined end to end, up to a pad, a via
-  // or a junction where several tracks meet (none of those is part of it).
+  // or a junction where several tracks meet (none of those is part of it). A conductor of a zipped pair:
+  // the whole section, both conductors (X once more takes both nets).
   const Board& b = *doc_->board();
   const Track& t0 = b.tracks[track];
+  if (t0.zip >= 0) {
+    std::vector<ItemRef> out;
+    for (int i = 0; i < int(b.tracks.size()); ++i)
+      if (b.tracks[i].zip == t0.zip) out.push_back({ItemType::Track, i});
+    return out;
+  }
   const int net = t0.net;
   const LayerId layer = t0.layer;
   const LayerMask lm = LayerMask(1) << layer;
@@ -2141,6 +2169,59 @@ void BoardView::changeTrackWidth() {
   for (ItemRef r : doc_->selectedItems())
     if (r.type == ItemType::Track) b.tracks[r.index].width = *w;
   doc_->commitEdit(before, tr("Изменить ширину"));
+}
+
+// The zipped sections the selected tracks are conductors of.
+std::vector<int> BoardView::selectedZips() const {
+  std::vector<int> out;
+  if (!doc_->hasBoard()) return out;
+  const Board& b = *doc_->board();
+  for (ItemRef r : doc_->selectedItems())
+    if (r.type == ItemType::Track && b.tracks[r.index].zip >= 0 && !std::ranges::contains(out, b.tracks[r.index].zip)) out.push_back(b.tracks[r.index].zip);
+  return out;
+}
+
+// «Застегнуть проводники»: the selected tracks of the two nets of a pair, a chain each on one layer.
+void BoardView::zipSelection() {
+  if (!doc_->hasBoard()) return;
+  Board& b = *doc_->board();
+  std::vector<int> tracks;
+  for (ItemRef r : doc_->selectedItems())
+    if (r.type == ItemType::Track) tracks.push_back(r.index);
+  auto before = doc_->beginEdit();
+  auto z = zipTracks(b, tracks);
+  if (!z) {  // (nothing changed: zipTracks checks everything first)
+    emit status(tr("Застегнуть проводники нельзя: %1").arg(QString::fromStdString(z.error())));
+    return;
+  }
+  doc_->commitEdit(before, tr("Застегнуть проводники"));
+  std::vector<ItemRef> sel;
+  for (int i = 0; i < int(b.tracks.size()); ++i)
+    if (b.tracks[i].zip == *z) sel.push_back({ItemType::Track, i});
+  doc_->setSelection(sel, {});
+  emit status(tr("Проводники застёгнуты"));
+}
+
+// «Расстегнуть проводники»: the sections of the selected conductors go, the conductors stay.
+void BoardView::unzipSelection() {
+  std::vector<int> zips = selectedZips();
+  if (zips.empty()) return;
+  Board& b = *doc_->board();
+  auto before = doc_->beginEdit();
+  std::ranges::sort(zips, std::greater<>());
+  for (int z : zips) unzip(b, z);
+  doc_->commitEdit(before, tr("Расстегнуть проводники"));
+  emit status(tr("Проводники расстёгнуты: %1").arg(zips.size()));
+}
+
+// «Поменять цепи местами» (Alt+Space): each selected section's conductors take each other's net.
+void BoardView::swapZipNets() {
+  std::vector<int> zips = selectedZips();
+  if (zips.empty()) return;
+  Board& b = *doc_->board();
+  auto before = doc_->beginEdit();
+  for (int z : zips) xr::swapZipNets(b, z);
+  doc_->commitEdit(before, tr("Поменять цепи местами"));
 }
 
 void BoardView::recomputeShapes() {

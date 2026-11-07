@@ -3,6 +3,7 @@
 #include "topo/PadExit.h"
 #include "router/topo/Realizer.h"
 
+#include "core/DiffPairs.h"
 #include "core/Prof.h"
 #include "core/SpatialIndex.h"
 #include "drc/Drc.h"
@@ -1997,85 +1998,13 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
       z.axis = axisOut;
       for (Track& t : z.axis) t.width = Coord(std::llround(double(w.width)));
       const double off = (double(w.condWidth) + double(z.gap)) / 2.0;
-      auto offsetAt = [&](const Track& t, Vec2 p, double side) {
-        Vec2 tangent;
-        if (t.mid) {
-          const ArcGeom g = ArcGeom::fromThreePoints(t.a.v(), t.mid->v(), t.b.v());
-          const Vec2 rad = (p - g.center).normalized();
-          tangent = g.sweep > 0 ? rad.perp() : rad.perp() * -1.0;
-        } else {
-          tangent = (t.b.v() - t.a.v()).normalized();
-        }
-        return p + tangent.perp() * (off * side);
-      };
       for (int side = 0; side < 2; ++side) {
         const double sg = (side ? 1.0 : -1.0) * double(w.pSide);  // [1] the positive conductor
-        const int net = side ? w.net : w.netN;
-        // Each piece offset; an arc whose radius on this side comes to nothing (a bend of the axis tighter
-        // than the offset: the inner conductor's arc turns inside out) is dropped, and its neighbours meet
-        // where their lines cross, or are joined by a straight piece.
-        std::vector<Track> run;
-        std::vector<char> gapBefore;
-        bool gap = false;
-        for (size_t k = 0; k < axisOut.size(); ++k) {
-          const Track& a = axisOut[k];
-          Track t;
-          t.a = Point(offsetAt(a, a.a.v(), sg));
-          t.b = Point(offsetAt(a, a.b.v(), sg));
-          if (a.mid) {
-            const ArcGeom g = ArcGeom::fromThreePoints(a.a.v(), a.mid->v(), a.b.v());
-            const Vec2 m = offsetAt(a, a.mid->v(), sg);
-            const double r2 = (m - g.center).len();
-            const bool flipped = (m - g.center).dot(a.mid->v() - g.center) <= 0;
-            if (!g.valid || flipped || r2 < 1000) {
-              gap = true;
-              continue;
-            }
-            if ((t.b.v() - t.a.v()).len() > 2000) t.mid = Point(m);  // (a chord of a micron or two: a line)
-          }
+        for (Track t : offsetRun(axisOut, sg * off, 4 * double(w.width))) {
           t.width = w.condWidth;
           t.layer = w.layer;
-          t.net = net;
+          t.net = side ? w.net : w.netN;
           t.zip = w.zip;
-          if (t.a == t.b) continue;
-          run.push_back(t);
-          gapBefore.push_back(gap);
-          gap = false;
-        }
-        for (size_t k = 1; k < run.size(); ++k) {
-          if (!gapBefore[k] && run[k - 1].b == run[k].a) continue;
-          Track& p0 = run[k - 1];
-          Track& p1 = run[k];
-          if ((p0.b.v() - p1.a.v()).len() < 2000) {  // (a micron or two apart: one point, on the line's side)
-            if (!p1.mid) p1.a = p0.b;
-            else p0.b = p1.a;
-            continue;
-          }
-          if (!p0.mid && !p1.mid) {  // two lines: to where they cross, near the corner
-            const Vec2 A = p0.a.v(), B = p0.b.v(), C = p1.a.v(), D = p1.b.v();
-            const double den = (B - A).cross(D - C);
-            if (std::abs(den) > 1e-9) {
-              const double u = (C - A).cross(D - C) / den;
-              const Vec2 X = A + (B - A) * u;
-              if (u > 0 && (X - B).len() < 4 * double(w.width) && (X - C).len() < 4 * double(w.width)) {
-                p0.b = Point(X);
-                p1.a = Point(X);
-                continue;
-              }
-            }
-          }
-          if (p0.b != p1.a) {  // else joined by a straight piece
-            Track j = p0;
-            j.mid.reset();
-            j.a = p0.b;
-            j.b = p1.a;
-            run.insert(run.begin() + long(k), j);
-            gapBefore.insert(gapBefore.begin() + long(k), 0);
-            ++k;
-          }
-        }
-        for (Track& t : run) {
-          if (t.a == t.b) continue;
           b.tracks.push_back(t);
           st.trackWire.push_back(wi);
         }

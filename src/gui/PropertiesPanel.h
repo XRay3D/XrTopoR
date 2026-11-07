@@ -25,6 +25,7 @@ class PropertiesPanel : public QWidget {
   QWidget* componentPage(const std::vector<int>& comps);
   QWidget* padPage(int pad);
   QWidget* wirePage(const std::vector<int>& tracks);
+  QWidget* zipPage(int zip);
   QWidget* viaPage(const std::vector<int>& vias);
   QWidget* zonePage(int zone);
   QWidget* keepoutPage(int keepout);

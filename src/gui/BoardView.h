@@ -87,6 +87,12 @@ class BoardView : public QWidget {
   void prevView();                   // Alt+←
   void nextView();                   // Alt+→
   void changeTrackWidth();
+  // The differential pairs' zipped sections: zip the selected tracks of a pair, unzip the selected sections,
+  // swap their nets.
+  void zipSelection();
+  void unzipSelection();
+  void swapZipNets();
+  std::vector<int> selectedZips() const;
   void recomputeShapes();  // F5: selected (or all) tracks become sketches and are re-realised
   bool recomputeShapesModel(bool editedOnly = false);  // false: stopped by the model's violations  // F5 on the topological model (everything unlocked)
 

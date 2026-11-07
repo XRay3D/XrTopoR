@@ -193,6 +193,9 @@ void MainWindow::bindCommands() {
   c.bind("Accel_FlipHorizontally", [this] { view_->flipSelection(false); });
   c.bind("Accel_FlipVertically", [this] { view_->flipSelection(true); });
   c.bind("Accel_Width", [this] { view_->changeTrackWidth(); });
+  c.bind("Accel_ZipWire", [this] { view_->zipSelection(); });
+  c.bind("Accel_UnZipWire", [this] { view_->unzipSelection(); });
+  c.bind("Accel_SwapZipNets", [this] { view_->swapZipNets(); });
   c.bind("Accel_Pour", [this] { pourSelected(0); });
   c.bind("Accel_UnPourWithRestore", [this] { pourSelected(1); });
   c.bind("Cmd_RePour", [this] { pourSelected(2); });
@@ -1239,6 +1242,7 @@ void MainWindow::refineModel(bool thenLayers) {
     auto before = doc_->beginEdit();
     Board& b = *doc_->board();
     b.tracks = work->tracks;
+    b.zips = work->zips;  // (the pairs' axes are redrawn with their conductors)
     b.vias = work->vias;
     b.zones = work->zones;
     doc_->commitEdit(before, tr("Перекладка проводников"), false);
@@ -1287,6 +1291,7 @@ void MainWindow::refineTracks(bool changeLayers) {
       auto before = doc_->beginEdit();
       Board& b = *doc_->board();
       b.tracks = work->tracks;
+      b.zips = work->zips;  // (the pairs' axes are redrawn with their conductors)
       b.vias = work->vias;
       doc_->clearSelection();
       doc_->commitEdit(before, tr("Перекладка проводников"));
@@ -1354,6 +1359,7 @@ void MainWindow::optimize(bool components, bool thenRefine) {
     b.components = work->components;
     b.pads = work->pads;
     b.tracks = work->tracks;
+    b.zips = work->zips;  // (the pairs' axes are redrawn with their conductors)
     b.vias = work->vias;
     doc_->commitEdit(before, tr("Подвижка"));
     doc_->clearLog(tr("Подвижка"));
@@ -1409,6 +1415,7 @@ void MainWindow::optimizeModel(bool thenRefine) {
     auto before = doc_->beginEdit();
     Board& b = *doc_->board();
     b.tracks = work->tracks;
+    b.zips = work->zips;  // (the pairs' axes are redrawn with their conductors)
     b.vias = work->vias;
     b.zones = work->zones;
     doc_->commitEdit(before, tr("Подвижка"), false);
