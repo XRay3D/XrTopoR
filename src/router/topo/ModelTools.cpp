@@ -198,7 +198,7 @@ RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int
           ob.pts[id].round = true;
           break;
         case Owner::Kind::Outline: id = ob.add(x.p, 0, clr, kBoardEdge); break;
-        case Owner::Kind::Keepout: id = ob.add(x.p, 0, 0, kKeepout); break;
+        case Owner::Kind::Keepout: id = ob.add(x.p, 0, 0, kBoardEdge); break;
       }
       if (id >= 0) ob.pts[id].owner = x.owner;
     }
@@ -219,6 +219,14 @@ RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int
     for (auto [owner, centre] : centreOf)
       for (int v : m.ownerVerts[owner])
         if (v != centre && !(m.verts[v].t == 0 && m.verts[v].off.len2() < 1)) ob.cornersOf[centre].push_back(v);
+    // A wire locked without crossings (through a keepout with no way round, one the mesh does not hold)
+    // is in no slot: its tracks are obstacles, as on the sketch path.
+    for (const Wire& w : t.wires) {
+      if (w.layer != layer || !w.locked || !w.cross.empty() || localOf.contains(int(&w - t.wires.data()))) continue;
+      for (uint32_t id : w.tracks)
+        for (const Track& tr : b.tracks)
+          if (tr.id == id && tr.layer == layer) ob.addTrack(tr, double(b.clearance(tr.net, layer)));
+    }
     // The stubs' copper, as the realiser adds it.
     for (int k = 0; k < NW; ++k)
       if (wires[k].layer == layer)
@@ -468,7 +476,7 @@ F5ModelResult runF5Model(Board& b, Topology& t, const F5ModelOptions& o) {
     }
   }
   for (const Violation& v : t.violations)
-    if (v.kind == Violation::Kind::Overflow || v.kind == Violation::Kind::OutsideBoard) r.violations.push_back(v);
+    if (v.kind == Violation::Kind::Overflow || v.kind == Violation::Kind::OutsideBoard || v.kind == Violation::Kind::Blocked) r.violations.push_back(v);
   return r;
 }
 
@@ -535,6 +543,7 @@ std::vector<DrcViolation> topologyViolations(const Board& b, const Topology& t, 
         break;
       case K::ThroughPad: d.message = std::format("wire {} through another net's copper", netOf(v.wireA)); break;
       case K::OutsideBoard: d.message = std::format("wire {} the mesh does not hold", netOf(v.wireA)); break;
+      case K::Blocked: d.message = std::format("wire {} through a keepout, no way round", netOf(v.wireA)); break;
       case K::Overflow: d.message = std::format("edge overflowing by {:.3f} mm", v.deficit / 1e6); break;
     }
     if (auto a = trackOf(v.wireA)) d.a = *a;

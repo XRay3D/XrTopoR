@@ -166,7 +166,7 @@ double tautLength(const Topology& t, int wi) {
   return len;
 }
 
-std::optional<RelayPath> findRelay(const Topology& t, int wi, const std::vector<char>* avoid, const std::vector<int>* absent) {
+std::optional<RelayPath> findRelay(const Topology& t, int wi, const std::vector<char>* avoid, const std::vector<int>* absent, bool squeeze) {
   const Wire& w = t.wires[wi];
   const LayerMesh& m = *t.mesh(w.layer);
   RelayPath out;
@@ -246,8 +246,10 @@ std::optional<RelayPath> findRelay(const Topology& t, int wi, const std::vector<
   // Crossing edge e at the gap: does it still fit, and where does the wire cross?
   struct Fit {
     bool ok = false;
+    double penalty = 0;  // squeezing: the deficit, many times over
     Vec2 p;
   };
+  constexpr double kSqueeze = 200;  // a 0.1 mm deficit costs as much as a 20 mm detour
   std::map<std::pair<int, int>, Fit> fitCache;
   auto fit = [&](int e, const std::vector<int>& cids, int gap) -> const Fit& {
     auto [it, fresh] = fitCache.try_emplace({e, gap});
@@ -263,7 +265,15 @@ std::optional<RelayPath> findRelay(const Topology& t, int wi, const std::vector<
     const EdgeCapacity c = capacityOf(t, m, E.v[0], E.v[1], ws, isAbsent(E.along) ? -1 : E.along);
     // It fits at the nominal widths: a new path is no reason to narrow a wire (the capacity would narrow one
     // to make room — the automatic tools narrow only as the last resort).
-    it->second.ok = c.deficit <= 0 && c.cls < 3 && !c.narrowed;
+    // Squeezing: a deficit is taken anywhere but against a wall (the realiser shares a deficit between
+    // the edge's two ends, and a keepout or the board edge gives nothing); there the wires may be narrowed
+    // to their minimum (the last resort), no more.
+    const bool atWall = std::ranges::any_of(E.v, [&](int v) {
+      const Owner::Kind k = t.owners[m.verts[v].owner].kind;
+      return k == Owner::Kind::Outline || k == Owner::Kind::Keepout;
+    });
+    it->second.ok = c.cls < 3 && (squeeze ? (!atWall || c.deficit <= 0) : (c.deficit <= 0 && !c.narrowed));
+    if (squeeze) it->second.penalty = kSqueeze * std::max(0.0, c.deficit) + (c.narrowed ? kSqueeze * 10000 : 0);
     it->second.p = pointOn(m, E, slotOf(c, gap).mid(), c.L);
     return it->second;
   };
@@ -358,7 +368,7 @@ std::optional<RelayPath> findRelay(const Topology& t, int wi, const std::vector<
         const Fit& ft = fit(e, cids, gap);
         if (!ft.ok) continue;
         const int le = m.localEdge(next, e);
-        push({nd.g + (ft.p - nd.p).len(), ni, next, le, -1, e, gap, gapPlace(next, le, E, cids, gap), ft.p});
+        push({nd.g + (ft.p - nd.p).len() + ft.penalty, ni, next, le, -1, e, gap, gapPlace(next, le, E, cids, gap), ft.p});
       }
     }
   }

@@ -117,7 +117,8 @@ struct Wire {
 };
 
 struct Violation {
-  enum class Kind { Crossing, ThroughPad, OutsideBoard, Overflow };
+  // Blocked: a wire drawn through a keepout or across a cutout that found no way round (locked where it is).
+  enum class Kind { Crossing, ThroughPad, OutsideBoard, Overflow, Blocked };
   Kind kind = Kind::Crossing;
   int wireA = -1, wireB = -1;
   int owner = -1;
@@ -176,6 +177,7 @@ struct Topology {
   void buildOwners(const Board& b, BuildScratch& s);
   void buildMeshes(const Board& b, BuildScratch& s);
   void convertWires(const Board& b, BuildScratch& s);
+  void relayDisplaced(const Board& b, BuildScratch& s);
 };
 
 }  // namespace xr::topo

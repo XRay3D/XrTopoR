@@ -243,14 +243,14 @@ LayerObstacles collect(const Board& b, LayerId layer, const std::vector<RealVia>
         Vec2 a = pts[i], c = pts[(i + 1) % n];
         int parts = std::max(1, int(std::ceil((c - a).len() / (0.5 * kNmPerMm))));
         for (int q = 0; q < parts; ++q) {
-          int o = ob.add(a + (c - a) * (double(q) / parts), 0, 0, kKeepout);
+          int o = ob.add(a + (c - a) * (double(q) / parts), 0, 0, kBoardEdge);
           if (prev >= 0) ob.link(prev, o, 0);
           else first = o;
           prev = o;
         }
       }
       if (closed) ob.link(prev, first, 0);
-      else ob.link(prev, ob.add(pts.back(), 0, 0, kKeepout), 0);
+      else ob.link(prev, ob.add(pts.back(), 0, 0, kBoardEdge), 0);
     }
   }
   if (opt.tracksAsObstacles)
@@ -264,16 +264,7 @@ LayerObstacles collect(const Board& b, LayerId layer, const std::vector<RealVia>
         if (t.mid) tb.add(t.mid->v());
         if (!inRegion(tb.inflated(t.width))) continue;
       }
-      double r = t.width / 2.0, clr = double(b.clearance(t.net, layer)) + kTrackObstacleMargin;
-      int prev = -1;
-      // Arcs coarsely (0.2 mm chords, sagitta under the margin): a point every 20 um made bend
-      // circles that overlapped one another, tangents failed and apexes were dropped — the wire
-      // then cut straight through the fixed one (a subset of six nets re-laid alone: 155 violations).
-      for (Vec2 p : t.path(200000)) {
-        int o = ob.add(p, r, clr, t.net);
-        if (prev >= 0) ob.link(prev, o, r);
-        prev = o;
-      }
+      ob.addTrack(t, double(b.clearance(t.net, layer)) + kTrackObstacleMargin);
     }
   return ob;
 }
@@ -321,7 +312,7 @@ LayerObstacles collectFromMesh(const Board& b, LayerId layer, const TopoMesh& m,
       case VKind::Outline: ob.add(v.p, 0, double(b.edgeClearance), kBoardEdge); break;
       case VKind::Keepout: {
         const Keepout& k = b.keepouts[v.keepout];
-        if (k.onLayer(layer) && k.wires) ob.add(v.p, 0, 0, kKeepout);
+        if (k.onLayer(layer) && k.wires) ob.add(v.p, 0, 0, kBoardEdge);
         else ob.add(v.p, 0, 0, kTransparent);
         break;
       }
@@ -346,7 +337,7 @@ LayerObstacles collectFromMesh(const Board& b, LayerId layer, const TopoMesh& m,
   for (const MEdge& e : m.edges) {
     if (!(e.constrained || e.blocked) || e.v[0] == e.v[1]) continue;
     ob.constraints.push_back({e.v[0], e.v[1]});
-    if (isWall(ob.pts[e.v[0]].net) && isWall(ob.pts[e.v[1]].net)) ob.side(e.v[0], e.v[1], 0);
+    if (ob.pts[e.v[0]].net == kBoardEdge && ob.pts[e.v[1]].net == kBoardEdge) ob.side(e.v[0], e.v[1], 0);
   }
   return ob;
 }
@@ -861,7 +852,7 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
   // The clearance between a wire and an obstacle, between two wires: the pair's rule when the board has
   // such rules (clearances between net groups), else the larger of their own.
   auto clrTo = [&](const OPt& o, const RealWire& w) {
-    if (o.net == kKeepout) return 0.0;  // a wall with no clearance: the wire's copper may touch it
+    if (o.net == kBoardEdge) return o.clr;  // a wall: its own clearance alone (none from a keepout)
     double c = std::max(o.clr, double(w.clearance));
     if (o.net >= 0 && w.net >= 0 && !b.pairRules.empty())
       if (Coord p = pairClearance(b.pairRules, o.net, w.net, w.layer); p > 0) c = double(p);

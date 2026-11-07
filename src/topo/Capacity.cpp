@@ -15,7 +15,7 @@ bool foreign(const Owner& o, const Wire& w) { return o.net != w.net || w.net == 
 
 double ownerClearance(const Topology& t, const LayerMesh& m, int owner, const Wire& w) {
   const Owner& o = t.owners[owner];
-  if (o.kind == Owner::Kind::Keepout) return 0.0;
+  if (o.kind == Owner::Kind::Outline || o.kind == Owner::Kind::Keepout) return m.ownerClr[owner];  // a wall: its own alone
   if (Coord p = pairClearance(t.pairRules, o.net, w.net, m.layer); p > 0) return double(p);
   return std::max(m.ownerClr[owner], double(w.clr));
 }

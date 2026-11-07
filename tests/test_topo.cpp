@@ -274,13 +274,13 @@ TEST(Topo, CapacityIsTheRealisersPacking) {
 namespace {
 
 struct Counts {
-  int crossing = 0, throughPad = 0, outside = 0, overflow = 0;
+  int crossing = 0, throughPad = 0, outside = 0, overflow = 0, blocked = 0;
 };
 Counts countViolations(const topo::Topology& t) {
   Counts c;
   for (const topo::Violation& v : t.violations) {
     using K = topo::Violation::Kind;
-    (v.kind == K::Crossing ? c.crossing : v.kind == K::ThroughPad ? c.throughPad : v.kind == K::OutsideBoard ? c.outside : c.overflow)++;
+    (v.kind == K::Crossing ? c.crossing : v.kind == K::ThroughPad ? c.throughPad : v.kind == K::OutsideBoard ? c.outside : v.kind == K::Blocked ? c.blocked : c.overflow)++;
   }
   return c;
 }
@@ -1779,6 +1779,70 @@ TEST(Topo, KeepoutClearanceIsZero) {
       EXPECT_LE(q.y, PinBoard::at(0, 10.0).y + 1000) << "the wall";
     }
   }
+}
+
+namespace {
+
+// After F5 on the model: the wire N drawn straight through the obstacle between its pads at (5,10) and
+// (35,10) went round it; `detour`: the longest way round allowed, in mm over the straight 30.
+void expectReLaidRound(PinBoard& p, double detour, const char* how) {
+  auto f = p.f5Model();
+  ASSERT_TRUE(f.res.drawn) << how;
+  for (const topo::Violation& v : f.res.violations)
+    EXPECT_NE(v.kind, topo::Violation::Kind::Blocked) << how << ": no way round found";
+  for (const topo::Violation& v : f.t.violations)
+    EXPECT_NE(v.kind, topo::Violation::Kind::OutsideBoard) << how << ": the mesh does not hold it";
+  EXPECT_EQ(p.drcOf(DrcViolation::Type::Keepout), 0) << how;
+  EXPECT_EQ(p.drcOf(DrcViolation::Type::Edge), 0) << how;
+  EXPECT_EQ(p.drcOf(DrcViolation::Type::Short), 0) << how;
+  EXPECT_GT(p.length("N"), 30.1) << how << ": still straight through";
+  EXPECT_LT(p.length("N"), 30 + detour) << how << ": the long way round";
+  // The model's wire crosses no edge of a blocked triangle.
+  for (const topo::Wire& w : f.t.wires) {
+    const topo::LayerMesh& m = *f.t.mesh(w.layer);
+    for (int cid : w.cross)
+      for (int ti : m.edges[f.t.crossings[cid].edge].t)
+        if (ti >= 0) EXPECT_FALSE(m.tris[ti].blocked) << how;
+  }
+}
+
+}  // namespace
+
+// A wire drawn through a keepout area is laid round it by F5 on the model, the shorter way (TopoR leaves
+// the error 5031 and runs no automatic procedure until the wire is moved out by hand). The keepout is
+// 4 x 6 mm across the wire, from y 7 to 13: round its lower side is the shorter way, under 2 x 3.2 extra.
+TEST(Topo, WireInsideAKeepoutIsReLaidRound) {
+  PinBoard p;
+  p.pad("N", 5, 10, PadShapeKind::Circle, 1, 1);
+  p.pad("N", 35, 10, PadShapeKind::Circle, 1, 1);
+  p.track("N", {{5, 10}, {35, 10}}, 0.3);
+  p.keepout({{18, 7}, {22, 7}, {22, 13}, {18, 13}});
+  EXPECT_EQ(p.drcOf(DrcViolation::Type::Keepout), 1) << "drawn through";
+  expectReLaidRound(p, 2 * 3.2 + 1, "area");
+}
+
+// The same across a keepout line (a barrier from y 5 to 15): round one of its ends.
+TEST(Topo, WireAcrossAKeepoutLineIsReLaid) {
+  PinBoard p;
+  p.pad("N", 5, 10, PadShapeKind::Circle, 1, 1);
+  p.pad("N", 35, 10, PadShapeKind::Circle, 1, 1);
+  p.track("N", {{5, 10}, {35, 10}}, 0.3);
+  p.keepoutLine({20, 5}, {20, 15});
+  EXPECT_EQ(p.drcOf(DrcViolation::Type::Keepout), 1) << "drawn across";
+  expectReLaidRound(p, 2 * 5.2 + 1, "line");
+}
+
+// And across a cutout in the board: a keepout with the clearance to the board edge, nothing more.
+TEST(Topo, WireThroughACutoutIsReLaid) {
+  PinBoard p;
+  p.pad("N", 5, 10, PadShapeKind::Circle, 1, 1);
+  p.pad("N", 35, 10, PadShapeKind::Circle, 1, 1);
+  p.track("N", {{5, 10}, {35, 10}}, 0.3);
+  p.cutout({{18, 7}, {22, 7}, {22, 13}, {18, 13}});
+  EXPECT_GE(p.drcOf(DrcViolation::Type::Edge), 1) << "drawn through";
+  expectReLaidRound(p, 2 * 3.2 + 2 * 0.25 + 1, "cutout");
+  const Vec2 c[4] = {PinBoard::at(18, 7), PinBoard::at(22, 7), PinBoard::at(22, 13), PinBoard::at(18, 13)};
+  for (int i = 0; i < 4; ++i) EXPECT_GE(p.centreLineTo("N", c[i], c[(i + 1) % 4]), 0.15 + 0.25 - 0.005) << "side " << i;
 }
 
 // The pins of a row are left through their ends only (TopoR's F5: 109 of the 110 exits of

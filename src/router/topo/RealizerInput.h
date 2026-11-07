@@ -16,11 +16,9 @@
 namespace xr::topo {
 
 constexpr int kTransparent = -3;  // a point that constrains nothing (via site, pad of another layer)
-// A routing keepout's point: a wall every net keeps out of, with no clearance of its own (TopoR has no
-// such rule, only the error of a wire across the keepout). The outline's points are kBoardEdge, with the
-// clearance to the board edge.
-constexpr int kKeepout = -4;
-inline bool isWall(int net) { return net == kBoardEdge || net == kKeepout; }
+// A wall's point (the outline, a cutout, a keepout) is kBoardEdge: it keeps every net out, by its own
+// clearance alone (the clearance to the board edge; nothing from a keepout: TopoR has no such rule, only
+// the error of a wire across it).
 
 struct OPt {
   Vec2 p;
@@ -54,6 +52,18 @@ struct LayerObstacles {
   void side(int a, int c, double r) {
     adj[a].push_back({c, r});
     adj[c].push_back({a, r});
+  }
+  // A track that stays as it lies, as a chain of points. Arcs coarsely (0.2 mm chords, sagitta under the
+  // margin): a point every 20 um made bend circles that overlapped one another, tangents failed and apexes
+  // were dropped, and the wire cut straight through the fixed one (six nets re-laid alone: 155 violations).
+  void addTrack(const Track& t, double clr) {
+    const double r = t.width / 2.0;
+    int prev = -1;
+    for (Vec2 p : t.path(200000)) {
+      int o = add(p, r, clr, t.net);
+      if (prev >= 0) link(prev, o, r);
+      prev = o;
+    }
   }
   void link(int a, int c, double r) {
     constraints.push_back({a, c});

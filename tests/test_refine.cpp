@@ -366,6 +366,47 @@ TEST(Refine, WireBetweenTwoPadsAtTheRulesExactly) {
   for (const DrcViolation& v : topo::topologyViolations(b, t2, vs)) std::println("{} at ({:.3f}, {:.3f})", v.message, v.pos.x / 1e6, v.pos.y / 1e6);
 }
 
+// A keepout area over a bus (Placement_standard_routing: 5 x 3 mm across three tracks on Top, two of them
+// 1.5 mm wide, and two on Bottom, no pad or via within 1.3 mm) empties on F5 by the model: every wire goes
+// round, the wide ones first, the last squeezed in with its width narrowed where there is no other way;
+// the board's own 10 clearance violations stay what they were, no short. TopoR leaves the error 5031.
+TEST(Refine, PlacementWithAKeepoutOverTracks) {
+  auto lb = io::loadBoard(data("topor/Example_02/Placement_standard_routing.fst"));
+  ASSERT_TRUE(lb.has_value());
+  Board& b = **lb;
+  auto count = [&](DrcViolation::Type kind) {
+    DrcOptions o;
+    o.unconnected = false;
+    o.widths = false;
+    int n = 0;
+    for (const DrcViolation& v : runDrc(b, o)) n += v.type == kind;
+    return n;
+  };
+  auto f5 = [&] {
+    topo::Topology::assignIds(b);
+    topo::Topology t;
+    t.build(b);
+    auto res = topo::runF5Model(b, t);
+    EXPECT_TRUE(res.drawn);
+    for (const topo::Violation& v : res.violations) EXPECT_NE(v.kind, topo::Violation::Kind::Blocked) << "no way round";
+  };
+  Board clean = b;
+  f5();
+  const int clearances = count(DrcViolation::Type::Clearance);
+  b = clean;
+  Keepout k;
+  Graphic g;
+  g.kind = GraphicKind::Poly;
+  for (auto [x, y] : {std::pair{130.0, 95.0}, {135.0, 95.0}, {135.0, 98.0}, {130.0, 98.0}}) g.pts.push_back({x * kNmPerMm, -y * kNmPerMm});
+  k.shape.push_back(g);
+  b.keepouts.push_back(k);
+  EXPECT_EQ(count(DrcViolation::Type::Keepout), 5) << "drawn through";
+  f5();
+  EXPECT_EQ(count(DrcViolation::Type::Keepout), 0);
+  EXPECT_EQ(count(DrcViolation::Type::Short), 0);
+  EXPECT_LE(count(DrcViolation::Type::Clearance), clearances + 3) << clearances << " without the keepout";
+}
+
 // The wires widened past what the layout has room for (MinVia_standard_routing with every track 0.4 mm wide
 // in a layout drawn at 0.254: 756 clearance violations, none of them a short) are laid tight, the deficit
 // shared, as TopoR draws it: no wire through a pad and no loop. Three things used to go wrong: a bend round

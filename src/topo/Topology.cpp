@@ -114,8 +114,9 @@ void Topology::build(const Board& b) {
   violations.clear();
   BuildScratch scratch;
   buildOwners(b, scratch);
+  takeRules(b);  // before the wires: relayDisplaced searches with the pair rules
   convertWires(b, scratch);  // adds the junction owners, builds the meshes, lays the wires on them
-  takeRules(b);
+  relayDisplaced(b, scratch);  // the wires drawn through keepouts and cutouts, round them
   boardHash = boardHashOf(b);
 }
 
@@ -174,62 +175,48 @@ void Topology::buildOwners(const Board& b, BuildScratch& scratch) {
     o.locked = v.locked;
     viaOwner[vi] = add(std::move(o));
   }
-  // The outline, subdivided so that the edge clearance is sampled densely enough, and the keepouts.
+  // The walls: the outline and its cutouts (the clearance to the board edge is kept from them), the
+  // keepouts (no clearance); all subdivided so that the clearance is sampled densely enough.
   double viaDia = 0;
   for (const NetClass& nc : b.netClasses) viaDia = std::max(viaDia, double(nc.viaDiameter));
   const double pitch = std::max(1.2 * (viaDia + double(b.maxClearance())), 1.0 * kNmPerMm);
-  std::vector<std::pair<int, int>>& outlineLinks = scratch.outlineLinks;
-  auto outlineLoop = [&](const Polyline& loop) {
-    int first = -1, prev = -1;
-    for (Vec2 p : subdivide(loop, true, pitch)) {
+  auto wall = [&](const Polyline& pts, bool area, bool border, LayerMask layers) {
+    WallLoop wl{layers, {}, area, border};
+    for (Vec2 p : subdivide(pts, area, pitch)) {
       Owner o;
-      o.kind = Owner::Kind::Outline;
-      o.net = kBoardEdge;
+      o.kind = border ? Owner::Kind::Outline : Owner::Kind::Keepout;
+      o.net = border ? kBoardEdge : kNoNet;
       o.c = p;
       o.shape = Shape::circle(p, 0);
-      o.layers = cuMask;
-      int id = add(std::move(o));
-      if (prev >= 0) outlineLinks.push_back({prev, id});
-      else first = id;
-      prev = id;
+      o.layers = layers;
+      wl.owners.push_back(add(std::move(o)));
     }
-    if (prev >= 0 && first >= 0 && prev != first) outlineLinks.push_back({prev, first});
+    if (!wl.owners.empty()) scratch.walls.push_back(std::move(wl));
   };
-  for (const auto& loop : b.outline) outlineLoop(loop);
+  for (const auto& loop : b.outline) wall(loop, true, true, cuMask);
   if (b.outline.empty()) {
     BBox bb = b.bbox();
     if (bb.valid()) {
       BBox ob = bb.inflated(2 * kNmPerMm);
-      outlineLoop({{ob.minX, ob.minY}, {ob.maxX, ob.minY}, {ob.maxX, ob.maxY}, {ob.minX, ob.maxY}});
+      wall({{ob.minX, ob.minY}, {ob.maxX, ob.minY}, {ob.maxX, ob.maxY}, {ob.minX, ob.maxY}}, true, true, cuMask);
     }
   }
-  std::vector<KeepoutLoop>& keepoutLoops = scratch.keepoutLoops;
   for (const Keepout& k : b.keepouts) {
     if (k.role != Keepout::Role::Route || !k.wires) continue;
     LayerMask layers = (k.layers ? k.layers : cuMask) & cuMask;
     for (const Shape& s : k.shapes()) {
-      KeepoutLoop kl{layers, {}, s.kind != Shape::Kind::Segment};
-      Polyline pts = s.kind == Shape::Kind::Polygon ? s.poly
-                     : s.kind == Shape::Kind::Point ? s.outline(std::max(2000.0, s.r * 0.02))
-                                                    : Polyline{s.a, s.b};
-      for (Vec2 p : subdivide(pts, kl.area, pitch)) {
-        Owner o;
-        o.kind = Owner::Kind::Keepout;
-        o.net = kNoNet;
-        o.c = p;
-        o.shape = Shape::circle(p, 0);
-        o.layers = layers;
-        kl.owners.push_back(add(std::move(o)));
-      }
-      keepoutLoops.push_back(std::move(kl));
+      const bool area = s.kind != Shape::Kind::Segment;
+      wall(s.kind == Shape::Kind::Polygon ? s.poly
+           : s.kind == Shape::Kind::Point ? s.outline(std::max(2000.0, s.r * 0.02))
+                                          : Polyline{s.a, s.b},
+           area, false, layers);
     }
   }
 }
 
 void Topology::buildMeshes(const Board& b, BuildScratch& scratch) {
   const std::vector<std::vector<Vec2>>& corners = scratch.corners;
-  const std::vector<std::pair<int, int>>& outlineLinks = scratch.outlineLinks;
-  const std::vector<KeepoutLoop>& keepoutLoops = scratch.keepoutLoops;
+  const std::vector<WallLoop>& walls = scratch.walls;
   auto add = [&](Owner o) {
     owners.push_back(std::move(o));
     scratch.corners.emplace_back();
@@ -278,19 +265,15 @@ void Topology::buildMeshes(const Board& b, BuildScratch& scratch) {
       }
     }
     auto only = [&](int owner) { return m.ownerVerts[owner].front(); };
-    for (auto [a, c] : outlineLinks) {
-      in.constraints.push_back({only(a), only(c)});
-      in.border.push_back(1);
-    }
-    for (const KeepoutLoop& kl : keepoutLoops) {
-      if (!((kl.layers >> layer) & 1)) continue;
-      for (size_t i = 0; i + 1 < kl.owners.size(); ++i) {
-        in.constraints.push_back({only(kl.owners[i]), only(kl.owners[i + 1])});
-        in.border.push_back(0);
+    for (const WallLoop& wl : walls) {
+      if (!((wl.layers >> layer) & 1)) continue;
+      for (size_t i = 0; i + 1 < wl.owners.size(); ++i) {
+        in.constraints.push_back({only(wl.owners[i]), only(wl.owners[i + 1])});
+        in.border.push_back(wl.border ? 1 : 0);
       }
-      if (kl.area && kl.owners.size() > 2) {
-        in.constraints.push_back({only(kl.owners.back()), only(kl.owners.front())});
-        in.border.push_back(0);
+      if (wl.area && wl.owners.size() > 2) {
+        in.constraints.push_back({only(wl.owners.back()), only(wl.owners.front())});
+        in.border.push_back(wl.border ? 1 : 0);
       }
     }
     CdtResult r = triangulate(in);
@@ -352,10 +335,10 @@ void Topology::buildMeshes(const Board& b, BuildScratch& scratch) {
       for (int i = 0; i < 3; ++i)
         if (t.nb[i] >= 0 && (!m.tris[t.nb[i]].inside || m.edges[t.e[i]].constrained)) t.nb[i] = -1;
     for (Edge& e : m.edges) e.rigid |= m.verts[e.v[0]].owner == m.verts[e.v[1]].owner;
-    for (const KeepoutLoop& kl : keepoutLoops) {
-      if (!kl.area || !((kl.layers >> layer) & 1)) continue;
+    for (const WallLoop& wl : walls) {
+      if (wl.border || !wl.area || !((wl.layers >> layer) & 1)) continue;  // a keepout area: its triangles are blocked (a cutout's are outside)
       Polyline poly;
-      for (int o : kl.owners) poly.push_back(owners[o].c);
+      for (int o : wl.owners) poly.push_back(owners[o].c);
       for (Tri& t : m.tris)
         if (t.inside && pointInPolygon((m.verts[t.v[0]].p + m.verts[t.v[1]].p + m.verts[t.v[2]].p) / 3.0, poly)) t.blocked = true;
     }

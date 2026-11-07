@@ -17,6 +17,7 @@
 #include "topo/Build.h"
 #include "topo/Capacity.h"
 #include "topo/Chains.h"
+#include "topo/Relay.h"
 #include "topo/Topology.h"
 
 namespace xr::topo {
@@ -46,10 +47,12 @@ int fanTriangle(const LayerMesh& m, int v, Vec2 d) {
 
 // Where a polyline from vertex v0 to vertex v1 crosses the edges of the mesh (cancelled back-and-forth
 // crossings removed), as the realiser walks its sketches. Empty with `ok` false when the walk leaves
-// the mesh.
-std::vector<Hit> walk(const LayerMesh& m, int v0, int v1, const Polyline& sk, bool& ok, std::string* why) {
+// the mesh; `wall` then names the constrained edge it stopped at (a keepout's wall, the outline, a
+// cutout), or -1 when it failed otherwise.
+std::vector<Hit> walk(const LayerMesh& m, int v0, int v1, const Polyline& sk, bool& ok, std::string* why, int* wall = nullptr) {
   std::vector<Hit> out;
   ok = true;
+  if (wall) *wall = -1;
   if (sk.size() < 2) return out;
   auto fail = [&](std::string s) {
     ok = false;
@@ -77,8 +80,10 @@ std::vector<Hit> walk(const LayerMesh& m, int v0, int v1, const Polyline& sk, bo
       if (exit < 0) return fail(std::format("stuck in triangle {} at segment {} after {} hits", f, s, out.size()));
       int e = T.e[exit];
       int n = T.nb[exit];
-      if (n < 0)  // a constrained edge, or the outside
+      if (n < 0) {  // a constrained edge, or the outside
+        if (wall && m.edges[e].constrained) *wall = e;
         return fail(std::format("edge {} ({}) at segment {} after {} hits", e, m.edges[e].constrained ? "constrained" : "hull", s, out.size()));
+      }
       const Edge& E = m.edges[e];
       Vec2 a = P(E.v[0]), c = P(E.v[1]);
       double den = (c - a).cross(q - p);
@@ -405,7 +410,8 @@ void Topology::convertWires(const Board& b, BuildScratch& scratch) {
     }
     bool ok = true;
     std::string why;
-    std::vector<Hit> hits = walk(m, v0, v1, sk, ok, &why);
+    int wall = -1;
+    std::vector<Hit> hits = walk(m, v0, v1, sk, ok, &why, &wall);
     // Out of its copper and back without crossing anything: that copper, not a wire.
     if (ok && hits.empty() && w.end[0] == w.end[1]) {
       ++loops;
@@ -431,7 +437,34 @@ void Topology::convertWires(const Board& b, BuildScratch& scratch) {
       if (along < 0) ok = false, why = "crosses nothing, and its ends are not joined by an edge";
     }
     int wi = int(wires.size());
-    if (!ok) {
+    // Through a keepout (its wall, or an area's triangles), across a cutout, or out of the board and
+    // back: the wire is displaced, to be laid round by relayDisplaced once the mesh holds the rest. A wire
+    // locked where it lies, or one whose end is outside the board, stays: a violation.
+    bool displaced = false;
+    if (!w.locked) {
+      const bool endsInside = !m.verts[v0].tris.empty() && !m.verts[v1].tris.empty();
+      if (!ok) displaced = wall >= 0 && endsInside;
+      else {
+        auto blockedBeside = [&](int e) {
+          const Edge& E = m.edges[e];
+          return (E.t[0] >= 0 && m.tris[E.t[0]].blocked) || (E.t[1] >= 0 && m.tris[E.t[1]].blocked);
+        };
+        for (const Hit& h : hits) displaced |= blockedBeside(h.edge);
+        if (hits.empty() && endsInside && sk.size() >= 2) {
+          int f = fanTriangle(m, v0, sk[1] - sk[0]);
+          displaced |= f >= 0 && m.tris[f].blocked;
+        }
+      }
+    }
+    if (displaced) {
+      if (std::getenv("XR_TOPO_DEBUG"))
+        std::println(stderr, "wire {} net {} L{} from ({:.3f},{:.3f}) to ({:.3f},{:.3f}) is displaced: {}", wi, b.nets[c.net].name, int(c.layer),
+                     sk.front().x / 1e6, sk.front().y / 1e6, sk.back().x / 1e6, sk.back().y / 1e6, ok ? "through a keepout area" : why);
+      scratch.displaced.push_back(wi);
+      ok = true;
+      hits.clear();
+      along = -1;
+    } else if (!ok) {
       if (std::getenv("XR_TOPO_DEBUG"))
         std::println(stderr, "wire {} net {} L{} from ({:.3f},{:.3f}) to ({:.3f},{:.3f}), {} points: {}", wi, b.nets[c.net].name, int(c.layer),
                      sk.front().x / 1e6, sk.front().y / 1e6, sk.back().x / 1e6, sk.back().y / 1e6, sk.size(), why);
@@ -588,6 +621,40 @@ void Topology::convertWires(const Board& b, BuildScratch& scratch) {
       }
   }
   (void)kJoin;
+}
+
+// A wire drawn through a keepout (an area or a line), across a cutout, or out of the board and back is
+// laid round by the shortest way the mesh has for it (findRelay tries both ways round and takes the
+// shorter), as TopoR does not: there the error 5031 stands until the wire is moved out by hand. No way
+// round: the wire stays where it was drawn, locked, with a Blocked violation.
+void Topology::relayDisplaced(const Board& b, BuildScratch& scratch) {
+  // The wide ones first: they need the room, the thin ones squeeze in beside them.
+  std::ranges::stable_sort(scratch.displaced, [&](int x, int y) { return wires[x].width > wires[y].width; });
+  for (int wi : scratch.displaced) {
+    Wire& w = wires[wi];
+    auto p = findRelay(*this, wi);
+    if (!p) p = findRelay(*this, wi, nullptr, nullptr, true);  // no way with room: squeezed in beside the others
+    if (p) {
+      applyRelay(*this, wi, *p);
+      continue;
+    }
+    if (std::getenv("XR_TOPO_DEBUG"))
+      std::println(stderr, "wire {} net {} L{}: no way round the keepout", wi, b.nets[w.net].name, int(w.layer));
+    Violation v;
+    v.kind = Violation::Kind::Blocked;
+    v.wireA = wi;
+    v.layer = w.layer;
+    const LayerMesh& m = *mesh(w.layer);
+    v.pos = (m.verts[w.endVertex[0]].p + m.verts[w.endVertex[1]].p) * 0.5;
+    if (!w.tracks.empty())
+      for (const Track& tr : b.tracks)
+        if (tr.id == w.tracks[w.tracks.size() / 2]) {
+          v.pos = (tr.a.v() + tr.b.v()) * 0.5;
+          break;
+        }
+    violations.push_back(v);
+    w.locked = true;
+  }
 }
 
 }  // namespace xr::topo

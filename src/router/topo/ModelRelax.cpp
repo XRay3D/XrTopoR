@@ -816,7 +816,7 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
   b = std::move(best.board);
   r.drawn = true;
   for (const Violation& v : t.violations)
-    if (v.kind == Violation::Kind::Overflow || v.kind == Violation::Kind::OutsideBoard) r.violations.push_back(v);
+    if (v.kind == Violation::Kind::Overflow || v.kind == Violation::Kind::OutsideBoard || v.kind == Violation::Kind::Blocked) r.violations.push_back(v);
   return r;
 }
 

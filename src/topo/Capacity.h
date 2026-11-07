@@ -25,9 +25,9 @@ struct EdgeCapacity {
   std::vector<double> width;    // per crossing: the width used
 };
 
-// The clearance a wire keeps from an owner on the layer: none from a keepout (TopoR has no such rule,
-// only the error of a wire across it), the pair's rule when the board has one, else the larger of the
-// owner's and the wire's own.
+// The clearance a wire keeps from an owner on the layer: a wall's own (the clearance to the board edge
+// from the outline and its cutouts, none from a keepout: TopoR has no such rule, only the error of a wire
+// across it), the pair's rule when the board has one, else the larger of the owner's and the wire's own.
 double ownerClearance(const Topology& t, const LayerMesh& m, int owner, const Wire& w);
 // The capacity of edge e of mesh m from its crossings as they are.
 EdgeCapacity edgeCapacity(const Topology& t, const LayerMesh& m, int e);
