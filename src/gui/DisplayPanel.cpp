@@ -22,6 +22,8 @@
 #include <QScrollArea>
 #include <QSlider>
 #include <QTabWidget>
+#include <QStyleOptionToolButton>
+#include <QStylePainter>
 #include <QToolButton>
 #include <QVBoxLayout>
 
@@ -128,33 +130,24 @@ class FilterButton : public QToolButton {
       uint32_t f = doc_->selectionFilter();
       doc_->setSelectionFilter(on ? f | bit_ : f & ~bit_);
     });
-    restyle();
   }
 
  protected:
-  // A filter that is on: filled with the panel's violet, bold; off: no fill, a faint frame. The text keeps the
-  // theme's colour either way.
-  void restyle() {
-    if (restyling_) return;
-    restyling_ = true;
-    // The parent's palette: the button's own is the style sheet's once it has one.
-    QPalette pal = parentWidget() ? parentWidget()->palette() : palette();
-    QColor text = pal.color(QPalette::WindowText), bg = pal.color(QPalette::Window);
-    auto mix = [&](double k) {
-      return QColor::fromRgbF(text.redF() * k + bg.redF() * (1 - k), text.greenF() * k + bg.greenF() * (1 - k),
-                              text.blueF() * k + bg.blueF() * (1 - k));
-    };
-    setStyleSheet(QString("QToolButton { border: 1px solid %1; border-radius: 3px; padding: 3px 4px; background: transparent;"
-                          " color: %2; }"
-                          "QToolButton:hover { border-color: %3; }"
-                          "QToolButton:checked { background: #7a68a8; border-color: #5b4b8a; font-weight: bold; }"
-                          "QToolButton:checked:hover { background: #8a78b8; }")
-                      .arg(mix(0.3).name(), text.name(), pal.color(QPalette::Highlight).name()));
-    restyling_ = false;
-  }
-  void changeEvent(QEvent* e) override {
-    if (e->type() == QEvent::PaletteChange || e->type() == QEvent::ParentChange) restyle();
-    QToolButton::changeEvent(e);
+  // The theme's own button; a filter that is on has only its fill changed — the panel's violet in place of the
+  // style's pressed look — its label drawn by the style as ever.
+  void paintEvent(QPaintEvent*) override {
+    QStylePainter p(this);
+    QStyleOptionToolButton opt;
+    initStyleOption(&opt);
+    if (!isChecked()) {
+      p.drawComplexControl(QStyle::CC_ToolButton, opt);
+      return;
+    }
+    p.setRenderHint(QPainter::Antialiasing, true);
+    p.setPen(QColor(underMouse() ? 0x9a88c8 : 0x5b4b8a));
+    p.setBrush(QColor(underMouse() ? 0x8a78b8 : 0x7a68a8));
+    p.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 3, 3);
+    p.drawControl(QStyle::CE_ToolButtonLabel, opt);
   }
 
   void mousePressEvent(QMouseEvent* e) override {
@@ -168,7 +161,6 @@ class FilterButton : public QToolButton {
  private:
   uint32_t bit_;
   Document* doc_;
-  bool restyling_ = false;
 };
 
 QWidget* scrollPage(QWidget* content) {
