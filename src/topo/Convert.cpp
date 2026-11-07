@@ -220,7 +220,6 @@ void Topology::convertWires(const Board& b, BuildScratch& scratch) {
   effectiveWidths(b, g, copper);
   std::vector<WireChain> chains = wireChains(b, g, all, copper);
   std::erase_if(chains, [](const WireChain& c) { return c.closed || c.path.size() < 2; });
-
   ownerTracks.clear();
   // The ends: a pad or via of the net, or else a branch point or free end — a junction owner there.
   struct End {

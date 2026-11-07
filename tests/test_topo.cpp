@@ -1719,6 +1719,38 @@ struct PinBoard {
     }
     return int(b.zones.size() - 1);
   }
+  // A differential pair of the nets P and N: an impedance rule with the conductor width and the gap on every
+  // copper layer, a cluster and a signal per net, the differential signal; the rules compiled (the board's own
+  // rules as they are, DesignRules of the classes).
+  int pair(const std::string& P, const std::string& N, double w, double gap, double mismatch = 0.1) {
+    net(P);
+    net(N);
+    Impedance z;
+    z.name = "ZD";
+    z.z0 = 100;
+    z.diff = true;
+    for (LayerId l : b.copperLayers()) z.rules.push_back({b.layers[l].name, mmToNm(w), mmToNm(gap)});
+    b.hispeed.impedances.push_back(z);
+    for (const std::string& n : {P, N}) {
+      SignalCluster c;
+      c.impedance = "ZD";
+      c.nets = {n};
+      Signal sg;
+      sg.name = n + "_sig";
+      c.signalList.push_back(sg);
+      b.hispeed.clusters.push_back(c);
+    }
+    DiffSignal d;
+    d.name = P + "/" + N;
+    d.mismatch = mmToNm(mismatch);
+    d.impedance = "ZD";
+    d.signalA = P + "_sig";
+    d.signalB = N + "_sig";
+    b.hispeed.diffSignals.push_back(d);
+    if (!b.rules) b.rules = rulesFromBoard(b);
+    compileRules(b);
+    return int(b.hispeed.diffSignals.size() - 1);
+  }
   int drcOf(DrcViolation::Type kind) const {
     DrcOptions d;
     d.unconnected = false;
@@ -1758,6 +1790,35 @@ struct PinBoard {
 };
 
 }  // namespace
+
+// A differential pair's rule: the gap of the impedance rule is the clearance between the two nets of the pair on
+// the layer (0.2 where the class says 0.3), nothing changes between a pair's net and another; the conductor is as
+// wide as the rule says and no narrower; two conductors a gap apart, 0.3 wide where the class says 0.4, are no
+// violation (AMK310: 126 width records of 0.3 < 0.4 on the pairs' nets gone).
+TEST(Topo, PairRuleGivesTheGapAndTheWidth) {
+  PinBoard p;
+  p.b.netClasses[0].clearance = mmToNm(0.3);
+  p.b.netClasses[0].trackWidth = mmToNm(0.4);
+  p.pad("P", 5, 10, PadShapeKind::Circle, 1, 1);
+  p.pad("N", 5, 12, PadShapeKind::Circle, 1, 1);
+  p.pad("X", 5, 16, PadShapeKind::Circle, 1, 1);
+  const int d = p.pair("P", "N", 0.3, 0.2);
+  EXPECT_EQ(d, 0);
+  const int P = p.net("P"), N = p.net("N"), X = p.net("X");
+  EXPECT_EQ(p.b.pairOfNet(P), 0);
+  EXPECT_EQ(p.b.pairOfNet(X), -1);
+  EXPECT_EQ(p.b.clearance(P, N, p.top), mmToNm(0.2));
+  EXPECT_EQ(p.b.clearance(P, X, p.top), mmToNm(0.3));
+  EXPECT_EQ(p.b.trackWidth(P, p.top), mmToNm(0.3));
+  EXPECT_EQ(p.b.minTrackWidth(P, p.top), mmToNm(0.3));
+  EXPECT_EQ(p.b.trackWidth(X, p.top), mmToNm(0.4));
+  p.track("P", {{8, 10}, {30, 10}}, 0.3);
+  p.track("N", {{8, 10.5}, {30, 10.5}}, 0.3);  // 0.2 apart edge to edge
+  EXPECT_EQ(p.drcOf(DrcViolation::Type::Clearance), 0);
+  EXPECT_EQ(p.drcOf(DrcViolation::Type::Width), 0);
+  p.track("X", {{8, 11.0}, {30, 11.0}}, 0.4);  // 0.15 from N: a violation of the ordinary rule
+  EXPECT_EQ(p.drcOf(DrcViolation::Type::Clearance), 1);
+}
 
 // A wire keeps no clearance from a routing keepout: its copper may touch the keepout's boundary (TopoR has
 // no rule for the distance, only the error of a wire across). Between a pad's edge and a keepout's wall

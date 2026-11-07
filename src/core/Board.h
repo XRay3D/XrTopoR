@@ -343,6 +343,8 @@ struct Board {
   int pairOfNet(int net) const { return net >= 0 && net < int(netPair.size()) ? netPair[size_t(net)] : -1; }
   // The pair's rule on a copper layer: the conductor width and the gap; false without one.
   bool pairRule(int pair, LayerId layer, Coord& width, Coord& gap) const;
+  // The width of a differential pair's conductor on the layer by its rule; 0 for a net of no pair.
+  Coord pairWidth(int net, LayerId layer) const;
   // Takes a zipped section away: its conductors stay as tracks, renumbered.
   void removeZip(int z);
   std::vector<TextStyle> textStyles{TextStyle{}};

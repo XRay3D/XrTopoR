@@ -58,6 +58,7 @@ std::string mmText(Coord c) { return std::format("{:g}", c / double(kNmPerMm)); 
 
 Coord Board::minTrackWidth(int net, LayerId layer) const {
   const Board& b = *this;
+  if (Coord w = pairWidth(net, layer); w > 0) return w;  // a pair's conductor: the rule's width, no narrower
   if (!b.rules) return b.trackWidth(net, layer);
   const DesignRules& r = *b.rules;
   Coord w = 0;
@@ -190,6 +191,43 @@ void compileRules(Board& b) {
       b.netClasses.push_back(nc);
     }
     b.nets[n].netClass = it->second;
+  }
+  // The differential pairs: each net knows its pair, and the gap of the pair's rule is the clearance between
+  // the two nets on the layer where it is below the rule for them (the last pair rule wins in pairClearance):
+  // the DRC, the capacity and the realiser follow without knowing of pairs.
+  b.netPair.assign(b.nets.size(), -1);
+  for (size_t d = 0; d < b.hispeed.diffSignals.size(); ++d) {
+    const DiffSignal& ds = b.hispeed.diffSignals[d];
+    std::vector<int> pNets, nNets;
+    for (int side = 0; side < 2; ++side)
+      if (const SignalCluster* c = b.hispeed.clusterOf(side ? ds.signalB : ds.signalA))
+        for (const std::string& name : c->nets)
+          if (int n = b.findNet(name); n >= 0) {
+            (side ? nNets : pNets).push_back(n);
+            b.netPair[size_t(n)] = int(d);
+          }
+    if (pNets.empty() || nNets.empty()) continue;
+    if (const Impedance* z = b.hispeed.impedance(ds.impedance); z && z->diff)
+      for (const ImpedanceLayerRule& lr : z->rules) {
+        LayerId l = b.findLayer(lr.layer);
+        if (l < 0 || b.layers[size_t(l)].kind != LayerKind::Copper || lr.gap <= 0) continue;
+        const LayerMask lm = LayerMask(1) << l;
+        // What the two nets keep on the layer so far: the last pair rule naming both (the local list, not yet
+        // the board's), else the larger of their own.
+        Coord have = 0;
+        for (int p : pNets)
+          for (int n : nNets) {
+            Coord c = std::max(b.clearance(p, l), b.clearance(n, l));
+            for (const ClearancePair& pr : pairRules)
+              if ((!pr.layers || ((pr.layers >> l) & 1)) && ((r::contains(pr.netsA, p) && r::contains(pr.netsB, n)) || (r::contains(pr.netsA, n) && r::contains(pr.netsB, p))))
+                c = pr.clearance;
+            have = std::max(have, c);
+          }
+        if (lr.gap < have) {
+          pairRules.push_back({pNets, nNets, lm, lr.gap});
+          if (!nominalRules.empty()) nominalRules.push_back({pNets, nNets, lm, lr.gap});
+        }
+      }
   }
   b.layerRules = std::move(layerRules);
   b.pairRules = std::move(pairRules);

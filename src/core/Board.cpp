@@ -185,7 +185,13 @@ const NetClass& Board::classOf(int net) const {
   return netClasses.front();
 }
 
+Coord Board::pairWidth(int net, LayerId layer) const {
+  Coord w = 0, g = 0;
+  return pairRule(pairOfNet(net), layer, w, g) ? w : 0;
+}
+
 Coord Board::trackWidth(int net, LayerId layer) const {
+  if (Coord pw = pairWidth(net, layer); pw > 0) return pw;  // a pair's conductor is as wide as the pair's rule says
   Coord w = classOf(net).trackWidth;
   if (layer >= 0)
     for (auto& r : layerRules)

@@ -84,6 +84,8 @@ bool inOwnCopper(const Board& b, const SpatialIndex& idx, ItemRef r) {
 bool skipPair(const Board& b, ItemRef a, ItemRef c) {
   int na = itemNet(b, a), nc = itemNet(b, c);
   if (na != kNoNet && na == nc) return true;
+  // The two conductors of one zipped section of a differential pair are one object (their gap is the rule).
+  if (a.type == ItemType::Track && c.type == ItemType::Track && b.tracks[a.index].zip >= 0 && b.tracks[a.index].zip == b.tracks[c.index].zip) return true;
   if (a.type == ItemType::Pad && c.type == ItemType::Pad) {
     const Pad& pa = b.pads[a.index];
     const Pad& pc = b.pads[c.index];
