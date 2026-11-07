@@ -4,6 +4,7 @@
 
 #include <cstdio>
 #include <print>
+#include <string_view>
 
 #include "core/Connectivity.h"
 #include "drc/Drc.h"
@@ -77,7 +78,9 @@ TEST(Realizer, ReshapeIsAFixedPoint) {
       was = now;
       wasLength = len;
     }
-    EXPECT_LE(was, 18);
+    // Arcs_master: 26 records, 13 of them one place (AD0 between the via of ADR21 and the pad D1-30, 0.016 mm
+    // short of the rule at both, as TopoR's F5 draws it: the deficit shared, the wire in short arcs there).
+    EXPECT_LE(was, std::string_view(name).ends_with(".pcb") ? 26 : 18);
   }
 }
 
@@ -103,13 +106,16 @@ TEST(Realizer, SettledReshapeIsAFixedPoint) {
 
 // F5 on the model, the realiser fed from the model: a fixed point — a board re-laid from its own result
 // comes out the same (the same violations, the length within half a millimetre). The violations are those
-// of F5 on the tracks (arz_2L 9, arz_4L 10) or a few more (Arcs_master 22 against 18, local stacking
-// defects at the QFP still to be found). With the nominal clearance kept from round copper (the arz boards'
-// rules: 0.2 / 0.3) arz_4L has 13: one bend of net 84 round a via, the outer of two wires there, is dropped
-// where its radius grew (3 records of one place, 0.066 mm deep); 10 at the minimum.
+// of F5 on the tracks (arz_2L 9, arz_4L 10) or a few more (Arcs_master 32 against 26: local stacking
+// defects at the QFP still to be found; 13 of the records are one place, AD0 between the via of ADR21 and the
+// pad D1-30, where two bends of opposite sense overlap and both shrink until the circles touch, the deficit
+// shared as TopoR's F5 has it: 0.284 and 0.268 against its 0.283 and 0.267). With the nominal clearance
+// kept from round copper (the arz boards' rules: 0.2 / 0.3) arz_4L has 13: one bend of net 84 round a via,
+// the outer of two wires there, is dropped where its radius grew (3 records of one place, 0.066 mm deep); 10
+// at the minimum.
 TEST(Realizer, ModelReshapeIsAFixedPoint) {
   struct Expect { const char* file; int conflicts; };
-  for (Expect x : {Expect{"topor/Example_03/arz_2L.fst", 9}, Expect{"topor/Example_03/arz_4L.fst", 13}, Expect{"topor/Example_04/Arcs_master.pcb", 22}}) {
+  for (Expect x : {Expect{"topor/Example_03/arz_2L.fst", 9}, Expect{"topor/Example_03/arz_4L.fst", 13}, Expect{"topor/Example_04/Arcs_master.pcb", 32}}) {
     const char* name = x.file;
     auto lb = io::loadBoard(data(name));
     ASSERT_TRUE(lb.has_value()) << name;
@@ -142,7 +148,7 @@ TEST(Realizer, ModelReshapeIsAFixedPoint) {
 // F7 on the model: the vias and branch points go down the gradient of the drawn length (the wires' pull at
 // their ends and their push at their bends, taken from the realiser's drawing), every iteration judged by the
 // drawing. Never worse than F5 from the model (the best drawing is kept), nothing lost, the mesh whole; and
-// the wires are pulled taut: Arcs_master 22 -> 4 violations and 6405.6 -> 6200.8 mm (TopoR's own F7 of that
+// the wires are pulled taut: Arcs_master 32 -> 4 violations and 6405.6 -> 6200.6 mm (TopoR's own F7 of that
 // board: 6245.4 mm at its nominal clearance), the forces left on the objects halved (248 -> 117; TopoR's F7
 // leaves 125 by the same measure), arz_2L 9 -> 5 and 24 mm shorter (its branch points merged into their pads,
 // the wires led from the pads' centres again).
@@ -152,7 +158,7 @@ TEST(Optimizer, ModelRelaxDoesNotBreak) {
   // have a nominal clearance, 0.2 / 0.3 — stop where their wires would lose the nominal's room: 7 mm gained
   // where 24 were with the stop at the minimum; Arcs_master.pcb has the one clearance).
   struct Expect { const char* file; int f5; int conflicts; double gain; double force; };
-  for (Expect x : {Expect{"topor/Example_04/Arcs_master.pcb", 22, 5, 150, 0.6}, Expect{"topor/Example_03/arz_2L.fst", 9, 6, 5, 0.97}}) {
+  for (Expect x : {Expect{"topor/Example_04/Arcs_master.pcb", 32, 5, 150, 0.6}, Expect{"topor/Example_03/arz_2L.fst", 9, 6, 5, 0.97}}) {
     auto lb = io::loadBoard(data(x.file));
     ASSERT_TRUE(lb.has_value()) << x.file;
     Board& b = **lb;
@@ -358,4 +364,47 @@ TEST(Refine, WireBetweenTwoPadsAtTheRulesExactly) {
   std::vector<topo::Violation> vs;
   EXPECT_TRUE(topo::prepareModel(t2, false, false, flips, vs));
   for (const DrcViolation& v : topo::topologyViolations(b, t2, vs)) std::println("{} at ({:.3f}, {:.3f})", v.message, v.pos.x / 1e6, v.pos.y / 1e6);
+}
+
+// The wires widened past what the layout has room for (MinVia_standard_routing with every track 0.4 mm wide
+// in a layout drawn at 0.254: 756 clearance violations, none of them a short) are laid tight, the deficit
+// shared, as TopoR draws it: no wire through a pad and no loop. Three things used to go wrong: a bend round
+// the wire's own end (another wire's arc round that pad), a bend dropped where two circles overlapped by more
+// than a hairline (the wire then through the pad, or 276 degrees round the next), and a chord near one end
+// of a pad's side blamed on the side's other corner (277 degrees round it): 127 shorts after F5, A3 286
+// degrees round the pad of A2.
+TEST(Realizer, WidenedWiresAreLaidTight) {
+  auto lb = io::loadBoard(data("topor/Example_05/MinVia_standard_routing.fst"));
+  ASSERT_TRUE(lb.has_value());
+  Board& b = **lb;
+  for (Track& tr : b.tracks) tr.width = mmToNm(0.4);
+  topo::Topology::assignIds(b);
+  topo::Topology t;
+  t.build(b);
+  ASSERT_TRUE(topo::runF5Model(b, t).drawn);
+  DrcOptions o;
+  o.unconnected = false;
+  o.widths = false;
+  int shorts = 0, clearances = 0;
+  for (const DrcViolation& v : runDrc(b, o)) {
+    if (v.type == DrcViolation::Type::Short) {
+      ++shorts;
+      std::println("short: {} at ({:.3f}, {:.3f})", v.message, v.pos.x / 1e6, v.pos.y / 1e6);
+    } else {
+      ++clearances;
+    }
+  }
+  std::println("widened MinVia_standard_routing after F5: {} clearance violations, {} shorts", clearances, shorts);
+  EXPECT_LE(shorts, 2) << "one of 0.014 mm between two tracks of a tight stack is known";
+  // No loop: an arc of more than 240 degrees (the U-turns of the layout round a pin are 210-216).
+  int loops = 0;
+  for (const Track& tr : b.tracks) {
+    if (!tr.isArc()) continue;
+    const ArcGeom g = ArcGeom::fromThreePoints(tr.a.v(), tr.mid->v(), tr.b.v());
+    if (g.valid && std::abs(g.sweep) > 240.0 * kPi / 180.0) {
+      ++loops;
+      std::println("loop: {} degrees of {} at ({:.2f}, {:.2f})", std::abs(g.sweep) * 180.0 / kPi, b.nets[tr.net].name, g.center.x / 1e6, g.center.y / 1e6);
+    }
+  }
+  EXPECT_EQ(loops, 0);
 }

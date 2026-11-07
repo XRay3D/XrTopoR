@@ -1290,7 +1290,12 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
           if (k > 0 && k + 1 < n - 1 && cs[k].rho * cs[k + 1].rho < 0) {
             double D = (cs[k + 1].c - cs[k].c).len();
             double deficit = std::abs(cs[k].rho) + std::abs(cs[k + 1].rho) - D;
-            if (deficit > 0 && deficit < 30000 && shrinks < 8) {
+            // Two bends of opposite sense whose circles overlap: both shrink until they touch, the wire
+            // passes between the two obstacles tightly. Any overlap, not hairlines only: a stack short of room
+            // (the wires widened past what the layout has, 8 overflowed edges on MinVia_standard_routing at
+            // 0.4 mm) is a clearance violation TopoR draws as such, and the bend dropped instead sent the
+            // wire through the pad or round the next one (D6, 276 degrees round the pad of A3).
+            if (deficit > 0 && shrinks < 16) {
               double f = (D - 1000) / (std::abs(cs[k].rho) + std::abs(cs[k + 1].rho));
               cs[k].rho *= f;
               cs[k + 1].rho *= f;
@@ -1368,8 +1373,25 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
             // Sides incident to the obstacle point (pad edges, outline, stub wires) with their own radius.
             if ((c - ob.pts[o].p).len2() < 1) {
               double extra = R - x;  // clearance + half width + margin + nesting
-              for (const Side& sd : ob.adj[o])
-                pen = std::max(pen, sd.r + extra - distSegmentSegment(p, q, c, ob.pts[sd.to].p));
+              for (const Side& sd : ob.adj[o]) {
+                const Vec2 far = ob.pts[sd.to].p;
+                const double dd = distSegmentSegment(p, q, c, far);
+                if (sd.r + extra - dd <= pen) continue;
+                // The side is this point's only where the chord comes near its half: a chord that leaves
+                // the bend round the side's other end (narrowed there, so nearer the side than this end's
+                // rule) is that end's, and a bend round this end would be made from the wrong side (D0 of
+                // MinVia_standard_routing at 0.4 mm, 277 degrees round the far corner of the pad of J4-1).
+                if (!segmentsIntersect(p, q, c, far)) {
+                  double best = std::numeric_limits<double>::max();
+                  Vec2 on = c;
+                  for (Vec2 e : {p, q})
+                    if (const Vec2 f = closestPointOnSegment(e, c, far); (f - e).len2() < best) best = (f - e).len2(), on = f;
+                  for (Vec2 e : {c, far})
+                    if (const Vec2 f = closestPointOnSegment(e, p, q); (f - e).len2() < best) best = (f - e).len2(), on = e;
+                  if ((on - far).len2() < (on - c).len2()) continue;
+                }
+                pen = sd.r + extra - dd;
+              }
             }
             if (pen > worst) {
               worst = pen;
@@ -1396,6 +1418,11 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
             for (size_t m = 1; m + 1 < ocs.size(); ++m) {
               const Circle& oc = ocs[m];
               if (oc.obst < 0) continue;
+              // The wire's own end (the other wire bends round this wire's pad, and the way into the pad
+              // crosses that arc) is no obstacle to bend round: a bend about the point the wire ends at
+              // is a loop, and the tangents past it come in from the wrong side (MinVia_standard_routing
+              // with the wires widened to 0.4 mm: A3 went 286 degrees round the pad of A2).
+              if ((oc.c - cs.front().c).len2() < 1 || (oc.c - cs.back().c).len2() < 1) continue;
               double R = std::abs(oc.rho);
               double spacing = width / 2.0 + clrBetween(w, o) + kMargin + oc.width / 2.0;
               Vec2 X = closestPointOnSegment(oc.c, p, q);
@@ -1430,7 +1457,18 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
                   bestD = std::abs(r - R);
                   radial = r;
                 }
-                if (radial >= 0 && radial < R) radius = R - spacing;
+                if (radial >= 0 && radial < R) {
+                  radius = R - spacing;
+                  // ... and never nearer the obstacle than this wire's own rule: inside the other wire's arc
+                  // there may be no room (D0 of MinVia_standard_routing at 0.4 mm, put 0.46 from the corner of
+                  // the pad of J4-1, inside its copper, and 277 degrees round it). Then the chord stays as it
+                  // is, a conflict the DRC reports.
+                  const OPt& op = ob.pts[size_t(oc.obst)];
+                  const double own = (op.net == w.net && w.net != kNoNet) || op.net == kTransparent
+                                         ? 0.0
+                                         : ob.reach(op, (X - op.p).normalized()) + clrTo(op, w) + kMargin + width / 2.0;
+                  if (radius < own - 1000) continue;
+                }
                 if (radius <= 0) continue;
               } else if (!onArc(X, 0.05)) {
                 continue;  // the closest point must face the arc itself, not the rest of the circle
