@@ -967,6 +967,75 @@ TEST(Gui, BoardOutlineByItsHandles) {
   EXPECT_EQ(joined, 2);
 }
 
+// With «Привязка к сетке» on, a handle dragged lands on the grid: a corner of the outline, a new vertex at a
+// side's middle, a line of the outline moved across itself, the end of a wire; also with the 45-degree mode on
+// (the 45-degree line from a neighbour on the grid crosses the grid at a grid point). The steps of 0.5 mm and
+// of 0.001 mm (a projection on a 45-degree line left nanometres off it).
+TEST(Gui, HandlesSnapToTheGrid) {
+  Fixture f("topor/Example_05/MinVia_standard_routing.fst");
+  const Board& b = f.b();
+  int poly = -1, line = -1;
+  for (int i = 0; i < int(b.graphics.size()); ++i)
+    if (b.isEdge(b.graphics[i].layer)) (b.graphics[i].kind == GraphicKind::Poly ? poly : line) = i;
+  ASSERT_GE(poly, 0);
+  ASSERT_GE(line, 0);
+  struct Case { double step; bool angle; };
+  for (Case cs : {Case{0.5 * kNmPerMm, false}, Case{0.001 * kNmPerMm, false}, Case{0.001 * kNmPerMm, true}}) {
+    SCOPED_TRACE(std::to_string(cs.step) + (cs.angle ? " 45" : " free"));
+    auto onGrid = [&](Vec2 v) {
+      return std::abs(v.x / cs.step - std::round(v.x / cs.step)) < 1e-6 &&
+             std::abs(v.y / cs.step - std::round(v.y / cs.step)) < 1e-6;
+    };
+    auto show = [](Vec2 v) { return std::to_string(v.x) + " " + std::to_string(v.y); };
+    f.doc.display().alignToGrid = true;
+    f.doc.display().gridX = f.doc.display().gridY = cs.step;
+    f.view.setRouteAngle(cs.angle ? RouteAngle::Deg45 : RouteAngle::Free);
+    auto pts = b.graphics[poly].pts;
+    Vec2 lo = pts[0];
+    f.doc.setSelection({{ItemType::Detail, poly}}, {});
+    f.look(lo, 20);
+    f.drag(f.at(lo), f.at(lo + Vec2{1.37 * kNmPerMm, 0.81 * kNmPerMm}));
+    Vec2 v = f.b().graphics[poly].pts[0];
+    EXPECT_NE(v, lo);
+    // The 45-degree mode on the 0.5 mm grid with the outline off it: the free coordinate at least.
+    if (cs.step < kNmPerMm / 100 || !cs.angle) EXPECT_TRUE(onGrid(v)) << show(v);
+    f.doc.undoStack()->undo();
+
+    Vec2 mid = (pts[0] + pts[1]) * 0.5;
+    f.doc.setSelection({{ItemType::Detail, poly}}, {});
+    f.look(mid, 20);
+    f.drag(f.at(mid), f.at(mid + (pts[1] - pts[0]).perp().normalized() * (1.73 * kNmPerMm)));
+    ASSERT_EQ(f.b().graphics[poly].pts.size(), pts.size() + 1);
+    v = f.b().graphics[poly].pts[1];
+    if (cs.step < kNmPerMm / 100 || !cs.angle) EXPECT_TRUE(onGrid(v)) << show(v);
+    f.doc.undoStack()->undo();
+
+    const Graphic& g = f.b().graphics[line];
+    Vec2 grab = g.a + (g.b - g.a) * 0.3;
+    f.doc.setSelection({{ItemType::Detail, line}}, {});
+    f.look(grab, 20);
+    f.drag(f.at(grab), f.at(grab + (g.b - g.a).perp().normalized() * (1.21 * kNmPerMm) + (g.b - g.a).normalized() * 3e5));
+    EXPECT_TRUE(onGrid(f.b().graphics[line].a) || cs.step > kNmPerMm / 100) << show(f.b().graphics[line].a);
+    if (cs.step > kNmPerMm / 100) {
+      // Across itself, onto the grid line.
+      Vec2 n = (g.b - g.a).perp().normalized();
+      Vec2 m = f.b().graphics[line].a;
+      double c = std::abs(n.x) > 0.5 ? m.x : m.y;
+      EXPECT_NEAR(c / cs.step, std::round(c / cs.step), 1e-6) << show(m);
+    }
+    f.doc.undoStack()->undo();
+
+    int ti = 0;
+    Vec2 a = b.tracks[ti].b.v();
+    f.doc.setSelection({{ItemType::Track, ti}}, {});
+    f.look(a, 10);
+    f.drag(f.at(a), f.at(a + Vec2{0.63 * kNmPerMm, 0.29 * kNmPerMm}));
+    v = f.b().tracks[ti].b.v();
+    if (cs.step < kNmPerMm / 100 || !cs.angle) EXPECT_TRUE(onGrid(v)) << show(v);
+    f.doc.undoStack()->undo();
+  }
+}
+
 // S flips a component to the other side; its SMD wires stay behind, a second S brings it back.
 TEST(Gui, FlipComponent) {
   Fixture f("topor/Example_05/MinVia_standard_routing.fst");

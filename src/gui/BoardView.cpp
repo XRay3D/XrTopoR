@@ -1712,7 +1712,8 @@ void BoardView::applyDrag() {
       Vec2 c = track ? b.tracks[dragFragment_.tracks[0]].b.v() : b.graphics[dragFragment_.details[0]].b;
       bool arc = track ? b.tracks[dragFragment_.tracks[0]].isArc() : b.graphics[dragFragment_.details[0]].kind == GraphicKind::Arc;
       Vec2 n = (c - a).perp().normalized();
-      m.shift = arc || n.len2() == 0 ? d : n * d.dot(n);
+      // With the grid on, the moved segment's start goes to the grid along the normal.
+      m.shift = arc || n.len2() == 0 ? d : snappedOnLine(a + n * d.dot(n), n) - a;
       if (track) edit::move(b, dragFragment_, m);
       else edit::moveFigureSide(b.graphics, dragFragment_.details[0], m.shift);
       if (dragFragment_.touchesOutline(b)) syncOutline();
@@ -2299,7 +2300,19 @@ Vec2 BoardView::constrained(Vec2 from, Vec2 to) const {
   double len = d.len();
   // Project onto the nearest 45-degree direction.
   Vec2 dir{std::cos(q), std::sin(q)};
-  return from + dir * (d.dot(dir) > 0 ? d.dot(dir) : len);
+  return snappedOnLine(from + dir * (d.dot(dir) > 0 ? d.dot(dir) : len), dir);
+}
+
+// A point held to a line through `p` along `dir`, with the grid on: where the line crosses the grid line nearest
+// `p` — both coordinates on the grid when the line goes through a grid point, the free one at least when not.
+Vec2 BoardView::snappedOnLine(Vec2 p, Vec2 dir) const {
+  if (!doc_->hasBoard() || !doc_->display().alignToGrid || dir.len2() == 0) return p;
+  Vec2 g = snapped(p);
+  dir = dir.normalized();
+  if (std::abs(dir.y) < 1e-9) return {g.x, p.y};
+  if (std::abs(dir.x) < 1e-9) return {p.x, g.y};
+  Vec2 byX = p + dir * ((g.x - p.x) / dir.x), byY = p + dir * ((g.y - p.y) / dir.y);
+  return (byX - p).len2() <= (byY - p).len2() ? byX : byY;
 }
 
 std::optional<Track> BoardView::makeSegment(Vec2 from, Vec2 to) const {

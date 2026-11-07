@@ -180,6 +180,7 @@ class BoardView : public QWidget {
   void routeStart(const Pick& pk, Vec2 at);
   void routeAddPoint(Vec2 at, const Pick& pk);
   Vec2 constrained(Vec2 from, Vec2 to) const;
+  Vec2 snappedOnLine(Vec2 p, Vec2 dir) const;
   std::optional<Track> makeSegment(Vec2 from, Vec2 to) const;  // honours angle mode (arc)
   double rubberMargin(const Track& t) const;
 
