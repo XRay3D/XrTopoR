@@ -163,7 +163,7 @@ void MessagesPanel::rebuild() {
                                 Kind{DrcViolation::Type::Keepout, tr("Нарушение DRC: объект в запрете")},
                                 Kind{DrcViolation::Type::Unconnected, tr("Нарушение DRC: несоединённые объекты")},
                                 Kind{DrcViolation::Type::Topology, tr("Топологическое нарушение (команда прервана)")}}) {
-      int n = int(std::ranges::count_if(drc, [&](const DrcViolation& v) { return v.type == type; }));
+      int n = int(r::count(drc, type, &DrcViolation::type));
       if (!n) continue;
       auto* g = group(title, kDrc, n);
       for (int i = 0; i < int(drc.size()); ++i)

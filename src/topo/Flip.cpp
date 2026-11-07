@@ -160,9 +160,7 @@ bool planFlip(const Topology& t, const LayerMesh& m, int e, FlipPlan& plan, cons
   }
   // The wire along e, from p to q, now crosses the diagonal.
   if (E.along >= 0) plan.diag.push_back({E.along, -1, 0, atP, atQ});
-  std::ranges::sort(plan.diag, [](const FlipPlan::Run& x, const FlipPlan::Run& y) {
-    return x.posP != y.posP ? x.posP < y.posP : x.posQ < y.posQ;
-  });
+  r::sort(plan.diag, {}, [](const FlipPlan::Run& x) { return std::pair(x.posP, x.posQ); });
   for (const FlipPlan::Run& r : plan.diag) plan.wires.push_back(r.wire);
   return true;
 }
@@ -211,7 +209,7 @@ bool flip(Topology& t, LayerMesh& m, int e, const FlipGate& gate) {
   std::map<int, std::vector<std::pair<int, int>>> inserts;  // wire -> (insertAt, cid)
   std::vector<char> gone(t.crossings.size(), 0);
   for (int cid : plan.erase) gone[cid] = 1;
-  if (E.v[0] == Q.b) std::ranges::reverse(plan.diag);  // the list runs from v[0]
+  if (E.v[0] == Q.b) r::reverse(plan.diag);  // the list runs from v[0]
   for (const FlipPlan::Run& r : plan.diag) {
     int cid = r.oldCid;
     if (cid < 0) {
@@ -227,13 +225,13 @@ bool flip(Topology& t, LayerMesh& m, int e, const FlipGate& gate) {
   for (int cid : plan.erase) touched.push_back(t.crossings[cid].wire);
   for (auto& [wi, _] : inserts) touched.push_back(wi);
   if (E.along >= 0) touched.push_back(E.along);
-  std::ranges::sort(touched);
-  touched.erase(std::unique(touched.begin(), touched.end()), touched.end());
+  r::sort(touched);
+  touched.erase(r::unique(touched).begin(), touched.end());
   for (int wi : touched) {
     Wire& w = t.wires[wi];
     std::vector<int> out;
     auto& ins = inserts[wi];
-    std::ranges::sort(ins);
+    r::sort(ins);
     size_t next = 0;
     for (size_t i = 0; i <= w.cross.size(); ++i) {
       while (next < ins.size() && ins[next].first == int(i)) out.push_back(ins[next++].second);

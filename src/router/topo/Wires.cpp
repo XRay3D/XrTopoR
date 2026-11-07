@@ -62,7 +62,7 @@ std::vector<RealWire> sketchesOf(const Board& b, const std::vector<WireChain>& c
   std::erase_if(wires, [&](RealWire& w) {
     auto h0 = copper.roundAt(w.sketch.front(), w.net, w.layer), h1 = copper.roundAt(w.sketch.back(), w.net, w.layer);
     if (h0 && h1 && (h0->first - h1->first).len2() < 1 &&
-        std::ranges::all_of(w.sketch, [&](Vec2 q) { return (q - h0->first).len() <= h0->second; }))
+        r::all_of(w.sketch, [&](Vec2 q) { return (q - h0->first).len() <= h0->second; }))
       return true;  // inside one pad or via
     if (h0) w.sketch.front() = h0->first;
     if (h1) w.sketch.back() = h1->first;
@@ -70,7 +70,7 @@ std::vector<RealWire> sketchesOf(const Board& b, const std::vector<WireChain>& c
     if (p0 >= 0 && p0 == p1) {
       const Shape sh = b.pads[p0].shapeGeom();
       if (padFrame(b.pads[p0]).kind != PadFrame::Kind::Other &&
-          std::ranges::all_of(w.sketch, [&](Vec2 q) { return sh.distance(q) <= kPadEdgeTol; })) {
+          r::all_of(w.sketch, [&](Vec2 q) { return sh.distance(q) <= kPadEdgeTol; })) {
         runs.push_back({p0, w.layer, w.sketch.front(), w.sketch.back()});
         return true;
       }
@@ -125,7 +125,7 @@ std::vector<int> leadTracks(const Board& b, const OwnCopper& copper, Vec2 p, int
     for (size_t i = 0; i < b.tracks.size() && next < 0; ++i) {
       const Track& t = b.tracks[i];
       if (t.net != net || t.layer != layer || t.locked || t.mid) continue;
-      if (skip(int(i)) || std::ranges::contains(lead, int(i))) continue;
+      if (skip(int(i)) || r::contains(lead, int(i))) continue;
       const bool atA = (t.a.v() - cur).len() <= edit::kJoinTol, atB = (t.b.v() - cur).len() <= edit::kJoinTol;
       if (atA == atB) continue;
       if (sh.distance(t.a.v()) > kPadEdgeTol || sh.distance(t.b.v()) > kPadEdgeTol) continue;  // wholly inside only
@@ -157,7 +157,7 @@ RealizeStats reshapeTracks(Board& b, std::vector<char> chosen, const ReshapeOpti
         if (chosen[j] || add[j]) continue;
         const Track& u = b.tracks[j];
         if (u.locked || u.layer != t.layer || u.net == t.net) continue;
-        if (!o.aroundNets.empty() && !std::ranges::contains(o.aroundNets, u.net)) continue;
+        if (!o.aroundNets.empty() && !r::contains(o.aroundNets, u.net)) continue;
         if (distSegmentSegment(t.a.v(), t.b.v(), u.a.v(), u.b.v()) < o.around + (t.width + u.width) / 2.0) add[j] = 1;
       }
     }
@@ -187,7 +187,7 @@ RealizeStats reshapeTracks(Board& b, std::vector<char> chosen, const ReshapeOpti
   for (auto& w : wires)
     for (Vec2 p : {w.sketch.front(), w.sketch.back()}) {
       if (copper.touches(Point(p), w.net, w.layer)) continue;
-      auto it = std::ranges::find_if(opt.anchors, [&](const RealizeOptions::Anchor& a) {
+      auto it = r::find_if(opt.anchors, [&](const RealizeOptions::Anchor& a) {
         return a.layer == w.layer && a.net == w.net && (a.pos - p).len2() < 1e6;
       });
       if (it != opt.anchors.end()) it->radius = std::max(it->radius, w.width / 2.0);

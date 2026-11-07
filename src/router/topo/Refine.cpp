@@ -61,7 +61,7 @@ struct Grid {
         Vec2 a = poly[i], c = poly[(i + 1) % poly.size()];
         if ((a.y <= cy) != (c.y <= cy)) xs.push_back(a.x + (cy - a.y) / (c.y - a.y) * (c.x - a.x));
       }
-      std::ranges::sort(xs);
+      r::sort(xs);
       for (size_t k = 0; k + 1 < xs.size(); k += 2) {
         int x0 = std::max(0, int(std::ceil((xs[k] - box.minX) / h - 0.5)));
         int x1 = std::min(nx - 1, int(std::floor((xs[k + 1] - box.minX) / h - 0.5)));
@@ -266,7 +266,7 @@ std::optional<Polyline> findPath(const Board& b, Vec2 from, Vec2 to, LayerId lay
   }
   Polyline cells;
   for (int c = t; c != s; c = prev[c]) cells.push_back(g.centre(c));
-  std::ranges::reverse(cells);
+  r::reverse(cells);
   Polyline path{from};
   // The first and last cells stand for the exact end points.
   for (size_t i = 0; i + 1 < cells.size(); ++i) path.push_back(cells[i]);
@@ -314,15 +314,15 @@ RefineResult refine(Board& b, const RefineOptions& o) {
     if (b.flexFixed(b.tracks[i].net)) chosen[i] = 0;
   if (!o.nets.empty())
     for (size_t i = 0; i < b.tracks.size(); ++i)
-      if (!std::ranges::contains(o.nets, b.tracks[i].net)) chosen[i] = 0;
+      if (!r::contains(o.nets, b.tracks[i].net)) chosen[i] = 0;
   std::vector<Chain> chains = chainsOf(b, chosen);
   // Longest first: they gain the most and leave room for the rest.
-  std::ranges::sort(chains, std::greater{}, &Chain::length);
+  r::sort(chains, std::greater{}, &Chain::length);
   r.wires = int(chains.size());
   size_t unrouted = Connectivity::compute(b).ratsnest.size();
   std::vector<LayerId> signal;
   for (LayerId l : b.copperLayers())
-    if (!b.layers[l].plane && (o.layers.empty() || std::ranges::contains(o.layers, l))) signal.push_back(l);
+    if (!b.layers[l].plane && (o.layers.empty() || r::contains(o.layers, l))) signal.push_back(l);
 
   const OwnCopper copper(b);  // the pads: they do not change here
   for (size_t ci = 0; ci < chains.size(); ++ci) {
@@ -397,7 +397,7 @@ RefineResult refine(Board& b, const RefineOptions& o) {
         double leadLen = 0;
         if (!raw && l == c.layer)
           for (int end = 0; end < 2; ++end) {
-            leads[end] = leadTracks(b, copper, end ? c.b : c.a, c.net, c.layer, [&](int ti) { return std::ranges::contains(c.tracks, ti); }, centre[end]);
+            leads[end] = leadTracks(b, copper, end ? c.b : c.a, c.net, c.layer, [&](int ti) { return r::contains(c.tracks, ti); }, centre[end]);
             if (end == 1 && !leads[0].empty() && (centre[0] - centre[1]).len() < 1) leads[0].clear(), leads[1].clear();  // one pad
           }
         for (int end = 0; end < 2; ++end)
@@ -481,13 +481,13 @@ RefineResult refine(Board& b, const RefineOptions& o) {
     // a piece of the lead taken off is no more.
     std::vector<int> gone = c.tracks;
     gone.insert(gone.end(), bestGone.begin(), bestGone.end());
-    std::ranges::sort(gone);
+    r::sort(gone);
     for (size_t k = ci + 1; k < chains.size(); ++k) {
-      if (std::ranges::any_of(chains[k].tracks, [&](int ti) { return std::ranges::binary_search(gone, ti); })) {
+      if (r::any_of(chains[k].tracks, [&](int ti) { return r::binary_search(gone, ti); })) {
         chains[k].tracks.clear();
         continue;
       }
-      for (int& ti : chains[k].tracks) ti -= int(std::ranges::lower_bound(gone, ti) - gone.begin());
+      for (int& ti : chains[k].tracks) ti -= int(r::lower_bound(gone, ti) - gone.begin());
     }
     b = std::move(*best);
     ++r.improved;

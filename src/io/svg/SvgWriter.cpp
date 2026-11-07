@@ -13,7 +13,7 @@ constexpr const char* kCopperColors[] = {"#d33a2c", "#2f6fd6", "#c9a227", "#2aa8
 
 std::string pathOf(const Polyline& pts, bool close) {
   std::string d;
-  for (auto [i, p] : std::views::enumerate(pts)) d += std::format("{}{:.4f},{:.4f} ", i ? 'L' : 'M', p.x / 1e6, p.y / 1e6);
+  for (auto [i, p] : v::enumerate(pts)) d += std::format("{}{:.4f},{:.4f} ", i ? 'L' : 'M', p.x / 1e6, p.y / 1e6);
   if (close) d += 'Z';
   return d;
 }
@@ -32,7 +32,7 @@ std::string writeSvg(const Board& b, const SvgOptions& opt) {
 
   auto cu = b.copperLayers();
   // Bottom layers first so the top copper is drawn last.
-  for (auto [ci, l] : std::views::enumerate(cu) | std::views::reverse) {
+  for (auto [ci, l] : v::enumerate(cu) | v::reverse) {
     const char* col = kCopperColors[ci % std::size(kCopperColors)];
     out += std::format("<g fill=\"{0}\" stroke=\"{0}\" opacity=\"0.65\">\n", col);
     for (auto& z : b.zones)

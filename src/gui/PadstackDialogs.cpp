@@ -338,7 +338,7 @@ PadstackEditor::PadstackEditor(const Board& b, Padstack ps, Unit u, std::vector<
   });
   connect(apply_, &QPushButton::clicked, this, [this] {
     std::string name = name_->text().trimmed().toStdString();
-    if (name.empty() || std::ranges::contains(others_, name)) {
+    if (name.empty() || r::contains(others_, name)) {
       QMessageBox::warning(this, windowTitle(), tr("Стек КП с таким именем уже существует."));
       return;
     }
@@ -433,7 +433,7 @@ void PadstackEditor::fillTree() {
       kThermalRow, {});
   std::vector<std::string> classes(std::begin(kClasses), std::end(kClasses));
   for (auto& d : ps_.details)
-    if (d.layer.empty() && !std::ranges::contains(classes, d.layerClass)) classes.push_back(d.layerClass);
+    if (d.layer.empty() && !r::contains(classes, d.layerClass)) classes.push_back(d.layerClass);
   auto kindText = [&](const std::string& cls) {
     return cls == "Signal" || cls == "Plane" ? tr("[Сигнальный слой]") : tr("[Механический слой]");
   };
@@ -446,7 +446,7 @@ void PadstackEditor::fillTree() {
   for (auto& L : b_.layers)
     if (L.kind != LayerKind::Edge) layers.push_back(L.name);
   for (auto& d : ps_.details)
-    if (!d.layer.empty() && !std::ranges::contains(layers, d.layer)) layers.push_back(d.layer);
+    if (!d.layer.empty() && !r::contains(layers, d.layer)) layers.push_back(d.layer);
   for (auto& name : layers) {
     LayerId l = b_.findLayer(name);
     std::string cls = l >= 0 ? layerClassOf(b_, l) : std::string("Signal");
@@ -1066,7 +1066,7 @@ CreateDetailsDialog::CreateDetailsDialog(const Board& b, std::vector<Padstack> s
     auto* lw = new QListWidget;
     lw->setSelectionMode(QAbstractItemView::ExtendedSelection);
     for (size_t i = 0; i < current_.size(); ++i)
-      if (!std::ranges::contains(list_, int(i))) {
+      if (!r::contains(list_, int(i))) {
         auto* it = new QListWidgetItem(QString::fromStdString(current_[i].name), lw);
         it->setData(Qt::UserRole, int(i));
       }
@@ -1133,9 +1133,8 @@ void CreateDetailsDialog::fillList() {
   std::vector<int> order = list_;
   QCollator coll;
   coll.setNumericMode(true);
-  std::ranges::sort(order, [&](int x, int y) {
-    return coll.compare(QString::fromStdString(current_[size_t(x)].name), QString::fromStdString(current_[size_t(y)].name)) < 0;
-  });
+  r::sort(order, [&](const QString& x, const QString& y) { return coll.compare(x, y) < 0; },
+          [&](int i) { return QString::fromStdString(current_[size_t(i)].name); });
   for (int s : order) {
     const Padstack& ps = current_[size_t(s)];
     QString name = QString::fromStdString(ps.name);
@@ -1179,8 +1178,8 @@ void CreateDetailsDialog::create() {
   std::vector<std::pair<int, int>> result;
   for (int s : list_) {
     auto& ks = by[s];
-    bool made = std::ranges::any_of(ks, [](auto k) { return k == LayerDetailsResult::Kind::Added || k == LayerDetailsResult::Kind::Replaced; });
-    bool failed = std::ranges::any_of(ks, [](auto k) { return k == LayerDetailsResult::Kind::Failed; });
+    bool made = r::any_of(ks, [](auto k) { return k == LayerDetailsResult::Kind::Added || k == LayerDetailsResult::Kind::Replaced; });
+    bool failed = r::contains(ks, LayerDetailsResult::Kind::Failed);
     result.push_back({s, made ? 1 : failed ? -1 : 0});
   }
   fillReport(result);
@@ -1188,7 +1187,7 @@ void CreateDetailsDialog::create() {
 }
 
 void CreateDetailsDialog::fillReport(const std::vector<std::pair<int, int>>& result) {
-  int made = int(std::ranges::count_if(result, [](auto& r) { return r.second > 0; }));
+  int made = int(r::count_if(result, [](auto& r) { return r.second > 0; }));
   summary_->setText(QString::fromUtf8("✔ ") + tr("Добавлены детали в %1 из %2 стеков КП").arg(made).arg(result.size()));
   QStringList failed;
   for (auto& [s, k] : result)
@@ -1244,7 +1243,7 @@ QString viaDiameters(const Board& b, const ViaType& t, Unit u) {
   (void)b;
   std::vector<Coord> ds{t.diameter};
   for (auto& p : t.pads)
-    if (p.diameter > 0 && !std::ranges::contains(ds, p.diameter)) ds.push_back(p.diameter);
+    if (p.diameter > 0 && !r::contains(ds, p.diameter)) ds.push_back(p.diameter);
   QStringList s;
   for (Coord d : ds) s << formatLength(double(d), u, 4);
   return s.join(", ");
@@ -1363,7 +1362,7 @@ std::vector<LayerId> ViaStackDiagram::rows() const {
     if (L.kind == LayerKind::Copper) return 100 + L.copperIndex;
     return L.side == Side::Bottom ? 1000 : 0;
   };
-  std::ranges::stable_sort(out, {}, rank);
+  r::stable_sort(out, {}, rank);
   // The bottom side's layers mirror the top's: the mask outermost.
   return out;
 }

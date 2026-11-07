@@ -117,14 +117,12 @@ LayerList Board::copperLayers() const {
   LayerList out;
   for (LayerId i = 0; i < LayerId(layers.size()); ++i)
     if (layers[i].kind == LayerKind::Copper) out.push_back(i);
-  std::sort(out.begin(), out.end(), [&](LayerId a, LayerId b) {
-    return layers[a].copperIndex < layers[b].copperIndex;
-  });
+  r::sort(out, {}, [&](LayerId l) { return layers[l].copperIndex; });
   return out;
 }
 
 int Board::copperCount() const {
-  return int(std::count_if(layers.begin(), layers.end(), [](const Layer& l) { return l.kind == LayerKind::Copper; }));
+  return int(r::count(layers, LayerKind::Copper, &Layer::kind));
 }
 
 LayerId Board::findLayer(const std::string& name) const {
@@ -191,7 +189,7 @@ Coord Board::trackWidth(int net, LayerId layer) const {
   Coord w = classOf(net).trackWidth;
   if (layer >= 0)
     for (auto& r : layerRules)
-      if (r.width > 0 && (!r.layers || ((r.layers >> layer) & 1)) && (r.nets.empty() || std::ranges::contains(r.nets, net)))
+      if (r.width > 0 && (!r.layers || ((r.layers >> layer) & 1)) && (r.nets.empty() || r::contains(r.nets, net)))
         w = r.width;
   return w;
 }
@@ -200,14 +198,14 @@ Coord Board::clearance(int net, LayerId layer) const {
   Coord c = classOf(net).clearance;
   if (layer >= 0)
     for (auto& r : layerRules)
-      if (r.clearance > 0 && (!r.layers || ((r.layers >> layer) & 1)) && (r.nets.empty() || std::ranges::contains(r.nets, net)))
+      if (r.clearance > 0 && (!r.layers || ((r.layers >> layer) & 1)) && (r.nets.empty() || r::contains(r.nets, net)))
         c = r.clearance;
   return c;
 }
 
 Coord pairClearance(const std::vector<ClearancePair>& pairs, int netA, int netB, LayerId layer) {
   if (netA < 0 || netB < 0) return 0;
-  auto in = [](const std::vector<int>& nets, int net) { return nets.empty() || std::ranges::contains(nets, net); };
+  auto in = [](const std::vector<int>& nets, int net) { return nets.empty() || r::contains(nets, net); };
   for (auto p = pairs.rbegin(); p != pairs.rend(); ++p) {
     if (p->clearance <= 0) continue;
     if (p->layers && (layer < 0 || !((p->layers >> layer) & 1))) continue;
@@ -223,7 +221,7 @@ Coord clearanceBetween(const std::vector<Coord>& byNet, const std::vector<LayerR
     Coord c = net >= 0 && net < int(byNet.size()) ? byNet[size_t(net)] : byNet.empty() ? 0 : byNet.front();
     if (layer >= 0)
       for (auto& r : layerRules)
-        if (r.clearance > 0 && (!r.layers || ((r.layers >> layer) & 1)) && (r.nets.empty() || std::ranges::contains(r.nets, net))) c = r.clearance;
+        if (r.clearance > 0 && (!r.layers || ((r.layers >> layer) & 1)) && (r.nets.empty() || r::contains(r.nets, net))) c = r.clearance;
     return c;
   };
   return std::max(own(netA), own(netB));
@@ -243,7 +241,7 @@ Coord Board::clearance(int netA, int netB, LayerId layer) const {
 
 Coord Board::clearanceNom(int netA, int netB, LayerId layer) const {
   const Coord least = clearance(netA, netB, layer);
-  auto in = [](const std::vector<int>& nets, int net) { return nets.empty() || (net >= 0 && std::ranges::contains(nets, net)); };
+  auto in = [](const std::vector<int>& nets, int net) { return nets.empty() || (net >= 0 && r::contains(nets, net)); };
   for (auto p = nominalRules.rbegin(); p != nominalRules.rend(); ++p) {
     if (p->layers && (layer < 0 || !((p->layers >> layer) & 1))) continue;
     if ((in(p->netsA, netA) && in(p->netsB, netB)) || (in(p->netsA, netB) && in(p->netsB, netA))) return std::max(least, p->clearance);
@@ -253,7 +251,7 @@ Coord Board::clearanceNom(int netA, int netB, LayerId layer) const {
 
 Coord Board::clearanceUpper(int net, LayerId layer) const {
   Coord c = clearance(net, layer);
-  auto in = [](const std::vector<int>& nets, int n) { return nets.empty() || std::ranges::contains(nets, n); };
+  auto in = [](const std::vector<int>& nets, int n) { return nets.empty() || r::contains(nets, n); };
   for (const ClearancePair& p : pairRules)
     if ((!p.layers || (layer >= 0 && ((p.layers >> layer) & 1))) && (in(p.netsA, net) || in(p.netsB, net))) c = std::max(c, p.clearance);
   return c;
@@ -302,7 +300,7 @@ double arcAngle(Vec2 a, Vec2 m, Vec2 b) {
 }
 
 bool Graphic::hasArcs() const {
-  return std::ranges::any_of(arcs, [](double x) { return x != 0; });
+  return r::any_of(arcs, [](double x) { return x != 0; });
 }
 
 Polyline Graphic::path(double tol) const {

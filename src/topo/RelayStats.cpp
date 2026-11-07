@@ -102,10 +102,10 @@ RelayStats relayStats(const Board& b) {
       }
     }
   }
-  s.pads = int(std::ranges::count(padHas, 1));
-  s.padsAtCentre = int(std::ranges::count(padCentre, 1));
-  s.vias = int(std::ranges::count(viaHas, 1));
-  s.viasAtCentre = int(std::ranges::count(viaCentre, 1));
+  s.pads = int(r::count(padHas, 1));
+  s.padsAtCentre = int(r::count(padCentre, 1));
+  s.vias = int(r::count(viaHas, 1));
+  s.viasAtCentre = int(r::count(viaCentre, 1));
   // Tracks wholly inside their own copper; the boundary crossings of the elongated pads.
   for (int ti = 0; ti < int(b.tracks.size()); ++ti) {
     const Track& t = b.tracks[ti];
@@ -135,7 +135,7 @@ RelayStats relayStats(const Board& b) {
       const Shape shape = b.pads[size_t(in->index)].shapeGeom();
       // The boundary point along the track from this end.
       Polyline path = t.path(2000);
-      if (e) std::ranges::reverse(path);
+      if (e) r::reverse(path);
       Vec2 inside = path.front(), outside = path.front();
       bool found = false;
       for (size_t k = 1; k < path.size(); ++k) {

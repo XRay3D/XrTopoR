@@ -154,9 +154,7 @@ ViaResult removeVias(Board& b, Topology& t, const ViaOptions& o) {
     }
     std::erase_if(out, [&](const Cand& c) { return refused.contains(c.key); });
     // Two vias for one wire first, then the fewest layers to copy onto, then the shortest wire.
-    std::ranges::sort(out, [](const Cand& x, const Cand& y) {
-      return std::tuple(!x.both, x.retype >= 0, std::popcount(x.copy), x.length) < std::tuple(!y.both, y.retype >= 0, std::popcount(y.copy), y.length);
-    });
+    r::sort(out, {}, [](const Cand& c) { return std::tuple(!c.both, c.retype >= 0, std::popcount(c.copy), c.length); });
     // One change at an owner in a pass.
     std::set<int> used;
     std::vector<Cand> one;
@@ -269,7 +267,7 @@ ViaResult removeVias(Board& b, Topology& t, const ViaOptions& o) {
     std::erase_if(mb.tracks, [&](const Track& tr) { return tr.id && goneTracks.contains(tr.id); });
     std::erase_if(mb.vias, [&](const Via& v) { return v.id && goneVias.contains(v.id); });
     std::erase_if(mb.vias, [&](const Via& v) {
-      return v.id && std::ranges::find(maybe, v.id) != maybe.end() && std::popcount(edit::viaTrackLayers(mb, v) | edit::viaHeldBy(mb, v)) <= 1;
+      return v.id && r::find(maybe, v.id) != maybe.end() && std::popcount(edit::viaTrackLayers(mb, v) | edit::viaHeldBy(mb, v)) <= 1;
     });
     return redrawTracks(mb, o.flips, r.drawings);
   };
@@ -286,7 +284,7 @@ ViaResult removeVias(Board& b, Topology& t, const ViaOptions& o) {
       Topology::assignIds(c);
       Topology m;
       m.build(c);
-      if (std::ranges::any_of(m.violations, [](const Violation& v) { return v.kind == Violation::Kind::Crossing || v.kind == Violation::Kind::ThroughPad; })) {
+      if (r::any_of(m.violations, [](const Violation& v) { return v.kind == Violation::Kind::Crossing || v.kind == Violation::Kind::ThroughPad; })) {
         r.log.push_back(std::format("vias: {} candidate(s), none tried: the drawing's own tracks cross, no model can be built from it", list.size()));
         break;
       }

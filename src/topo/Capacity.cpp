@@ -37,7 +37,7 @@ bool chooseNarrowing(const std::vector<double>& width, const std::vector<double>
       total += width[k] - widthMin[k];
     }
   if (deficit <= 0 || total < deficit - 1.0) return false;  // a nanometre of rounding is no shortfall
-  std::ranges::stable_sort(order, [&](int x, int y) { return width[x] - widthMin[x] > width[y] - widthMin[y]; });
+  r::stable_sort(order, std::greater{}, [&](int i) { return width[i] - widthMin[i]; });
   double left = deficit;
   for (int k : order) {
     if (left <= 1.0) break;

@@ -146,8 +146,7 @@ void buildOutline(Board& b, LayerId edgeLayer) {
       loops.push_back(loop);
     }
   }
-  std::sort(loops.begin(), loops.end(),
-            [](const Polyline& a, const Polyline& c) { return std::abs(polygonArea(a)) > std::abs(polygonArea(c)); });
+  r::sort(loops, std::greater{}, [](const Polyline& p) { return std::abs(polygonArea(p)); });
   b.outline = std::move(loops);
 }
 

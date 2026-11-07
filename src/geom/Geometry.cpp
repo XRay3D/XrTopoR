@@ -64,17 +64,17 @@ double polygonArea(const Polyline& poly) {
 // with the smallest angle to the ray. Holes still to be merged lie left of M, so no bridge crosses one.
 Polyline fracture(const Polyline& outer, std::vector<Polyline> holes) {
   Polyline res = outer;
-  if (polygonArea(res) < 0) std::reverse(res.begin(), res.end());
+  if (polygonArea(res) < 0) r::reverse(res);
   auto maxX = [](const Polyline& h) {
     double m = std::numeric_limits<double>::lowest();
     for (auto& v : h) m = std::max(m, v.x);
     return m;
   };
   std::erase_if(holes, [](const Polyline& h) { return h.size() < 3; });
-  std::sort(holes.begin(), holes.end(), [&](const Polyline& a, const Polyline& b) { return maxX(a) > maxX(b); });
+  r::sort(holes, std::greater{}, maxX);
   for (auto& h0 : holes) {
     Polyline h = h0;
-    if (polygonArea(h) > 0) std::reverse(h.begin(), h.end());  // holes clockwise
+    if (polygonArea(h) > 0) r::reverse(h);  // holes clockwise
     size_t mi = 0;
     for (size_t j = 1; j < h.size(); ++j)
       if (h[j].x > h[mi].x || (h[j].x == h[mi].x && h[j].y < h[mi].y)) mi = j;

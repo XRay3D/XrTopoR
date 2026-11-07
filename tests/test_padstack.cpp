@@ -51,7 +51,7 @@ TEST(Padstack, ReadsTheStacksOfADesign) {
   const Board& b = **r;
   ASSERT_EQ(b.padstacks.size(), 9u);
   auto use = padstackUse(b);
-  EXPECT_EQ(std::ranges::count(use, 0), 2);
+  EXPECT_EQ(r::count(use, 0), 2);
   EXPECT_EQ(use[size_t(stackIndex(b, "(Default)"))], 0);
   EXPECT_EQ(use[size_t(stackIndex(b, "C140R.PS"))], 0);
   const Padstack& smd = b.padstacks[size_t(stackIndex(b, "C35LH.PS"))];
@@ -112,7 +112,7 @@ TEST(Padstack, FstRoundTrip) {
   EXPECT_EQ(b.padstacks[size_t(stackIndex(b, "(Default)"))].type, PadstackType::MountHole);
   EXPECT_FALSE(b.padstacks[size_t(stackIndex(b, "(Default)"))].plated);
   // A pad of the stack: the chamfered shape is a polygon on the top, a plain square on the bottom.
-  auto pi = std::ranges::find_if(b.pads, [&](const Pad& p) { return p.padstack == stackIndex(b, "C150S.PS"); });
+  auto pi = r::find(b.pads, stackIndex(b, "C150S.PS"), &Pad::padstack);
   ASSERT_NE(pi, b.pads.end());
   EXPECT_EQ(pi->shape.kind, PadShapeKind::Polygon);
   EXPECT_FALSE(pi->uniform);
@@ -175,7 +175,7 @@ TEST(Padstack, MaskAndPasteDetails) {
   std::vector<int> origin(stacks.size());
   for (size_t i = 0; i < origin.size(); ++i) origin[i] = int(i);
   setPadstacks(b, stacks, origin);
-  auto pi = std::ranges::find_if(b.pads, [&](const Pad& p) { return p.padstack == square; });
+  auto pi = r::find(b.pads, square, &Pad::padstack);
   ASSERT_NE(pi, b.pads.end());
   auto m = padShapeOn(b, *pi, topMask);
   ASSERT_TRUE(m);
@@ -278,7 +278,7 @@ TEST(Padstack, ShiftMovesThePad) {
   ASSERT_TRUE(r) << r.error();
   Board& b = **r;
   int sq = stackIndex(b, "N150S.PS");
-  auto pi = size_t(std::ranges::find_if(b.pads, [&](const Pad& p) { return p.padstack == sq; }) - b.pads.begin());
+  auto pi = size_t(r::find(b.pads, sq, &Pad::padstack) - b.pads.begin());
   ASSERT_LT(pi, b.pads.size());
   Vec2 before = b.pads[pi].pos.v();
   double angle = b.pads[pi].angle;
@@ -314,7 +314,7 @@ TEST(Padstack, BuiltForOtherFormats) {
   ASSERT_TRUE(pc) << pc.error();
   for (auto& p : (*pc)->pads) ASSERT_GE(p.padstack, 0);
   // P-CAD pad styles keep their names.
-  EXPECT_TRUE(std::ranges::none_of((*pc)->padstacks, [](const Padstack& s) { return s.name.ends_with("_SMD"); }));
+  EXPECT_TRUE(r::none_of((*pc)->padstacks, [](const Padstack& s) { return s.name.ends_with("_SMD"); }));
 }
 
 // A pad bigger on one copper layer than on the others is checked there by its size there.
@@ -338,11 +338,11 @@ TEST(Padstack, DrcByTheLayersShape) {
   std::vector<Padstack> stacks = b.padstacks;
   PadDetail big = *named(stacks[size_t(round)], "Bottom");
   big.w = big.h = mmToNm(3.5);
-  *std::ranges::find_if(stacks[size_t(round)].details, [](const PadDetail& d) { return d.layer == "Bottom"; }) = big;
+  *r::find(stacks[size_t(round)].details, std::string("Bottom"), &PadDetail::layer) = big;
   std::vector<int> origin(stacks.size());
   for (size_t i = 0; i < origin.size(); ++i) origin[i] = int(i);
   setPadstacks(b, stacks, origin);
-  auto pi = std::ranges::find_if(b.pads, [&](const Pad& p) { return p.padstack == round; });
+  auto pi = r::find(b.pads, round, &Pad::padstack);
   ASSERT_NE(pi, b.pads.end());
   EXPECT_FALSE(pi->uniform);
   EXPECT_EQ(pi->shape.w, mmToNm(1.5));  // the routing still sees the top one
@@ -394,7 +394,7 @@ TEST(Padstack, ViaTypesLayerByLayer) {
   ASSERT_TRUE(r) << r.error();
   const Board& b = **r;
   ASSERT_TRUE(b.rules);
-  auto t = std::ranges::find_if(b.rules->viaTypes, [](const ViaType& v) { return v.name == "C140R.PS"; });
+  auto t = r::find(b.rules->viaTypes, std::string("C140R.PS"), &ViaType::name);
   ASSERT_NE(t, b.rules->viaTypes.end());
   EXPECT_EQ(t->diameter, mmToNm(1.4));
   EXPECT_TRUE(t->viaOnPin);
@@ -403,7 +403,7 @@ TEST(Padstack, ViaTypesLayerByLayer) {
   EXPECT_EQ(viaPadDiameter(*t, "Mask", "TopMask"), mmToNm(1.2));
   EXPECT_EQ(viaPadDiameter(*t, "Mask", "BotMask"), mmToNm(1.3));
   EXPECT_EQ(viaPadDiameter(*t, "Paste", "TopPaste"), 0);
-  auto v = std::ranges::find_if(b.vias, [](const Via& v) { return v.diameter == mmToNm(1.4); });
+  auto v = r::find(b.vias, mmToNm(1.4), &Via::diameter);
   ASSERT_NE(v, b.vias.end());
   EXPECT_EQ(viaDiameterOn(b, *v, b.findLayer("TopMask")), mmToNm(1.2));
   EXPECT_EQ(viaDiameterOn(b, *v, b.findLayer("BotMask")), mmToNm(1.3));
@@ -413,7 +413,7 @@ TEST(Padstack, ViaTypesLayerByLayer) {
 
   auto again = io::readFst(io::writeFst(b), "via2.fst");
   ASSERT_TRUE(again) << again.error();
-  auto t2 = std::ranges::find_if((*again)->rules->viaTypes, [](const ViaType& v) { return v.name == "C140R.PS"; });
+  auto t2 = r::find((*again)->rules->viaTypes, std::string("C140R.PS"), &ViaType::name);
   ASSERT_NE(t2, (*again)->rules->viaTypes.end());
   EXPECT_EQ(t2->viaOnPin, true);
   EXPECT_EQ(t2->from, "Top");

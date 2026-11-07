@@ -129,7 +129,7 @@ std::vector<Violation> Topology::findCrossings(const LayerMesh& m) const {
       int from = T.v[(i + 1) % 3];  // the edge runs from v[i+1] to v[i+2] along the perimeter
       const Edge& E = m.edges[e];
       int n = int(E.cross.size());
-      int k = int(std::ranges::find(E.cross, cid) - E.cross.begin());
+      int k = int(r::find(E.cross, cid) - E.cross.begin());
       double frac = (k + 1.0) / (n + 1.0);
       if (E.v[0] != from) frac = 1 - frac;
       return double((i + 1) % 3) + frac;
@@ -312,7 +312,7 @@ void Topology::convertWires(const Board& b, BuildScratch& scratch) {
     w.end[0] = ends[ci][0].owner;
     w.end[1] = ends[ci][1].owner;
     for (int ti : c.tracks) w.tracks.push_back(b.tracks[ti].id);
-    w.locked = std::ranges::any_of(c.tracks, [&](int ti) { return b.tracks[ti].locked; });
+    w.locked = r::any_of(c.tracks, &Track::locked, of(b.tracks));
     w.dirty = true;
     if (w.end[0] < 0 || w.end[1] < 0 || m.ownerVerts[w.end[0]].empty() || m.ownerVerts[w.end[1]].empty()) {
       ++noEnd;
@@ -676,7 +676,7 @@ void Topology::convertWires(const Board& b, BuildScratch& scratch) {
     for (int e = 0; e < int(m.edges.size()); ++e)
       if (m.edges[e].cls == 2) {
         // (Only locked wires there, a pad of another net inside a pour: nothing will move, nothing to report.)
-        if (std::ranges::all_of(m.edges[e].cross, [&](int cid) { return wires[crossings[cid].wire].locked; })) continue;
+        if (r::all_of(m.edges[e].cross, &Wire::locked, [&](int cid) -> auto& { return wires[crossings[cid].wire]; })) continue;
         Violation v;
         v.kind = Violation::Kind::Overflow;
         v.layer = m.layer;
@@ -695,7 +695,7 @@ void Topology::convertWires(const Board& b, BuildScratch& scratch) {
 // round: the wire stays where it was drawn, locked, with a Blocked violation.
 void Topology::relayDisplaced(const Board& b, BuildScratch& scratch) {
   // The wide ones first: they need the room, the thin ones squeeze in beside them.
-  std::ranges::stable_sort(scratch.displaced, [&](int x, int y) { return wires[x].width > wires[y].width; });
+  r::stable_sort(scratch.displaced, std::greater{}, [&](int i) { return wires[i].width; });
   for (int wi : scratch.displaced) {
     Wire& w = wires[wi];
     auto p = findRelay(*this, wi);

@@ -264,7 +264,7 @@ struct Reader {
           // the plane ones.
           if (det->layer.empty() && det->layerClass.empty()) {
             auto has = [&](const char* cls) {
-              return std::ranges::any_of(st.details, [&](const PadDetail& x) { return x.layerClass == cls; });
+              return r::contains(st.details, cls, &PadDetail::layerClass);
             };
             if (!has("Signal")) det->layerClass = "Signal";
             else if (!has("Plane")) det->layerClass = "Plane";
@@ -353,7 +353,7 @@ struct Reader {
     if (pts.size() >= 2 && (pts.front() - pts.back()).len() < 1e-9) pts.pop_back();
     else arcs.resize(pts.size(), 0);
     arcs.resize(pts.size(), 0);
-    if (std::ranges::none_of(arcs, [](double x) { return x != 0; })) arcs.clear();
+    if (r::none_of(arcs, [](double x) { return x != 0; })) arcs.clear();
     return true;
   }
 
@@ -857,10 +857,10 @@ struct Reader {
       std::vector<int> out;
       for (auto& k : d->second->kids) {
         if (k.is("NetRef")) out.push_back(b.addNet(std::string(k.attr("name"))));
-        else if (k.is("NetGroupRef")) std::ranges::copy(self(k.attr("name")), std::back_inserter(out));
+        else if (k.is("NetGroupRef")) r::copy(self(k.attr("name")), std::back_inserter(out));
       }
-      std::ranges::sort(out);
-      out.erase(std::ranges::unique(out).begin(), out.end());
+      r::sort(out);
+      out.erase(r::unique(out).begin(), out.end());
       return netGroups[std::string(name)] = out;
     };
     auto layers = [&](this auto& self, std::string_view name) -> LayerMask {

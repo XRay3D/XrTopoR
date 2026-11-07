@@ -312,7 +312,7 @@ TEST(Topo, ConvertsReferenceBoards) {
       auto r0 = own.at(c.a(), c.net, c.layer), r1 = own.at(c.b(), c.net, c.layer);
       bool inside = r0 && r1 && *r0 == *r1;
       for (size_t k = 0; inside && k < c.path.size(); ++k)
-        inside = std::ranges::any_of(itemShapes(b, *r0), [&](const Shape& s) { return s.contains(c.path[k]); });
+        inside = r::any_of(itemShapes(b, *r0), [&](const Shape& s) { return s.contains(c.path[k]); });
       real += !inside;
     }
     EXPECT_EQ(t.wires.size(), real) << x.file;
@@ -819,7 +819,7 @@ TEST(Topo, CompareTwoModels) {
     for (int cid : w.cross) {
       const topo::Edge& E = m.edges[t.crossings[cid].edge];
       Vec2 u = m.verts[E.v[0]].p, v = m.verts[E.v[1]].p;
-      int k = int(std::ranges::find(E.cross, cid) - E.cross.begin());
+      int k = int(r::find(E.cross, cid) - E.cross.begin());
       out.push_back({std::llround(u.x / 1000), std::llround(u.y / 1000), std::llround(v.x / 1000), std::llround(v.y / 1000), k, int(E.cross.size())});
     }
     return out;
@@ -833,7 +833,7 @@ TEST(Topo, CompareTwoModels) {
     ++matched;
     auto ea = edges(A, A.wires[wi]), ec = edges(C, C.wires[it->second]);
     // The same wire may run the other way round in the other model.
-    if (A.owners[A.wires[wi].end[0]].c != C.owners[C.wires[it->second].end[0]].c) std::ranges::reverse(ec);  // ranks are per edge, not per wire
+    if (A.owners[A.wires[wi].end[0]].c != C.owners[C.wires[it->second].end[0]].c) r::reverse(ec);  // ranks are per edge, not per wire
     auto strip = [](auto v) { for (auto& e : v) { std::get<4>(e) = 0; std::get<5>(e) = 0; } return v; };
     if (strip(ea) != strip(ec)) {
       if (differ < 5) std::println("wire net {} L{}: {} vs {} crossings", (**la).nets[A.wires[wi].net].name, int(A.wires[wi].layer), ea.size(), ec.size());
@@ -2410,14 +2410,14 @@ std::vector<double> anglesAt(const Board& b, Vec2 p) {
     if ((t.a.v() - p).len() < 1000) dirs.push_back(std::atan2(t.b.v().y - p.y, t.b.v().x - p.x));
     if ((t.b.v() - p).len() < 1000) dirs.push_back(std::atan2(t.a.v().y - p.y, t.a.v().x - p.x));
   }
-  std::ranges::sort(dirs);
+  r::sort(dirs);
   std::vector<double> out;
   for (size_t i = 0; i < dirs.size(); ++i) {
     double d = dirs[(i + 1) % dirs.size()] - dirs[i];
     if (d <= 0) d += 2 * std::numbers::pi;
     out.push_back(d * 180 / std::numbers::pi);
   }
-  std::ranges::sort(out);
+  r::sort(out);
   return out;
 }
 
@@ -2957,7 +2957,7 @@ TEST(Topo, ClinchWithTwoHinderingWires) {
   auto res = topo::refineModel(p.b, t);
   ASSERT_TRUE(res.drawn);
   EXPECT_EQ(res.clinches, 1);
-  EXPECT_TRUE(std::ranges::any_of(res.log, [](const std::string& l) { return l.contains("more than one wire"); }));
+  EXPECT_TRUE(r::any_of(res.log, [](const std::string& l) { return l.contains("more than one wire"); }));
   EXPECT_NEAR(p.length("N1"), 10.0, 0.05);
   EXPECT_LT(p.length("N2"), 23.0) << "was " << was;
   expectSoundModel(t);

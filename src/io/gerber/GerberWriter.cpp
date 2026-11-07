@@ -299,7 +299,7 @@ std::vector<GerberFile> makeGerbers(const Board& b, const GerberOptions& opt) {
     if (opt.silk) {
       Gerber g("Legend," + sfx);
       auto ls = sideLayers(LayerKind::Silk, side);
-      auto onSilk = [&](LayerId l) { return std::find(ls.begin(), ls.end(), l) != ls.end(); };
+      auto onSilk = [&](LayerId l) { return r::contains(ls, l); };
       for (auto& c : b.components)
         for (auto& gr : c.graphics)
           if (onSilk(gr.layer)) addGraphic(g, gr);

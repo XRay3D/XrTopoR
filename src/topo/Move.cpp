@@ -22,7 +22,7 @@ Shape moved(Shape s, Vec2 d) {
 // not cross each other (I2), which is all the side tests need.
 Vec2 rankPos(const LayerMesh& m, const Edge& E, int cid) {
   int n = int(E.cross.size());
-  int k = int(std::ranges::find(E.cross, cid) - E.cross.begin());
+  int k = int(r::find(E.cross, cid) - E.cross.begin());
   Vec2 U = m.verts[E.v[0]].p, V = m.verts[E.v[1]].p;
   return U + (V - U) * (double(k + 1) / double(n + 1));
 }
@@ -32,13 +32,13 @@ Vec2 rankPos(const LayerMesh& m, const Edge& E, int cid) {
 void spliceWires(Topology& t, const std::vector<char>& gone, std::map<int, std::vector<std::pair<int, int>>>& inserts,
                  std::vector<int> touched) {
   for (auto& [wi, _] : inserts) touched.push_back(wi);
-  std::ranges::sort(touched);
-  touched.erase(std::unique(touched.begin(), touched.end()), touched.end());
+  r::sort(touched);
+  touched.erase(r::unique(touched).begin(), touched.end());
   for (int wi : touched) {
     Wire& w = t.wires[wi];
     std::vector<int> out;
     auto& ins = inserts[wi];
-    std::ranges::stable_sort(ins, [](auto& x, auto& y) { return x.first < y.first; });
+    r::stable_sort(ins, {}, &std::pair<int, int>::first);
     size_t next = 0;
     for (size_t i = 0; i <= w.cross.size(); ++i) {
       while (next < ins.size() && ins[next].first == int(i)) out.push_back(ins[next++].second);
@@ -74,8 +74,8 @@ std::vector<int> starEdges(const LayerMesh& m, int v) {
   std::vector<int> out;
   for (int ti : m.verts[v].tris)
     for (int e : m.tris[ti].e) out.push_back(e);
-  std::ranges::sort(out);
-  out.erase(std::unique(out.begin(), out.end()), out.end());
+  r::sort(out);
+  out.erase(r::unique(out).begin(), out.end());
   return out;
 }
 
@@ -273,7 +273,7 @@ int insertVertex(Topology& t, LayerMesh& m, int owner, double at, Vec2 off, bool
       Vec2 at = ch.a + (ch.b - ch.a) * u;
       hs.push_back({u, i, (at - P).len()});
     }
-    std::ranges::sort(hs, [](const Hit& p, const Hit& q) { return p.u < q.u; });
+    r::sort(hs, {}, &Hit::u);
     for (const Hit& h : hs) {
       int cid = int(t.crossings.size());
       t.crossings.push_back({ch.wire, spoke[h.i], -1, double(t.wires[ch.wire].width)});
@@ -282,10 +282,10 @@ int insertVertex(Topology& t, LayerMesh& m, int owner, double at, Vec2 off, bool
     }
   }
   for (int i = 0; i < 3; ++i) {
-    std::ranges::stable_sort(onSpoke[i], [](const OnSpoke& p, const OnSpoke& q) { return p.dist < q.dist; });
+    r::stable_sort(onSpoke[i], {}, &OnSpoke::dist);
     Edge& S = m.edges[spoke[i]];
     for (const OnSpoke& s : onSpoke[i]) S.cross.push_back(s.cid);
-    if (S.v[0] != x) std::ranges::reverse(S.cross);  // the list runs from v[0]
+    if (S.v[0] != x) r::reverse(S.cross);  // the list runs from v[0]
   }
   spliceWires(t, {}, inserts, {});
   for (int i = 0; i < 3; ++i) refreshEdge(t, m, spoke[i]);
@@ -417,13 +417,13 @@ bool removeVertex(Topology& t, LayerMesh& m, int v, bool lawson) {
     std::vector<int>& list = m.verts[c[i]].tris;
     std::erase(list, T[1]);
     std::erase(list, T[2]);
-    if (!std::ranges::contains(list, T[0])) list.push_back(T[0]);
+    if (!r::contains(list, T[0])) list.push_back(T[0]);
   }
   std::erase(m.ownerVerts[m.verts[v].owner], v);
   m.verts[v] = Vertex{};
   m.verts[v].owner = -1;
-  std::ranges::sort(touched);
-  touched.erase(std::unique(touched.begin(), touched.end()), touched.end());
+  r::sort(touched);
+  touched.erase(r::unique(touched).begin(), touched.end());
   for (int wi : touched) tighten(t, m, wi);
   if (lawson) flipLoop(t, m, {far[0], far[1], far[2]}, {}, false);
   return true;

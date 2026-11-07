@@ -145,7 +145,7 @@ Result<std::string> writePcad(const Board& b) {
     double rot = flipped ? std::fmod(720.0 - c.angle, 360.0) : c.angle;
     if (Node* p = findChild(inst, "pt")) *p = pt(c.pos.v());
     auto afterPt = [&](Node n) {
-      auto it = std::find_if(inst.kids.begin(), inst.kids.end(), [](const Node& k) { return k.is("pt"); });
+      auto it = r::find_if(inst.kids, [](const Node& k) { return k.is("pt"); });
       inst.kids.insert(it == inst.kids.end() ? inst.kids.end() : it + 1, std::move(n));
     };
     if (Node* f = findChild(inst, "isFlipped")) {

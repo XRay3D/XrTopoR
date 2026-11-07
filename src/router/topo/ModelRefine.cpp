@@ -81,7 +81,7 @@ RefineModelResult refineModel(Board& b, Topology& t, const RefineModelOptions& o
     const double detour = tautLength(t, wi) - straight;
     if (detour >= o.detour) order.push_back({wi, detour});
   }
-  std::ranges::sort(order, [](const Candidate& x, const Candidate& y) { return x.detour > y.detour; });
+  r::sort(order, std::greater{}, &Candidate::detour);
   // No wire is led past a via that has yet to step off copper it is too close to (F7 does that): it would
   // take the room the via has to step into.
   const std::vector<char> unsettled = viasTooClose(b, t);
@@ -123,7 +123,7 @@ RefineModelResult refineModel(Board& b, Topology& t, const RefineModelOptions& o
         const std::optional<PastResult> past = relayPast(t, c.wire, hs, was - std::max(o.gain, o.gainPart * was), &unsettled, saved);
         if (!past) break;
         std::vector<int> key = past->taken;
-        std::ranges::sort(key);
+        r::sort(key);
         now = past->length + past->othersAfter;
         wasAll = was + past->othersBefore;
         if (now <= wasAll - std::max(o.gain, o.gainPart * wasAll) && !refusedPairs.contains({c.wire, key})) {
@@ -226,7 +226,7 @@ RefineModelResult refineModel(Board& b, Topology& t, const RefineModelOptions& o
       const Wire& w = t.wires[size_t(wi)];
       const size_t was = linesOf(b, w.net);
       Board trial = b;
-      std::erase_if(trial.tracks, [&](const Track& tr) { return tr.id && std::ranges::contains(w.tracks, tr.id); });
+      std::erase_if(trial.tracks, [&](const Track& tr) { return tr.id && r::contains(w.tracks, tr.id); });
       if (linesOf(trial, w.net) > was) continue;  // the pour does not connect what it did
       b = std::move(trial);
       ++removed;

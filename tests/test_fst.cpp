@@ -124,8 +124,8 @@ TEST(FstIO, MatchesDsn) {
   }
   EXPECT_GT(compared, 500);
   EXPECT_EQ(netMismatch, 0);
-  EXPECT_EQ(d.components.size() + 0u, size_t(std::count_if(f.components.begin(), f.components.end(),
-                                                            [&](const Component& c) { return d.findComponent(c.ref) >= 0; })));
+  EXPECT_EQ(d.components.size() + 0u, size_t(r::count_if(f.components, [&](const std::string& ref) { return d.findComponent(ref) >= 0; },
+                                                         &Component::ref)));
 }
 
 TEST(FstIO, Arcs) {

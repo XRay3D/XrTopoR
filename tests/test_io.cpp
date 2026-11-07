@@ -118,7 +118,7 @@ TEST(PcadIO, WriterRoundTripAndRouting) {
   ASSERT_TRUE(b2);
   EXPECT_EQ((*b2)->components[3].pos, (*b)->components[3].pos);
   // Tracks are read layer by layer: find the arc by its end point.
-  auto it = std::ranges::find_if((*b2)->tracks, [&](const Track& t) {
+  auto it = r::find_if((*b2)->tracks, [&](const Track& t) {
     auto near = [](Point p, Point q) { return (p.v() - q.v()).len() < 1000; };
     return t.isArc() && ((near(t.a, arc.a) && near(t.b, arc.b)) || (near(t.a, arc.b) && near(t.b, arc.a)));
   });

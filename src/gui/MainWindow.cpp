@@ -553,7 +553,7 @@ void MainWindow::applyToporLayout(const ToporSettings& t) {
     }
   for (auto& [state, list] : sides) {
     bool vertical = state == "left" || state == "right";
-    std::ranges::sort(list, {}, [&](const ToporPanel* p) { return vertical ? p->posVert : p->posHor; });
+    r::sort(list, {}, [&](const ToporPanel* p) { return vertical ? p->posVert : p->posHor; });
     QList<QDockWidget*> docks;
     QList<int> share;
     for (auto* p : list) {
@@ -572,7 +572,7 @@ void MainWindow::applyToporLayout(const ToporSettings& t) {
   std::vector<const ToporPanel*> bars;
   for (auto& p : t.panels)
     if (auto* tb = findChild<QToolBar*>(p.name); tb && tb->parentWidget() == this) bars.push_back(&p);
-  std::ranges::sort(bars, {}, [](const ToporPanel* p) { return std::pair{p->posVert, p->posHor}; });
+  r::sort(bars, {}, [](const ToporPanel* p) { return std::pair{p->posVert, p->posHor}; });
   for (auto* p : bars) {
     auto* tb = findChild<QToolBar*>(p->name);
     Qt::ToolBarArea a = p->state == "left" ? Qt::LeftToolBarArea : p->state == "right" ? Qt::RightToolBarArea
@@ -1100,7 +1100,7 @@ void MainWindow::showContextMenu(QPoint globalPos) {
     });
     m.addAction(tr("Добавить в фильтр отображения связей"), this, [this, name] {
       auto& list = doc_->display().netlineNets;
-      if (!std::ranges::contains(list, name.toStdString())) list.push_back(name.toStdString());
+      if (!r::contains(list, name.toStdString())) list.push_back(name.toStdString());
       doc_->display().filterNetlines = true;
       doc_->displayChanged();
     });
@@ -1197,7 +1197,7 @@ void MainWindow::autoroute() {
 // over. Selected wires go the second way alone.
 void MainWindow::refine(bool changeLayers) {
   if (!doc_->hasBoard()) return;
-  const bool selected = std::ranges::any_of(doc_->selectedItems(), [](ItemRef r) { return r.type == ItemType::Track; });
+  const bool selected = r::contains(doc_->selectedItems(), ItemType::Track, &ItemRef::type);
   if (!selected && QSettings().value("topo/model", true).toBool()) refineModel(changeLayers);
   else refineTracks(changeLayers);
 }
@@ -1308,8 +1308,8 @@ void MainWindow::showTopologyViolations(const Board& b, const topo::Topology& t,
     if (v.a.type == ItemType::Track) sel.push_back(v.a);
     if (v.hasB) sel.push_back(v.b);
   }
-  std::ranges::sort(sel, [](ItemRef x, ItemRef y) { return std::tie(x.type, x.index) < std::tie(y.type, y.index); });
-  sel.erase(std::unique(sel.begin(), sel.end(), [](ItemRef x, ItemRef y) { return x.type == y.type && x.index == y.index; }), sel.end());
+  r::sort(sel, {}, [](ItemRef x) { return std::pair(x.type, x.index); });
+  sel.erase(r::unique(sel).begin(), sel.end());
   doc_->setDrc(drc);
   doc_->setSelection(sel, {});
   showHint(tr("%1 прервана: топологических нарушений %2 (проводники выделены, см. окно сообщений)").arg(what).arg(drc.size()), 10000);

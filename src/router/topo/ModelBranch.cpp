@@ -293,7 +293,7 @@ BranchResult splitBranches(Board& b, Topology& t, const BranchOptions& o) {
     // The pair with the most to gain, and the best of the pairs of the other wires there: a vertex of four
     // wires gives two pairs at once (of a branch point nothing is left then but a bend in the way between the
     // two new ones, and the drawing pulls that out).
-    std::ranges::sort(here, [](const Split& a, const Split& c) { return a.gain > c.gain; });
+    r::sort(here, std::greater{}, &Split::gain);
     for (size_t k = 0, taken = 0; k < here.size() && taken < 2; ++k) {
       if (taken == 1 && (here[k].x.wire == splits.back().x.wire || here[k].x.wire == splits.back().y.wire || here[k].y.wire == splits.back().x.wire ||
                          here[k].y.wire == splits.back().y.wire))
@@ -359,7 +359,7 @@ BranchResult splitBranches(Board& b, Topology& t, const BranchOptions& o) {
                          "by its track; {} wire(s) to a branch point with another wire of the net nearer, {:.2f} mm",
                  dWidthCould, gWidth / 1e6, dPolyCould, gPoly / 1e6, dClear, dClearTrack, dReattach, gReattach / 1e6);
   }
-  std::ranges::sort(splits, [](const Split& x, const Split& y) { return x.gain > y.gain; });
+  r::sort(splits, std::greater{}, &Split::gain);
   // A wire in one split a pass (its other end may be a pair's leg too).
   {
     std::set<int> used;
@@ -429,7 +429,7 @@ BranchResult splitBranches(Board& b, Topology& t, const BranchOptions& o) {
         Topology::assignIds(one);
         Topology m;
         m.build(one);
-        if (std::ranges::any_of(m.violations, [](const Violation& v) { return v.kind == Violation::Kind::Crossing || v.kind == Violation::Kind::ThroughPad; })) {
+        if (r::any_of(m.violations, [](const Violation& v) { return v.kind == Violation::Kind::Crossing || v.kind == Violation::Kind::ThroughPad; })) {
           out[k] = 1;
           any = true;
           if (debug) std::println(stderr, "new branch point of {} at ({:.3f}, {:.3f}) left out: its wires would cross what lies between", b.nets[t.wires[splits[k].x.wire].net].name, splits[k].p.x / 1e6, -splits[k].p.y / 1e6);
@@ -513,7 +513,7 @@ BranchResult reattachBranches(Board& b, Topology& t, const BranchOptions& o) {
       if (c.near < c.len - std::max(o.gain, 0.05 * c.len)) cands.push_back(c);
     }
   }
-  std::ranges::sort(cands, [](const Cand& x, const Cand& y) { return x.len - x.near > y.len - y.near; });
+  r::sort(cands, std::greater{}, [](const Cand& c) { return c.len - c.near; });
   const DrawingScore was = scoreDrawing(b);
   int attempts = 0;
   for (const Cand& c : cands) {

@@ -34,7 +34,7 @@ std::string routingReport(const Board& b) {
   BBox bb = b.bbox();
   double total = 0;
   for (auto& t : b.tracks) total += t.length();
-  int arcs = int(std::ranges::count_if(b.tracks, [](const Track& t) { return t.isArc(); }));
+  int arcs = int(r::count_if(b.tracks, &Track::isArc));
   out += std::format("Board: {}\n", b.name);
   out += std::format("Size: {:.2f} x {:.2f} mm, {} copper layer(s)\n", bb.width() / kNmPerMm, bb.height() / kNmPerMm,
                      b.copperCount());
@@ -68,8 +68,8 @@ std::string routingReport(const Board& b) {
     if (p.net >= 0) nets[p.net].pads++;
   for (auto& r : conn.ratsnest) nets[r.net].unrouted++;
   std::vector<int> order(nets.size());
-  std::ranges::iota(order, 0);
-  std::ranges::sort(order, std::greater{}, [&](int i) { return nets[i].length; });
+  r::iota(order, 0);
+  r::sort(order, std::greater{}, [&](int i) { return nets[i].length; });
   out += "\nNet                             Pads   Length, mm   Vias   Unrouted\n";
   for (int i : order) {
     const NetStat& s = nets[i];
@@ -84,8 +84,8 @@ std::string bomCsv(const Board& b) {
   std::map<std::pair<std::string, std::string>, std::vector<std::string>> groups;
   for (auto& c : b.components) groups[{c.value, c.footprint}].push_back(c.ref);
   std::vector<std::pair<std::pair<std::string, std::string>, std::vector<std::string>>> rows(groups.begin(), groups.end());
-  for (auto& [k, refs] : rows) std::ranges::sort(refs, refLess);
-  std::ranges::sort(rows, [](auto& a, auto& c) { return refLess(a.second.front(), c.second.front()); });
+  for (auto& [k, refs] : rows) r::sort(refs, refLess);
+  r::sort(rows, refLess, [](auto& row) -> auto& { return row.second.front(); });
   auto quote = [](const std::string& s) {
     std::string q = "\"";
     for (char ch : s) q += ch == '"' ? std::string("\"\"") : std::string(1, ch);
@@ -94,7 +94,7 @@ std::string bomCsv(const Board& b) {
   std::string out = "Count;RefDes;Value;Footprint\n";
   for (auto& [k, refs] : rows) {
     std::string list;
-    for (auto [i, r] : std::views::enumerate(refs)) list += (i ? ", " : "") + r;
+    for (auto [i, r] : v::enumerate(refs)) list += (i ? ", " : "") + r;
     out += std::format("{};{};{};{}\n", refs.size(), quote(list), quote(k.first), quote(k.second));
   }
   return out;

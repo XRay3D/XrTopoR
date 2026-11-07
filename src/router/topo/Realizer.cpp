@@ -186,7 +186,7 @@ std::vector<RoundWall> roundWalls(const Board& b, LayerId layer) {
     if (!b.isEdge(g.layer) || !circle(g, c, r)) continue;
     for (size_t i = 1; i < b.outline.size(); ++i) {
       const double tol = std::max(2000.0, r * 0.01);
-      if (std::ranges::all_of(b.outline[i], [&](Vec2 p) { return std::abs((p - c).len() - r) <= tol; })) {
+      if (r::all_of(b.outline[i], [&](Vec2 p) { return std::abs((p - c).len() - r) <= tol; })) {
         out.push_back({c, r, double(b.edgeClearance)});
         break;
       }
@@ -218,7 +218,7 @@ std::vector<RoundWall> roundWalls(const Board& b, LayerId layer) {
       const Polyline path = g.path();
       bool cutout = false;
       for (size_t i = 1; i < b.outline.size() && !cutout; ++i)
-        cutout = !path.empty() && std::ranges::any_of(b.outline[i], [&](Vec2 p) { return (p - path.front()).len() < 10; });
+        cutout = !path.empty() && r::any_of(b.outline[i], [&](Vec2 p) { return (p - path.front()).len() < 10; });
       if (cutout) arcsOf(g, double(b.edgeClearance));
     }
   for (const Keepout& k : b.keepouts) {
@@ -543,7 +543,7 @@ void prepareStubs(const Board& b, const std::vector<RealWire>& wires, const Real
       if (sk.size() < 2 || w.net == kNoNet || opt.mesh || !opt.padPattern) continue;
       double reach = double(w.clearance) + w.width / 2.0 + kMargin;  // the wire's envelope beyond the copper
       for (int end = 0; end < 2; ++end) {
-        if (end) std::ranges::reverse(sk);
+        if (end) r::reverse(sk);
         Vec2 p = sk.front();
         std::optional<Shape> pad;
         int padIndex = -1;
@@ -663,7 +663,7 @@ void prepareStubs(const Board& b, const std::vector<RealWire>& wires, const Real
                        int(f.kind), on, d.mid.x / 1e6, -d.mid.y / 1e6, d.to.x / 1e6, -d.to.y / 1e6, sk.size(), sk[0].x / 1e6, -sk[0].y / 1e6,
                        sk[1].x / 1e6, -sk[1].y / 1e6, sk.back().x / 1e6, -sk.back().y / 1e6);
         }
-        if (end) std::ranges::reverse(sk);
+        if (end) r::reverse(sk);
       }
     }
   }
@@ -721,7 +721,7 @@ void prepareStubs(const Board& b, const std::vector<RealWire>& wires, const Real
       const Lead& ld = leads[wi][end];
       if (!st.on || ld.dropped.empty()) continue;
       Polyline& sk = sketches[wi];
-      if (end) std::ranges::reverse(sk);
+      if (end) r::reverse(sk);
       const size_t next = ld.inserted ? 1 : 0;  // the first drawn point the pattern kept
       Polyline now{st.from, st.mid, st.to}, was = ld.dropped;
       if (next < sk.size()) {
@@ -735,7 +735,7 @@ void prepareStubs(const Board& b, const std::vector<RealWire>& wires, const Real
         if ((sk.front() - st.from).len2() > 1) sk.insert(sk.begin(), st.from);
         st = {};
       }
-      if (end) std::ranges::reverse(sk);
+      if (end) r::reverse(sk);
     }
 }
 
@@ -845,7 +845,7 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
         if (f != 0 && bk != 0 && f != bk) {
           ++st.sketchCrossings;
           auto pr = std::minmax(wires[a.first].net, wires[b.first].net);
-          if (!std::ranges::contains(st.crossingNets, std::pair{pr.first, pr.second})) st.crossingNets.push_back({pr.first, pr.second});
+          if (!r::contains(st.crossingNets, std::pair{pr.first, pr.second})) st.crossingNets.push_back({pr.first, pr.second});
           return hA.t < hB.t;
         }
         int r = f != 0 ? f : bk;
@@ -1449,7 +1449,7 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
           for (auto [o, R0, c, x, d] : {std::tuple{h.u, sl.ru, sl.cu, sl.xu, sl.du}, std::tuple{h.v, sl.rv, sl.cv, sl.xv, sl.dv}}) {
             double R = inSlot ? std::min(R0, d) : R0;
             if (R <= 0 || dropped.contains(o) ||
-                std::ranges::any_of(cs, [&](const Circle& x) { return x.obst == o && (x.c - c).len2() < 1; }))
+                r::any_of(cs, [&](const Circle& x) { return x.obst == o && (x.c - c).len2() < 1; }))
               continue;
             double t = (c - p).dot(q - p) / (q - p).len2();
             if (t <= 0 || t >= 1) continue;
@@ -1557,7 +1557,7 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
               } else if (!onArc(X, 0.05)) {
                 continue;  // the closest point must face the arc itself, not the rest of the circle
               }
-              if (dropped.contains(oc.obst) || std::ranges::any_of(cs, [&](const Circle& x) { return x.obst == oc.obst; })) continue;
+              if (dropped.contains(oc.obst) || r::contains(cs, oc.obst, &Circle::obst)) continue;
               at = int(k) + 1;
               ins = {oc.c, (orient(p, q, oc.c) > 0 ? 1 : -1) * radius, oc.obst, cs[k].portal, width};
               break;
@@ -1585,7 +1585,7 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
             // (A large round obstacle, a hole in the board, reaches the chord from far outside the box.)
             if (!bb.contains(op.p) && (op.r < 3 * kNmPerMm || distPointSegment(op.p, p, q) > op.r + 3 * kNmPerMm + w.width)) continue;
             if (op.r <= 0 && op.shape < 0) continue;  // a bare point (outline, keepout) has sides handled elsewhere
-            if (dropped.contains(o) || std::ranges::any_of(cs, [&](const Circle& x) { return x.obst == o; })) continue;
+            if (dropped.contains(o) || r::contains(cs, o, &Circle::obst)) continue;
             Vec2 on = closestPointOnSegment(op.p, p, q);
             double t = (on - p).dot(q - p) / (q - p).len2();
             if (t <= 0 || t >= 1) continue;

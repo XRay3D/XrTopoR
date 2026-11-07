@@ -47,7 +47,7 @@ RealWire sketchOf(const Board& b, const Topology& t, int wi) {
     const Crossing& c = t.crossings[cid];
     const Edge& E = m.edges[c.edge];
     EdgeCapacity cap = edgeCapacity(t, m, c.edge);
-    int k = int(std::ranges::find(E.cross, cid) - E.cross.begin());
+    int k = int(r::find(E.cross, cid) - E.cross.begin());
     Slot s = slotOf(cap, k);
     Vec2 U = m.verts[E.v[0]].p, V = m.verts[E.v[1]].p;
     double L = cap.L > 0 ? cap.L : 1;
@@ -401,7 +401,7 @@ void drawModel(Board& b, Topology& t, bool direct, RealizeStats& stats, int& nWi
   for (int wi = 0; wi < int(t.wires.size()); ++wi) {
     const Wire& w = t.wires[wi];
     if (w.locked) continue;
-    if (editedOnly && std::ranges::none_of(w.tracks, [&](uint32_t id) { return edited.contains(id); })) continue;
+    if (editedOnly && r::none_of(w.tracks, [&](uint32_t id) { return edited.contains(id); })) continue;
     chosen.push_back(wi);
     for (uint32_t id : w.tracks) gone.insert(id);
     redrawnAt.insert(w.end[0]);
@@ -426,7 +426,7 @@ void drawModel(Board& b, Topology& t, bool direct, RealizeStats& stats, int& nWi
                  m.verts[w.endVertex[1]].p.y / 1e6);
       for (int cid : w.cross) {
         const Edge& E = m.edges[t.crossings[cid].edge];
-        int k2 = int(std::ranges::find(E.cross, cid) - E.cross.begin());
+        int k2 = int(r::find(E.cross, cid) - E.cross.begin());
         std::print(stderr, " [({:.2f},{:.2f})-({:.2f},{:.2f}) {}/{}]", m.verts[E.v[0]].p.x / 1e6, m.verts[E.v[0]].p.y / 1e6, m.verts[E.v[1]].p.x / 1e6,
                    m.verts[E.v[1]].p.y / 1e6, k2, E.cross.size());
       }
@@ -471,7 +471,7 @@ F5ModelResult runF5Model(Board& b, Topology& t, const F5ModelOptions& o) {
   if (!prepareModel(t, o.flips, o.weighted, r.flips, r.violations)) return r;
   drawModel(b, t, o.direct, r.stats, r.wires, o.editedOnly);
   r.drawn = true;
-  if (o.junctions && o.direct && std::ranges::any_of(t.owners, [](const Owner& x) { return x.kind == Owner::Kind::Junction && x.layers != 0 && !x.locked; })) {
+  if (o.junctions && o.direct && r::any_of(t.owners, [](const Owner& x) { return x.kind == Owner::Kind::Junction && x.layers != 0 && !x.locked; })) {
     ProfScope p("F5 model: branch points");
     OptimizeModelOptions mo;
     mo.flips = false;

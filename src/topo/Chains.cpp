@@ -240,7 +240,7 @@ std::vector<Vec2> OwnCopper::crossedBetween(Vec2 p, Vec2 q, int net, LayerId lay
         return;
       }
   });
-  std::ranges::sort(cuts, {}, [](auto& c) { return c.first; });
+  r::sort(cuts, {}, &std::pair<double, Vec2>::first);
   std::vector<Vec2> out;
   for (auto& [d, pt] : cuts) out.push_back(pt);
   return out;
@@ -301,7 +301,7 @@ std::vector<WireChain> wireChains(const Board& b, const WireGraph& g, const std:
       Point next = nextEnd ? t.b : t.a;
       if (t.isArc()) {
         auto pts = t.path(20000);
-        if (nextEnd == 0) std::ranges::reverse(pts);
+        if (nextEnd == 0) r::reverse(pts);
         for (size_t k = 1; k + 1 < pts.size(); ++k) w.path.push_back(pts[k]);
       }
       if (w.path.back() != next.v()) w.path.push_back(next.v());
@@ -313,7 +313,7 @@ std::vector<WireChain> wireChains(const Board& b, const WireGraph& g, const std:
         if (chosen[j] && !used[j] && j != ti && sameChain(b, g, ti, j)) cont = j;
       if (cont < 0) break;
       for (int j : ends[curV])
-        if (inner[j] && !std::ranges::contains(w.tracks, j)) w.tracks.push_back(j);
+        if (inner[j] && !r::contains(w.tracks, j)) w.tracks.push_back(j);
       ti = cont;
       // The glued ends may differ by a few um: the sketch continues from the next track's own end.
       Point from = vid[ti][0] == curV ? b.tracks[ti].a : b.tracks[ti].b;

@@ -305,11 +305,11 @@ void removeUserViewScheme(const std::string& name) {
 }
 
 bool isBuiltinColorScheme(const std::string& name) {
-  return std::ranges::any_of(builtinColorSchemes(), [&](auto& s) { return s.name == name; });
+  return r::contains(builtinColorSchemes(), name, &ColorScheme::name);
 }
 
 bool isBuiltinViewScheme(const std::string& name) {
-  return std::ranges::any_of(builtinViewSchemes(), [&](auto& s) { return s.name == name; });
+  return r::contains(builtinViewSchemes(), name, &ViewScheme::name);
 }
 
 std::string defaultColorScheme() {

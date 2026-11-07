@@ -315,9 +315,9 @@ QWidget* DesignParamsDialog::netsCell(const RuleNets& value, std::function<void(
   std::vector<RuleNets> options{RuleNets{}};
   for (auto& g : rules_.netGroups) options.push_back({RuleNets::Kind::Group, g.name});
   for (auto& n : b.nets) options.push_back({RuleNets::Kind::Net, n.name});
-  if (std::ranges::find(options, value) == options.end()) options.push_back(value);
+  if (r::find(options, value) == options.end()) options.push_back(value);
   for (auto& o : options) c->addItem(netsText(o));
-  c->setCurrentIndex(int(std::ranges::find(options, value) - options.begin()));
+  c->setCurrentIndex(int(r::find(options, value) - options.begin()));
   connect(c, &QComboBox::activated, this, [this, set, options](int i) {
     set(options[size_t(i)]);
     changed();
@@ -331,13 +331,13 @@ QWidget* DesignParamsDialog::layerCell(const std::vector<std::string>& value, st
   c->setFrame(false);
   std::vector<std::vector<std::string>> options{{}};
   for (LayerId l : b.copperLayers()) options.push_back({b.layers[l].name});
-  if (std::ranges::find(options, value) == options.end()) options.push_back(value);
+  if (r::find(options, value) == options.end()) options.push_back(value);
   for (auto& o : options) {
     QStringList names;
     for (auto& n : o) names << QString::fromStdString(n);
     c->addItem(o.empty() ? tr("Все") : names.join(", "));
   }
-  c->setCurrentIndex(int(std::ranges::find(options, value) - options.begin()));
+  c->setCurrentIndex(int(r::find(options, value) - options.begin()));
   connect(c, &QComboBox::activated, this, [this, set, options](int i) {
     set(options[size_t(i)]);
     changed();
@@ -476,7 +476,7 @@ QWidget* DesignParamsDialog::padsPage() {
     if (L.kind == LayerKind::Copper) return 100 + L.copperIndex;
     return L.side == Side::Bottom ? 1000 + int(l) : int(l);  // each side's mask outermost, as the file lists them
   };
-  std::ranges::stable_sort(layers, {}, rank);
+  r::stable_sort(layers, {}, rank);
   {
     QSignalBlocker block(columns);
     const QString groups[] = {tr("Верхние механические"), tr("Металлические"), tr("Нижние механические")};
@@ -546,9 +546,8 @@ QWidget* DesignParamsDialog::padsPage() {
     // Natural order, as TopoR sorts: C35 before C140.
     QCollator coll;
     coll.setNumericMode(true);
-    std::ranges::sort(order, [&](int x, int y) {
-      return coll.compare(QString::fromStdString(stacks_[size_t(x)].name), QString::fromStdString(stacks_[size_t(y)].name)) < 0;
-    });
+    r::sort(order, [&](const QString& x, const QString& y) { return coll.compare(x, y) < 0; },
+            [&](int i) { return QString::fromStdString(stacks_[size_t(i)].name); });
     QString f = search->text();
     t->setRowCount(0);
     for (int i : order) {
@@ -574,10 +573,10 @@ QWidget* DesignParamsDialog::padsPage() {
           it->setToolTip(detailFormName(*d));
         }
       }
-      if (std::ranges::contains(selectedStacks_, i))
+      if (r::contains(selectedStacks_, i))
         t->selectionModel()->select(t->model()->index(r, 0), QItemSelectionModel::Select | QItemSelectionModel::Rows);
     }
-    int unused = int(std::ranges::count(n, 0));
+    int unused = int(r::count(n, 0));
     count->setText(tr("<i>Всего стеков КП: %1 (%2 не используется)</i>").arg(stacks_.size()).arg(unused));
     stretchColumns(t);
   };
@@ -609,7 +608,7 @@ QWidget* DesignParamsDialog::padsPage() {
       for (int i : busy) names << QString::fromStdString(stacks_[size_t(i)].name);
       QMessageBox::warning(this, windowTitle(), tr("Стеки КП используются контактами и не удаляются: %1").arg(names.join(", ")));
     }
-    std::ranges::sort(which, std::greater{});
+    r::sort(which, std::greater{});
     bool any = false;
     for (int i : which)
       if (n[size_t(i)] == 0) {
@@ -658,7 +657,7 @@ QWidget* DesignParamsDialog::padsPage() {
       QString name = QInputDialog::getText(this, tr("Переименовать"), tr("Имя стека КП:"), QLineEdit::Normal,
                                            QString::fromStdString(ps.name), &ok).trimmed();
       if (!ok || name.isEmpty() || name.toStdString() == ps.name) return;
-      if (std::ranges::any_of(stacks_, [&](const Padstack& o) { return o.name == name.toStdString(); })) {
+      if (r::contains(stacks_, name.toStdString(), &Padstack::name)) {
         QMessageBox::warning(this, windowTitle(), tr("Стек КП с таким именем уже существует."));
         return;
       }
@@ -732,7 +731,7 @@ void DesignParamsDialog::newStack() {
 
 void DesignParamsDialog::createDetails(LayerKind kind, std::vector<int> which) {
   const Board& b = *doc_->board();
-  bool layer = std::ranges::any_of(b.layers, [&](const Layer& L) { return L.kind == kind; });
+  bool layer = r::contains(b.layers, kind, &Layer::kind);
   if (!layer) {
     QMessageBox::information(this, windowTitle(), kind == LayerKind::Mask ? tr("В дизайне нет слоёв маски.")
                                                                           : tr("В дизайне нет слоёв пасты."));
@@ -965,7 +964,7 @@ QWidget* DesignParamsDialog::netGroupsPage() {
     auto& nets = rules_.netGroups[size_t(g)].nets;
     for (auto& n : nets) members->addItem(QString::fromStdString(n));
     for (auto& n : b.nets)
-      if (!std::ranges::contains(nets, n.name)) others->addItem(QString::fromStdString(n.name));
+      if (!r::contains(nets, n.name)) others->addItem(QString::fromStdString(n.name));
   };
   connect(groups, &QListWidget::currentRowChanged, w, fill);
   connect(add, &QToolButton::clicked, this, [this, groups] {

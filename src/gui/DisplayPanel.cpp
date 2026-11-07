@@ -714,8 +714,8 @@ void DisplayPanel::addNets(bool netlineFilter) {
   for (auto* it : list->selectedItems()) {
     std::string name = it->text().toStdString();
     if (netlineFilter) {
-      if (!std::ranges::contains(d.netlineNets, name)) d.netlineNets.push_back(name);
-    } else if (std::ranges::none_of(d.netColors, [&](const NetColor& nc) { return nc.net == name; })) {
+      if (!r::contains(d.netlineNets, name)) d.netlineNets.push_back(name);
+    } else if (!r::contains(d.netColors, name, &NetColor::net)) {
       d.netColors.push_back({name, palette[d.netColors.size() % std::size(palette)]});
     }
   }

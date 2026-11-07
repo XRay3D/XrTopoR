@@ -80,7 +80,7 @@ void addPlaneZones(Board& b) {
   for (LayerId l = 0; l < LayerId(b.layers.size()); ++l) {
     const Layer& L = b.layers[l];
     if (!L.plane || L.planeNet == kNoNet) continue;
-    if (std::ranges::any_of(b.zones, [&](const Zone& z) { return z.layer == l && z.net == L.planeNet; })) continue;
+    if (r::any_of(b.zones, [&](const Zone& z) { return z.layer == l && z.net == L.planeNet; })) continue;
     Zone z;
     z.layer = l;
     z.net = L.planeNet;
@@ -99,7 +99,7 @@ void addPlaneZones(Board& b) {
 
 ZoneFillStats fillZones(Board& b, const ZoneFillOptions& opt) {
   ZoneFillStats st;
-  auto selected = [&](int zi) { return opt.only.empty() || std::ranges::contains(opt.only, zi); };
+  auto selected = [&](int zi) { return opt.only.empty() || r::contains(opt.only, zi); };
   for (int zi = 0; zi < int(b.zones.size()); ++zi)
     if (selected(zi)) b.zones[zi].filled.clear();
   SpatialIndex idx;
@@ -117,8 +117,8 @@ ZoneFillStats fillZones(Board& b, const ZoneFillOptions& opt) {
 
   // Higher priority first: its fill is an obstacle for lower-priority zones of other nets.
   std::vector<int> order(b.zones.size());
-  std::iota(order.begin(), order.end(), 0);
-  std::ranges::stable_sort(order, std::greater{}, [&](int i) { return b.zones[i].priority; });
+  r::iota(order, 0);
+  r::stable_sort(order, std::greater{}, [&](int i) { return b.zones[i].priority; });
   for (int zi : order) {
     Zone& z = b.zones[zi];
     if (z.outline.size() < 3 || !selected(zi)) continue;

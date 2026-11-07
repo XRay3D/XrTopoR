@@ -479,7 +479,7 @@ void Router::setup() {
   for (LayerId l : b_.copperLayers()) {
     if (b_.layers[l].plane) continue;  // plane layers carry their net as a pour, not tracks
     int idx = b_.layers[l].copperIndex;
-    if (o_.copperIndices.empty() || std::ranges::contains(o_.copperIndices, idx)) layers_.push_back(l);
+    if (o_.copperIndices.empty() || r::contains(o_.copperIndices, idx)) layers_.push_back(l);
   }
   NL_ = int(layers_.size());
 
@@ -497,7 +497,7 @@ void Router::setup() {
 
   padShape_.resize(b_.pads.size());
   cornerOk_.resize(b_.pads.size());
-  for (auto [i, p] : std::views::enumerate(b_.pads)) {
+  for (auto [i, p] : v::enumerate(b_.pads)) {
     padShape_[i] = (!p.copper && p.drill > 0) ? Shape::circle(p.pos.v(), p.drill / 2.0) : p.shapeGeom();
     // TopoR rule: tracks attach to the pad anchor; corners only when they are rounded enough for the
     // narrowest wire the net may use (fine-pitch pads are left from their ends, narrowed).
@@ -506,7 +506,7 @@ void Router::setup() {
     cornerOk_[i] = padShape_[i].r >= narrowest / 2.0;
   }
   padExit_.assign(b_.pads.size(), {});
-  for (auto [i, p] : std::views::enumerate(b_.pads)) {
+  for (auto [i, p] : v::enumerate(b_.pads)) {
     if (p.drill > 0 || p.net == kNoNet) continue;
     const Shape& s = padShape_[i];
     const NetClass& nc = b_.classOf(p.net);
@@ -532,7 +532,7 @@ void Router::setup() {
     }
   }
   vshape_.resize(m_.verts.size());
-  for (auto [i, v] : std::views::enumerate(m_.verts)) {
+  for (auto [i, v] : v::enumerate(m_.verts)) {
     if (v.kind == VKind::FixedVia) vshape_[i] = Shape::circle(v.p, b_.vias[v.fixedVia].diameter / 2.0);
     else if (v.kind == VKind::Track) vshape_[i] = Shape::circle(v.p, b_.tracks[v.track].width / 2.0);
     else vshape_[i] = Shape::circle(v.p, siteRadius(int(i)));
@@ -541,7 +541,7 @@ void Router::setup() {
   // Free interval of every edge: the part not covered by pad copper.
   interval_.resize(m_.edges.size());
   vertEdges_.assign(m_.verts.size(), {});
-  for (auto [e, me] : std::views::enumerate(m_.edges)) {
+  for (auto [e, me] : v::enumerate(m_.edges)) {
     computeInterval(int(e));
     vertEdges_[me.v[0]].push_back(int(e));
     vertEdges_[me.v[1]].push_back(int(e));
@@ -556,14 +556,14 @@ void Router::setup() {
 
   // Net jobs: every net with at least two routable pads.
   std::flat_map<int, std::vector<int>> netPads;
-  for (auto [i, p] : std::views::enumerate(b_.pads)) {
+  for (auto [i, p] : v::enumerate(b_.pads)) {
     if (p.net == kNoNet || m_.padVerts[i].empty()) continue;
-    if (!std::ranges::any_of(layers_, [&](LayerId l) { return p.onLayer(l); })) continue;
+    if (!r::any_of(layers_, [&](LayerId l) { return p.onLayer(l); })) continue;
     netPads[p.net].push_back(int(i));
   }
   for (auto&& [net, pads] : netPads) {
     if (pads.size() < 2) continue;
-    if (!o_.nets.empty() && !std::ranges::contains(o_.nets, b_.nets[net].name)) continue;
+    if (!o_.nets.empty() && !r::contains(o_.nets, b_.nets[net].name)) continue;
     if (b_.nets[size_t(net)].flexFixed || !b_.nets[size_t(net)].route) continue;  // not to be routed
     NetJob j;
     j.net = net;
@@ -585,7 +585,7 @@ void Router::setup() {
     }
     jobs_.push_back(std::move(j));
   }
-  std::ranges::sort(jobs_, {}, &NetJob::estLen);
+  r::sort(jobs_, {}, &NetJob::estLen);
   s_.failed.assign(jobs_.size(), {});
   padCluster_ = Connectivity::compute(b_).padCluster;
   copperIdx_.build(b_);
@@ -763,7 +763,7 @@ double Router::viaPenalty(int w, bool& blocked, const std::vector<SNode>& nodes,
       auto o = obst(other, li, kNoNet);
       Shape via = Shape::circle(P(w), viaR_);
       Shape otherVia = Shape::circle(P(other), viaR_);
-      bool pathVia = std::ranges::contains(pathVias, other) && !std::getenv("XR_NOPATHVIAS");
+      bool pathVia = r::contains(pathVias, other) && !std::getenv("XR_NOPATHVIAS");
       if (pathVia && !o) o = ObstInfo{&otherVia, viaClr_, -2 - other};
       double free = o ? o->shape->distance(via) : via.distance(P(other));
       double need = u.sumW + (u.n - 1) * u.maxC + std::max(viaClr_, u.maxC) + (o ? std::max(o->clr, u.maxC) : 0) +
@@ -1006,14 +1006,14 @@ int Router::placeVia(int t, Vec2 p) {
     auto rank = [&](const Job& j) {
       const GEnd& ga = oldEnds[j.old].first;
       if (ga.vertex) return -1L;
-      return long(std::ranges::find(w.cids, ga.cid) - w.cids.begin());
+      return long(r::find(w.cids, ga.cid) - w.cids.begin());
     };
-    std::ranges::sort(list, {}, rank);
+    r::sort(list, {}, rank);
     std::vector<size_t> occ;
     for (size_t k = 0; k < w.tris.size(); ++k)
       if (w.tris[k] == t) occ.push_back(k);
     for (size_t k = 0; k < list.size(); ++k) list[k].pos = k < occ.size() ? occ[k] : w.tris.size();
-    for (auto& j : list | std::views::reverse) jobs.push_back(j);
+    for (auto& j : list | v::reverse) jobs.push_back(j);
   }
   for (const Job& j : jobs) {
     const Old& o = olds[j.old];
@@ -1116,7 +1116,7 @@ void Router::addChordWalk(int li, int wire, int t, const End& a, Vec2 P0, const 
     for (int le = 0; le < 3; ++le) {
       int e = m_.tris[cur].e[le];
       int nb = m_.tris[cur].nb[le];
-      if (nb < 0 || !std::ranges::contains(parts, nb)) continue;
+      if (nb < 0 || !r::contains(parts, nb)) continue;
       Vec2 u = P(m_.edges[e].v[0]), w = P(m_.edges[e].v[1]);
       if (!segmentsIntersect(P0, Q, u, w)) continue;
       double den = (w - u).cross(Q - P0);
@@ -1131,7 +1131,7 @@ void Router::addChordWalk(int li, int wire, int t, const End& a, Vec2 P0, const 
       // edges that share a vertex V hugs that corner, i.e. crosses the new edge (V, via) next to V.
       int via = -1;
       for (int x : m_.tris[parts[0]].v)
-        if (std::ranges::all_of(parts, [&](int pt) { return m_.localVertex(pt, x) >= 0; })) via = x;
+        if (r::all_of(parts, [&](int pt) { return m_.localVertex(pt, x) >= 0; })) via = x;
       int V = -1;
       if (!a.vertex && !c.vertex)
         for (int x : m_.edges[a.local].v)
@@ -1162,7 +1162,7 @@ void Router::addChordWalk(int li, int wire, int t, const End& a, Vec2 P0, const 
     int cid = insertCrossing(li, e, g, wire, false, f);
     auto& cids = s_.wires[wire].cids;
     if (cidAfter && *cidAfter >= 0) {
-      auto pos = std::ranges::find(cids, *cidAfter);
+      auto pos = r::find(cids, *cidAfter);
       cids.insert(pos == cids.end() ? cids.end() : pos + 1, cid);
     } else {
       cids.insert(cids.begin(), cid);
@@ -1179,7 +1179,7 @@ void Router::addChordWalk(int li, int wire, int t, const End& a, Vec2 P0, const 
 bool Router::checkState(const char* where) const {
   if (!std::getenv("XR_CHECK")) return true;
   int bad = 0;
-  for (auto [wi, w] : std::views::enumerate(s_.wires)) {
+  for (auto [wi, w] : v::enumerate(s_.wires)) {
     if (!w.alive || !w.complete()) continue;
     if (w.tris.size() != w.cids.size() + 1) {
       if (bad++ < 5)
@@ -1288,7 +1288,7 @@ bool Router::checkState(const char* where) const {
 
 double Router::crossCoord(int li, int t, int le, int cid) const {
   const auto& list = s_.cross[li, m_.tris[t].e[le]];
-  auto k = std::ranges::find(list, cid) - list.begin();
+  auto k = r::find(list, cid) - list.begin();
   double f = (double(k) + 1.0) / (double(list.size()) + 1.0);
   if (!m_.sameDir(t, le)) f = 1 - f;
   return (le + 1) % 3 + f;
@@ -1613,7 +1613,7 @@ std::optional<std::vector<SNode>> Router::search(int pad) {
     if (n.goal) {
       std::vector<SNode> path;
       for (int i = idx; i >= 0; i = nodes[i].parent) path.push_back(nodes[i]);
-      std::ranges::reverse(path);
+      r::reverse(path);
       return path;
     }
     if (++expansions > kMaxExpansions || (expansions % 4096 == 0 && cancelled())) break;
@@ -1733,9 +1733,9 @@ void Router::commit(const std::vector<SNode>& path, std::vector<int>& joinedPads
       const auto& list = s_.cross[n.li, e];
       int gap = 0;
       if (n.before >= 0)
-        if (auto it = std::ranges::find(list, n.before); it != list.end()) gap = int(it - list.begin()) + 1;
+        if (auto it = r::find(list, n.before); it != list.end()) gap = int(it - list.begin()) + 1;
       if (n.after >= 0)
-        if (auto it = std::ranges::find(list, n.after); it != list.end()) gap = std::min(gap, int(it - list.begin()));
+        if (auto it = r::find(list, n.after); it != list.end()) gap = std::min(gap, int(it - list.begin()));
       if (viaNext) {
         // The wire ends in a via on this edge: the edge is split there and the chord ends at the vertex.
         double fv = viaFraction(n.li, path[ni + 1].li, e, gap);
@@ -1823,8 +1823,8 @@ void Router::removeWire(int wi) {
     for (int c : list) u.maxC = std::max(u.maxC, double(s_.wires[s_.crossings[c].wire].clr));
     if (u.n <= 0) u = EdgeUse{};
   }
-  std::ranges::sort(w.tris);
-  auto [first, last] = std::ranges::unique(w.tris);
+  r::sort(w.tris);
+  auto [first, last] = r::unique(w.tris);
   w.tris.erase(first, last);
   for (int t : w.tris) std::erase_if(s_.chords[w.li, t], [&](const Chord& c) { return c.wire == wi; });
   w.alive = false;
@@ -1836,7 +1836,7 @@ void Router::ripup(int job) {
   int net = jobs_[job].net;
   for (int wi = 0; wi < int(s_.wires.size()); ++wi)
     if (s_.wires[wi].alive && s_.wires[wi].net == net) removeWire(wi);
-  for (auto [v, vn] : std::views::enumerate(s_.viaNet))
+  for (auto [v, vn] : v::enumerate(s_.viaNet))
     if (vn == net) {
       vn = -1;
       vshape_[v] = Shape::circle(P(int(v)), siteRadius(int(v)));
@@ -1895,7 +1895,7 @@ int Router::placeEdgeVia(int e, double f) {
   for (int x : vertEdges_[v]) computeInterval(x);  // the via's copper shortens its edges
   for (int li = 0; li < NL_; ++li) {
     s_.cross[li, e] = keep[li];
-    std::ranges::reverse(moved[li]);  // the new half runs from W: the far crossings come first
+    r::reverse(moved[li]);  // the new half runs from W: the far crossings come first
     for (int cid : moved[li]) s_.crossings[cid].edge = eVW;
     s_.cross[li, eVW] = moved[li];
     recomputeUse(li, e);
@@ -1917,13 +1917,13 @@ int Router::placeEdgeVia(int e, double f) {
     auto rank = [&](const Job& j) {
       const Old& o = olds[j.old];
       if (o.av) return -1L;
-      return long(std::ranges::find(w.cids, o.acid) - w.cids.begin());
+      return long(r::find(w.cids, o.acid) - w.cids.begin());
     };
-    std::ranges::sort(list, {}, rank);
+    r::sort(list, {}, rank);
     (void)t;
     (void)w;
     for (size_t k = 0; k < list.size(); ++k) list[k].pos = k;  // k-th chord of the wire in this triangle
-    for (auto& j : list | std::views::reverse) jobs.push_back(j);
+    for (auto& j : list | v::reverse) jobs.push_back(j);
   }
   auto edgeOf = [&](int id, int cid) { return (!moved.empty() && cid >= 0 && s_.crossings[cid].edge == eVW) ? eVW : id; };
   for (const Job& j : jobs) {
@@ -2186,7 +2186,7 @@ std::vector<int> Router::blockersOf(int ji) const {
   std::flat_map<int, int> count;  // net -> crossings on the corridor
   for (auto [pa, pb] : s_.failed[ji]) {
     Vec2 a = b_.pads[pa].pos.v(), c = b_.pads[pb].pos.v();
-    for (auto [e, me] : std::views::enumerate(m_.edges)) {
+    for (auto [e, me] : v::enumerate(m_.edges)) {
       if (me.v[0] < 0 || !segmentsIntersect(a, c, P(me.v[0]), P(me.v[1]))) continue;
       for (int li = 0; li < NL_; ++li)
         for (int cid : s_.cross[li, e]) {
@@ -2196,16 +2196,16 @@ std::vector<int> Router::blockersOf(int ji) const {
     }
   }
   std::vector<std::pair<int, int>> v(count.begin(), count.end());
-  std::ranges::sort(v, std::greater{}, &std::pair<int, int>::second);
+  r::sort(v, std::greater{}, &std::pair<int, int>::second);
   if (v.size() > 6) v.resize(6);
-  return v | std::views::keys | std::ranges::to<std::vector>();
+  return v | v::keys | r::to<std::vector>();
 }
 
 std::vector<int> Router::realizeAll() {
   std::vector<RealWire> wires;
   realizedWires_.clear();
   std::vector<RealVia> vias;
-  for (auto [wiIdx, w] : std::views::enumerate(s_.wires)) {
+  for (auto [wiIdx, w] : v::enumerate(s_.wires)) {
     if (!w.alive || !w.complete()) continue;
     realizedWires_.push_back(int(wiIdx));
     if (w.c1 >= 0) {  // the via the wire ends in (its twin wire starts there; listed once)
@@ -2252,7 +2252,7 @@ std::vector<int> Router::realizeAll() {
     rw.sketch.push_back(pts.back());
     wires.push_back(std::move(rw));
   }
-  for (auto [v, net] : std::views::enumerate(s_.viaNet)) {
+  for (auto [v, net] : v::enumerate(s_.viaNet)) {
     if (net < 0) continue;
     const NetClass& nc = b_.classOf(net);
     vias.push_back({P(int(v)), net, nc.viaDiameter, nc.viaDrill});
@@ -2260,7 +2260,7 @@ std::vector<int> Router::realizeAll() {
   size_t before = b_.tracks.size();
   if (std::getenv("XR_SKETCH")) {  // debug: emit the topological sketches instead of taut geometry
     for (auto& w : wires)
-      for (auto [a, c] : w.sketch | std::views::adjacent<2>) {
+      for (auto [a, c] : w.sketch | v::adjacent<2>) {
         Track t;
         t.a = Point(a);
         t.b = Point(c);
@@ -2361,7 +2361,7 @@ RouterResult Router::run() {
   std::optional<Full> best;
   int bestScore = std::numeric_limits<int>::max();
   std::vector<int> queue(jobs_.size());
-  std::ranges::iota(queue, 0);
+  r::iota(queue, 0);
   int maxPasses = std::max(1, o_.maxPasses);
   bool soft = o_.softPlanarity && maxPasses > 2;
   // Soft passes first (everything routes, conflicts negotiated), then hard passes (planar, within
@@ -2380,7 +2380,7 @@ RouterResult Router::run() {
     if (pass > 0) {
       std::vector<char> pick(jobs_.size(), 0);
       std::flat_map<int, int> jobOfNet;
-      for (auto [j, job] : std::views::enumerate(jobs_)) jobOfNet[job.net] = int(j);
+      for (auto [j, job] : v::enumerate(jobs_)) jobOfNet[job.net] = int(j);
       // Nets whose chords cross: ripped up, and the triangles where it happened get history cost.
       std::vector<char> crossNets(b_.nets.size(), 0);
       if (countCrossings(&crossNets) > 0) {
@@ -2416,7 +2416,7 @@ RouterResult Router::run() {
         }
       queue = failedJobs;
       for (int j = 0; j < int(jobs_.size()); ++j)
-        if (pick[j] && !std::ranges::contains(queue, j)) queue.push_back(j);
+        if (pick[j] && !r::contains(queue, j)) queue.push_back(j);
       if (queue.empty()) break;
       // A different order every pass: with a fixed order the same net encloses the same pins again.
       if (soft) {
@@ -2457,7 +2457,7 @@ RouterResult Router::run() {
             double need = u.sumW + (u.n - 1) * u.maxC + (ou ? std::max(cu, u.maxC) : 0) + (ov ? std::max(cv, u.maxC) : 0);
             worst.push_back({need - free, e * NL_ + li});
           }
-      std::ranges::sort(worst, std::greater{});
+      r::sort(worst, std::greater{});
       for (size_t i = 0; i < worst.size() && i < 8; ++i) {
         int e = worst[i].second / NL_, li = worst[i].second % NL_;
         const MEdge& me = m_.edges[e];
@@ -2484,7 +2484,7 @@ RouterResult Router::run() {
   res_.log.push_back(std::format("mesh after routing: {} vertices ({} added for vias)", m_.verts.size(), m_.verts.size() - verts0));
   softPlanar_ = false;
   crossPenalty_ = 0;
-  for (auto [v, vn] : std::views::enumerate(s_.viaNet))
+  for (auto [v, vn] : v::enumerate(s_.viaNet))
     if (m_.verts[v].kind == VKind::ViaSite)
       vshape_[v] = Shape::circle(P(int(v)), vn >= 0 ? b_.classOf(vn).viaDiameter / 2.0 : 0.0);
   res_.cancelled = cancelled();
@@ -2494,7 +2494,7 @@ RouterResult Router::run() {
   size_t tracks0 = b_.tracks.size(), vias0 = b_.vias.size();
   std::vector<int> trackWire = realizeAll();
   std::flat_map<int, int> jobOfNet;
-  for (auto [j, job] : std::views::enumerate(jobs_)) jobOfNet[job.net] = int(j);
+  for (auto [j, job] : v::enumerate(jobs_)) jobOfNet[job.net] = int(j);
   struct Snapshot {
     Full s;
     std::vector<Track> tracks;
@@ -2529,7 +2529,7 @@ RouterResult Router::run() {
     }
     // Reroute the net with fewer pads first so it is the one that moves.
     std::vector<int> queue(reroute.begin(), reroute.end());
-    std::ranges::sort(queue, {}, [&](int j) { return jobs_[j].pads.size(); });
+    r::sort(queue, {}, [&](int j) { return jobs_[j].pads.size(); });
     for (int j : queue) ripup(j);
     for (int j : queue) routeJob(j);
     b_.tracks.resize(tracks0);
@@ -2584,7 +2584,7 @@ RouterResult Router::run() {
     res_.log.push_back(std::format("poured {} zone(s): {} polygon(s)", zs.zones, zs.polygons));
   }
   int fails = 0;
-  for (auto [j, f] : std::views::enumerate(s_.failed)) {
+  for (auto [j, f] : v::enumerate(s_.failed)) {
     fails += int(f.size());
     for (auto [pa, pb] : f)
       res_.log.push_back(std::format("failed: {} {}-{} -> {}-{}", b_.nets[jobs_[j].net].name,

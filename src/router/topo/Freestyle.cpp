@@ -145,7 +145,7 @@ bool step(Board& b, FreestyleTarget& t, const edit::Motion& m, Push push) {
   std::vector<Mover> movers;
   if (t.vertex) {
     auto ends = edit::endsAt(b, *t.vertex, t.vertexLayer, t.vertexNet);
-    if (ends.empty() || std::ranges::any_of(ends, [&](auto e) { return b.tracks[e.first].locked; })) return false;
+    if (ends.empty() || r::any_of(ends, &Track::locked, [&](auto e) -> auto& { return b.tracks[e.first]; })) return false;
     Vec2 to = m.apply(*t.vertex);
     region.add(*t.vertex);
     region.add(to);

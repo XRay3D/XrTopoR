@@ -497,7 +497,7 @@ std::vector<std::string> Topology::check() const {
           int other = E.t[0] == ti ? E.t[1] : E.t[0];
           if (other >= 0 && m.tris[other].inside) fail(m, std::format("triangle {} ignores its neighbour {} across edge {}", ti, other, e));
         }
-        if (t.inside && !std::ranges::contains(m.verts[t.v[i]].tris, ti)) fail(m, std::format("vertex {} does not list triangle {}", t.v[i], ti));
+        if (t.inside && !r::contains(m.verts[t.v[i]].tris, ti)) fail(m, std::format("vertex {} does not list triangle {}", t.v[i], ti));
       }
     }
     for (int v = 0; v < int(m.verts.size()); ++v)
@@ -530,7 +530,7 @@ std::vector<std::string> Topology::check() const {
       int cid = w.cross[k];
       if (cid < 0 || cid >= int(crossings.size()) || crossings[cid].wire != wi) { bad.push_back(std::format("wire {} lists crossing {} that is not its", wi, cid)); break; }
       const Edge& E = m.edges[crossings[cid].edge];
-      if (!std::ranges::contains(E.cross, cid)) bad.push_back(std::format("edge {} does not list crossing {} of wire {}", crossings[cid].edge, cid, wi));
+      if (!r::contains(E.cross, cid)) bad.push_back(std::format("edge {} does not list crossing {} of wire {}", crossings[cid].edge, cid, wi));
       if (k + 1 < w.cross.size()) {
         const Edge& N = m.edges[crossings[w.cross[k + 1]].edge];
         bool share = (E.t[0] >= 0 && (E.t[0] == N.t[0] || E.t[0] == N.t[1])) || (E.t[1] >= 0 && (E.t[1] == N.t[0] || E.t[1] == N.t[1]));

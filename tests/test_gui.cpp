@@ -582,7 +582,7 @@ TEST(Gui, ShapeEditor) {
 
   table()->item(0, 1)->setText(QString::number(pts[0].x / kNmPerMm + 1));
   EXPECT_NEAR(f.b().graphics[poly].pts[0].x, pts[0].x + kNmPerMm, 1);
-  EXPECT_TRUE(std::ranges::any_of(f.b().outline[0], [&](Vec2 v) { return (v - f.b().graphics[poly].pts[0]).len() < 1000; }));
+  EXPECT_TRUE(r::any_of(f.b().outline[0], [&](Vec2 v) { return (v - f.b().graphics[poly].pts[0]).len() < 1000; }));
   EXPECT_EQ(props.findChild<QTabWidget*>()->currentIndex(), 1) << "the page stays on the shape";
 
   table()->item(1, 3)->setText("90");
@@ -770,14 +770,14 @@ TEST(Gui, DrcSettingsAndReport) {
   s.setValue("drc/reportPath", dir.filePath("drc.txt"));
   int n = DrcDialog::run(&f.doc);
   ASSERT_GE(n, 1);
-  EXPECT_TRUE(std::ranges::any_of(f.doc.drc(), [](auto& v) { return v.type == DrcViolation::Type::Width; }));
+  EXPECT_TRUE(r::contains(f.doc.drc(), DrcViolation::Type::Width, &DrcViolation::type));
   QFile report(dir.filePath("drc.txt"));
   ASSERT_TRUE(report.open(QIODevice::ReadOnly));
   EXPECT_TRUE(QString::fromUtf8(report.readAll()).contains("Ширина 0.05 <"));
   s.setValue("drc/widths", false);
   s.setValue("drc/report", false);
   DrcDialog::run(&f.doc);
-  EXPECT_TRUE(std::ranges::none_of(f.doc.drc(), [](auto& v) { return v.type == DrcViolation::Type::Width; }));
+  EXPECT_FALSE(r::contains(f.doc.drc(), DrcViolation::Type::Width, &DrcViolation::type));
   s.remove("drc");
 }
 
@@ -814,7 +814,7 @@ TEST(ToporSettings, ImportIntoMainWindow) {
   EXPECT_FALSE(AppSettings::openLastProject());
   EXPECT_TRUE(AppSettings::toporImported());
   auto recent = AppSettings::recentFiles();
-  EXPECT_TRUE(std::ranges::any_of(recent, [](auto& r) { return r.path == "/tmp/xrtopor_test/a.fsproj"; }));
+  EXPECT_TRUE(r::contains(recent, QString("/tmp/xrtopor_test/a.fsproj"), &RecentFile::path));
   QSettings().clear();
 }
 
@@ -896,7 +896,7 @@ TEST(Gui, BoardOutlineByItsHandles) {
   // Inside the board, 1 mm off its left side: not the outline.
   f.look(left, 20);
   QTest::mouseClick(&f.view, Qt::LeftButton, {}, f.at(left + Vec2{kNmPerMm, 0}));
-  EXPECT_FALSE(std::ranges::any_of(f.doc.selectedItems(), isOutline));
+  EXPECT_FALSE(r::any_of(f.doc.selectedItems(), isOutline));
   QTest::mouseClick(&f.view, Qt::LeftButton, {}, f.at(left));
   ASSERT_EQ(f.doc.selectedItems().size(), 1u);
   EXPECT_TRUE(isOutline(f.doc.selectedItems()[0]));
@@ -909,7 +909,7 @@ TEST(Gui, BoardOutlineByItsHandles) {
   // A corner of the contour: the polygon's vertex and the two lines' ends meeting there go to the new place.
   f.doc.setSelection({{ItemType::Detail, poly}}, {});
   auto pts = b.graphics[poly].pts;
-  int k = int(std::ranges::find_if(pts, [&](Vec2 v) { return (v - lo).len() < 1000; }) - pts.begin());
+  int k = int(r::find_if(pts, [&](Vec2 v) { return (v - lo).len() < 1000; }) - pts.begin());
   ASSERT_LT(k, int(pts.size()));
   f.look(lo, 20);
   Vec2 to = lo + Vec2{2 * kNmPerMm, 1 * kNmPerMm};
@@ -925,7 +925,7 @@ TEST(Gui, BoardOutlineByItsHandles) {
       EXPECT_GT((g.b - lo).len(), 1000);
     }
   EXPECT_EQ(ends, 2);
-  EXPECT_TRUE(std::ranges::any_of(f.b().outline[0], [&](Vec2 v) { return (v - moved).len() < 1000; }));
+  EXPECT_TRUE(r::any_of(f.b().outline[0], [&](Vec2 v) { return (v - moved).len() < 1000; }));
   f.doc.undoStack()->undo();
   EXPECT_EQ(f.b().graphics[poly].pts[k], lo);
 
@@ -1041,7 +1041,7 @@ TEST(Gui, HandlesSnapToTheGrid) {
 TEST(Gui, ComponentBoundsTurnWithIt) {
   Fixture f("topor/Example_04/Arcs_master_f5.fst");
   Board& b = *f.doc.board();
-  int ci = int(std::ranges::find_if(b.components, [](const Component& c) { return c.ref == "D1"; }) - b.components.begin());
+  int ci = int(r::find(b.components, std::string("D1"), &Component::ref) - b.components.begin());
   ASSERT_LT(ci, int(b.components.size()));
   edit::Fragment fr;
   fr.components = {ci};
@@ -1065,9 +1065,9 @@ TEST(Gui, ComponentBoundsTurnWithIt) {
   f.doc.setSelectionFilter(SelComponents);
   Vec2 beside = c.toBoard(wide ? Vec2{bb.center().x, bb.maxY + kNmPerMm} : Vec2{bb.maxX + kNmPerMm, bb.center().y});
   QTest::mouseClick(&f.view, Qt::LeftButton, {}, f.at(beside));
-  EXPECT_FALSE(std::ranges::contains(f.doc.selectedComponents(), ci));
+  EXPECT_FALSE(r::contains(f.doc.selectedComponents(), ci));
   QTest::mouseClick(&f.view, Qt::LeftButton, {}, f.at(centre));
-  EXPECT_TRUE(std::ranges::contains(f.doc.selectedComponents(), ci));
+  EXPECT_TRUE(r::contains(f.doc.selectedComponents(), ci));
 }
 
 // S flips a component to the other side; its SMD wires stay behind, a second S brings it back.
@@ -1610,7 +1610,7 @@ TEST(Gui, SelectWireTakesTheWholeChain) {
         view.selectWire();
         auto got = doc.selectedItems();
         int missing = 0;
-        for (int ti : c.tracks) missing += !std::ranges::contains(got, ItemRef{ItemType::Track, ti});
+        for (int ti : c.tracks) missing += !r::contains(got, ItemRef{ItemType::Track, ti});
         // More than the chain: the wire goes on through a change of width or inside a pad or via it touches
         // (chains end there), no further.
         if (got.size() > c.tracks.size()) {
@@ -1620,7 +1620,7 @@ TEST(Gui, SelectWireTakesTheWholeChain) {
           for (ItemRef r : got) {
             const Track& t = b.tracks[r.index];
             width |= t.width != b.tracks[c.tracks.front()].width;
-            if (!std::ranges::contains(c.tracks, r.index)) inCopper &= copper.touches(t.a, t.net, t.layer) && copper.touches(t.b, t.net, t.layer);
+            if (!r::contains(c.tracks, r.index)) inCopper &= copper.touches(t.a, t.net, t.layer) && copper.touches(t.b, t.net, t.layer);
           }
           widthChange += width;
           throughCopper += inCopper;
@@ -1696,8 +1696,8 @@ TEST(Gui, SelectWireThroughASerpentine) {
     view.selectWire();
     auto got = doc.selectedItems();
     EXPECT_EQ(got.size(), wire.size()) << "from track " << from;
-    for (int ti : wire) EXPECT_TRUE(std::ranges::contains(got, ItemRef{ItemType::Track, ti})) << "from " << from << ", track " << ti;
-    for (int ti : {branch1, branch2, otherOut}) EXPECT_FALSE(std::ranges::contains(got, ItemRef{ItemType::Track, ti})) << "from " << from << ", track " << ti;
+    for (int ti : wire) EXPECT_TRUE(r::contains(got, ItemRef{ItemType::Track, ti})) << "from " << from << ", track " << ti;
+    for (int ti : {branch1, branch2, otherOut}) EXPECT_FALSE(r::contains(got, ItemRef{ItemType::Track, ti})) << "from " << from << ", track " << ti;
   }
   doc.setSelection({ItemRef{ItemType::Track, branch1}}, {});
   view.selectWire();
@@ -1722,7 +1722,7 @@ TEST(Gui, FlexFixTogglesAndUndoes) {
   view.toggleFlexFix();
   EXPECT_TRUE(brd.nets[size_t(net)].flexFixed);
   EXPECT_FALSE(brd.nets[size_t(net)].route);
-  const size_t ofNet = size_t(std::ranges::count_if(brd.tracks, [&](const Track& t) { return t.net == net; }));
+  const size_t ofNet = size_t(r::count(brd.tracks, net, &Track::net));
   Board cleared = brd;
   cleared.clearRouting(true);
   EXPECT_EQ(cleared.tracks.size(), ofNet);  // the fixed net's wires stay, the rest go
@@ -1914,7 +1914,7 @@ TEST(Gui, PadstackEditorResizesPads) {
   QObject::connect(&ed2, &PadstackEditor::applied, [&](const Padstack& ps) { got2 = ps; });
   ed2.findChild<QPushButton*>("apply")->click();
   ASSERT_TRUE(got2);
-  auto top = std::ranges::find_if(got2->details, [](const PadDetail& d) { return d.layer == "Top"; });
+  auto top = r::find(got2->details, std::string("Top"), &PadDetail::layer);
   ASSERT_NE(top, got2->details.end());
   EXPECT_EQ(top->handling, CornerHandling::Chamfer);
 }
@@ -1999,8 +1999,8 @@ TEST(Gui, MaskLayerShowsDetails) {
     if (auto* ld = d.layer(L.name)) ld->visible = L.name == "TopMask";
   d.show["showTopMechPads"] = true;
   f.view.show();
-  auto pr = std::ranges::find_if(b.pads, [&](const Pad& p) { return p.padstack == round; });
-  auto other = std::ranges::find_if(b.pads, [&](const Pad& p) { return p.padstack != round && p.padstack >= 0; });
+  auto pr = r::find(b.pads, round, &Pad::padstack);
+  auto other = r::find_if(b.pads, [&](const Pad& p) { return p.padstack != round && p.padstack >= 0; });
   ASSERT_NE(pr, b.pads.end());
   ASSERT_NE(other, b.pads.end());
   QRgb bg = QColor(f.doc.color("background", 0x030b10)).rgb();

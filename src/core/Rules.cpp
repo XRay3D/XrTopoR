@@ -53,7 +53,7 @@ Coord Board::minTrackWidth(int net, LayerId layer) const {
     if (!rule.enabled) continue;
     if (LayerMask lm = layersOf(b, rule.layers); lm && !((lm >> layer) & 1)) continue;
     auto nets = netsOf(b, r, rule.nets);
-    if (nets && !std::ranges::contains(*nets, net)) continue;
+    if (nets && !r::contains(*nets, net)) continue;
     w = rule.min > 0 ? rule.min : rule.nom;
   }
   return w > 0 ? w : b.trackWidth(net, layer);
@@ -66,7 +66,7 @@ LayerMask Board::assignedLayers(int net) const {
     LayerId l = findLayer(rule.layer);
     if (!rule.enabled || l < 0 || layers[l].kind != LayerKind::Copper) continue;
     for (auto& o : rule.nets)
-      if (auto nets = netsOf(*this, *rules, o); !nets || std::ranges::contains(*nets, net)) {
+      if (auto nets = netsOf(*this, *rules, o); !nets || r::contains(*nets, net)) {
         m |= LayerMask(1) << l;
         break;
       }
@@ -211,7 +211,7 @@ DesignRules rulesFromBoard(const Board& b) {
   auto groupOf = [&](const std::string& name, std::vector<std::string> nets) {
     if (nets.size() == 1) return RuleNets{RuleNets::Kind::Net, nets[0]};
     std::string g = name;
-    for (int k = 2; std::ranges::any_of(r.netGroups, [&](auto& x) { return x.name == g; }); ++k) g = std::format("{}_{}", name, k);
+    for (int k = 2; r::contains(r.netGroups, g, &NetGroup::name); ++k) g = std::format("{}_{}", name, k);
     r.netGroups.push_back({g, std::move(nets)});
     return RuleNets{RuleNets::Kind::Group, g};
   };

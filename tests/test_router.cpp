@@ -231,7 +231,7 @@ TEST(Router, KeptWiresAreObstacles) {
     std::vector<double> len(b.nets.size(), 0);
     for (auto& t : b.tracks)
       if (t.net >= 0) len[size_t(t.net)] += (t.b.v() - t.a.v()).len();
-    int net = int(std::ranges::max_element(len) - len.begin());
+    int net = int(r::max_element(len) - len.begin());
     std::erase_if(b.tracks, [&](const Track& t) { return t.net == net; });
     std::erase_if(b.vias, [&](const Via& v) { return v.net == net; });
     size_t others = b.tracks.size();

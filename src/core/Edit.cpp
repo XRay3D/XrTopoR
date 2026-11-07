@@ -106,7 +106,7 @@ LayerMask mirrorMask(const Board& b, LayerMask m) {
 }
 
 bool Fragment::touchesOutline(const Board& b) const {
-  return std::ranges::any_of(details, [&](int i) { return b.isEdge(b.graphics[i].layer); });
+  return r::any_of(details, [&](int i) { return b.isEdge(b.graphics[i].layer); });
 }
 
 BBox bboxOf(const Board& b, const Fragment& f) {
@@ -141,14 +141,13 @@ Vec2 pivotOf(const Board& b, const Fragment& f) {
 }
 
 bool hasPoured(const Board& b, const Fragment& f) {
-  return std::ranges::any_of(f.zones, [&](int zi) { return !b.zones[zi].filled.empty(); });
+  return r::any_of(f.zones, [&](int zi) { return !b.zones[zi].filled.empty(); });
 }
 
 bool hasLocked(const Board& b, const Fragment& f) {
   // Keepouts, texts and drawings have no fixation in the model.
-  return std::ranges::any_of(f.components, [&](int i) { return b.components[i].locked; }) ||
-         std::ranges::any_of(f.tracks, [&](int i) { return b.tracks[i].locked; }) ||
-         std::ranges::any_of(f.vias, [&](int i) { return b.vias[i].locked; });
+  return r::any_of(f.components, &Component::locked, of(b.components)) ||
+         r::any_of(f.tracks, &Track::locked, of(b.tracks)) || r::any_of(f.vias, &Via::locked, of(b.vias));
 }
 
 std::vector<std::pair<int, int>> endsAt(const Board& b, Vec2 p, LayerId layer, int net) {
@@ -163,8 +162,8 @@ std::vector<std::pair<int, int>> endsAt(const Board& b, Vec2 p, LayerId layer, i
 }
 
 bool anchoredAt(const Board& b, Vec2 p, LayerId layer, int net) {
-  return std::ranges::any_of(b.pads, [&](const Pad& pad) { return onPad(pad, p, layer, net); }) ||
-         std::ranges::any_of(b.vias, [&](const Via& v) { return onVia(v, p, layer, net); });
+  return r::any_of(b.pads, [&](const Pad& pad) { return onPad(pad, p, layer, net); }) ||
+         r::any_of(b.vias, [&](const Via& v) { return onVia(v, p, layer, net); });
 }
 
 std::vector<char> attachedTo(const Board& b, const Shape& shape, LayerMask layers, int net) {
@@ -319,9 +318,9 @@ bool move(Board& b, const Fragment& f, const Motion& m) {
         for (auto& p : poly) p = m.apply(p);
     if (m.mirror) {
       z.layer = mirrorLayer(b, z.layer);
-      std::ranges::reverse(z.outline);
+      r::reverse(z.outline);
       for (auto* polys : {&z.filled, &z.cutouts})
-        for (auto& poly : *polys) std::ranges::reverse(poly);
+        for (auto& poly : *polys) r::reverse(poly);
     }
   }
   for (int ki : f.keepouts) {
@@ -364,7 +363,7 @@ bool moveVertex(Board& b, int track, int end, Vec2 to) {
     return true;
   }
   auto ends = endsAt(b, p, t.layer, t.net);
-  if (std::ranges::any_of(ends, [&](auto e) { return b.tracks[e.first].locked; })) return false;
+  if (r::any_of(ends, &Track::locked, [&](auto e) -> auto& { return b.tracks[e.first]; })) return false;
   for (auto [ti, e] : ends) setEnd(b.tracks[ti], e, to);
   return true;
 }
@@ -607,7 +606,7 @@ void editFigure(Board& b, ItemRef r, int part, const std::function<void(std::vec
 int straighten(Board& b, const std::vector<int>& tracks) {
   // Chains: tracks of one net and layer joined at vertices where exactly two of them meet.
   std::vector<int> parent(tracks.size());
-  std::ranges::iota(parent, 0);
+  r::iota(parent, 0);
   auto find = [&](int i) {
     while (parent[i] != i) i = parent[i] = parent[parent[i]];
     return i;
@@ -638,7 +637,7 @@ int straighten(Board& b, const std::vector<int>& tracks) {
       }
     if (branched || ends.size() != 2) continue;
     if (chain.size() == 1 && !b.tracks[chain[0]].isArc()) continue;
-    if (std::ranges::any_of(chain, [&](int ti) { return b.tracks[ti].locked; })) continue;
+    if (r::any_of(chain, &Track::locked, of(b.tracks))) continue;
     Track t = b.tracks[chain[0]];
     t.a = Point(ends[0]);
     t.b = Point(ends[1]);
@@ -646,7 +645,7 @@ int straighten(Board& b, const std::vector<int>& tracks) {
     made.push_back(t);
     remove.insert(remove.end(), chain.begin(), chain.end());
   }
-  std::ranges::sort(remove, std::greater{});
+  r::sort(remove, std::greater{});
   for (int ti : remove) b.tracks.erase(b.tracks.begin() + ti);
   for (auto& t : made) b.tracks.push_back(t);
   return int(made.size());
@@ -673,7 +672,7 @@ int changeLayer(Board& b, const std::vector<int>& tracks, LayerId layer) {
   int added = 0;
   for (auto [p, from, net] : ends) {
     // Already joined to the new layer by a via or a through pad?
-    if (std::ranges::any_of(b.vias, [&](const Via& v) { return onVia(v, p, layer, net); })) continue;
+    if (r::any_of(b.vias, [&](const Via& v) { return onVia(v, p, layer, net); })) continue;
     bool through = false, needs = false;
     for (const Pad& pad : b.pads) {
       if (pad.net != net || !pad.shapeGeom().contains(p)) continue;
@@ -685,7 +684,7 @@ int changeLayer(Board& b, const std::vector<int>& tracks, LayerId layer) {
       const Track& o = b.tracks[ti];
       needs = !moved[ti] && o.net == net && o.layer != layer && (sameVertex(o.a.v(), p) || sameVertex(o.b.v(), p));
     }
-    if (!needs || std::ranges::any_of(placed, [&](Vec2 q) { return sameVertex(p, q); })) continue;
+    if (!needs || r::any_of(placed, [&](Vec2 q) { return sameVertex(p, q); })) continue;
     const NetClass& nc = b.classOf(net);
     Via v;
     v.pos = Point(p);
@@ -851,8 +850,8 @@ Fragment paste(Board& b, const Clip& c, Vec2 at) {
 
 void erase(Board& b, const Fragment& f) {
   auto drop = [](auto& list, std::vector<int> idx) {
-    std::ranges::sort(idx, std::greater{});
-    auto [first, last] = std::ranges::unique(idx);
+    r::sort(idx, std::greater{});
+    auto [first, last] = r::unique(idx);
     idx.erase(first, last);
     for (int i : idx) list.erase(list.begin() + i);
   };

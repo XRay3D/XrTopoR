@@ -6,6 +6,8 @@
 #include <optional>
 #include <vector>
 
+#include "geom/Ranges.h"
+
 namespace xr {
 
 using Coord = std::int64_t;  // nanometres

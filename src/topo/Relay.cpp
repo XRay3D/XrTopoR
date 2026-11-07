@@ -57,7 +57,7 @@ std::vector<Chord> chordsOf(const Topology& t, const LayerMesh& m, int tri, int 
     const int n = int(E.cross.size());
     for (int k = 0; k < n; ++k) {
       const Crossing& c = t.crossings[E.cross[k]];
-      if (c.wire < 0 || c.wire == skip || (absent && std::ranges::find(*absent, c.wire) != absent->end())) continue;
+      if (c.wire < 0 || c.wire == skip || (absent && r::find(*absent, c.wire) != absent->end())) continue;
       const Wire& w = t.wires[c.wire];
       const double here = perimeter(m, tri, i, double(k + 1) / (n + 1));
       // To the corner opposite, when the wire ends there.
@@ -68,7 +68,7 @@ std::vector<Chord> chordsOf(const Topology& t, const LayerMesh& m, int tri, int 
         const int j = m.localEdge(tri, d.edge);
         if (j >= 0 && j != i) {
           const Edge& F = m.edges[d.edge];
-          const int kf = int(std::ranges::find(F.cross, w.cross[c.idx + 1]) - F.cross.begin());
+          const int kf = int(r::find(F.cross, w.cross[c.idx + 1]) - F.cross.begin());
           out.push_back({here, perimeter(m, tri, j, double(kf + 1) / (F.cross.size() + 1)), w.net});
         }
       }
@@ -116,7 +116,7 @@ double tautLength(const Topology& t, int wi) {
     const Edge& E = m.edges[e];
     const int into = i + 1 < n ? commonTri(E, m.edges[t.crossings[w.cross[i + 1]].edge]) : triWithCorner(m, E, w.endVertex[1]);
     const EdgeCapacity c = edgeCapacity(t, m, e);
-    const int k = int(std::ranges::find(E.cross, w.cross[i]) - E.cross.begin());
+    const int k = int(r::find(E.cross, w.cross[i]) - E.cross.begin());
     Slot s = slotOf(c, k);
     if (s.hi < s.lo) s.lo = s.hi = s.mid();
     const Vec2 a = pointOn(m, E, s.lo, c.L), b = pointOn(m, E, s.hi, c.L);
@@ -195,7 +195,7 @@ std::optional<RelayPath> findRelay(const Topology& t, int wi, const std::vector<
     const int inner = end == 0 ? (keep > 0 ? commonTri(E, m.edges[t.crossings[w.cross[keep - 1]].edge]) : triWithCorner(m, E, w.endVertex[0]))
                                : (keep + 1 < n ? commonTri(E, m.edges[t.crossings[w.cross[keep + 1]].edge]) : triWithCorner(m, E, w.endVertex[1]));
     x.tri = across(E, inner);
-    const int k = int(std::ranges::find(E.cross, cid) - E.cross.begin());
+    const int k = int(r::find(E.cross, cid) - E.cross.begin());
     x.f = double(k + 1) / (E.cross.size() + 1);
     const EdgeCapacity c = edgeCapacity(t, m, x.edge);
     x.p = pointOn(m, E, slotOf(c, k).mid(), c.L);
@@ -207,7 +207,7 @@ std::optional<RelayPath> findRelay(const Topology& t, int wi, const std::vector<
   // The wire's own middle crossings are not there for the search.
   std::set<int> gone(w.cross.begin() + out.first, w.cross.begin() + out.last);
   // ... nor are those of the wires taken out with it.
-  auto isAbsent = [&](int wire) { return absent && std::ranges::find(*absent, wire) != absent->end(); };
+  auto isAbsent = [&](int wire) { return absent && r::find(*absent, wire) != absent->end(); };
   if (absent)
     for (int other : *absent) {
       const Wire& x = t.wires[size_t(other)];
@@ -235,7 +235,7 @@ std::optional<RelayPath> findRelay(const Topology& t, int wi, const std::vector<
   // The places of the crossings on the perimeter count the wire's own middle crossings too (chordsOf sees the
   // edges as they are): a gap's place is taken between the two crossings it lies between, as they are.
   auto gapPlace = [&](int tri, int le, const Edge& E, const std::vector<int>& cids, int gap) {
-    auto rank = [&](int cid) { return double(std::ranges::find(E.cross, cid) - E.cross.begin() + 1) / (E.cross.size() + 1); };
+    auto rank = [&](int cid) { return double(r::find(E.cross, cid) - E.cross.begin() + 1) / (E.cross.size() + 1); };
     const double lo = gap > 0 ? rank(cids[size_t(gap - 1)]) : 0.0, hi = gap < int(cids.size()) ? rank(cids[size_t(gap)]) : 1.0;
     return perimeter(m, tri, le, (lo + hi) / 2);
   };
@@ -278,7 +278,7 @@ std::optional<RelayPath> findRelay(const Topology& t, int wi, const std::vector<
     // Squeezing: a deficit is taken anywhere but against a wall (the realiser shares a deficit between
     // the edge's two ends, and a keepout or the board edge gives nothing); there the wires may be narrowed
     // to their minimum (the last resort), no more.
-    const bool atWall = std::ranges::any_of(E.v, [&](int v) {
+    const bool atWall = r::any_of(E.v, [&](int v) {
       const Owner::Kind k = t.owners[m.verts[v].owner].kind;
       return k == Owner::Kind::Outline || k == Owner::Kind::Keepout;
     });
@@ -400,7 +400,7 @@ std::optional<RelayPath> findRelay(const Topology& t, int wi, const std::vector<
     if (!edges.insert(nd.edge).second) return std::nullopt;  // an edge twice: the gaps would not hold
     out.steps.push_back({nd.edge, nd.gap});
   }
-  std::ranges::reverse(out.steps);
+  r::reverse(out.steps);
   // The gaps were counted without the wire's own middle crossings; they are about to go.
   return out;
 }
@@ -466,7 +466,7 @@ std::vector<int> wiresRound(const Topology& t, LayerId layer, int ownerA, int ow
       const Wire& x = t.wires[size_t(other)];
       if (x.net == net || x.locked || x.end[0] < 0 || x.end[1] < 0) continue;
       if (fixed && x.net >= 0 && x.net < int(fixed->size()) && (*fixed)[size_t(x.net)]) continue;
-      if (std::ranges::find(out, other) == out.end()) out.push_back(other);
+      if (r::find(out, other) == out.end()) out.push_back(other);
     }
   }
   if (out.size() > most) out.resize(most);
@@ -501,7 +501,7 @@ std::optional<PastResult> relayPast(Topology& t, int wire, const std::vector<int
   }
   PastResult r;
   for (int h : out) r.othersBefore += tautLength(t, h);
-  std::ranges::sort(out, [&](int x, int y) { return tautLength(t, x) < tautLength(t, y); });
+  r::sort(out, {}, [&](int w) { return tautLength(t, w); });
   saved = t;
   auto back = [&] {
     t = std::move(*saved);

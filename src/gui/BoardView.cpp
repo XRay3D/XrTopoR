@@ -235,7 +235,7 @@ BoardView::Pick BoardView::pick(QPointF screen) const {
       bool edge = b.layers[l].kind == LayerKind::Edge;
       if (edge ? !(filter & SelBoard) || !d.flag("showBoardOutline") : !(filter & SelMechDetails) || !layerVisible(l)) continue;
       // Drawings lying on one another (TopoR's contour beside the outline's lines): the selected one is taken.
-      bool chosen = std::ranges::contains(doc_->selectedItems(), ItemRef{ItemType::Detail, i});
+      bool chosen = r::contains(doc_->selectedItems(), ItemRef{ItemType::Detail, i});
       for (auto& sh : itemShapes(b, {ItemType::Detail, i}))
         if (double dd = std::max(0.0, sh.distance(w)); dd < bd || (dd == bd && (chosen || !pk.item))) {
           bd = dd;
@@ -670,7 +670,7 @@ void BoardView::drawBoard(QPainter& p) {
     if (groupOf(l) == 2 && layerVisible(l)) drawLayer(p, l);
   auto cu = b.copperLayers();
   LayerId active = doc_->activeLayer();
-  for (LayerId l : cu | std::views::reverse)
+  for (LayerId l : cu | v::reverse)
     if (l != active && layerVisible(l)) drawLayer(p, l);
   if (layerVisible(active)) drawLayer(p, active);
   drawVias(p);
@@ -726,7 +726,7 @@ void BoardView::drawBoard(QPainter& p) {
     QColor nl = doc_->color("netLines", 0xaf7d3a);
     for (auto& r : doc_->connectivity().ratsnest) {
       if (d.filterNetlines && !d.netlineNets.empty()) {
-        bool listed = std::ranges::contains(d.netlineNets, b.nets[r.net].name);
+        bool listed = r::contains(d.netlineNets, b.nets[r.net].name);
         if (listed == d.hideFilteredNetlines) continue;
       }
       p.setPen(QPen(netColor(r.net, d.colorizeNetline).value_or(nl), 1));
@@ -894,8 +894,8 @@ void BoardView::mousePressEvent(QMouseEvent* e) {
         break;
       }
       // Pressing a selected object drags the whole selection; a click without a drag selects it alone.
-      bool selected = (pk.component >= 0 && std::ranges::contains(doc_->selectedComponents(), pk.component)) ||
-                      (pk.component < 0 && pk.item && std::ranges::contains(doc_->selectedItems(), *pk.item));
+      bool selected = (pk.component >= 0 && r::contains(doc_->selectedComponents(), pk.component)) ||
+                      (pk.component < 0 && pk.item && r::contains(doc_->selectedItems(), *pk.item));
       if (selected) pendingClick_ = pk;
       else clickSelect(pk, {});
       edit::Fragment f = selectedFragment();
@@ -934,8 +934,8 @@ void BoardView::mousePressEvent(QMouseEvent* e) {
         clickSelect(pk, e->modifiers());  // wires are not moved in Freestyle: their shape is computed
         break;
       }
-      bool selected = (pk.component >= 0 && std::ranges::contains(doc_->selectedComponents(), pk.component)) ||
-                      (pk.component < 0 && pk.item && std::ranges::contains(doc_->selectedItems(), *pk.item));
+      bool selected = (pk.component >= 0 && r::contains(doc_->selectedComponents(), pk.component)) ||
+                      (pk.component < 0 && pk.item && r::contains(doc_->selectedItems(), *pk.item));
       if (add || !selected) clickSelect(pk, e->modifiers());
       if (add) break;
       fsTarget_ = {};
@@ -1018,7 +1018,7 @@ void BoardView::clickSelect(const Pick& pk, Qt::KeyboardModifiers mods) {
   auto items = add ? doc_->selectedItems() : std::vector<ItemRef>{};
   auto comps = add ? doc_->selectedComponents() : std::vector<int>{};
   auto toggle = [&](auto& list, auto v) {
-    if (auto it = std::ranges::find(list, v); it != list.end()) list.erase(it);
+    if (auto it = r::find(list, v); it != list.end()) list.erase(it);
     else list.push_back(v);
   };
   if (pk.item && pk.item->type != ItemType::Pad) {
@@ -1050,7 +1050,7 @@ void BoardView::selectInFrame(QRectF screenRect, bool crossing, bool add) {
   auto items = add ? doc_->selectedItems() : std::vector<ItemRef>{};
   auto comps = add ? doc_->selectedComponents() : std::vector<int>{};
   auto addItem = [&](ItemRef r) {
-    if (!std::ranges::contains(items, r)) items.push_back(r);
+    if (!r::contains(items, r)) items.push_back(r);
   };
   if ((filter & SelWires) && d.flag("showWires"))
     for (int i = 0; i < int(b.tracks.size()); ++i)
@@ -1069,7 +1069,7 @@ void BoardView::selectInFrame(QRectF screenRect, bool crossing, bool add) {
       if (!componentVisible(ci)) continue;
       BBox bb;
       for (int pi : b.components[ci].pads) bb.add(b.pads[pi].shapeGeom().bbox());
-      if (hit(bb) && !std::ranges::contains(comps, ci)) comps.push_back(ci);
+      if (hit(bb) && !r::contains(comps, ci)) comps.push_back(ci);
     }
   if ((filter & SelTexts) && d.flag("showTexts"))
     for (int i = 0; i < int(b.texts.size()); ++i)
@@ -1146,7 +1146,7 @@ std::vector<ItemRef> BoardView::wireOf(int track) const {
     for (int o : g.ends[v])
       if (!g.tiny[o]) {
         ++degree;
-        if (o != ti && !std::ranges::contains(others, o)) others.push_back(o);
+        if (o != ti && !r::contains(others, o)) others.push_back(o);
       }
     if (degree > 2) continue;  // a junction
     if (degree <= 2)
@@ -1176,7 +1176,7 @@ void BoardView::selectWire() {
   for (ItemRef r : doc_->selectedItems())
     if (r.type == ItemType::Track)
       for (ItemRef w : wireOf(r.index))
-        if (!std::ranges::contains(items, w)) items.push_back(w);
+        if (!r::contains(items, w)) items.push_back(w);
   if (!items.empty()) doc_->setSelection(std::move(items), {});
 }
 
@@ -1185,15 +1185,15 @@ void BoardView::selectNet() {
   const Board& b = *doc_->board();
   std::vector<int> nets;
   for (ItemRef r : doc_->selectedItems())
-    if (int n = itemNet(b, r); n >= 0 && !std::ranges::contains(nets, n)) nets.push_back(n);
+    if (int n = itemNet(b, r); n >= 0 && !r::contains(nets, n)) nets.push_back(n);
   if (nets.empty()) return;
   std::vector<ItemRef> items;
   for (int i = 0; i < int(b.tracks.size()); ++i)
-    if (std::ranges::contains(nets, b.tracks[i].net)) items.push_back({ItemType::Track, i});
+    if (r::contains(nets, b.tracks[i].net)) items.push_back({ItemType::Track, i});
   for (int i = 0; i < int(b.vias.size()); ++i)
-    if (std::ranges::contains(nets, b.vias[i].net)) items.push_back({ItemType::Via, i});
+    if (r::contains(nets, b.vias[i].net)) items.push_back({ItemType::Via, i});
   for (int i = 0; i < int(b.pads.size()); ++i)
-    if (std::ranges::contains(nets, b.pads[i].net)) items.push_back({ItemType::Pad, i});
+    if (r::contains(nets, b.pads[i].net)) items.push_back({ItemType::Pad, i});
   doc_->setSelection(std::move(items), {});
 }
 
@@ -1368,8 +1368,8 @@ void BoardView::mouseReleaseEvent(QMouseEvent* e) {
     }
     // The object under the cursor becomes the selection unless it is already selected.
     Pick pk = pick(e->position());
-    bool selected = (pk.item && std::ranges::contains(doc_->selectedItems(), *pk.item)) ||
-                    (pk.component >= 0 && std::ranges::contains(doc_->selectedComponents(), pk.component));
+    bool selected = (pk.item && r::contains(doc_->selectedItems(), *pk.item)) ||
+                    (pk.component >= 0 && r::contains(doc_->selectedComponents(), pk.component));
     if (!selected && (pk.item || pk.component >= 0)) clickSelect(pk, {});
     emit contextMenuRequested(e->globalPosition().toPoint());
     return;
@@ -1937,7 +1937,7 @@ void BoardView::createShape(std::vector<Graphic> fig) {
         if (b.layers[l].kind == LayerKind::Edge) edge = l;
       if (edge < 0) edge = b.addLayer("Board_outline", LayerKind::Edge, Side::None);
       // An outline without drawings (Specctra) becomes drawings first, so that it is built again with the new one.
-      if (std::ranges::none_of(b.graphics, [&](const Graphic& g) { return g.layer == edge; }))
+      if (!r::contains(b.graphics, edge, &Graphic::layer))
         for (auto& loop : b.outline) {
           Graphic g;
           g.kind = GraphicKind::Poly;
@@ -2123,7 +2123,7 @@ void BoardView::changeTrackWidth() {
     if (r.type == ItemType::Track) {
       cur = b.tracks[r.index].width;
       layer = b.tracks[r.index].layer;
-      if (!std::ranges::contains(nets, b.tracks[r.index].net)) nets.push_back(b.tracks[r.index].net);
+      if (!r::contains(nets, b.tracks[r.index].net)) nets.push_back(b.tracks[r.index].net);
     }
   if (!routing_ && nets.empty()) return;
   std::erase(nets, kNoNet);
@@ -2169,7 +2169,7 @@ void BoardView::recomputeShapes() {
   std::vector<int> nets;  // junctions settle on the re-laid nets only (all when everything is re-laid)
   if (local)
     for (size_t i = 0; i < b.tracks.size(); ++i)
-      if (chosen[i] && b.tracks[i].net != kNoNet && !std::ranges::contains(nets, b.tracks[i].net)) nets.push_back(b.tracks[i].net);
+      if (chosen[i] && b.tracks[i].net != kNoNet && !r::contains(nets, b.tracks[i].net)) nets.push_back(b.tracks[i].net);
   auto before = doc_->beginEdit();
   auto st = topo::reshapeTracks(b, std::move(chosen), {.local = local});
   int settled = topo::settleJunctions(b, nets);
@@ -2206,8 +2206,8 @@ bool BoardView::recomputeShapesModel(bool editedOnly) {
       if (v.a.type == ItemType::Track) sel.push_back(v.a);
       if (v.hasB) sel.push_back(v.b);
     }
-    std::ranges::sort(sel, [](ItemRef x, ItemRef y) { return std::tie(x.type, x.index) < std::tie(y.type, y.index); });
-    sel.erase(std::unique(sel.begin(), sel.end(), [](ItemRef x, ItemRef y) { return x.type == y.type && x.index == y.index; }), sel.end());
+    r::sort(sel, {}, [](ItemRef x) { return std::pair(x.type, x.index); });
+    sel.erase(r::unique(sel).begin(), sel.end());
     doc_->setDrc(drc);
     doc_->setSelection(sel, {});
     emit status(tr("Расчёт формы прерван: топологических нарушений %1 (проводники выделены, см. окно сообщений)").arg(drc.size()));
@@ -2378,7 +2378,7 @@ void BoardView::routeAddVia() {
   routeDir_.reset();
   // Next copper layer (cyclic).
   auto cu = b.copperLayers();
-  auto it = std::ranges::find(cu, routeLayer_);
+  auto it = r::find(cu, routeLayer_);
   size_t idx = it == cu.end() ? 0 : size_t(it - cu.begin());
   routeLayer_ = cu[(idx + 1) % cu.size()];
   routeWidth_ = b.trackWidth(routeNet_, routeLayer_);
@@ -2410,12 +2410,12 @@ void BoardView::changeLayer() {
     QAction* a = menu.addAction(QString::fromStdString(b.layers[l].name));
     a->setData(l);
     a->setCheckable(true);
-    a->setChecked(std::ranges::all_of(tracks, [&](int ti) { return b.tracks[ti].layer == l; }));
+    a->setChecked(r::all_of(tracks, [&](int ti) { return b.tracks[ti].layer == l; }));
   }
   QAction* chosen = menu.exec(QCursor::pos());
   if (!chosen) return;
   LayerId layer = chosen->data().toInt();
-  if (std::ranges::any_of(tracks, [&](int ti) { return b.tracks[ti].locked; }))
+  if (r::any_of(tracks, &Track::locked, of(b.tracks)))
     emit status(tr("Зафиксированные участки проводников остались на своём слое"));
   auto before = doc_->beginEdit();
   int vias = edit::changeLayer(b, tracks, layer);
@@ -2559,18 +2559,18 @@ void BoardView::invertSelection() {
   std::vector<int> nc;
   if ((filter & SelWires) && d.flag("showWires"))
     for (int i = 0; i < int(b.tracks.size()); ++i)
-      if (layerVisible(b.tracks[i].layer) && !std::ranges::contains(items, ItemRef{ItemType::Track, i}))
+      if (layerVisible(b.tracks[i].layer) && !r::contains(items, ItemRef{ItemType::Track, i}))
         ni.push_back({ItemType::Track, i});
   if ((filter & SelVias) && d.flag("showVias"))
     for (int i = 0; i < int(b.vias.size()); ++i)
-      if (!std::ranges::contains(items, ItemRef{ItemType::Via, i})) ni.push_back({ItemType::Via, i});
+      if (!r::contains(items, ItemRef{ItemType::Via, i})) ni.push_back({ItemType::Via, i});
   if ((filter & SelCoppers) && d.flag("showCoppers"))
     for (int i = 0; i < int(b.zones.size()); ++i)
-      if (layerVisible(b.zones[i].layer) && !std::ranges::contains(items, ItemRef{ItemType::Zone, i}))
+      if (layerVisible(b.zones[i].layer) && !r::contains(items, ItemRef{ItemType::Zone, i}))
         ni.push_back({ItemType::Zone, i});
   if (filter & SelComponents)
     for (int i = 0; i < int(b.components.size()); ++i)
-      if (componentVisible(i) && !std::ranges::contains(comps, i)) nc.push_back(i);
+      if (componentVisible(i) && !r::contains(comps, i)) nc.push_back(i);
   doc_->setSelection(std::move(ni), std::move(nc));
 }
 
@@ -2632,7 +2632,7 @@ void BoardView::updateRouteHint() {
   }
   std::erase_if(cands, [&](auto& c) { return c.first < 1; });
   if (cands.empty()) return;
-  std::ranges::sort(cands, {}, &std::pair<double, Vec2>::first);
+  r::sort(cands, {}, &std::pair<double, Vec2>::first);
   routeTarget_ = cands[size_t(targetIndex_) % cands.size()].second;
   routeHint_ = topo::routeConnection(b, routeLast_, *routeTarget_, routeLayer_, routeNet_, routeWidth_);
 }
@@ -2692,7 +2692,7 @@ void BoardView::toggleFlexFix() {
     emit status(tr("Гибкая фиксация: выделите проводник или переход цепи"));
     return;
   }
-  const bool all = std::ranges::all_of(nets, [&](int n) { return b.nets[size_t(n)].flexFixed; });
+  const bool all = r::all_of(nets, &Net::flexFixed, of(b.nets));
   auto before = doc_->beginEdit();
   for (int n : nets) {
     b.nets[size_t(n)].flexFixed = !all;

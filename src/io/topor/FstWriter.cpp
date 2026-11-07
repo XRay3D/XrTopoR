@@ -656,7 +656,7 @@ struct Writer {
       if (b.isEdge(g.layer) && !b.outline.empty()) {
         auto path = g.path();
         if (path.empty()) continue;
-        bool hole = std::any_of(b.outline.begin() + 1, b.outline.end(), [&](auto& loop) { return onLoop(path.front(), loop); });
+        bool hole = r::any_of(b.outline | v::drop(1), [&](auto& loop) { return onLoop(path.front(), loop); });
         (hole ? voids : contour).push_back(&g);
       }
     auto shapes = [&](const std::vector<const Graphic*>& gs) {

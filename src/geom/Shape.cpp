@@ -124,7 +124,7 @@ Polyline Shape::outline(double tol) const {
     case Kind::Polygon: {
       if (r <= 0) { out = poly; break; }
       Polyline p = poly;
-      if (polygonArea(p) < 0) std::reverse(p.begin(), p.end());
+      if (polygonArea(p) < 0) r::reverse(p);
       size_t n = p.size();
       for (size_t i = 0; i < n; ++i) {
         Vec2 prev = p[(i + n - 1) % n], cur = p[i], next = p[(i + 1) % n];

@@ -55,11 +55,11 @@ void usage() {
 struct Args {
   std::vector<std::string_view> v;
   std::string_view opt(std::string_view name) const {
-    for (auto [a, b] : v | std::views::adjacent<2>)
+    for (auto [a, b] : v | v::adjacent<2>)
       if (a == name) return b;
     return {};
   }
-  bool flag(std::string_view name) const { return std::ranges::contains(v, name); }
+  bool flag(std::string_view name) const { return r::contains(v, name); }
 };
 
 int fail(const std::string& msg) {
@@ -82,8 +82,8 @@ int cmdInfo(const Board& b) {
                tht, connected);
   std::println("nets       {}\ntracks     {}\nvias       {}\nzones      {}\noutline    {} contour(s)", b.nets.size(),
                b.tracks.size(), b.vias.size(), b.zones.size(), b.outline.size());
-  if (auto n = std::ranges::count_if(b.nets, [](const Net& x) { return x.flexFixed; }); n > 0) std::println("flexibly fixed nets {}", n);
-  if (auto n = std::ranges::count_if(b.nets, [](const Net& x) { return !x.route; }); n > 0) std::println("nets not to route   {}", n);
+  if (auto n = r::count_if(b.nets, &Net::flexFixed); n > 0) std::println("flexibly fixed nets {}", n);
+  if (auto n = r::count(b.nets, false, &Net::route); n > 0) std::println("nets not to route   {}", n);
   for (auto& nc : b.netClasses)
     std::println("class      {:<12} width {:.3f} clearance {:.3f} via {:.3f}/{:.3f} mm", nc.name, nc.trackWidth / 1e6,
                  nc.clearance / 1e6, nc.viaDiameter / 1e6, nc.viaDrill / 1e6);
@@ -96,7 +96,7 @@ int cmdDrc(const Board& b, size_t maxShow) {
   auto v = runDrc(b);
   std::flat_map<DrcViolation::Type, int> counts;
   for (auto& x : v) counts[x.type]++;
-  for (auto& x : v | std::views::take(maxShow))
+  for (auto& x : v | v::take(maxShow))
     std::println("[{}] ({:.3f}, {:.3f}) {}", drcTypeName(x.type), x.pos.x / 1e6, x.pos.y / 1e6, x.message);
   std::print("DRC: {} violation(s):", v.size());
   for (auto&& [t, n] : counts) std::print(" {}={}", drcTypeName(t), n);
@@ -119,14 +119,14 @@ int cmdRoute(Board& b, const Args& a) {
   if (auto p = a.opt("--via-cost"); !p.empty()) ro.viaCost = std::stod(std::string(p));
   ro.useVias = !a.flag("--no-vias");
   if (auto p = a.opt("--layers"); !p.empty())  // copper indices, 0 = top
-    for (auto part : std::views::split(p, ',')) ro.copperIndices.push_back(std::stoi(std::string(part.begin(), part.end())));
+    for (auto part : v::split(p, ',')) ro.copperIndices.push_back(std::stoi(std::string(part.begin(), part.end())));
   ro.ripupExisting = !a.flag("--keep");
   ro.softPlanarity = a.flag("--soft");
   if (a.flag("--no-optimize")) ro.optimizeIterations = 0;
   ro.refine = !a.flag("--no-refine");
   ro.fillZones = !a.flag("--no-fill");
   if (auto p = a.opt("--nets"); !p.empty())
-    ro.nets = p | std::views::split(',') | std::ranges::to<std::vector<std::string>>();
+    ro.nets = p | v::split(',') | r::to<std::vector<std::string>>();
   int lastDecile = -1;
   ro.progress = [&](int done, int total, const std::string& stage) {
     int decile = total ? done * 10 / total : 0;
@@ -198,7 +198,7 @@ int main(int argc, char** argv) {
   }
   if (cmd == "flexfix" && !a.opt("-o").empty()) {
     // The flexible fixation of the nets named (--off takes it off); «Трассировать» goes the other way.
-    const auto names = a.opt("--nets") | std::views::split(',') | std::ranges::to<std::vector<std::string>>();
+    const auto names = a.opt("--nets") | v::split(',') | r::to<std::vector<std::string>>();
     const bool on = !a.flag("--off");
     if (names.empty()) return fail("flexfix: --nets a,b names the nets");
     int n = 0;
@@ -335,7 +335,7 @@ int main(int argc, char** argv) {
         if (std::getenv("XR_TOPO_DEBUG")) {
           std::vector<std::pair<double, int>> d;
           for (auto& [n, l] : now) d.push_back({l - was[n], n});
-          std::ranges::sort(d, std::greater{}, [](auto& x) { return std::abs(x.first); });
+          r::sort(d, std::greater{}, [](auto& x) { return std::abs(x.first); });
           for (size_t k = 0; k < d.size() && k < 6 && std::abs(d[k].first) > 1000; ++k)
             std::println("    {} {:+.3f} mm", d[k].second == kNoNet ? "-" : b.nets[d[k].second].name, d[k].first / 1e6);
         }
@@ -355,9 +355,9 @@ int main(int argc, char** argv) {
     std::vector<char> all(b.tracks.size(), 1);
     bool local = false;
     if (auto p = a.opt("--nets"); !p.empty()) {
-      auto names = p | std::views::split(',') | std::ranges::to<std::vector<std::string>>();
+      auto names = p | v::split(',') | r::to<std::vector<std::string>>();
       for (size_t i = 0; i < b.tracks.size(); ++i)
-        all[i] = b.tracks[i].net != kNoNet && std::ranges::contains(names, b.nets[b.tracks[i].net].name);
+        all[i] = b.tracks[i].net != kNoNet && r::contains(names, b.nets[b.tracks[i].net].name);
       local = true;
     }
     double around = a.opt("--around").empty() ? 0.0 : std::stod(std::string(a.opt("--around"))) * kNmPerMm;
@@ -377,7 +377,7 @@ int main(int argc, char** argv) {
         if (std::getenv("XR_TOPO_DEBUG")) {  // the nets whose length changed most
           std::vector<std::pair<double, int>> d;
           for (auto& [n, l] : now) d.push_back({l - was[n], n});
-          std::ranges::sort(d, std::greater{}, [](auto& x) { return std::abs(x.first); });
+          r::sort(d, std::greater{}, [](auto& x) { return std::abs(x.first); });
           for (size_t k = 0; k < d.size() && k < 6 && std::abs(d[k].first) > 1000; ++k)
             std::println("    {} {:+.3f} mm", d[k].second == kNoNet ? "-" : b.nets[d[k].second].name, d[k].first / 1e6);
         }
@@ -390,7 +390,7 @@ int main(int argc, char** argv) {
       std::vector<int> nets;
       if (local)
         for (size_t i = 0; i < b.nets.size(); ++i)
-          if (std::ranges::contains(a.opt("--nets") | std::views::split(',') | std::ranges::to<std::vector<std::string>>(), b.nets[i].name)) nets.push_back(int(i));
+          if (r::contains(a.opt("--nets") | v::split(',') | r::to<std::vector<std::string>>(), b.nets[i].name)) nets.push_back(int(i));
       std::println("junctions settled: {}", topo::settleJunctions(b, nets));
     }
     xr::Prof::get().report("reshape");

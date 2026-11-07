@@ -81,7 +81,7 @@ std::optional<std::vector<Vec2>> offsetPolygon(const std::vector<Vec2>& poly, do
   bg::strategy::buffer::side_straight side;
   bg::buffer(p, out, dist, side, join, end, pt);
   if (out.empty()) return std::nullopt;
-  auto& best = *std::ranges::max_element(out, {}, [](const BPoly& q) { return bg::area(q); });
+  auto& best = *r::max_element(out, {}, [](const BPoly& q) { return bg::area(q); });
   std::vector<Vec2> r;
   for (size_t i = 0; i + 1 < best.outer().size(); ++i) r.push_back({best.outer()[i].x(), best.outer()[i].y()});
   if (r.size() < 3) return std::nullopt;
@@ -347,7 +347,7 @@ void syncPadsFromStacks(Board& b, const std::vector<Padstack>& before) {
 
 std::string uniquePadstackName(const std::vector<Padstack>& stacks, const std::string& base) {
   auto taken = [&](const std::string& n) {
-    return std::ranges::any_of(stacks, [&](const Padstack& s) { return s.name == n; });
+    return r::contains(stacks, n, &Padstack::name);
   };
   if (!base.empty() && !taken(base)) return base;
   for (int i = 2;; ++i) {
@@ -358,7 +358,7 @@ std::string uniquePadstackName(const std::vector<Padstack>& stacks, const std::s
 
 void buildPadstacksFromPads(Board& b, const std::vector<std::string>& names) {
   auto cu = b.copperLayers();
-  bool planes = std::ranges::any_of(cu, [&](LayerId l) { return b.layers[l].plane; });
+  bool planes = r::any_of(cu, &Layer::plane, of(b.layers));
   // Stacks made here, by what they are (and the source's name for them).
   std::map<std::tuple<std::string, std::string>, int> made;
   auto key = [](const Padstack& ps) {
@@ -509,7 +509,7 @@ LayerDetailsResult createLayerDetails(const Board& b, std::vector<Padstack>& sta
       res.stacks.push_back({si, LayerDetailsResult::Kind::Kept});
       continue;
     }
-    auto own = std::ranges::find_if(ps.details, [&](const PadDetail& d) {
+    auto own = r::find_if(ps.details, [&](const PadDetail& d) {
       return !d.layer.empty() && detailLayer(b, d.layer, false) == target;
     });
     if (own != ps.details.end()) *own = std::move(*made);
@@ -526,7 +526,7 @@ void deleteLayerDetails(const Board& b, std::vector<Padstack>& stacks, const std
     if (si < 0 || size_t(si) >= stacks.size()) continue;
     Padstack& ps = stacks[size_t(si)];
     std::erase_if(ps.details, [&](const PadDetail& d) { return !d.layer.empty() && detailLayer(b, d.layer, false) == target; });
-    auto cl = std::ranges::find_if(ps.details, [&](const PadDetail& d) { return d.layer.empty() && d.layerClass == cls; });
+    auto cl = r::find_if(ps.details, [&](const PadDetail& d) { return d.layer.empty() && d.layerClass == cls; });
     if (cl == ps.details.end()) continue;
     // The class detail stays on the class's other layers, each by name.
     PadDetail keep = *cl;

@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <QSettings>
 
+#include "geom/Ranges.h"
+
 namespace xr::gui::AppSettings {
 
 namespace {
@@ -87,11 +89,11 @@ void addRecentFile(const QString& path) {
 void mergeRecentFiles(const std::vector<RecentFile>& files) {
   auto list = recentFiles();
   for (auto& f : files) {
-    auto it = std::ranges::find(list, f.path, &RecentFile::path);
+    auto it = r::find(list, f.path, &RecentFile::path);
     if (it == list.end()) list.push_back(f);
     else if (f.opened > it->opened) it->opened = f.opened;
   }
-  std::ranges::stable_sort(list, std::greater{}, &RecentFile::opened);
+  r::stable_sort(list, std::greater{}, &RecentFile::opened);
   if (list.size() > kMaxRecent) list.resize(kMaxRecent);
   writeRecent(list);
 }

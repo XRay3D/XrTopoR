@@ -68,7 +68,7 @@ Local evaluate(const Board& b, const SpatialIndex& idx, const BBox& region, cons
   Local l;
   auto changed = [&](ItemRef r) {
     if (r.type == ItemType::Track) return r.index < int(changedTracks.size()) && changedTracks[r.index] != 0;
-    return std::ranges::contains(changedItems, r);
+    return r::contains(changedItems, r);
   };
   l.conflicts = regionConflicts(b, idx, region, changed);
   for (ItemRef r : idx.query(region, ~LayerMask(0)))
@@ -176,7 +176,7 @@ void addNeighbours(const Board& b, std::vector<char>& chosen, Vec2 a, Vec2 c, do
   for (size_t i = 0; i < b.tracks.size(); ++i) {
     const Track& t = b.tracks[i];
     if (chosen[i] || t.locked || !((layers >> t.layer) & 1)) continue;
-    if (!nets.empty() && !std::ranges::contains(nets, t.net)) continue;
+    if (!nets.empty() && !r::contains(nets, t.net)) continue;
     if (distSegmentSegment(a, c, t.a.v(), t.b.v()) < r + t.width / 2.0) chosen[i] = 1;
   }
 }
@@ -213,7 +213,7 @@ std::vector<Junction> junctionsOf(const Board& b, const std::vector<int>& nets) 
     Point q{std::get<0>(k) * 1000, std::get<1>(k) * 1000};
     LayerId layer = std::get<2>(k);
     int net = std::get<3>(k);
-    if (!nets.empty() && !std::ranges::contains(nets, net)) continue;
+    if (!nets.empty() && !r::contains(nets, net)) continue;
     bool onCopper = false;
     BBox bb;
     bb.add(q.v());
@@ -242,7 +242,7 @@ int settleOnce(Board& b, const std::vector<int>& nets, int rounds, const std::ve
   for (int round = 0; round < rounds; ++round) {
     std::vector<Junction> js = junctionsOf(b, nets);
     std::erase_if(js, [&](const Junction& j) {
-      return std::ranges::any_of(keep, [&](const SettledMove& m) {
+      return r::any_of(keep, [&](const SettledMove& m) {
         return m.layer == j.layer && m.net == j.net && ((m.from - j.p.v()).len() < 1000 || (m.to - j.p.v()).len() < 1000);
       });
     });
@@ -414,12 +414,12 @@ OptimizeResult optimize(Board& b, const OptimizeOptions& o) {
       std::vector<ViaJob> jobs;
       for (int vi = 0; vi < int(b.vias.size()); ++vi) {
         const Via& v = b.vias[vi];
-        if (v.locked || b.flexFixed(v.net) || (!o.nets.empty() && !std::ranges::contains(o.nets, v.net))) continue;
+        if (v.locked || b.flexFixed(v.net) || (!o.nets.empty() && !r::contains(o.nets, v.net))) continue;
         ViaJob j;
         j.vi = vi;
         j.vs = Shape::circle(v.pos.v(), v.diameter / 2.0);
         auto attached = attachedTo(b, j.vs, v.layers, v.net);
-        if (std::ranges::none_of(attached, [](char c) { return c != 0; })) continue;
+        if (r::none_of(attached, [](char c) { return c != 0; })) continue;
         jobs.push_back(std::move(j));
       }
       struct Best {
@@ -606,7 +606,7 @@ OptimizeResult optimize(Board& b, const OptimizeOptions& o) {
         Shape js0 = Shape::circle(j.p.v(), j.width / 2.0);
         LayerMask lm = LayerMask(1) << j.layer;
         auto chosen = attachedTo(b, js0, lm, j.net);
-        if (std::ranges::none_of(chosen, [](char c) { return c != 0; })) return;
+        if (r::none_of(chosen, [](char c) { return c != 0; })) return;
         std::vector<int> current = indicesOf(growChains(b, chosen));
         double bestGain = 1000.0;
         for (Vec2 d : std::span(kDirs, it == 0 ? 8 : 4)) {

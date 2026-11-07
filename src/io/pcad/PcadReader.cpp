@@ -221,10 +221,7 @@ struct Reader {
     std::vector<Def> signal;
     for (auto& d : defs)
       if (d.type == "Signal" || d.type == "Plane") signal.push_back(d);
-    std::sort(signal.begin(), signal.end(), [&](const Def& a, const Def& c) {
-      auto rank = [&](const Def& d) { return d.num == topNum ? -1 : d.num == bottomNum ? 1 << 20 : d.num; };
-      return rank(a) < rank(c);
-    });
+    r::sort(signal, {}, [&](const Def& d) { return d.num == topNum ? -1 : d.num == bottomNum ? 1 << 20 : d.num; });
     for (size_t i = 0; i < signal.size(); ++i) {
       if (signal[i].type == "Plane") continue;
       Side side = signal[i].num == topNum ? Side::Top : signal[i].num == bottomNum ? Side::Bottom : Side::None;
@@ -482,7 +479,7 @@ Result<BoardPtr> readPcad(const std::string& text, const std::string& path) {
     for (auto& t : b->tracks) widths[t.width]++;
     for (auto& v : b->vias) viaKinds[{v.diameter, v.drill}]++;
     NetClass& d = b->netClasses[0];
-    auto mode = [](const auto& m) { return std::ranges::max_element(m, {}, [](auto& kv) { return kv.second; })->first; };
+    auto mode = [](const auto& m) { return r::max_element(m, {}, [](auto& kv) { return kv.second; })->first; };
     if (!widths.empty()) d.trackWidth = mode(widths);
     if (!viaKinds.empty()) std::tie(d.viaDiameter, d.viaDrill) = mode(viaKinds);
   }

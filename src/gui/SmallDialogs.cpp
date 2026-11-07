@@ -57,13 +57,13 @@ std::optional<Coord> askTrackWidth(QWidget* parent, Document* doc, const std::ve
   DesignRules rules = b.rules ? *b.rules : rulesFromBoard(b);
   auto groupHas = [&](const std::string& g, const std::string& net) {
     for (auto& grp : rules.netGroups)
-      if (grp.name == g && std::ranges::contains(grp.nets, net)) return true;
+      if (grp.name == g && r::contains(grp.nets, net)) return true;
     return false;
   };
   for (int i = 0; i < int(rules.widths.size()); ++i) {
     const WidthRule& w = rules.widths[size_t(i)];
     if (!w.enabled) continue;
-    bool layerOk = w.layers.empty() || (layer >= 0 && std::ranges::contains(w.layers, b.layers[layer].name));
+    bool layerOk = w.layers.empty() || (layer >= 0 && r::contains(w.layers, b.layers[layer].name));
     bool netOk = w.nets.kind == RuleNets::Kind::All;
     for (int n : nets) {
       const std::string& name = b.nets[n].name;
@@ -174,7 +174,7 @@ std::optional<int> askNet(QWidget* parent, Document* doc, int current) {
   none->setData(Qt::UserRole, kNoNet);
   std::vector<int> order(b.nets.size());
   for (int i = 0; i < int(order.size()); ++i) order[size_t(i)] = i;
-  std::ranges::sort(order, {}, [&](int n) { return b.nets[size_t(n)].name; });
+  r::sort(order, {}, [&](int n) { return b.nets[size_t(n)].name; });
   for (int n : order) {
     auto* it = new QListWidgetItem(QString::fromStdString(b.nets[size_t(n)].name), list);
     it->setData(Qt::UserRole, n);

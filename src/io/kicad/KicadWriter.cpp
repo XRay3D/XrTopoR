@@ -188,7 +188,7 @@ void flipFootprint(Node& fp) {
       if (Node* eff = k.find("effects")) {
         Node* just = eff->find("justify");
         if (!just) just = &eff->add(Node::list("justify"));
-        auto it = std::ranges::find_if(just->kids, [](const Node& a) { return !a.isList && a.text == "mirror"; });
+        auto it = r::find_if(just->kids, [](const Node& a) { return !a.isList && a.text == "mirror"; });
         if (it != just->kids.end()) just->kids.erase(it);
         else just->addAtom("mirror");
         if (just->kids.size() == 1) std::erase_if(eff->kids, [](const Node& a) { return a.is("justify"); });
@@ -522,7 +522,7 @@ std::string generate(const Board& b) {
   }
   for (auto& g : kb.graphics)
     if (g.layer >= 0) root.add(graphicNode(kb, g, "gr_", {}, 0));
-  if (kb.graphics.empty() || std::none_of(kb.graphics.begin(), kb.graphics.end(), [&](const Graphic& g) {
+  if (kb.graphics.empty() || r::none_of(kb.graphics, [&](const Graphic& g) {
         return g.layer >= 0 && kb.layers[g.layer].kind == LayerKind::Edge;
       })) {
     for (auto& loop : kb.outline) {

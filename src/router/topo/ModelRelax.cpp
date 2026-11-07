@@ -577,9 +577,9 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
     // and as long as the force is strong, checked against the copper where it lands (shortened, or slid along
     // what blocks it) and against the room in the model around it — the step goes back if that got shorter.
     std::vector<size_t> order(objs.size());
-    std::iota(order.begin(), order.end(), size_t(0));
+    r::iota(order, size_t(0));
     auto strength = [&](size_t k) { return clear[k].len2() > 0 ? 1e9 : force[k].len(); };
-    std::ranges::sort(order, [&](size_t x, size_t y) { return strength(x) > strength(y); });
+    r::sort(order, std::greater{}, strength);
     int stepped = 0, blocked = 0;
     int why[3] = {0, 0, 0};  // attempts refused by the copper, by the mesh, by the room in the model
     std::vector<std::pair<size_t, Vec2>> taken;  // the steps as they went, in order
@@ -668,7 +668,7 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
           if ((ow.c - prev.pos[k]).len() < 1) continue;
           double dist = (ow.c - v.pos).len();
           if (dist < nd) { nd = dist; nearest = k; }
-          if (dist < kBlame[wide] || (dist < 8 * kBlame[wide] && std::ranges::contains(nets, ow.net))) blamed[k] = 1, hit = true;
+          if (dist < kBlame[wide] || (dist < 8 * kBlame[wide] && r::contains(nets, ow.net))) blamed[k] = 1, hit = true;
         }
         if (!hit && nearest < objs.size()) blamed[nearest] = 1;
       }

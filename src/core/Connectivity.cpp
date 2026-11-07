@@ -9,7 +9,7 @@ namespace xr {
 namespace {
 struct Dsu {
   std::vector<int> p;
-  explicit Dsu(int n) : p(n) { std::iota(p.begin(), p.end(), 0); }
+  explicit Dsu(int n) : p(n) { r::iota(p, 0); }
   int find(int x) { while (p[x] != x) x = p[x] = p[p[x]]; return x; }
   void unite(int a, int b) { p[find(a)] = find(b); }
 };

@@ -215,7 +215,7 @@ TEST(Refine, ModelRelaysTheLongWaysRound) {
   EXPECT_EQ(after.vias, before.vias - res.viasRemoved);
   const int sd3 = b.findNet("SD3");
   ASSERT_GE(sd3, 0);
-  EXPECT_EQ(std::ranges::count_if(b.vias, [&](const Via& v) { return v.net == sd3; }), 0);
+  EXPECT_EQ(r::count(b.vias, sd3, &Via::net), 0);
   EXPECT_LT(after.length, before.length - 35 * kNmPerMm);
   EXPECT_LE(after.real, before.real);
   EXPECT_LE(after.shorts, before.shorts);

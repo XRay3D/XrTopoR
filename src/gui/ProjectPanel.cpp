@@ -171,7 +171,7 @@ io::FsProjFolder* ProjectPanel::folderOf(QTreeWidgetItem* it) {
   }
   if (!cur) return &project_->data().documents;
   io::FsProjFolder* f = cur->data(0, FolderRole).toInt() == 1 ? &project_->data().autorouting : &project_->data().documents;
-  for (int idx : chain | std::views::reverse) f = &f->folders[size_t(idx)];
+  for (int idx : chain | v::reverse) f = &f->folders[size_t(idx)];
   return f;
 }
 
@@ -220,14 +220,13 @@ void ProjectPanel::refresh() {
     std::vector<std::pair<QString, QDateTime>> files;
     for (auto& file : f.files) {
       QString p = project_->resolve(file);
-      if (std::ranges::none_of(files, [&](auto& e) { return e.first == p; }))
+      if (!r::contains(files, p, &std::pair<QString, QDateTime>::first))
         files.push_back({p, QFileInfo(p).lastModified()});
     }
-    if (byDate) std::ranges::sort(files, std::greater{}, &std::pair<QString, QDateTime>::second);
+    if (byDate) r::sort(files, std::greater{}, &std::pair<QString, QDateTime>::second);
     else
-      std::ranges::sort(files, [](auto& a, auto& b) {
-        return QFileInfo(a.first).fileName().compare(QFileInfo(b.first).fileName(), Qt::CaseInsensitive) < 0;
-      });
+      r::sort(files, [](const QString& a, const QString& b) { return a.compare(b, Qt::CaseInsensitive) < 0; },
+              [](auto& e) { return QFileInfo(e.first).fileName(); });
     for (auto& [p, date] : files) {
       auto* it = new QTreeWidgetItem(parent, {QFileInfo(p).fileName()});
       it->setIcon(0, fileIcon);

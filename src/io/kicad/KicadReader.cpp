@@ -44,7 +44,7 @@ struct Reader {
     if (n->argc() >= 2) return b.addNet(n->arg(1));
     const std::string& a = n->arg(0);
     if (n->kids.size() >= 2 && !n->kids[1].quoted && !a.empty() &&
-        std::all_of(a.begin(), a.end(), [](char c) { return std::isdigit(static_cast<unsigned char>(c)); })) {
+        r::all_of(a, [](char c) { return std::isdigit(static_cast<unsigned char>(c)); })) {
       auto it = netCodes.find(std::stoi(a));
       return it == netCodes.end() ? kNoNet : b.addNet(it->second);
     }
@@ -68,7 +68,7 @@ struct Reader {
       if (n.rfind("In", 0) == 0) return std::atoi(n.c_str() + 2);
       return 500;
     };
-    std::sort(copper.begin(), copper.end(), [&](const L& a, const L& c) { return rank(a.name) < rank(c.name); });
+    r::sort(copper, {}, [&](const L& l) { return rank(l.name); });
     for (size_t i = 0; i < copper.size(); ++i) {
       Side side = i == 0 ? Side::Top : (i + 1 == copper.size() ? Side::Bottom : Side::None);
       b.addLayer(copper[i].name, LayerKind::Copper, side);
