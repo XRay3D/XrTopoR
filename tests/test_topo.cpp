@@ -1845,6 +1845,39 @@ TEST(Topo, WireThroughACutoutIsReLaid) {
   for (int i = 0; i < 4; ++i) EXPECT_GE(p.centreLineTo("N", c[i], c[(i + 1) % 4]), 0.15 + 0.25 - 0.005) << "side " << i;
 }
 
+// A keepout for vias holds a via off itself (touching allowed, as the DRC takes it): F7 does not move a via
+// into it and pushes one out that stands inside. Net N from a pad on Top through a via to a pad on Bottom,
+// the via first beside the keepout, then inside it.
+TEST(Topo, ViaStaysOutOfAViaKeepout) {
+  for (double y0 : {13.0, 10.7}) {
+    PinBoard p;
+    p.twoLayers();
+    p.pad("N", 5, 10, PadShapeKind::Circle, 1, 1);
+    p.pad("N", 35, 10, PadShapeKind::Circle, 1, 1);
+    p.b.pads.back().copper = LayerMask(1) << p.bottom;
+    p.via("N", 20, y0, 0.6);
+    p.b.vias.back().layers = (LayerMask(1) << p.top) | (LayerMask(1) << p.bottom);
+    p.track("N", {{5, 10}, {20, y0}}, 0.3);
+    p.track("N", {{20, y0}, {35, 10}}, 0.3);
+    p.b.tracks.back().layer = p.bottom;
+    p.keepout({{15, 9}, {25, 9}, {25, 12}, {15, 12}}, /*wires*/ false, /*vias*/ true);
+    const bool inside = y0 < 12;
+    EXPECT_EQ(p.drcOf(DrcViolation::Type::Keepout), inside ? 1 : 0) << y0;
+    auto res = p.f7();
+    ASSERT_TRUE(res.drawn) << y0;
+    ASSERT_EQ(p.b.vias.size(), 1u);
+    const Vec2 v = p.b.vias.front().pos.v();
+    const Shape bar = Shape::polygon({PinBoard::at(15, 9), PinBoard::at(25, 9), PinBoard::at(25, 12), PinBoard::at(15, 12)});
+    if (!inside) {
+      EXPECT_GE(bar.distance(v), 0.3 * kNmPerMm - 1000) << "F7 moved the via into the keepout: " << v.x / 1e6 << "," << v.y / 1e6;
+      EXPECT_LT(v.y, PinBoard::at(0, 13).y - 100000) << "the via was pulled towards the straight line between the pads";
+    } else {
+      EXPECT_GE(bar.distance(v), 0.3 * kNmPerMm - 1000) << "the via stayed inside: " << v.x / 1e6 << "," << v.y / 1e6;
+    }
+    EXPECT_EQ(p.drcOf(DrcViolation::Type::Keepout), 0) << y0;
+  }
+}
+
 // The pins of a row are left through their ends only (TopoR's F5: 109 of the 110 exits of
 // Arcs_standard_routing, the one left is a dog-leg another wire runs round): a wire drawn out of the long
 // side is led from the pad's centre to the centre of the rounded end and straight out. Two pins of one net

@@ -114,10 +114,55 @@ void Topology::build(const Board& b) {
   violations.clear();
   BuildScratch scratch;
   buildOwners(b, scratch);
+  takeViaBars(b);
   takeRules(b);  // before the wires: relayDisplaced searches with the pair rules
   convertWires(b, scratch);  // adds the junction owners, builds the meshes, lays the wires on them
   relayDisplaced(b, scratch);  // the wires drawn through keepouts and cutouts, round them
   boardHash = boardHashOf(b);
+}
+
+void Topology::takeViaBars(const Board& b) {
+  viaBars.clear();
+  const LayerMask cuMask = b.allCopperMask();
+  for (const Keepout& k : b.keepouts) {
+    if (k.role != Keepout::Role::Route || !k.vias) continue;
+    const LayerMask layers = (k.layers ? k.layers : cuMask) & cuMask;
+    for (const Shape& s : k.shapes()) viaBars.push_back({layers, s});
+  }
+}
+
+double Topology::viaBarIntrusion(Vec2 p, double r, LayerMask layers, Vec2* way) const {
+  double worst = 0;
+  if (way) *way = {};
+  for (const ViaBar& bar : viaBars) {
+    if (!(bar.layers & layers)) continue;
+    const Shape& s = bar.shape;
+    double depth;
+    Vec2 out;
+    if (s.kind == Shape::Kind::Polygon && pointInPolygon(p, s.poly)) {
+      // Inside: the distance to the nearest side, the way out towards its foot (the polygon's distance is 0
+      // anywhere inside, flat).
+      double d = std::numeric_limits<double>::max();
+      Vec2 foot;
+      for (size_t i = 0, n = s.poly.size(), j = n - 1; i < n; j = i++) {
+        Vec2 f = closestPointOnSegment(p, s.poly[j], s.poly[i]);
+        if (double x = (f - p).len(); x < d) d = x, foot = f;
+      }
+      depth = r + s.r + d;
+      out = d > 1 ? (foot - p).normalized() : Vec2{0, 1};
+    } else {
+      depth = r - s.distance(p);
+      constexpr double e = 2000;
+      out = {s.distance(p + Vec2{e, 0}) - s.distance(p - Vec2{e, 0}), s.distance(p + Vec2{0, e}) - s.distance(p - Vec2{0, e})};
+      if (out.len() < 1) out = p - s.center();
+      out = out.len() < 1 ? Vec2{0, 1} : out.normalized();
+    }
+    if (depth > worst) {
+      worst = depth;
+      if (way) *way = out;
+    }
+  }
+  return worst;
 }
 
 void Topology::takeRules(const Board& b) {

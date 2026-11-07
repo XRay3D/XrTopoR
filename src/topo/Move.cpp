@@ -147,6 +147,7 @@ int insertVertex(Topology& t, LayerMesh& m, int owner, double at, Vec2 off, bool
   const Owner& o = t.owners[owner];
   nx.p = o.c + o.axis * at + off;
   const Vec2 P = nx.p;
+  if (o.kind == Owner::Kind::Via && t.viaBarIntrusion(P, o.halfWidth, LayerMask(1) << m.layer) > 1000) return -1;  // in a via keepout
   const int ti = m.locate(P);
   if (ti < 0) return -1;
   const Tri T = m.tris[ti];  // a copy: the slot is reused

@@ -139,6 +139,18 @@ struct Topology {
   std::vector<Violation> violations;
   uint64_t boardHash = 0;
   std::vector<int> padOwner, viaOwner;  // board index -> owner (-1: none)
+  // The keepouts that keep vias out (areas, circles, lines as capsules): no mesh of their own, a via is
+  // held off them where it is placed (insertVertex) and moved (F7's push).
+  struct ViaBar {
+    LayerMask layers;
+    Shape shape;
+  };
+  std::vector<ViaBar> viaBars;
+  void takeViaBars(const Board& b);
+  // How far a via of radius r at p on these layers reaches into a via keepout (0: clear; touching is
+  // allowed, as the DRC takes it); inside an area, its radius plus the way to the boundary. `way` (may be
+  // null): the shortest way out of the worst one, a unit vector.
+  double viaBarIntrusion(Vec2 p, double r, LayerMask layers, Vec2* way = nullptr) const;
   // The tracks lying wholly inside an owner's copper (a hand-drawn track's run from the pad's centre to its
   // edge): that copper, not wires. F5 draws a wire to the pad's connection point and drops them.
   std::vector<std::pair<int, uint32_t>> ownerTracks;  // (owner, track id)

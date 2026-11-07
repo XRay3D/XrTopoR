@@ -114,10 +114,22 @@ void segmentPush(const Board& b, const Topology& t, int oi, Vec2 at, CopperPush&
       }
   }
 }
+// A via against the keepouts that keep vias out: held off by its radius (touching allowed), pushed out
+// from where it stands inside one.
+void viaBarPush(const Topology& t, int oi, Vec2 at, CopperPush& out) {
+  const Owner& ob = t.owners[oi];
+  if (ob.kind != Owner::Kind::Via || t.viaBars.empty()) return;
+  Vec2 way;
+  const double depth = t.viaBarIntrusion(at, ob.halfWidth, ob.layers, &way);
+  if (depth <= 1000) return;
+  out.shortfall += depth - 1000;
+  out.push = out.push + way * (depth + 2000);
+}
 CopperPush copperPush(const Board& b, const Topology& t, const OwnerGrid& grid, int oi, Vec2 at) {
   const Owner& ob = t.owners[oi];
   CopperPush out;
   segmentPush(b, t, oi, at, out);
+  viaBarPush(t, oi, at, out);
   const double maxClr = double(b.maxClearance());
   grid.near(at, ob.halfWidth + maxClr + 1000, [&](int oj) {
     if (oj == oi) return;
@@ -174,6 +186,8 @@ std::optional<Vec2> blockerAt(const Board& b, const Topology& t, const OwnerGrid
     CopperPush there, here;
     segmentPush(b, t, oi, p, there);
     segmentPush(b, t, oi, ob.c, here);
+    viaBarPush(t, oi, p, there);
+    viaBarPush(t, oi, ob.c, here);
     shortThere += there.shortfall;
     shortHere += here.shortfall;
     if (there.shortfall > 0) {

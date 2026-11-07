@@ -411,6 +411,7 @@ std::expected<Topology, std::string> loadTopology(const Board& b, const std::str
     t.boardHash = hash;
     t.padOwner.assign(b.pads.size(), -1);
     t.viaOwner.assign(b.vias.size(), -1);
+    t.takeViaBars(b);
     for (const json::value& v : root.at("owners").as_array()) {
       const json::object& o = v.as_object();
       Owner ow;
