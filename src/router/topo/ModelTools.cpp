@@ -431,6 +431,19 @@ RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int
 // Stops before anything is drawn when wires cross or a wire runs through another net's copper (TopoR's
 // 5032 and the like); else the flips and the capacities. A wire the mesh does not hold stays as drawn,
 // locked, and is no bar (as an unrouted connection, TopoR's 5007, is none) — it is reported with the result.
+int resolveCrossings(const Board& b, Topology& t) {
+  auto crossing = [](const Topology& x) {
+    if (r::any_of(x.violations, [](const Violation& v) { return v.kind == Violation::Kind::Crossing; })) return true;
+    return r::any_of(x.layers, [&](const LayerMesh& m) { return !x.findCrossings(m).empty(); });
+  };
+  if (!crossing(t)) return 0;
+  Topology fresh;
+  fresh.build(b);
+  const int swaps = fresh.untangled;
+  t = std::move(fresh);
+  return swaps;
+}
+
 bool prepareModel(Topology& t, bool flips, bool weighted, int& nFlips, std::vector<Violation>& stopping) {
   for (const Violation& v : t.violations)
     if (v.kind == Violation::Kind::Crossing || v.kind == Violation::Kind::ThroughPad) stopping.push_back(v);
@@ -538,6 +551,22 @@ std::vector<int> settleClasps(Board& b, Topology& t, const std::vector<int>& cho
 
 // Draws every unlocked wire of the model: their tracks go, and the hand-drawn runs inside the pads they
 // end at (the wire is drawn to the pad's connection point); the locked ones stay as obstacles.
+// The pieces the realiser leaves shorter than the files' grid (0.1 um): a file writes their ends as one point and
+// reads no piece back (AMK310: a +3.3V track of 58 nm, a pair's axis arc of none), and the model saved with the
+// board was stale. Their neighbours meet within the glue.
+void dropCrumbs(Board& b, size_t from, RealizeStats& stats) {
+  constexpr double kCrumb = 100;
+  auto crumb = [](const Track& t) { return (t.b.v() - t.a.v()).len() < kCrumb && (!t.mid || t.length() < kCrumb); };
+  for (size_t k = b.tracks.size(); k-- > from;)
+    if (crumb(b.tracks[k])) {
+      const size_t i = k - from;
+      if (i < stats.trackWire.size()) stats.trackWire.erase(stats.trackWire.begin() + long(i));
+      b.tracks.erase(b.tracks.begin() + long(k));
+    }
+  for (ZippedWire& z : b.zips)
+    if (z.axis.size() > 1) std::erase_if(z.axis, crumb);
+}
+
 void drawModel(Board& b, Topology& t, bool direct, RealizeStats& stats, int& nWires, bool editedOnly, const std::vector<int>* only) {
   std::vector<int> chosen;
   std::set<uint32_t> gone;
@@ -549,7 +578,7 @@ void drawModel(Board& b, Topology& t, bool direct, RealizeStats& stats, int& nWi
   for (int wi = 0; wi < int(t.wires.size()); ++wi) {
     const Wire& w = t.wires[wi];
     if (w.locked) continue;
-    if (editedOnly && r::none_of(w.tracks, [&](uint32_t id) { return edited.contains(id); })) continue;
+    if (editedOnly && !w.rerouted && r::none_of(w.tracks, [&](uint32_t id) { return edited.contains(id); })) continue;
     if (only && !r::contains(*only, wi)) continue;
     chosen.push_back(wi);
     for (uint32_t id : w.tracks) gone.insert(id);
@@ -630,8 +659,12 @@ void drawModel(Board& b, Topology& t, bool direct, RealizeStats& stats, int& nWi
     ProfScope p("F5 model: realize");
     stats = direct ? realizeFromModel(b, t, chosen, opt) : realize(b, wires, {}, opt);
   }
+  dropCrumbs(b, before, stats);
   Topology::assignIds(b);
-  for (int wi : chosen) t.wires[wi].tracks.clear();
+  for (int wi : chosen) {
+    t.wires[wi].tracks.clear();
+    t.wires[wi].rerouted = false;
+  }
   for (size_t k = 0; k < stats.trackWire.size(); ++k) {
     int wi = chosen[stats.trackWire[k]];
     t.wires[wi].tracks.push_back(b.tracks[before + k].id);
@@ -650,6 +683,7 @@ void drawModel(Board& b, Topology& t, bool direct, RealizeStats& stats, int& nWi
     std::erase_if(b.tracks, [&](const Track& tr) { return tr.id && old.contains(tr.id); });
     const size_t from = b.tracks.size();
     RealizeStats st2 = realizeFromModel(b, t, again, opt);
+    dropCrumbs(b, from, st2);
     Topology::assignIds(b);
     for (int wi : again) t.wires[size_t(wi)].tracks.clear();
     for (size_t k = 0; k < st2.trackWire.size(); ++k) t.wires[size_t(again[st2.trackWire[k]])].tracks.push_back(b.tracks[from + k].id);
@@ -661,6 +695,7 @@ void drawModel(Board& b, Topology& t, bool direct, RealizeStats& stats, int& nWi
 F5ModelResult runF5Model(Board& b, Topology& t, const F5ModelOptions& o) {
   ProfScope pAll("F5 model total");
   F5ModelResult r;
+  r.untangled = resolveCrossings(b, t);
   if (!prepareModel(t, o.flips, o.weighted, r.flips, r.violations)) return r;
   // Edited only: the branch points at the edited wires' ends balance, their wires alone drawn (the rest of the
   // board stays as it lies).
@@ -670,7 +705,7 @@ F5ModelResult runF5Model(Board& b, Topology& t, const F5ModelOptions& o) {
     for (const Track& tr : b.tracks)
       if (tr.edited && tr.id) edited.insert(tr.id);
     for (const Wire& w : t.wires)
-      if (!w.locked && r::any_of(w.tracks, [&](uint32_t id) { return edited.contains(id); }))
+      if (!w.locked && (w.rerouted || r::any_of(w.tracks, [&](uint32_t id) { return edited.contains(id); })))
         for (int e : w.end)
           if (e >= 0 && t.owners[size_t(e)].kind == Owner::Kind::Junction && !r::contains(balanced, e)) balanced.push_back(e);
   }

@@ -31,6 +31,7 @@ struct F5ModelResult {
   int flips = 0;
   int wires = 0;
   int junctionMoves = 0;  // branch points moved to their balance
+  int untangled = 0;      // double crossings taken apart first (resolveCrossings)
   RealizeStats stats;
 };
 
@@ -44,6 +45,11 @@ F5ModelResult runF5Model(Board& b, Topology& t, const F5ModelOptions& o = {});
 // Stops before anything is drawn when wires cross or a wire runs through another net's copper; else the
 // flips and the edges' capacities. False: `stopping` says why.
 bool prepareModel(Topology& t, bool flips, bool weighted, int& nFlips, std::vector<Violation>& stopping);
+// F5, F6 and F7 take the crossings apart before they give up on them: a model whose wires cross (built from tracks
+// drawn across each other before this was done, or read from a file that keeps no violations) is built anew from the
+// board's tracks, where the double crossings of wires are taken apart (Chains.h untangleChains). The
+// swaps made; a crossing left is in the model's violations, and prepareModel stops on it.
+int resolveCrossings(const Board& b, Topology& t);
 // Draws every unlocked wire of the model on the board: their tracks go, and the hand-drawn runs inside the
 // pads they end at; the model's wires then own the new tracks.
 // `only` (with editedOnly false): these wires alone, the rest as they lie.

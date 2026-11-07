@@ -1228,6 +1228,8 @@ void MainWindow::refine(bool changeLayers) {
 }
 
 void MainWindow::refineModel(bool thenLayers) {
+  // (The double crossings the model's build took apart: said with the result.)
+  const int untangledBefore = std::exchange(doc_->topology().untangled, 0);
   auto topo = std::make_shared<topo::Topology>(doc_->topology());  // a copy, with the ids given
   auto work = std::make_shared<Board>(*doc_->board());
   auto* dlg = new QProgressDialog(tr("Перекладка по модели..."), QString(), 0, 0, this);
@@ -1235,7 +1237,7 @@ void MainWindow::refineModel(bool thenLayers) {
   dlg->setWindowModality(Qt::WindowModal);
   dlg->setMinimumDuration(300);
   auto* watcher = new QFutureWatcher<topo::RefineModelResult>(this);
-  connect(watcher, &QFutureWatcher<topo::RefineModelResult>::finished, this, [this, watcher, dlg, work, topo, thenLayers] {
+  connect(watcher, &QFutureWatcher<topo::RefineModelResult>::finished, this, [this, watcher, dlg, work, topo, thenLayers, untangledBefore] {
     topo::RefineModelResult res = watcher->result();
     dlg->close();
     dlg->deleteLater();
@@ -1253,6 +1255,8 @@ void MainWindow::refineModel(bool thenLayers) {
     b.vias = work->vias;
     b.zones = work->zones;
     doc_->commitEdit(before, tr("Перекладка проводников"), false);
+    const int untangled = untangledBefore + res.untangled;
+    topo->untangled = 0;
     doc_->setTopology(std::make_unique<topo::Topology>(std::move(*topo)));
     showHint(tr("Перекладка по модели: переложено %1 из %2 (клинчей %3), переходов убрано %11, в металлизации убрано %13, ветвлений создано %4, слито %5, сдвинуто %6, пересажено %12; конфликтов %7 → %8; длина %9 → %10 мм")
                  .arg(res.relaid)
@@ -1267,7 +1271,8 @@ void MainWindow::refineModel(bool thenLayers) {
                  .arg(res.lengthAfter / 1e6, 0, 'f', 1)
                  .arg(res.viasRemoved)
                  .arg(res.reattached)
-                 .arg(res.zoneTracksRemoved),
+                 .arg(res.zoneTracksRemoved) +
+                 (untangled > 0 ? tr("; распутано двойных пересечений: %1").arg(untangled) : QString()),
              10000);
     if (thenLayers) refineTracks(true);
   });
@@ -1401,6 +1406,8 @@ void MainWindow::optimize(bool components, bool thenRefine) {
 // F7 on the topological model: the vias and branch points relax in the model, the realiser draws once
 // at the end (ModelTools.h). Stopped by a violation, nothing changes and the wires concerned are shown.
 void MainWindow::optimizeModel(bool thenRefine) {
+  // (The double crossings the model's build took apart: said with the result.)
+  const int untangledBefore = std::exchange(doc_->topology().untangled, 0);
   auto topo = std::make_shared<topo::Topology>(doc_->topology());  // a copy, with the ids given
   auto work = std::make_shared<Board>(*doc_->board());
   auto* dlg = new QProgressDialog(tr("Подвижка по модели..."), QString(), 0, 0, this);
@@ -1408,7 +1415,7 @@ void MainWindow::optimizeModel(bool thenRefine) {
   dlg->setWindowModality(Qt::WindowModal);
   dlg->setMinimumDuration(300);
   auto* watcher = new QFutureWatcher<topo::OptimizeModelResult>(this);
-  connect(watcher, &QFutureWatcher<topo::OptimizeModelResult>::finished, this, [this, watcher, dlg, work, topo, thenRefine] {
+  connect(watcher, &QFutureWatcher<topo::OptimizeModelResult>::finished, this, [this, watcher, dlg, work, topo, thenRefine, untangledBefore] {
     topo::OptimizeModelResult res = watcher->result();
     dlg->close();
     dlg->deleteLater();
@@ -1426,6 +1433,8 @@ void MainWindow::optimizeModel(bool thenRefine) {
     b.vias = work->vias;
     b.zones = work->zones;
     doc_->commitEdit(before, tr("Подвижка"), false);
+    const int untangled = untangledBefore + res.untangled;
+    topo->untangled = 0;
     doc_->setTopology(std::make_unique<topo::Topology>(std::move(*topo)));
     showHint(tr("Подвижка по модели: переходов %1, ветвлений %2; итераций %3 (откатов %4); конфликтов %5 → %6; длина %7 → %8 мм")
                      .arg(res.viaMoves)
@@ -1436,7 +1445,8 @@ void MainWindow::optimizeModel(bool thenRefine) {
                      .arg(res.conflictsAfter)
                      .arg(res.lengthBefore / 1e6, 0, 'f', 1)
                      .arg(res.lengthAfter / 1e6, 0, 'f', 1) +
-                 (res.stats.narrowedWires > 0 ? tr("; заужено проводников: %1").arg(res.stats.narrowedWires) : QString()),
+                 (res.stats.narrowedWires > 0 ? tr("; заужено проводников: %1").arg(res.stats.narrowedWires) : QString()) +
+                 (untangled > 0 ? tr("; распутано двойных пересечений: %1").arg(untangled) : QString()),
              10000);
     if (thenRefine) refine(true);
   });

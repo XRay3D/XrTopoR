@@ -251,6 +251,7 @@ std::optional<Laid> layChain(Topology& self, LayContext& x, const WireChain& c, 
   for (int ti : c.tracks) w.tracks.push_back(b.tracks[ti].id);
   w.locked = r::any_of(c.tracks, [&](int ti) { return b.tracks[ti].locked || b.tracks[ti].serp >= 0; });
   w.dirty = true;
+  w.rerouted = c.rerouted;
   if (zipIndex >= 0) {  // the pair's wire: as wide as the pair, never narrower
     const ZippedWire& zip = b.zips[size_t(zipIndex)];
     w.pair = zip.pair;
@@ -593,6 +594,14 @@ void Topology::convertWires(const Board& b, BuildScratch& scratch) {
     if (c.path.size() < 2) continue;
     chains.push_back(std::move(c));
     chainZip.push_back(z);
+  }
+  // The double crossings of wires taken apart, before their ends and walks (untangleChains: a wire
+  // drawn across two others and back lies beside them; a locked one, a pair's, stays as drawn).
+  {
+    std::vector<char> eligible(chains.size(), 0);
+    for (size_t ci = 0; ci < chains.size(); ++ci)
+      eligible[ci] = chainZip[ci] < 0 && r::none_of(chains[ci].tracks, [&](int ti) { return b.tracks[size_t(ti)].locked || b.tracks[size_t(ti)].serp >= 0; });
+    untangled = untangleChains(chains, eligible);
   }
   // The clasps («замки») at the sections' ends: three vertices across the pair, the conductors' free ends
   // nearest the axis end (where the single wires to the pads start, exactly as the tracks have them) and the
@@ -945,6 +954,34 @@ bool Topology::relayTracks(const Board& b, const std::vector<uint32_t>& changedI
       for (int wi = 0; wi < int(wires.size()); ++wi)
         if (!out.contains(wi) && r::any_of(wires[size_t(wi)].tracks, [&](uint32_t id) { return ids.contains(id); }) && !takeOut(wi)) return false;
     }
+    // A chain taken across a track of another net: that net's wires come too (a double crossing is
+    // taken apart by the two together: untangleChains).
+    {
+      bool grew = false;
+      for (size_t ci = 0; ci < chains.size(); ++ci) {
+        if (!take[ci]) continue;
+        const WireChain& c = chains[ci];
+        BBox cb;
+        for (Vec2 q : c.path) cb.add(q);
+        for (const Track& tr : b.tracks) {
+          if (tr.layer != c.layer || tr.net == c.net || nets.contains(tr.net) || tr.zip >= 0) continue;
+          BBox tb;
+          tb.add(tr.a.v());
+          tb.add(tr.b.v());
+          if (!cb.intersects(tb)) continue;
+          const Polyline tp = tr.path(20000);
+          bool hit = false;
+          for (size_t q = 1; q < c.path.size() && !hit; ++q)
+            for (size_t k = 1; k < tp.size() && !hit; ++k) hit = segmentsIntersect(c.path[q - 1], c.path[q], tp[k - 1], tp[k]);
+          if (hit) {
+            nets.insert(tr.net);
+            ids.insert(tr.id);
+            grew = true;
+          }
+        }
+      }
+      if (grew) continue;
+    }
     // The ends: a pad or via of the net, a clasp, a poured zone, a branch point (one per glued vertex of the
     // graph, as the build has them).
     std::map<std::tuple<int, LayerId, int>, double> junctionWidth;
@@ -1010,6 +1047,13 @@ bool Topology::relayTracks(const Board& b, const std::vector<uint32_t>& changedI
               }
       }
     if (!more) break;
+  }
+  // Their double crossings taken apart, as the build does.
+  {
+    std::vector<char> eligible(chains.size(), 0);
+    for (size_t ci = 0; ci < chains.size(); ++ci)
+      eligible[ci] = take[ci] && r::none_of(chains[ci].tracks, [&](int ti) { return b.tracks[size_t(ti)].locked || b.tracks[size_t(ti)].serp >= 0; });
+    untangled += untangleChains(chains, eligible);
   }
   // The tracks of the chains laid again are no owner's any more (a chain inside its own copper is laid as the
   // owner's again).

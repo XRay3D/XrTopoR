@@ -198,7 +198,16 @@ uint64_t boardHashOf(const Board& b, bool places) {
   report("tracks");
   for (const auto& loop : b.outline)
     item([&](Fnv& f) {
-      for (Vec2 p : loop) f.v(p);
+      // From its least vertex, the way of its lesser neighbour: a file may write a loop from another corner or
+      // the other way round (a cutout of AMK310 came back from (239, 20) where it had been from (241, 20)).
+      std::vector<Vec2> pts = loop;
+      if (!pts.empty()) {
+        auto less = [](Vec2 x, Vec2 y) { return std::tie(x.x, x.y) < std::tie(y.x, y.y); };
+        const size_t n = pts.size(), m = size_t(r::min_element(pts, less) - pts.begin());
+        r::rotate(pts, pts.begin() + long(m));
+        if (n > 2 && less(pts[n - 1], pts[1])) std::reverse(pts.begin() + 1, pts.end());
+      }
+      for (Vec2 p : pts) f.v(p);
     });
   report("outline");
   for (const Keepout& k : b.keepouts)
@@ -227,8 +236,10 @@ uint64_t boardHashOf(const Board& b, bool places) {
       for (Vec2 p : z.outline) f.v(p);
     });
   report("zones");
-  // The differential pairs and their zipped sections: the rule and the axis (not the conductors: they are
-  // the tracks, hashed above).
+  // The differential pairs and their zipped sections: the rule, and of the axis its pieces by number only (its
+  // geometry, as the tracks', comes back from a file rounded: the arcs by their centres on the 0.1 um grid, and a
+  // model saved with its board was stale when read with it; an axis moved moves the conductors, which the tracks'
+  // matching sees).
   for (const DiffSignal& d : b.hispeed.diffSignals)
     item([&](Fnv& f) {
       f.s(d.name);
@@ -247,11 +258,8 @@ uint64_t boardHashOf(const Board& b, bool places) {
       f.i(z.pair);
       f.i(z.pSide);
       f.i(z.fixed);
-      for (const Track& t : z.axis) {
-        f.v(t.a.v());
-        f.v(t.b.v());
-        if (t.mid) f.v(t.mid->v());
-      }
+      f.i(int64_t(z.axis.size()));
+      f.i(int64_t(r::count_if(z.axis, &Track::isArc)));
     });
   report("pairs");
   if (debug) std::fprintf(stderr, "hash: %zu pads %zu vias %zu tracks %zu nets %zu rules %zu classes\n", b.pads.size(), b.vias.size(), b.tracks.size(), b.nets.size(), b.layerRules.size(), b.netClasses.size());

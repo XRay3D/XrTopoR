@@ -126,6 +126,8 @@ struct Wire {
   std::vector<uint32_t> tracks;  // the board tracks it is drawn as (empty: not drawn yet)
   bool locked = false;
   bool dirty = true;        // converted from hand-drawn tracks since it was last drawn
+  // Its way is not its tracks' (the model took it apart from a double crossing): drawn with the edited wires.
+  bool rerouted = false;
   int zone = -1;            // the zone owner that locked it: its tracks lie in a pour (any net), or cross into one (another net)
   int pair = -1;            // a pair's wire: the differential signal; net is the positive net, width the pair's (2w + gap), tracks the conductors
   int zip = -1;             // ... and the zipped section it is
@@ -153,6 +155,7 @@ struct Topology {
   std::vector<Crossing> crossings;
   std::vector<Violation> violations;
   uint64_t boardHash = 0;
+  int untangled = 0;  // double crossings of wires taken apart when the tracks were converted (Chains.h untangleChains)
   std::vector<int> padOwner, viaOwner;  // board index -> owner (-1: none)
   // The keepouts that keep vias out (areas, circles, lines as capsules): no mesh of their own, a via is
   // held off them where it is placed (insertVertex) and moved (F7's push).

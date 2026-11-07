@@ -26,6 +26,7 @@ struct WireChain {
   Coord width = 0;
   bool closed = false;  // a loop: no end of its own
   int vertex[2] = {-1, -1};  // the wire graph's (glued) vertices at the ends
+  bool rerouted = false;     // its path taken apart from a double crossing (untangleChains): not as its tracks lie
   Vec2 a() const { return path.front(); }
   Vec2 b() const { return path.back(); }
 };
@@ -53,5 +54,14 @@ void growChains(const Board& b, std::vector<char>& chosen, const WireGraph& g);
 // still pass through that copper.
 std::vector<WireChain> wireChains(const Board& b, const WireGraph& g, const std::vector<char>& chosen,
                                   const OwnCopper& copper);
+
+// The double crossings of wires taken apart (Polubasov, «Трассировка в САПР TopoR — взгляд изнутри», 2010, fig. 1-2;
+// there of wires of one width, here of any: the realiser lays them by their widths): two chains of one layer, of
+// other nets, whose paths cross twice exchange their pieces
+// between the two points — each keeps its ends and tracks and goes the other's way there, and they cross no more.
+// A swap may make a new double crossing with a third (fig. 2): taken apart the same way, until none is left. A single
+// crossing stays (no swap takes it away). Only the chains `eligible` (unlocked single wires) are touched. Returns the
+// number of swaps.
+int untangleChains(std::vector<WireChain>& chains, const std::vector<char>& eligible);
 
 }  // namespace xr::topo

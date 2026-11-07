@@ -380,6 +380,7 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
   ProfScope pAll("F7 model total");
   OptimizeModelResult r;
   int nFlips = 0;
+  r.untangled = resolveCrossings(b, t);
   if (!prepareModel(t, o.flips, false, nFlips, r.violations)) return r;
   const bool debug = std::getenv("XR_TOPO_DEBUG") != nullptr;
 

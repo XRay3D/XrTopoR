@@ -38,6 +38,7 @@ struct OptimizeModelResult {
   int iterations = 0, viaMoves = 0, junctionMoves = 0;
   int junctionsInCopper = 0;  // branch points that ended inside copper of their own net
   int merged = 0;             // ... and were merged with the pad or via there
+  int untangled = 0;          // double crossings taken apart first (resolveCrossings)
   int drawings = 0;    // how many times the model was drawn and judged
   int rollbacks = 0;   // iterations whose drawing was worse and stayed worse without the steps blamed
   int conflictsBefore = 0, conflictsAfter = 0;  // the DRC of the first drawing and of the result

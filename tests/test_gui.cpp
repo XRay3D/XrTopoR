@@ -2690,3 +2690,66 @@ TEST(Gui, ZippedPairF5KeepsItsArcs) {
   }
   EXPECT_EQ(shape(), whole) << "after the axis edited";
 }
+
+// F5 on a board where a wire was drawn down across two others and back (the article's fig. 2): the double crossings
+// are taken apart, not stopped at — three parallel wires, no short, and the status says so.
+TEST(Gui, F5TakesDoubleCrossingsApart) {
+  Fixture f("tt.kicad_pcb");
+  auto board = std::make_unique<Board>();
+  Board& b = *board;
+  const LayerId top = b.addLayer("Top", LayerKind::Copper, Side::Top);
+  b.layers[top].copperIndex = 0;
+  b.netClasses[0].clearance = mmToNm(0.2);
+  auto at = [](double x, double y) { return Vec2{x * kNmPerMm, y * kNmPerMm}; };
+  b.outline.push_back({at(0, 0), at(40, 0), at(40, 20), at(0, 20)});
+  Component comp;
+  comp.ref = "U1";
+  b.components.push_back(comp);
+  auto pad = [&](const char* net, double x, double y) {
+    Pad p;
+    p.number = std::to_string(b.pads.size());
+    p.component = 0;
+    p.net = b.addNet(net);
+    p.pos = Point(at(x, y));
+    p.shape.kind = PadShapeKind::Circle;
+    p.shape.w = p.shape.h = mmToNm(1);
+    p.copper = LayerMask(1) << top;
+    b.pads.push_back(p);
+  };
+  auto track = [&](const char* net, std::initializer_list<std::pair<double, double>> pts) {
+    const std::pair<double, double>* prev = nullptr;
+    for (const auto& q : pts) {
+      if (prev) {
+        Track t;
+        t.a = Point(at(prev->first, prev->second));
+        t.b = Point(at(q.first, q.second));
+        t.width = mmToNm(0.3);
+        t.layer = top;
+        t.net = b.addNet(net);
+        b.tracks.push_back(t);
+      }
+      prev = &q;
+    }
+  };
+  for (auto [net, y] : {std::pair{"A", 8.0}, {"B", 10.0}, {"C", 12.0}}) {
+    pad(net, 4, y);
+    pad(net, 36, y);
+  }
+  track("A", {{4, 8}, {36, 8}});
+  track("B", {{4, 10}, {36, 10}});
+  track("C", {{4, 12}, {10, 12}, {14, 6}, {26, 6}, {30, 12}, {36, 12}});
+  // C drawn by hand: its tracks alone edited — the wires A and B its double crossings are taken apart from go
+  // another way in the model, and are drawn with it (left as drawn, C was laid over them).
+  for (Track& t : b.tracks) t.edited = b.nets[size_t(t.net)].name == "C";
+  f.doc.setBoard(std::move(board), "tangled");
+  QSignalSpy said(&f.view, &BoardView::status);
+  f.view.recomputeShapes();
+  ASSERT_FALSE(said.isEmpty());
+  const QString msg = said.last().at(0).toString();
+  EXPECT_TRUE(msg.contains("распутано двойных пересечений")) << msg.toStdString();
+  DrcOptions d;
+  d.unconnected = false;
+  d.widths = false;
+  EXPECT_TRUE(runDrc(f.b(), d).empty());
+  EXPECT_EQ(Connectivity::compute(f.b()).ratsnest.size(), 0u);
+}

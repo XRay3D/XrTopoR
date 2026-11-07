@@ -23,6 +23,7 @@ RefineModelResult refineModel(Board& b, Topology& t, const RefineModelOptions& o
   ProfScope pAll("F6 model total");
   RefineModelResult r;
   int nFlips = 0;
+  r.untangled = resolveCrossings(b, t);
   if (!prepareModel(t, o.flips, false, nFlips, r.violations)) return r;
 
   // The model drawn on a copy of the board (the model's own wires keep the tracks of the board they came with).

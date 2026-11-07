@@ -160,4 +160,114 @@ std::vector<WireChain> wireChains(const Board& b, const WireGraph& g, const std:
   return out;
 }
 
+namespace {
+
+// A proper crossing of two paths: at segment ia of the first and ib of the second, the parameters along each.
+struct PathCross {
+  double ta, tb;  // segment index + fraction along it
+  Vec2 p;
+};
+
+std::vector<PathCross> crossingsOf(const Polyline& A, const Polyline& B, const std::vector<BBox>& segA, const std::vector<BBox>& segB) {
+  std::vector<PathCross> out;
+  constexpr double kEnd = 1e-9;
+  for (size_t i = 0; i + 1 < A.size(); ++i)
+    for (size_t j = 0; j + 1 < B.size(); ++j) {
+      if (!segA[i].intersects(segB[j])) continue;
+      const Vec2 a0 = A[i], a1 = A[i + 1], b0 = B[j], b1 = B[j + 1];
+      const double den = (a1 - a0).cross(b1 - b0);
+      if (std::abs(den) < 1e-6) continue;  // parallel: no crossing to speak of
+      const double s = (b0 - a0).cross(b1 - b0) / den, u = (b0 - a0).cross(a1 - a0) / den;
+      // Half open at the far ends: a crossing at a joint of segments counted once.
+      if (s < -kEnd || s >= 1 - kEnd || u < -kEnd || u >= 1 - kEnd) continue;
+      // At the paths' own ends (a pad's centre, a branch point both reach) it is no crossing; nor at a vertex both
+      // have (where two wires taken apart touch: counted, they were swapped back and forth).
+      if ((i == 0 && s <= kEnd) || (j == 0 && u <= kEnd) || (s <= kEnd && u <= kEnd)) continue;
+      out.push_back({double(i) + std::max(0.0, s), double(j) + std::max(0.0, u), a0 + (a1 - a0) * std::max(0.0, s)});
+    }
+  r::sort(out, {}, &PathCross::ta);
+  return out;
+}
+
+std::vector<BBox> segmentBoxes(const Polyline& p) {
+  std::vector<BBox> out;
+  for (size_t i = 0; i + 1 < p.size(); ++i) {
+    BBox b;
+    b.add(p[i]);
+    b.add(p[i + 1]);
+    out.push_back(b);
+  }
+  return out;
+}
+
+// The points of `p` strictly between the parameters t0 < t1 (segment index + fraction), in order.
+std::vector<Vec2> between(const Polyline& p, double t0, double t1) {
+  std::vector<Vec2> out;
+  for (size_t k = size_t(std::floor(t0)) + 1; double(k) <= t1 && k < p.size(); ++k)
+    if (double(k) > t0 && double(k) < t1) out.push_back(p[k]);
+  return out;
+}
+
+}  // namespace
+
+int untangleChains(std::vector<WireChain>& chains, const std::vector<char>& eligible) {
+  int swaps = 0;
+  for (int step = 0; step < 256; ++step) {
+    std::vector<BBox> box(chains.size());
+    for (size_t i = 0; i < chains.size(); ++i)
+      for (Vec2 q : chains[i].path) box[i].add(q);
+    bool swapped = false;
+    for (size_t i = 0; i < chains.size() && !swapped; ++i) {
+      if (!eligible[i]) continue;
+      for (size_t j = i + 1; j < chains.size() && !swapped; ++j) {
+        WireChain& A = chains[i];
+        WireChain& B = chains[j];
+        if (!eligible[j] || A.layer != B.layer || A.net == B.net || !box[i].intersects(box[j])) continue;
+        const auto xs = crossingsOf(A.path, B.path, segmentBoxes(A.path), segmentBoxes(B.path));
+        if (xs.size() < 2) continue;
+        // Two crossings next to each other along both paths: the pieces between them make a lens.
+        for (size_t k = 0; k + 1 < xs.size() && !swapped; ++k) {
+          const PathCross& p1 = xs[k];
+          const PathCross& p2 = xs[k + 1];
+          const double lo = std::min(p1.tb, p2.tb), hi = std::max(p1.tb, p2.tb);
+          if (r::any_of(xs, [&](const PathCross& x) { return x.tb > lo && x.tb < hi; })) continue;
+          // A's piece P1 -> P2; B's between the two, in B's order.
+          const std::vector<Vec2> aMid = between(A.path, p1.ta, p2.ta);
+          std::vector<Vec2> bMid = between(B.path, lo, hi);
+          const bool bForward = p1.tb < p2.tb;  // B meets P1 first
+          if (!bForward) r::reverse(bMid);       // now P1 -> P2 as well
+          Polyline na(A.path.begin(), A.path.begin() + long(std::floor(p1.ta)) + 1);
+          na.push_back(p1.p);
+          na.insert(na.end(), bMid.begin(), bMid.end());
+          na.push_back(p2.p);
+          na.insert(na.end(), A.path.begin() + long(std::floor(p2.ta)) + 1, A.path.end());
+          Polyline nb(B.path.begin(), B.path.begin() + long(std::floor(lo)) + 1);
+          std::vector<Vec2> aIn = aMid;  // A's piece in B's order
+          if (bForward) {
+            nb.push_back(p1.p);
+            nb.insert(nb.end(), aIn.begin(), aIn.end());
+            nb.push_back(p2.p);
+          } else {
+            r::reverse(aIn);
+            nb.push_back(p2.p);
+            nb.insert(nb.end(), aIn.begin(), aIn.end());
+            nb.push_back(p1.p);
+          }
+          nb.insert(nb.end(), B.path.begin() + long(std::floor(hi)) + 1, B.path.end());
+          auto tidy = [](Polyline& p) { p.erase(std::unique(p.begin(), p.end(), [](Vec2 x, Vec2 y) { return (x - y).len2() < 1; }), p.end()); };
+          tidy(na);
+          tidy(nb);
+          A.path = std::move(na);
+          B.path = std::move(nb);
+          A.rerouted = B.rerouted = true;
+          ++swaps;
+          swapped = true;
+        }
+      }
+    }
+    if (!swapped) break;
+  }
+  return swaps;
+}
+
 }  // namespace xr::topo

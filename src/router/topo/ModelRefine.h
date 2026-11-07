@@ -45,6 +45,7 @@ struct RefineModelResult {
   int found = 0;      // ... with a shorter path found
   int relaid = 0;     // ... and kept: the drawing was better with it
   int junctionMoves = 0;
+  int untangled = 0;  // double crossings taken apart first (resolveCrossings)
   int clinches = 0;        // pairs of wires re-laid together
   int branches = 0;        // branch points made
   int branchesMerged = 0;  // pairs of branch points made one

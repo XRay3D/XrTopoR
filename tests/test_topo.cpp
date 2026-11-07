@@ -3681,3 +3681,157 @@ TEST(Topo, LiveModelRelaysEditedTracks) {
     }
   (void)midId;
 }
+
+namespace {
+
+// The y of the net's tracks where they pass x (mm), the first found.
+double yAt(const PinBoard& p, const std::string& net, double x) {
+  const Vec2 a = PinBoard::at(x, -100), c = PinBoard::at(x, 100);
+  for (const Track& t : p.b.tracks) {
+    if (p.b.nets[size_t(t.net)].name != net) continue;
+    const Polyline pts = t.path();
+    for (size_t k = 1; k < pts.size(); ++k)
+      if (segmentsIntersect(pts[k - 1], pts[k], a, c)) {
+        const Vec2 d = pts[k] - pts[k - 1];
+        if (std::abs(d.x) < 1) return pts[k].y / kNmPerMm;
+        return (pts[k - 1].y + d.y * (a.x - pts[k - 1].x) / d.x) / kNmPerMm;
+      }
+  }
+  return std::nan("");
+}
+
+int crossingsOf(const topo::Topology& t) {
+  return int(r::count_if(t.violations, [](const topo::Violation& v) { return v.kind == topo::Violation::Kind::Crossing; }));
+}
+
+// Three nets left to right, A below, B, C above, at both ends (the pads); C drawn as `cPath`.
+PinBoard threeWires(std::initializer_list<std::pair<double, double>> cPath, double cWidth = 0.3) {
+  PinBoard p;
+  p.b.netClasses[0].clearance = mmToNm(0.2);
+  p.pad("A", 4, 8, PadShapeKind::Circle, 1, 1);
+  p.pad("A", 36, 8, PadShapeKind::Circle, 1, 1);
+  p.pad("B", 4, 10, PadShapeKind::Circle, 1, 1);
+  p.pad("B", 36, 10, PadShapeKind::Circle, 1, 1);
+  p.pad("C", 4, 12, PadShapeKind::Circle, 1, 1);
+  p.pad("C", 36, 12, PadShapeKind::Circle, 1, 1);
+  p.track("A", {{4, 8}, {36, 8}}, 0.3);
+  p.track("B", {{4, 10}, {36, 10}}, 0.3);
+  p.track("C", cPath, cWidth);
+  return p;
+}
+
+}  // namespace
+
+// The article's fig. 1 (Polubasov, 2010): a wire drawn across another and back is taken apart from it — the two
+// exchange their pieces between the two crossings — and F5 lays them side by side: no crossing, no violation, C
+// above B all the way (of another width too: the realiser lays them by their widths).
+TEST(Topo, DoubleCrossingUntangled) {
+  PinBoard p = threeWires({{4, 12}, {10, 12}, {14, 9}, {26, 9}, {30, 12}, {36, 12}}, 0.4);  // across B only
+  topo::Topology::assignIds(p.b);
+  topo::Topology t;
+  t.build(p.b);
+  EXPECT_EQ(crossingsOf(t), 0);
+  EXPECT_EQ(t.untangled, 1);
+  auto f = p.f5Model();
+  ASSERT_TRUE(f.res.drawn);
+  EXPECT_EQ(p.violations(), 0);
+  EXPECT_EQ(Connectivity::compute(p.b).ratsnest.size(), 0u);
+  EXPECT_GT(yAt(p, "C", 20), yAt(p, "B", 20)) << "C above B";
+}
+
+// Fig. 2: C drawn down across B and A and back up — taken apart from one, it crosses the other twice, and that is
+// taken apart the next step; F5 lays three parallel wires in the order of their ends.
+TEST(Topo, DoubleCrossingsUntangledInTwoSteps) {
+  PinBoard p = threeWires({{4, 12}, {10, 12}, {14, 6}, {26, 6}, {30, 12}, {36, 12}});
+  topo::Topology::assignIds(p.b);
+  topo::Topology t;
+  t.build(p.b);
+  EXPECT_EQ(crossingsOf(t), 0);
+  EXPECT_GE(t.untangled, 2);
+  auto f = p.f5Model();
+  ASSERT_TRUE(f.res.drawn);
+  EXPECT_EQ(p.violations(), 0);
+  EXPECT_EQ(Connectivity::compute(p.b).ratsnest.size(), 0u);
+  const double a = yAt(p, "A", 20), bb = yAt(p, "B", 20), c = yAt(p, "C", 20);
+  EXPECT_LT(a, bb);
+  EXPECT_LT(bb, c);
+}
+
+// A single crossing (C goes from above B to below it and stays) is no double one: it stays, and F5 stops on it.
+TEST(Topo, SingleCrossingStays) {
+  PinBoard p = threeWires({{4, 12}, {10, 12}, {14, 9}, {36, 9}});
+  p.b.tracks.erase(p.b.tracks.begin());
+  p.pad("C", 36, 9, PadShapeKind::Circle, 1, 1);
+  topo::Topology::assignIds(p.b);
+  topo::Topology t;
+  t.build(p.b);
+  EXPECT_GT(crossingsOf(t), 0);
+  EXPECT_FALSE(p.f5Model().res.drawn);
+}
+
+// The live model takes a double crossing apart as the build does: C laid straight, then drawn down across B and A
+// and back (relayTracks): the wires of A and B come with it, no crossing, as a model built anew.
+TEST(Topo, LiveModelUntanglesADoubleCrossing) {
+  PinBoard p = threeWires({{4, 12}, {36, 12}});
+  topo::Topology::assignIds(p.b);
+  topo::Topology t;
+  t.build(p.b);
+  std::vector<uint32_t> changed;
+  for (const Track& tr : p.b.tracks)
+    if (p.b.nets[size_t(tr.net)].name == "C") changed.push_back(tr.id);
+  std::erase_if(p.b.tracks, [&](const Track& tr) { return p.b.nets[size_t(tr.net)].name == "C"; });
+  p.track("C", {{4, 12}, {10, 12}, {14, 6}, {26, 6}, {30, 12}, {36, 12}}, 0.3);
+  topo::Topology::assignIds(p.b);
+  for (const Track& tr : p.b.tracks)
+    if (p.b.nets[size_t(tr.net)].name == "C") changed.push_back(tr.id);
+  ASSERT_TRUE(t.relayTracks(p.b, changed));
+  EXPECT_EQ(crossingsOf(t), 0);
+  expectLikeBuilt(p.b, t, "C drawn across B and A and back");
+}
+
+// F6 and F7 take the crossings apart before they give up: handed a model with a crossing (built before this, or
+// read from a file), they build it anew from the tracks and go on; a single crossing stops them.
+TEST(Topo, F6AndF7TakeTheCrossingsApart) {
+  for (int which : {6, 7}) {
+    PinBoard p = threeWires({{4, 12}, {10, 12}, {14, 6}, {26, 6}, {30, 12}, {36, 12}});
+    topo::Topology::assignIds(p.b);
+    topo::Topology t;
+    t.build(p.b);
+    topo::Violation v;  // as a model of before had it
+    v.kind = topo::Violation::Kind::Crossing;
+    t.violations.push_back(v);
+    const bool drawn = which == 6 ? topo::refineModel(p.b, t).drawn : topo::optimizeModel(p.b, t).drawn;
+    EXPECT_TRUE(drawn) << "F" << which;
+    EXPECT_EQ(crossingsOf(t), 0) << "F" << which;
+  }
+  PinBoard p = threeWires({{4, 12}, {10, 12}, {14, 9}, {36, 9}});
+  p.b.tracks.erase(p.b.tracks.begin());
+  p.pad("C", 36, 9, PadShapeKind::Circle, 1, 1);
+  topo::Topology::assignIds(p.b);
+  topo::Topology t;
+  t.build(p.b);
+  EXPECT_FALSE(topo::optimizeModel(p.b, t).drawn) << "a single crossing";
+}
+
+// A board with zipped pairs saved with its model and read back: the model is the board's (the axes come back from
+// the file rounded — the arcs by their centres on the 0.1 um grid — and the model was stale, built anew).
+TEST(Topo, SidecarOfAPairedBoardReadsBack) {
+  auto r = io::loadBoard(data("topor/AMK310/AMK310_MCU_V2.fst"));
+  ASSERT_TRUE(r) << r.error();
+  Board& b = **r;
+  topo::Topology::assignIds(b);
+  topo::Topology t;
+  t.build(b);
+  ASSERT_TRUE(topo::runF5Model(b, t).drawn);
+  const auto dir = std::filesystem::temp_directory_path() / "xrtopor_paired_sidecar";
+  std::filesystem::create_directories(dir);
+  const std::string path = (dir / "board.fst").string();
+  ASSERT_TRUE(io::saveBoard(b, path).has_value());
+  ASSERT_TRUE(topo::saveTopology(t, b, topo::sidecarPath(path)).has_value());
+  auto again = io::loadBoard(path);
+  ASSERT_TRUE(again) << again.error();
+  topo::Topology::assignIds(**again);
+  auto loaded = topo::loadTopology(**again, topo::sidecarPath(path));
+  EXPECT_TRUE(loaded.has_value()) << (loaded ? "" : loaded.error());
+  std::filesystem::remove_all(dir);
+}
