@@ -263,6 +263,39 @@ class BoardView : public QWidget {
   std::optional<Vec2> routeTarget_;
   std::vector<Track> routeHint_;
   void updateRouteHint();
+  // A differential pair laid by hand (TopoR's «Ручная прокладка дифф. пары»): from a pad of a pair's net and its
+  // partner, the conductors converge to the clasp the second click places; the pair is laid as one wire (its
+  // axis in routeTracks_, as wide as the pair) up to a pad of the pair, where a clasp ends it and the conductors
+  // go to that pad and its partner; V: a clasp, two vias, a clasp on the next layer.
+  bool routePair_ = false;  // the mode's variant
+  struct PairRoute {
+    int pair = -1, netP = kNoNet, netN = kNoNet;
+    Coord w = 0, gap = 0;
+    bool clasp = false;     // the section's first clasp placed: routeTracks_ is its axis from routeLast_ on
+    Vec2 fromP, fromN;      // where the section's conductors start from (the pads, or the vias of a change of layer)
+    int pSide = 0;          // the positive conductor's side of the axis, from the first section's start
+    struct Section {
+      LayerId layer;
+      std::vector<Track> axis;
+      Vec2 fromP, fromN, toP, toN;
+      bool hasTo = false;
+    };
+    std::vector<Section> done;
+    std::vector<Via> vias;
+  } pr_;
+  void pairStart(const Pick& pk);
+  void pairAddPoint(Vec2 at, const Pick& pk);
+  void pairAddVia();
+  void pairUndoLast();
+  void pairFinish(std::optional<std::pair<Vec2, Vec2>> endPads);
+  // The pad of the pair's other net next to the item (same component first), its point.
+  std::optional<Vec2> partnerOf(ItemRef item, int otherNet) const;
+  // A section's conductors (offsetRun of the axis), the stubs from where it starts and ends.
+  std::vector<Track> pairCopper(const PairRoute::Section& s) const;
+
+ public:
+  void setRoutePair(bool on) { routePair_ = on; }
+  bool routingPair() const { return routePair_; }
 };
 
 }  // namespace xr::gui

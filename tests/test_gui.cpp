@@ -588,6 +588,170 @@ TEST(Gui, ZippedPairSelectionAndProperties) {
   EXPECT_EQ(f.b().zips.size(), 1u);
 }
 
+// «Ручная прокладка дифф. пары»: a click on a pad of a pair's net starts from it and its partner on the same
+// component, the second click places the clasp, the pair is laid by clicks as one wire, a click on a pad of the
+// pair at the far end ends it at a clasp with the conductors to that pad and its partner. One section, its
+// conductors 0.3 wide and 0.5 apart, every connection made, no violation.
+TEST(Gui, RoutePairByClicks) {
+  Fixture f("tt.kicad_pcb");
+  auto board = std::make_unique<Board>();
+  Board& b = *board;
+  const LayerId top = b.addLayer("Top", LayerKind::Copper, Side::Top);
+  b.layers[top].copperIndex = 0;
+  b.netClasses[0].clearance = mmToNm(0.2);
+  auto at = [](double x, double y) { return Vec2{x * kNmPerMm, y * kNmPerMm}; };
+  b.outline.push_back({at(0, 0), at(40, 0), at(40, 20), at(0, 20)});
+  for (const char* ref : {"U1", "U2"}) {
+    Component c;
+    c.ref = ref;
+    b.components.push_back(c);
+  }
+  auto pad = [&](const char* net, int comp, double x, double y) {
+    Pad p;
+    p.number = std::to_string(b.pads.size());
+    p.component = comp;
+    p.net = b.addNet(net);
+    p.pos = Point(at(x, y));
+    p.shape.kind = PadShapeKind::Circle;
+    p.shape.w = p.shape.h = mmToNm(1);
+    p.copper = LayerMask(1) << top;
+    b.components[size_t(comp)].pads.push_back(int(b.pads.size()));
+    b.pads.push_back(p);
+  };
+  pad("P", 0, 4, 11);
+  pad("N", 0, 4, 9);
+  pad("P", 1, 36, 11);
+  pad("N", 1, 36, 9);
+  Impedance z;
+  z.name = "ZD";
+  z.diff = true;
+  z.rules.push_back({"Top", mmToNm(0.3), mmToNm(0.2)});
+  b.hispeed.impedances.push_back(z);
+  for (const char* n : {"P", "N"}) {
+    SignalCluster c;
+    c.impedance = "ZD";
+    c.nets = {n};
+    Signal sg;
+    sg.name = std::string(n) + "_sig";
+    c.signalList.push_back(sg);
+    b.hispeed.clusters.push_back(c);
+  }
+  b.hispeed.diffSignals.push_back({"PN", mmToNm(0.1), "ZD", "P_sig", "N_sig"});
+  b.rules = rulesFromBoard(b);
+  compileRules(b);
+  f.doc.setBoard(std::move(board), "pair");
+  f.look(at(20, 10), 44);
+  f.view.setRoutePair(true);
+  f.view.setMode(Mode::Route);
+  auto click = [&](Vec2 w) { QTest::mouseClick(&f.view, Qt::LeftButton, {}, f.at(w)); };
+  click(at(4, 11));  // P of U1: N of U1 is its partner
+  ASSERT_TRUE(f.view.isRouting());
+  click(at(8, 10));   // the clasp
+  click(at(20, 12));  // the pair
+  click(at(32, 10));
+  click(at(36, 11));  // P of U2: the end
+  EXPECT_FALSE(f.view.isRouting());
+  const Board& nb = f.b();
+  ASSERT_EQ(nb.zips.size(), 1u);
+  EXPECT_EQ(nb.zips[0].axis.size(), 2u) << "(8,10) -> (20,12) -> (32,10)";
+  int conductors[2] = {0, 0};
+  for (const Track& t : nb.tracks)
+    if (t.zip == 0) ++conductors[t.net == nb.findNet("P")];
+  EXPECT_GE(conductors[0], 2);
+  EXPECT_GE(conductors[1], 2);
+  DrcOptions d;
+  d.widths = false;
+  EXPECT_EQ(Connectivity::compute(nb).ratsnest.size(), 0u) << "as laid";
+  for (const DrcViolation& v : runDrc(nb, d))
+    if (v.type != DrcViolation::Type::Unconnected) ADD_FAILURE() << "as laid: " << v.message;
+  // F5 on the model takes the pair as it was laid: one wire, the same section, clean.
+  f.view.recomputeShapes();
+  EXPECT_EQ(f.b().zips.size(), 1u);
+  EXPECT_EQ(Connectivity::compute(f.b()).ratsnest.size(), 0u) << "after F5";
+  for (const DrcViolation& v : runDrc(f.b(), d))
+    if (v.type != DrcViolation::Type::Unconnected) ADD_FAILURE() << "after F5: " << v.message;
+}
+
+// The same with a change of layer (V): the section ends at a clasp, two vias abreast of it as far apart as the
+// vias and the gap need, the next section starts there on the other layer. Two sections, two vias, every
+// connection made, no violation.
+TEST(Gui, RoutePairChangesLayer) {
+  Fixture f("tt.kicad_pcb");
+  auto board = std::make_unique<Board>();
+  Board& b = *board;
+  const LayerId top = b.addLayer("Top", LayerKind::Copper, Side::Top);
+  const LayerId bottom = b.addLayer("Bottom", LayerKind::Copper, Side::Bottom);
+  b.layers[top].copperIndex = 0;
+  b.layers[bottom].copperIndex = 1;
+  b.netClasses[0].clearance = mmToNm(0.2);
+  b.netClasses[0].viaDiameter = mmToNm(0.6);
+  b.netClasses[0].viaDrill = mmToNm(0.3);
+  auto at = [](double x, double y) { return Vec2{x * kNmPerMm, y * kNmPerMm}; };
+  b.outline.push_back({at(0, 0), at(40, 0), at(40, 20), at(0, 20)});
+  for (const char* ref : {"U1", "U2"}) {
+    Component c;
+    c.ref = ref;
+    b.components.push_back(c);
+  }
+  auto pad = [&](const char* net, int comp, double x, double y) {
+    Pad p;
+    p.number = std::to_string(b.pads.size());
+    p.component = comp;
+    p.net = b.addNet(net);
+    p.pos = Point(at(x, y));
+    p.shape.kind = PadShapeKind::Circle;
+    p.shape.w = p.shape.h = mmToNm(1);
+    p.drill = mmToNm(0.5);
+    p.copper = (LayerMask(1) << top) | (LayerMask(1) << bottom);
+    b.components[size_t(comp)].pads.push_back(int(b.pads.size()));
+    b.pads.push_back(p);
+  };
+  pad("P", 0, 4, 11);
+  pad("N", 0, 4, 9);
+  pad("P", 1, 36, 11);
+  pad("N", 1, 36, 9);
+  Impedance z;
+  z.name = "ZD";
+  z.diff = true;
+  z.rules.push_back({"Top", mmToNm(0.3), mmToNm(0.2)});
+  z.rules.push_back({"Bottom", mmToNm(0.3), mmToNm(0.2)});
+  b.hispeed.impedances.push_back(z);
+  for (const char* n : {"P", "N"}) {
+    SignalCluster c;
+    c.impedance = "ZD";
+    c.nets = {n};
+    Signal sg;
+    sg.name = std::string(n) + "_sig";
+    c.signalList.push_back(sg);
+    b.hispeed.clusters.push_back(c);
+  }
+  b.hispeed.diffSignals.push_back({"PN", mmToNm(0.1), "ZD", "P_sig", "N_sig"});
+  b.rules = rulesFromBoard(b);
+  compileRules(b);
+  f.doc.setBoard(std::move(board), "pair2");
+  f.doc.setActiveLayer(top);
+  f.look(at(20, 10), 44);
+  f.view.setRoutePair(true);
+  f.view.setMode(Mode::Route);
+  auto click = [&](Vec2 w) { QTest::mouseClick(&f.view, Qt::LeftButton, {}, f.at(w)); };
+  click(at(4, 11));
+  click(at(8, 10));   // the clasp
+  click(at(20, 10));
+  f.view.routeAddVia();
+  click(at(32, 10));
+  click(at(36, 11));
+  EXPECT_FALSE(f.view.isRouting());
+  const Board& nb = f.b();
+  ASSERT_EQ(nb.zips.size(), 2u);
+  EXPECT_NE(nb.zips[0].layer, nb.zips[1].layer);
+  EXPECT_EQ(nb.vias.size(), 2u);
+  EXPECT_EQ(Connectivity::compute(nb).ratsnest.size(), 0u);
+  DrcOptions d;
+  d.widths = false;
+  for (const DrcViolation& v : runDrc(nb, d))
+    if (v.type != DrcViolation::Type::Unconnected) ADD_FAILURE() << v.message;
+}
+
 // «Свойства»: the width of the selected wires is edited in place, as one undoable step.
 TEST(Gui, PropertiesEditWireWidth) {
   Fixture f("tt.kicad_pcb");

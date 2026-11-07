@@ -268,7 +268,14 @@ void MainWindow::bindCommands() {
 
   // Трассировка
   c.bind("Accel_TO", [this] { autoroute(); });
-  c.bind("Cmd_RouteWire", [this] { view_->setMode(Mode::Route); });
+  c.bind("Cmd_RouteWire", [this] {
+    view_->setRoutePair(false);
+    view_->setMode(Mode::Route);
+  });
+  c.bind("Cmd_RouteDiff", [this] {
+    view_->setRoutePair(true);
+    view_->setMode(Mode::Route);
+  });
   c.bind("Cmd_Unroute", [this] { clearRouting(); });
 
   // Вставка

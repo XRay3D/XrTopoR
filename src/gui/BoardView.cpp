@@ -848,6 +848,27 @@ void BoardView::drawBoard(QPainter& p) {
 void BoardView::drawOverlay(QPainter& p) {
   if (!routing_) return;
   QColor c = doc_->layerColor(routeLayer_);
+  if (routePair_) {  // the pair: the sections laid, the one being laid, the rubber band, as conductors
+    for (const auto& sec : pr_.done)
+      for (const Track& t : pairCopper(sec)) drawTrack(p, t, doc_->layerColor(t.layer));
+    for (const Via& v : pr_.vias) drawVia(p, v, doc_->color("clrThroughVias", 0x949494));
+    PairRoute::Section cur{routeLayer_, routeTracks_, pr_.fromP, pr_.fromN, {}, {}, false};
+    const Vec2 at = constrained(routeLast_, snapped(cursor_));
+    if (!pr_.clasp) {  // the conductors converging from the pads to a clasp at the cursor
+      const Vec2 mid = (pr_.fromP + pr_.fromN) * 0.5;
+      Vec2 d = at - mid;
+      if (d.len2() < 1) return;
+      const Vec2 n = d.normalized().perp() * (double(pr_.w + pr_.gap) / 2.0);
+      const Vec2 side = (pr_.fromP - mid).dot(n) >= 0 ? n : n * -1.0;
+      p.setPen(QPen(brighter(c, 30), std::max(1.0, px(double(pr_.w))), Qt::SolidLine, Qt::RoundCap));
+      p.drawLine(toScreen(pr_.fromP), toScreen(at + side));
+      p.drawLine(toScreen(pr_.fromN), toScreen(at - side));
+      return;
+    }
+    if (auto seg = makeSegment(routeLast_, at)) cur.axis.push_back(*seg);
+    for (const Track& t : pairCopper(cur)) drawTrack(p, t, brighter(c, 30));
+    return;
+  }
   for (auto& t : routeTracks_) drawTrack(p, t, doc_->layerColor(t.layer));
   for (auto& v : routeVias_) drawVia(p, v, doc_->color("clrThroughVias", 0x949494));
   // The suggested path to the target (dash-dotted), or a pointer to it when there is none.
@@ -970,6 +991,11 @@ void BoardView::mousePressEvent(QMouseEvent* e) {
       break;
     }
     case Mode::Route: {
+      if (routePair_) {
+        if (!routing_) pairStart(pk);
+        else pairAddPoint(constrained(routeLast_, w), pk);
+        break;
+      }
       if (!routing_) routeStart(pk, pk.item ? pk.snap : w);
       else routeAddPoint(constrained(routeLast_, pk.item && itemNet(*doc_->board(), *pk.item) == routeNet_ ? pk.snap : w), pk);
       break;
@@ -1464,7 +1490,10 @@ void BoardView::setMode(Mode m) {
                   : push_ == topo::Push::Vias ? tr("Freestyle: перемещение с подталкиванием переходов")
                                               : tr("Freestyle: перемещение с подталкиванием компонентов и переходов"));
       break;
-    case Mode::Route: emit status(tr("Прокладка проводника: щёлкните контакт, с которого начать")); break;
+    case Mode::Route:
+      emit status(routePair_ ? tr("Прокладка дифф. пары: щёлкните контакт цепи дифференциального сигнала")
+                             : tr("Прокладка проводника: щёлкните контакт, с которого начать"));
+      break;
     case Mode::Via: emit status(tr("Создание переходов: щёлкните место перехода")); break;
     case Mode::Measure:
       emit status(measureKind_ == MeasureKind::Points ? tr("Линейка: укажите первую точку")
@@ -2320,6 +2349,7 @@ void BoardView::cancelTool() {
     routing_ = false;
     routeTracks_.clear();
     routeVias_.clear();
+    pr_ = {};
     emit status(tr("Прокладка отменена"));
     update();
     return;
@@ -2450,6 +2480,10 @@ void BoardView::routeAddPoint(Vec2 at, const Pick& pk) {
 
 void BoardView::routeAddVia() {
   if (!routing_) return;
+  if (routePair_) {
+    pairAddVia();
+    return;
+  }
   Board& b = *doc_->board();
   const NetClass& nc = b.classOf(routeNet_);
   Via v;
@@ -2669,6 +2703,10 @@ void BoardView::routeUndoLast() {
     update();
     return;
   }
+  if (routing_ && routePair_) {
+    pairUndoLast();
+    return;
+  }
   if (!routing_ || routeTracks_.empty()) return;
   Track t = routeTracks_.back();
   routeTracks_.pop_back();
@@ -2830,6 +2868,10 @@ void BoardView::selectAll() {
 
 void BoardView::finishRoute() {
   if (!routing_) return;
+  if (routePair_) {
+    pairFinish(std::nullopt);
+    return;
+  }
   Board& b = *doc_->board();
   routing_ = false;
   if (!routeTracks_.empty() || !routeVias_.empty()) {
@@ -2841,6 +2883,283 @@ void BoardView::finishRoute() {
   routeTracks_.clear();
   routeVias_.clear();
   emit status(tr("Проводник проложен"));
+  update();
+}
+
+// ---------------------------------------------------------------- the differential pair laid by hand
+
+std::optional<Vec2> BoardView::partnerOf(ItemRef item, int otherNet) const {
+  const Board& b = *doc_->board();
+  Vec2 at;
+  int comp = -1;
+  if (item.type == ItemType::Pad) {
+    at = b.pads[size_t(item.index)].pos.v();
+    comp = b.pads[size_t(item.index)].component;
+  } else if (item.type == ItemType::Via) {
+    at = b.vias[size_t(item.index)].pos.v();
+  } else {
+    return std::nullopt;
+  }
+  std::optional<Vec2> best;
+  double bd = 1e300;
+  for (int pass = 0; pass < 2 && !best; ++pass)  // its component's pads first, then any pad or via within 10 mm
+    for (const Pad& pad : b.pads) {
+      if (pad.net != otherNet || (pass == 0 && (comp < 0 || pad.component != comp))) continue;
+      if (double d = (pad.pos.v() - at).len(); d < bd && (pass == 0 || d < 10 * kNmPerMm)) bd = d, best = pad.pos.v();
+    }
+  if (!best)
+    for (const Via& v : b.vias)
+      if (v.net == otherNet)
+        if (double d = (v.pos.v() - at).len(); d < bd && d < 10 * kNmPerMm) bd = d, best = v.pos.v();
+  return best;
+}
+
+std::vector<Track> BoardView::pairCopper(const PairRoute::Section& s) const {
+  std::vector<Track> out;
+  if (s.axis.empty()) return out;
+  const double off = double(pr_.w + pr_.gap) / 2.0;
+  const int side = pr_.pSide ? pr_.pSide : 1;
+  for (int k = 0; k < 2; ++k) {  // [0] negative, [1] positive
+    const double sg = (k ? 1.0 : -1.0) * side;
+    std::vector<Track> cond = offsetRun(s.axis, sg * off, 4 * double(2 * pr_.w + pr_.gap));
+    if (cond.empty()) continue;
+    const int net = k ? pr_.netP : pr_.netN;
+    for (Track& t : cond) {
+      t.width = pr_.w;
+      t.layer = s.layer;
+      t.net = net;
+      out.push_back(t);
+    }
+    auto stub = [&](Vec2 a, Vec2 c) {
+      if ((a - c).len() <= edit::kJoinTol) return;
+      Track t;
+      t.a = Point(a);
+      t.b = Point(c);
+      t.width = pr_.w;
+      t.layer = s.layer;
+      t.net = net;
+      out.push_back(t);
+    };
+    stub(k ? s.fromP : s.fromN, cond.front().a.v());
+    if (s.hasTo) stub(cond.back().b.v(), k ? s.toP : s.toN);
+  }
+  return out;
+}
+
+void BoardView::pairStart(const Pick& pk) {
+  const Board& b = *doc_->board();
+  const int net = pk.item ? itemNet(b, *pk.item) : kNoNet;
+  const int pair = b.pairOfNet(net);
+  if (pair < 0 || !pk.item || (pk.item->type != ItemType::Pad && pk.item->type != ItemType::Via)) {
+    emit status(tr("Прокладка дифф. пары: щёлкните контакт цепи дифференциального сигнала"));
+    return;
+  }
+  // The pair's nets: the positive one of its first signal's cluster.
+  const DiffSignal& ds = b.hispeed.diffSignals[size_t(pair)];
+  std::vector<int> pn[2];
+  for (int k = 0; k < 2; ++k)
+    if (const SignalCluster* c = b.hispeed.clusterOf(k ? ds.signalB : ds.signalA))
+      for (const std::string& n : c->nets)
+        if (int ni = b.findNet(n); ni >= 0) pn[k].push_back(ni);
+  const bool positive = r::contains(pn[0], net);
+  const int other = positive ? (pn[1].empty() ? kNoNet : pn[1].front()) : (pn[0].empty() ? kNoNet : pn[0].front());
+  const auto partner = partnerOf(*pk.item, other);
+  if (other == kNoNet || !partner) {
+    emit status(tr("Прокладка дифф. пары: у контакта нет парного контакта другой цепи"));
+    return;
+  }
+  LayerId layer = doc_->activeLayer();
+  const LayerMask lm = itemLayers(b, *pk.item);
+  if (!((lm >> layer) & 1))
+    for (LayerId l : b.copperLayers())
+      if ((lm >> l) & 1) {
+        layer = l;
+        break;
+      }
+  Coord w = 0, gap = 0;
+  if (!b.pairRule(pair, layer, w, gap)) {
+    emit status(tr("Прокладка дифф. пары: нет правила волнового сопротивления пары на слое %1").arg(QString::fromStdString(b.layers[size_t(layer)].name)));
+    return;
+  }
+  pr_ = {};
+  pr_.pair = pair;
+  pr_.netP = positive ? net : other;
+  pr_.netN = positive ? other : net;
+  pr_.w = w;
+  pr_.gap = gap;
+  pr_.fromP = positive ? pk.snap : *partner;
+  pr_.fromN = positive ? *partner : pk.snap;
+  routing_ = true;
+  routeNet_ = net;
+  routeLayer_ = layer;
+  doc_->setActiveLayer(layer);
+  routeWidth_ = 2 * w + gap;
+  routeTracks_.clear();
+  routeVias_.clear();
+  routeLast_ = (pr_.fromP + pr_.fromN) * 0.5;
+  routeDir_.reset();
+  routeHint_.clear();
+  routeTarget_.reset();
+  emit status(tr("Прокладка дифф. пары %1: щёлкните, где поставить замок").arg(QString::fromStdString(ds.name)));
+  update();
+}
+
+void BoardView::pairAddPoint(Vec2 at, const Pick& pk) {
+  const Board& b = *doc_->board();
+  if (!pr_.clasp) {  // the second click: the clasp
+    pr_.clasp = true;
+    routeLast_ = at;
+    routeDir_.reset();
+    emit status(tr("Ведите пару; щелчок по контакту цепи пары — завершить, V — смена слоя, Enter — закончить"));
+    update();
+    return;
+  }
+  // A pad or via of the pair's nets: the clasp at the end of the last segment, the conductors to it and its partner.
+  if (pk.item && (pk.item->type == ItemType::Pad || pk.item->type == ItemType::Via) && !routeTracks_.empty()) {
+    const int net = itemNet(b, *pk.item);
+    if (net == pr_.netP || net == pr_.netN) {
+      if (auto partner = partnerOf(*pk.item, net == pr_.netP ? pr_.netN : pr_.netP)) {
+        pairFinish(net == pr_.netP ? std::pair{pk.snap, *partner} : std::pair{*partner, pk.snap});
+        return;
+      }
+    }
+  }
+  auto seg = makeSegment(routeLast_, at);
+  if (!seg) return;
+  seg->net = kNoNet;
+  if (routeTracks_.empty() && pr_.done.empty() && pr_.pSide == 0) {  // the positive conductor on the side of its pad
+    const Vec2 d = seg->b.v() - seg->a.v();
+    pr_.pSide = d.cross(pr_.fromP - seg->a.v()) >= 0 ? 1 : -1;
+  }
+  routeTracks_.push_back(*seg);
+  Vec2 dir = (seg->b.v() - seg->a.v()).normalized();
+  if (seg->isArc()) {
+    auto g = ArcGeom::fromThreePoints(seg->a.v(), seg->mid->v(), seg->b.v());
+    Vec2 rad = seg->b.v() - g.center;
+    dir = (g.sweep > 0 ? rad.perp() : rad.perp() * -1.0).normalized();
+  }
+  routeDir_ = dir;
+  routeLast_ = at;
+  update();
+}
+
+void BoardView::pairAddVia() {
+  if (!pr_.clasp || routeTracks_.empty() || !routeDir_) return;
+  Board& b = *doc_->board();
+  // The section ends at a clasp here; two vias abreast of it, as far apart as the vias and the pair's gap need;
+  // the next section starts from them on the next layer at a clasp on the same spot.
+  const NetClass& nc = b.classOf(pr_.netP);
+  const double s = std::max(double(nc.viaDiameter + b.clearance(pr_.netP, pr_.netN, routeLayer_)), double(pr_.w + pr_.gap));
+  const Vec2 n = routeDir_->perp() * double(pr_.pSide ? pr_.pSide : 1);
+  const Vec2 viaP = routeLast_ + n * (s / 2), viaN = routeLast_ - n * (s / 2);
+  PairRoute::Section sec{routeLayer_, routeTracks_, pr_.fromP, pr_.fromN, viaP, viaN, true};
+  pr_.done.push_back(sec);
+  for (auto [pos, net] : {std::pair{viaP, pr_.netP}, std::pair{viaN, pr_.netN}}) {
+    Via v;
+    v.pos = Point(pos);
+    v.net = net;
+    v.diameter = nc.viaDiameter;
+    v.drill = nc.viaDrill;
+    v.layers = b.allCopperMask();
+    pr_.vias.push_back(v);
+  }
+  auto cu = b.copperLayers();
+  auto it = r::find(cu, routeLayer_);
+  size_t idx = it == cu.end() ? 0 : size_t(it - cu.begin());
+  routeLayer_ = cu[(idx + 1) % cu.size()];
+  doc_->setActiveLayer(routeLayer_);
+  Coord w = pr_.w, gap = pr_.gap;
+  if (b.pairRule(pr_.pair, routeLayer_, w, gap)) {
+    pr_.w = w;
+    pr_.gap = gap;
+  }
+  routeWidth_ = 2 * pr_.w + pr_.gap;
+  routeTracks_.clear();
+  pr_.fromP = viaP;
+  pr_.fromN = viaN;
+  update();
+}
+
+void BoardView::pairUndoLast() {
+  if (!routeTracks_.empty()) {
+    const Track t = routeTracks_.back();
+    routeTracks_.pop_back();
+    routeLast_ = t.a.v();  // back to where the piece began (the clasp, for the first)
+    routeDir_.reset();
+    if (!routeTracks_.empty()) routeDir_ = (routeTracks_.back().b.v() - routeTracks_.back().a.v()).normalized();
+  } else if (!pr_.done.empty()) {  // back over the change of layer
+    PairRoute::Section sec = pr_.done.back();
+    pr_.done.pop_back();
+    pr_.vias.resize(pr_.vias.size() >= 2 ? pr_.vias.size() - 2 : 0);
+    routeLayer_ = sec.layer;
+    doc_->setActiveLayer(routeLayer_);
+    routeTracks_ = sec.axis;
+    pr_.fromP = sec.fromP;
+    pr_.fromN = sec.fromN;
+    routeLast_ = routeTracks_.back().b.v();
+    routeDir_ = (routeTracks_.back().b.v() - routeTracks_.back().a.v()).normalized();
+  } else if (pr_.clasp) {
+    pr_.clasp = false;
+    routeLast_ = (pr_.fromP + pr_.fromN) * 0.5;
+    routeDir_.reset();
+  }
+  update();
+}
+
+void BoardView::pairFinish(std::optional<std::pair<Vec2, Vec2>> endPads) {
+  Board& b = *doc_->board();
+  routing_ = false;
+  std::vector<PairRoute::Section> all = pr_.done;
+  if (pr_.clasp && !routeTracks_.empty()) {
+    PairRoute::Section last{routeLayer_, routeTracks_, pr_.fromP, pr_.fromN, {}, {}, false};
+    if (endPads) {
+      last.toP = endPads->first;
+      last.toN = endPads->second;
+      last.hasTo = true;
+    }
+    all.push_back(last);
+  }
+  if (all.empty()) {
+    pr_ = {};
+    routeTracks_.clear();
+    emit status(tr("Прокладка дифф. пары отменена"));
+    update();
+    return;
+  }
+  auto before = doc_->beginEdit();
+  for (const auto& sec : all) {
+    ZippedWire z;
+    z.layer = sec.layer;
+    z.pair = pr_.pair;
+    z.netP = pr_.netP;
+    z.netN = pr_.netN;
+    z.pSide = pr_.pSide ? pr_.pSide : 1;
+    Coord w = pr_.w, gap = pr_.gap;
+    b.pairRule(pr_.pair, sec.layer, w, gap);
+    z.condWidth = w;
+    z.gap = gap;
+    z.axis = sec.axis;
+    for (Track& t : z.axis) {
+      t.width = z.width();
+      t.net = kNoNet;
+      t.layer = sec.layer;
+    }
+    const int zi = int(b.zips.size());
+    b.zips.push_back(z);
+    for (Track t : pairCopper(sec)) {
+      // The conductors (the pieces of the offset axis) belong to the section; the stubs do not.
+      const bool stub = (t.a.v() - sec.fromP).len() <= edit::kJoinTol || (t.a.v() - sec.fromN).len() <= edit::kJoinTol ||
+                        (sec.hasTo && ((t.b.v() - sec.toP).len() <= edit::kJoinTol || (t.b.v() - sec.toN).len() <= edit::kJoinTol));
+      if (!stub) t.zip = zi;
+      t.edited = true;
+      b.tracks.push_back(t);
+    }
+  }
+  for (const Via& v : pr_.vias) b.vias.push_back(v);
+  doc_->commitEdit(before, tr("Прокладка дифф. пары"));
+  pr_ = {};
+  routeTracks_.clear();
+  emit status(tr("Дифференциальная пара проложена"));
   update();
 }
 
