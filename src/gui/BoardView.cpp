@@ -2159,12 +2159,17 @@ void BoardView::recomputeShapes() {
   // Nothing selected: the tracks edited since the last computation only (their chains, with the
   // rest of the copper as it lies), when the setting says so and there are any; else everything.
   bool local = any;
+  const bool model = QSettings().value("topo/model", true).toBool();
   if (!any && QSettings().value("f5/editedOnly", true).toBool()) {
     for (size_t i = 0; i < b.tracks.size(); ++i)
       if (b.tracks[i].edited && !b.tracks[i].locked) { chosen[i] = 1; any = true; }
     local = any;
+    // By the model: the edited wires drawn from it, the rest as they lie (the sketch path on every track
+    // of a board moved whole made 7 shorts of nothing on SingleLayer); when the model stops at a crossing
+    // the edit made, the sketch path lays the chains as drawn.
+    if (any && model && recomputeShapesModel(true)) return;
   }
-  if (!any && QSettings().value("topo/model", true).toBool()) {
+  if (!any && model) {
     recomputeShapesModel();
     return;
   }
@@ -2195,11 +2200,14 @@ void BoardView::recomputeShapes() {
 // F5 on the topological model (ModelTools.h): every unlocked wire drawn from the model. Stopped by a
 // violation (wires crossing, a wire through another net's pad) nothing changes and the wires concerned
 // are selected, the violations in the message list.
-void BoardView::recomputeShapesModel() {
+bool BoardView::recomputeShapesModel(bool editedOnly) {
   Board& b = *doc_->board();
   auto before = doc_->beginEdit();
   topo::Topology& t = doc_->topology();
-  auto res = topo::runF5Model(b, t);
+  topo::F5ModelOptions o;
+  o.editedOnly = editedOnly;
+  auto res = topo::runF5Model(b, t, o);
+  if (!res.drawn && editedOnly) return false;  // nothing changed: the edit made a crossing, the sketch path takes the chains as drawn
   if (!res.drawn) {
     auto drc = topo::topologyViolations(b, t, res.violations);
     std::vector<ItemRef> sel;
@@ -2212,7 +2220,7 @@ void BoardView::recomputeShapesModel() {
     doc_->setDrc(drc);
     doc_->setSelection(sel, {});
     emit status(tr("Расчёт формы прерван: топологических нарушений %1 (проводники выделены, см. окно сообщений)").arg(drc.size()));
-    return;
+    return false;
   }
   for (auto& tr : b.tracks) tr.edited = false;
   doc_->clearSelection();
@@ -2225,6 +2233,7 @@ void BoardView::recomputeShapesModel() {
   if (res.junctionMoves > 0) msg += tr("; ветвлений сдвинуто: %1").arg(res.junctionMoves);
   if (res.stats.narrowedWires > 0) msg += tr("; заужено проводников: %1").arg(res.stats.narrowedWires);
   emit status(msg);
+  return true;
 }
 
 void BoardView::cancelTool() {

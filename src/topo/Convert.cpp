@@ -648,6 +648,19 @@ void Topology::convertWires(const Board& b, BuildScratch& scratch) {
         for (int end = 0; end < 2; ++end) {
           const Owner& o = owners[m.verts[E.v[end]].owner];
           if (o.net == w.net || o.kind == Owner::Kind::Junction) continue;
+          // At a wall (the board edge, a keepout) no room is an overflow, not a wire through copper: F5
+          // goes on and lays the wire tight, the DRC names the clearance to the edge (a board moved whole
+          // against its outline stopped at three such places).
+          if (o.kind == Owner::Kind::Outline || o.kind == Owner::Kind::Keepout) {
+            Violation v;
+            v.kind = Violation::Kind::Overflow;
+            v.layer = m.layer;
+            v.edge = e;
+            v.pos = (m.verts[E.v[0]].p + m.verts[E.v[1]].p) * 0.5;
+            v.deficit = E.need - E.freeLen;
+            violations.push_back(v);
+            break;
+          }
           Violation v;
           v.kind = Violation::Kind::ThroughPad;
           v.wireA = crossings[cid].wire;

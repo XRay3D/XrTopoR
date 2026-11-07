@@ -1058,6 +1058,45 @@ TEST(Gui, FreestyleDrag) {
   EXPECT_EQ(f.view.mode(), Mode::Select);
 }
 
+// The whole board moved (every part with every track, as the user dragged SingleLayer by 0.3 and 1.1 mm),
+// then F5 three times: every track is edited, and the edited wires are drawn from the model, not by the
+// sketch path (that made 7 shorts and 21 clearance violations of a drawing that had none, and the next
+// presses, with nothing edited, stopped at the crossings it had made).
+TEST(Gui, MovedBoardThenF5) {
+  Fixture f("topor/Example_01/SingleLayer.fst");
+  Board& b = *f.doc.board();
+  {
+    edit::Fragment fr;
+    for (int i = 0; i < int(b.components.size()); ++i) fr.components.push_back(i);
+    for (int i = 0; i < int(b.tracks.size()); ++i) fr.tracks.push_back(i);
+    for (int i = 0; i < int(b.graphics.size()); ++i) fr.details.push_back(i);  // the outline among them
+    edit::Motion m;
+    m.pivot = edit::pivotOf(b, fr);
+    m.shift = Vec2{0.3167 * kNmPerMm, 1.1179 * kNmPerMm};
+    auto before = f.doc.beginEdit();
+    ASSERT_TRUE(edit::move(b, fr, m));
+    if (fr.touchesOutline(b)) io::rebuildOutline(b);
+    f.doc.commitEdit(before, "move");
+    ASSERT_EQ(b.outline.size(), 2u) << "the hole moved along";
+  }
+  int edited = 0;
+  for (const Track& t : b.tracks) edited += t.edited;
+  ASSERT_EQ(edited, int(b.tracks.size())) << "the move marks every track";
+  for (int pass = 0; pass < 3; ++pass) {
+    f.view.recomputeShapes();
+    DrcOptions d;
+    d.unconnected = false;
+    d.widths = false;
+    int shorts = 0, clearances = 0;
+    for (const DrcViolation& v : runDrc(b, d)) {
+      shorts += v.type == DrcViolation::Type::Short;
+      clearances += v.type == DrcViolation::Type::Clearance;
+    }
+    EXPECT_EQ(shorts, 0) << "pass " << pass;
+    EXPECT_EQ(clearances, 0) << "pass " << pass;
+  }
+}
+
 // A keepout drawn over a track, then F5 with nothing selected: the track goes round it (the model is built
 // anew with the keepout, its wire laid round, and every wire is drawn from the model).
 TEST(Gui, KeepoutDrawnOverATrackThenF5) {

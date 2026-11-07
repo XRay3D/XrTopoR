@@ -88,7 +88,7 @@ class BoardView : public QWidget {
   void nextView();                   // Alt+→
   void changeTrackWidth();
   void recomputeShapes();  // F5: selected (or all) tracks become sketches and are re-realised
-  void recomputeShapesModel();  // F5 on the topological model (everything unlocked)
+  bool recomputeShapesModel(bool editedOnly = false);  // false: stopped by the model's violations  // F5 on the topological model (everything unlocked)
 
  signals:
   void cursorMoved(Vec2 world);

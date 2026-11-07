@@ -388,13 +388,18 @@ bool prepareModel(Topology& t, bool flips, bool weighted, int& nFlips, std::vect
 
 // Draws every unlocked wire of the model: their tracks go, and the hand-drawn runs inside the pads they
 // end at (the wire is drawn to the pad's connection point); the locked ones stay as obstacles.
-void drawModel(Board& b, Topology& t, bool direct, RealizeStats& stats, int& nWires) {
+void drawModel(Board& b, Topology& t, bool direct, RealizeStats& stats, int& nWires, bool editedOnly) {
   std::vector<int> chosen;
   std::set<uint32_t> gone;
   std::set<int> redrawnAt;
+  std::set<uint32_t> edited;
+  if (editedOnly)
+    for (const Track& tr : b.tracks)
+      if (tr.edited && tr.id) edited.insert(tr.id);
   for (int wi = 0; wi < int(t.wires.size()); ++wi) {
     const Wire& w = t.wires[wi];
     if (w.locked) continue;
+    if (editedOnly && std::ranges::none_of(w.tracks, [&](uint32_t id) { return edited.contains(id); })) continue;
     chosen.push_back(wi);
     for (uint32_t id : w.tracks) gone.insert(id);
     redrawnAt.insert(w.end[0]);
@@ -462,7 +467,7 @@ F5ModelResult runF5Model(Board& b, Topology& t, const F5ModelOptions& o) {
   ProfScope pAll("F5 model total");
   F5ModelResult r;
   if (!prepareModel(t, o.flips, o.weighted, r.flips, r.violations)) return r;
-  drawModel(b, t, o.direct, r.stats, r.wires);
+  drawModel(b, t, o.direct, r.stats, r.wires, o.editedOnly);
   r.drawn = true;
   if (o.junctions && o.direct && std::ranges::any_of(t.owners, [](const Owner& x) { return x.kind == Owner::Kind::Junction && x.layers != 0 && !x.locked; })) {
     ProfScope p("F5 model: branch points");

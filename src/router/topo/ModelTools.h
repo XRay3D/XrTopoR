@@ -20,6 +20,9 @@ struct F5ModelOptions {
   // standing; TopoR's own F5 moves nothing — its branch points move in F6 and F7 — ours has moved them on the
   // tracks, settleJunctions, and does so here).
   bool junctions = true;
+  // Only the wires with a track edited by hand since the last computation (Track::edited) are drawn, the
+  // rest stay as they lie (F5 without a selection in the editor).
+  bool editedOnly = false;
 };
 
 struct F5ModelResult {
@@ -43,7 +46,7 @@ F5ModelResult runF5Model(Board& b, Topology& t, const F5ModelOptions& o = {});
 bool prepareModel(Topology& t, bool flips, bool weighted, int& nFlips, std::vector<Violation>& stopping);
 // Draws every unlocked wire of the model on the board: their tracks go, and the hand-drawn runs inside the
 // pads they end at; the model's wires then own the new tracks.
-void drawModel(Board& b, Topology& t, bool direct, RealizeStats& stats, int& nWires);
+void drawModel(Board& b, Topology& t, bool direct, RealizeStats& stats, int& nWires, bool editedOnly = false);
 
 // The model's violations as DRC violations (Type::Topology) for the message list and the selection: `a`
 // and `b` are tracks of the wires concerned (or the pad a wire runs through).
