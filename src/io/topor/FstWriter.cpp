@@ -456,6 +456,7 @@ struct Writer {
       l.m = absToFp(g.m, c);
       if (g.kind == GraphicKind::Circle) l.b = l.a + Vec2{(g.b - g.a).len() / kNmPerMm, 0};
       for (auto& v : l.pts) v = absToFp(v, c);
+      if (bottom) l.mirrorArcs();
       l.width = g.width;
       d.graphics.emplace_back(layer, std::move(l));
     }
@@ -529,7 +530,19 @@ struct Writer {
       }
       case GraphicKind::Poly:
         if (g.pts.size() < 3) break;
-        if (g.filled) {
+        if (g.hasArcs()) {
+          // Arcs on the sides: a contour of lines and arcs by angle (fst frame, Y up: the angle as it is).
+          x.open(g.filled ? "FilledContour" : "Contour");
+          xy("Start", g.pts.front());
+          for (size_t i = 0; i < g.pts.size(); ++i) {
+            double deg = g.arcOf(i);
+            if (deg != 0) x.open("SegmentArcByAngle", {{"angle", num(deg)}});
+            else x.open("SegmentLine");
+            xy("End", g.pts[(i + 1) % g.pts.size()]);
+            x.close();
+          }
+          x.close();
+        } else if (g.filled) {
           x.open("Polygon");
           for (auto& v : g.pts) xy("Dot", v);
           x.close();
@@ -631,8 +644,34 @@ struct Writer {
   void writeConstructive() {
     x.open("Constructive", {{"version", "1.2"}});
     x.open("BoardOutline");
+    // The outline's drawings as they are (rectangles, arcs, lines; TopoR's Shapes), those of its holes as its
+    // voids; without drawings, the loops.
+    std::vector<const Graphic*> contour, voids;
+    auto onLoop = [](Vec2 p, const std::vector<Vec2>& loop) {
+      for (size_t k = 0; k < loop.size(); ++k)
+        if (distPointSegment(p, loop[k], loop[(k + 1) % loop.size()]) <= 20000) return true;
+      return false;
+    };
+    for (auto& g : b.graphics)
+      if (b.isEdge(g.layer) && !b.outline.empty()) {
+        auto path = g.path();
+        if (path.empty()) continue;
+        bool hole = std::any_of(b.outline.begin() + 1, b.outline.end(), [&](auto& loop) { return onLoop(path.front(), loop); });
+        (hole ? voids : contour).push_back(&g);
+      }
+    auto shapes = [&](const std::vector<const Graphic*>& gs) {
+      for (const Graphic* g : gs) {
+        Graphic l = fstGraphic(*g);
+        l.filled = false;
+        x.open("Shape", {{"lineWidth", mm(double(g->width > 0 ? g->width : mmToNm(0.1)))}});
+        writeFigure(l);
+        x.close();
+      }
+    };
     x.open("Contour");
-    if (!b.outline.empty() && b.outline.front().size() >= 3) {
+    if (!contour.empty()) {
+      shapes(contour);
+    } else if (!b.outline.empty() && b.outline.front().size() >= 3) {
       writeContour(b.outline.front());
     } else {
       BBox bb = b.bbox();
@@ -641,7 +680,13 @@ struct Writer {
       writeContour({{bb.minX, bb.minY}, {bb.maxX, bb.minY}, {bb.maxX, bb.maxY}, {bb.minX, bb.maxY}});
     }
     x.close();
-    if (b.outline.size() > 1) {
+    if (!contour.empty()) {
+      if (!voids.empty()) {
+        x.open("Voids");
+        shapes(voids);
+        x.close();
+      }
+    } else if (b.outline.size() > 1) {
       x.open("Voids");
       for (size_t i = 1; i < b.outline.size(); ++i)
         if (b.outline[i].size() >= 3) writeContour(b.outline[i]);
@@ -1088,7 +1133,13 @@ struct Writer {
     x.empty("LayerRef", {{"name", layerName[z.layer]}});
     if (z.net >= 0) x.empty("NetRef", {{"name", netName(z.net)}});
     x.open("Shape");
-    writeFilledContour(z.outline);
+    if (z.shape && (z.shape->kind != GraphicKind::Poly || z.shape->hasArcs())) {
+      Graphic l = fstGraphic(*z.shape);
+      l.filled = true;
+      writeFigure(l);
+    } else {
+      writeFilledContour(z.outline);
+    }
     x.close();
     if (!z.cutouts.empty()) {
       x.open("Voids");

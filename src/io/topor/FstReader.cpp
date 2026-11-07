@@ -58,6 +58,7 @@ struct FpGraphic {
   std::string layer;
   Vec2 a, b, m;
   std::vector<Vec2> pts;
+  std::vector<double> arcs;  // Poly: the sides' arc angles (Graphic::arcs)
   double width = 0;
   bool filled = false;
 };
@@ -328,6 +329,32 @@ struct Reader {
     viastacks[name] = d;
   }
 
+  // The vertices of a Contour/FilledContour (Start + Segment*) and the angles of its sides, as Graphic::arcs: a
+  // contour's arcs stay arcs. Returns false when the element has no Start.
+  bool contourVertices(const Element& e, std::vector<Vec2>& pts, std::vector<double>& arcs) const {
+    const Element* st = e.find("Start");
+    if (!st) return false;
+    Vec2 cur = pt(st);
+    pts.push_back(cur);
+    for (auto& seg : e.kids) {
+      if (!seg.name.starts_with("Segment")) continue;
+      Vec2 end = pt(seg.find("End"));
+      double deg = 0;
+      if (!seg.is("SegmentLine"))
+        if (auto arc = segmentArc(seg, cur, end); arc.valid) deg = radToDeg(arc.sweep);  // fst frame: Y up
+      arcs.resize(pts.size() - 1, 0);
+      arcs.push_back(deg);
+      pts.push_back(end);
+      cur = end;
+    }
+    // The contour closes on its start: the last side is the one back to it.
+    if (pts.size() >= 2 && (pts.front() - pts.back()).len() < 1e-9) pts.pop_back();
+    else arcs.resize(pts.size(), 0);
+    arcs.resize(pts.size(), 0);
+    if (std::ranges::none_of(arcs, [](double x) { return x != 0; })) arcs.clear();
+    return true;
+  }
+
   // Appends the segments of a Polyline/Contour/FilledContour (Start + Segment*) as polyline points,
   // tessellating arcs. Returns false when the element has no Start.
   bool contourPoints(const Element& e, std::vector<Vec2>& out, double tol) const {
@@ -426,9 +453,10 @@ struct Reader {
     } else if (f.is("Rect") || f.is("FilledRect")) {
       auto dots = f.findAll("Dot");
       if (dots.size() < 2) return;
-      Vec2 a = pt(dots[0]), c = pt(dots[1]);
-      g.kind = GraphicKind::Poly;
-      g.pts = {a, {c.x, a.y}, c, {a.x, c.y}};
+      // A rectangle stays one: TopoR edits it by its corners and sides.
+      g.kind = GraphicKind::Rect;
+      g.a = pt(dots[0]);
+      g.b = pt(dots[1]);
       g.filled = f.is("FilledRect");
       emit(g);
     } else if (f.is("Polygon")) {
@@ -461,8 +489,7 @@ struct Reader {
       }
     } else if (f.is("Contour") || f.is("FilledContour")) {
       g.kind = GraphicKind::Poly;
-      if (!contourPoints(f, g.pts, 5000)) return;
-      if (g.pts.size() >= 2 && (g.pts.front() - g.pts.back()).len() < 1e-9) g.pts.pop_back();
+      if (!contourVertices(f, g.pts, g.arcs)) return;
       g.filled = f.is("FilledContour");
       if (g.pts.size() >= 3) emit(g);
     }
@@ -627,9 +654,14 @@ struct Reader {
       pinToPad[key(c.ref, '\x01', fpad.name)] = pi;
       pinToPad[key(c.ref, '\x02', std::to_string(fpad.padNum))] = pi;
     }
-    for (auto& fg : fp.graphics) {
+    for (FpGraphic fg : fp.graphics) {
       LayerId l = detailLayer(fg.layer, bottom);
       if (l < 0) continue;
+      // A component's drawings turn with it: a rectangle becomes its corners.
+      if (fg.kind == GraphicKind::Rect) {
+        fg.kind = GraphicKind::Poly;
+        fg.pts = {fg.a, {fg.b.x, fg.a.y}, fg.b, {fg.a.x, fg.b.y}};
+      }
       Graphic g;
       g.kind = fg.kind;
       g.layer = l;
@@ -640,6 +672,8 @@ struct Reader {
       g.m = tr(fg.m);
       if (g.kind == GraphicKind::Circle) g.b = g.a + Vec2{(fg.b - fg.a).len() * s, 0};
       for (auto& v : fg.pts) g.pts.push_back(tr(v));
+      g.arcs = fg.arcs;
+      if (bottom) g.mirrorArcs();
       b.components[idx].graphics.push_back(std::move(g));
     }
   }
@@ -680,6 +714,7 @@ struct Reader {
     g.b = toBoard(f.b);
     g.m = toBoard(f.m);
     for (auto& v : f.pts) g.pts.push_back(toBoard(v));
+    g.arcs = f.arcs;  // Y flipped, and shown so: the turns look the same
     return g;
   }
 
@@ -1136,14 +1171,8 @@ struct Reader {
     figure(f, figs, "", 0);
     std::vector<Vec2> out;
     if (figs.empty()) return out;
-    const FpGraphic& g = figs.front();
-    if (g.kind == GraphicKind::Poly) {
-      for (auto& v : g.pts) out.push_back(toBoard(v));
-    } else if (g.kind == GraphicKind::Circle) {
-      auto pl = Shape::circle(toBoard(g.a), (g.b - g.a).len() * s).outline(5000);
-      out.assign(pl.begin(), pl.end());
-    }
-    return out;
+    if (figs.front().kind == GraphicKind::Line || figs.front().kind == GraphicKind::Arc) return out;
+    return toGraphic(figs.front(), -1).path();
   }
 
   void readCopper(const Element& c) {
@@ -1165,10 +1194,15 @@ struct Reader {
         z.thermalGap = len(th->num("backoff"));
         z.spokeAngle = th->num("angle");
       }
+    // The area's figure as TopoR drew it: a circle, a rectangle, a contour with arcs.
     if (auto* sh = c.find("Shape"))
       for (auto& f : sh->kids) {
-        z.outline = filledPolygon(f);
-        if (!z.outline.empty()) break;
+        std::vector<FpGraphic> figs;
+        figure(f, figs, "", 0);
+        if (figs.empty() || !toGraphic(figs.front(), z.layer).closed()) continue;
+        z.setShape(toGraphic(figs.front(), z.layer));
+        if (z.outline.size() >= 3) break;
+        z.shape.reset();
       }
     if (z.outline.empty()) return;
     if (auto* vs = c.find("Voids"))

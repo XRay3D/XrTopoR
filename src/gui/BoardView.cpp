@@ -83,11 +83,7 @@ void BoardView::fitAll() {
     bb.add(t.b.v());
   }
   for (auto& v : b.vias) bb.add(v.pos.v());
-  for (auto& g : b.graphics) {
-    bb.add(g.a);
-    bb.add(g.b);
-    for (auto& q : g.pts) bb.add(q);
-  }
+  for (auto& g : b.graphics) bb.add(g.bbox());
   if (!bb.valid()) return;
   bb = bb.inflated(2 * kNmPerMm);
   center_ = bb.center();
@@ -275,32 +271,7 @@ BoardView::Pick BoardView::pick(QPointF screen) const {
   return pk;
 }
 
-// Extent of a drawing: only the points its kind uses (unused ones are zero).
-BBox BoardView::graphicBBox(const Graphic& g) {
-  BBox bb;
-  switch (g.kind) {
-    case GraphicKind::Line:
-    case GraphicKind::Rect:
-      bb.add(g.a);
-      bb.add(g.b);
-      break;
-    case GraphicKind::Arc:
-      bb.add(g.a);
-      bb.add(g.m);
-      bb.add(g.b);
-      break;
-    case GraphicKind::Circle: {
-      double r = (g.b - g.a).len();
-      bb.add(g.a - Vec2{r, r});
-      bb.add(g.a + Vec2{r, r});
-      break;
-    }
-    case GraphicKind::Poly:
-      for (auto& p : g.pts) bb.add(p);
-      break;
-  }
-  return bb;
-}
+BBox BoardView::graphicBBox(const Graphic& g) { return g.bbox(); }
 
 bool BoardView::componentVisible(int ci) const {
   const DisplayControl& d = doc_->display();
@@ -481,7 +452,7 @@ void BoardView::drawGraphic(QPainter& p, const Graphic& g, const QColor& c) {
     }
     case GraphicKind::Poly: {
       if (g.pts.size() < 2) break;
-      QPolygonF poly = toPoly(g.pts, [&](Vec2 v) { return toScreen(v); });
+      QPolygonF poly = toPoly(g.path(std::max(2000.0, 0.5 / scale_)), [&](Vec2 v) { return toScreen(v); });
       if (filled) p.drawPolygon(poly);
       else {
         poly << poly.first();
@@ -1605,14 +1576,7 @@ void BoardView::editMarked(const std::function<void(std::vector<Graphic>&, int)>
   if (dragMarker_.item.type == ItemType::Detail && b.isEdge(b.graphics[dragMarker_.item.index].layer)) syncOutline();
 }
 
-void BoardView::syncOutline() {
-  Board& b = *doc_->board();
-  for (LayerId l = 0; l < LayerId(b.layers.size()); ++l)
-    if (b.layers[l].kind == LayerKind::Edge) {
-      io::buildOutline(b, l);
-      return;
-    }
-}
+void BoardView::syncOutline() { io::rebuildOutline(*doc_->board()); }
 
 void BoardView::transformSelection(double rotate, bool mirror, const QString& title) {
   edit::Fragment f = selectedFragment();
@@ -1657,11 +1621,11 @@ std::vector<BoardView::Marker> BoardView::markers() const {
   auto figure = [&](ItemRef r, int part, const Graphic& g) {
     auto vs = edit::figureVertices(g);
     for (int k = 0; k < int(vs.size()); ++k) out.push_back({r, part, Marker::End, k});
-    auto ms = edit::figureMiddles(g);
-    for (int k = 0; k < int(ms.size()); ++k) {
-      // A side's ends: a line's or an arc's own, a polygon's k and k + 1.
-      Vec2 a = g.kind == GraphicKind::Poly ? vs[k] : g.a, c = g.kind == GraphicKind::Poly ? vs[(k + 1) % vs.size()] : g.b;
-      if (roomy(a, c)) out.push_back({r, part, Marker::Middle, k});
+    for (int k = 0; Vec2 m : edit::figureMiddles(g)) {
+      double near = std::numeric_limits<double>::max();
+      for (Vec2 v : vs) near = std::min(near, (v - m).len());
+      if (px(near) > 15) out.push_back({r, part, Marker::Middle, k});
+      ++k;
     }
   };
   for (ItemRef r : items) {
@@ -1674,6 +1638,8 @@ std::vector<BoardView::Marker> BoardView::markers() const {
     } else if (r.type == ItemType::Keepout) {
       const auto& sh = b.keepouts[r.index].shape;
       for (int k = 0; k < int(sh.size()); ++k) figure(r, k, sh[k]);
+    } else if (r.type == ItemType::Zone && !b.zones[r.index].filled.empty()) {
+      continue;  // TopoR: a poured area's shape is not edited
     } else if (auto g = edit::figureOf(b, r)) {
       figure(r, 0, *g);
     }
@@ -1782,8 +1748,11 @@ void BoardView::applyDrag() {
         }
       } else {
         editMarked([&](std::vector<Graphic>& list, int i) {
-          Vec2 from = list[i].kind == GraphicKind::Poly ? list[i].pts[dragMarker_.vertex] : list[i].a;
-          edit::bendFigure(list, i, dragMarker_.vertex, list[i].kind == GraphicKind::Arc ? to : constrained(from, to));
+          // The angle mode holds a new vertex to the side's start; arcs and rectangle sides go where they are put.
+          const Graphic& g = list[i];
+          bool free = g.kind != GraphicKind::Line && (g.kind != GraphicKind::Poly || g.arcOf(dragMarker_.vertex) != 0);
+          Vec2 from = edit::figureVertices(g)[g.kind == GraphicKind::Line ? 0 : dragMarker_.vertex];
+          edit::bendFigure(list, i, dragMarker_.vertex, free ? to : constrained(from, to));
         });
       }
       break;
@@ -1882,8 +1851,9 @@ std::vector<Graphic> figureOf(DrawShape shape, const std::vector<Vec2>& pts) {
       break;
     case DrawShape::Rect:
       if (pts.size() < 2 || pts[0].x == pts[1].x || pts[0].y == pts[1].y) break;
-      g.kind = GraphicKind::Poly;
-      g.pts = {pts[0], {pts[1].x, pts[0].y}, pts[1], {pts[0].x, pts[1].y}};
+      g.kind = GraphicKind::Rect;  // edited as a rectangle
+      g.a = pts[0];
+      g.b = pts[1];
       g.filled = true;
       out.push_back(g);
       break;
@@ -1937,27 +1907,12 @@ std::vector<Graphic> figureOf(DrawShape shape, const std::vector<Vec2>& pts) {
 // A closed outline of the figure (copper areas and cutouts are polygons).
 Polyline polygonOf(const std::vector<Graphic>& fig) {
   Polyline out;
-  for (const Graphic& g : fig) switch (g.kind) {
-      case GraphicKind::Poly: out.insert(out.end(), g.pts.begin(), g.pts.end()); break;
-      case GraphicKind::Circle: {
-        auto pts = Shape::circle(g.a, (g.b - g.a).len()).outline(5000);
-        out.insert(out.end(), pts.begin(), pts.end());
-        break;
-      }
-      case GraphicKind::Line:
-        if (out.empty()) out.push_back(g.a);
-        out.push_back(g.b);
-        break;
-      case GraphicKind::Arc: {
-        auto arc = ArcGeom::fromThreePoints(g.a, g.m, g.b);
-        if (arc.valid) {
-          auto pts = arc.tessellate(5000);
-          out.insert(out.end(), pts.begin(), pts.end());
-        }
-        break;
-      }
-      case GraphicKind::Rect: out.insert(out.end(), {g.a, {g.b.x, g.a.y}, g.b, {g.a.x, g.b.y}}); break;
-    }
+  for (const Graphic& g : fig) {
+    auto pts = g.path();
+    // Lines drawn one after another share their ends.
+    if (!out.empty() && !pts.empty() && (out.back() - pts.front()).len() < 1) out.pop_back();
+    out.insert(out.end(), pts.begin(), pts.end());
+  }
   if (out.size() >= 2 && (out.front() - out.back()).len() < 1) out.pop_back();
   return out;
 }
@@ -2025,7 +1980,9 @@ void BoardView::createShape(std::vector<Graphic> fig) {
       if (poly.size() < 3) return;
       Zone z;
       z.layer = copper;
-      z.outline = std::move(poly);
+      // One figure stays itself (a circle, a rectangle), lines become the polygon they close.
+      if (fig.size() == 1 && fig[0].closed()) z.setShape(fig[0]);
+      else z.outline = std::move(poly);
       b.zones.push_back(std::move(z));
       made = {ItemType::Zone, int(b.zones.size()) - 1};
       title = tr("Создать область металлизации");

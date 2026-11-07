@@ -41,5 +41,7 @@ std::string writeFst(const Board& b);
 
 // Builds closed outline contours from Edge-layer graphics.
 void buildOutline(Board& b, LayerId edgeLayer);
+// The outline from the drawings of the board's outline layer, after they changed.
+void rebuildOutline(Board& b);
 
 }  // namespace xr::io

@@ -329,3 +329,36 @@ TEST(Edit, FiguresByTheirHandles) {
   edit::tidyFigure(list[3]);
   EXPECT_EQ(list[3].pts.size(), 3u);
 }
+
+// A rectangle stays one by its handles (a side moves across itself), a circle by its centre and rim; a polygon's
+// arc side bends through the point it is dragged to.
+TEST(Edit, RectanglesAndCirclesKeepTheirKind) {
+  auto mm = [](double x, double y) { return Vec2{x * kNmPerMm, y * kNmPerMm}; };
+  std::vector<Graphic> list(3);
+  list[0].kind = GraphicKind::Rect;
+  list[0].a = mm(0, 0);
+  list[0].b = mm(10, 6);
+  ASSERT_EQ(edit::figureMiddles(list[0]).size(), 4u);
+  edit::bendFigure(list, 0, 1, mm(14, 2));  // the side x = b.x
+  EXPECT_EQ(list[0].kind, GraphicKind::Rect);
+  EXPECT_EQ(list[0].b, mm(14, 6));
+  EXPECT_EQ(list[0].a, mm(0, 0));
+  list[1].kind = GraphicKind::Circle;
+  list[1].a = mm(20, 0);
+  list[1].b = mm(22, 0);
+  edit::moveFigureVertex(list, 1, 0, mm(30, 5));  // the centre takes the circle along
+  EXPECT_EQ(list[1].b, mm(32, 5));
+  edit::moveFigureVertex(list, 1, 1, mm(30, 8));  // the rim: the radius
+  EXPECT_NEAR((list[1].b - list[1].a).len(), 3 * kNmPerMm, 1);
+  list[2].kind = GraphicKind::Poly;
+  list[2].pts = {mm(0, 20), mm(10, 20), mm(10, 30)};
+  list[2].arcs = {90, 0, 0};
+  auto mids = edit::figureMiddles(list[2]);
+  EXPECT_NEAR((mids[0] - arcMiddle(mm(0, 20), mm(10, 20), 90)).len(), 0, 1);
+  edit::bendFigure(list, 2, 0, mm(5, 20));  // onto the chord: straight
+  EXPECT_EQ(list[2].arcOf(0), 0);
+  EXPECT_EQ(list[2].pts.size(), 3u);
+  edit::bendFigure(list, 2, 1, mm(12, 25));  // a straight side: a vertex
+  EXPECT_EQ(list[2].pts.size(), 4u);
+  EXPECT_EQ(list[2].arcs.size(), 4u);
+}

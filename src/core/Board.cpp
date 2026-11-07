@@ -254,6 +254,68 @@ void Board::updatePadPositions(int comp) {
   }
 }
 
+Vec2 arcMiddle(Vec2 a, Vec2 b, double deg) {
+  deg = std::clamp(deg, -359.9, 359.9);
+  Vec2 d = b - a;
+  // Board frame is Y down: a turn counter-clockwise on screen bulges to the chord's +perp side.
+  return (a + b) * 0.5 + d.perp().normalized() * (d.len() / 2 * std::tan(degToRad(deg) / 4));
+}
+
+double arcAngle(Vec2 a, Vec2 m, Vec2 b) {
+  if (std::abs(orient(a, b, m)) < 1e-6 * (b - a).len2()) return 0;
+  auto arc = ArcGeom::fromThreePoints(a, m, b);
+  return arc.valid ? -radToDeg(arc.sweep) : 0;
+}
+
+bool Graphic::hasArcs() const {
+  return std::ranges::any_of(arcs, [](double x) { return x != 0; });
+}
+
+Polyline Graphic::path(double tol) const {
+  switch (kind) {
+    case GraphicKind::Line: return {a, b};
+    case GraphicKind::Arc: {
+      auto arc = ArcGeom::fromThreePoints(a, m, b);
+      return arc.valid ? arc.tessellate(tol) : Polyline{a, b};
+    }
+    case GraphicKind::Circle: return Shape::circle(a, (b - a).len()).outline(tol);
+    case GraphicKind::Rect: return {a, {b.x, a.y}, b, {a.x, b.y}};
+    case GraphicKind::Poly: {
+      if (!hasArcs()) return pts;
+      Polyline out;
+      for (size_t k = 0; k < pts.size(); ++k) {
+        Vec2 p = pts[k], q = pts[(k + 1) % pts.size()];
+        out.push_back(p);
+        if (double deg = arcOf(k); deg != 0 && p != q) {
+          auto arc = ArcGeom::fromThreePoints(p, arcMiddle(p, q, deg), q);
+          if (arc.valid) {
+            auto pl = arc.tessellate(tol);
+            out.insert(out.end(), pl.begin() + 1, pl.end() - 1);
+          }
+        }
+      }
+      return out;
+    }
+  }
+  return {};
+}
+
+BBox Graphic::bbox() const {
+  BBox bb;
+  for (Vec2 p : path(2000)) bb.add(p);
+  return bb;
+}
+
+void Graphic::mirrorArcs() {
+  for (double& x : arcs) x = -x;
+}
+
+void Zone::setShape(Graphic g) {
+  g.filled = true;
+  outline = g.path();
+  shape = std::move(g);
+}
+
 static Vec2 rotAround(Vec2 p, Vec2 c, double deg) { return c + rotateBoard(p - c, deg); }
 
 void Board::moveComponent(int comp, Point newPos) {
@@ -287,23 +349,18 @@ void Board::rotateComponent(int comp, double deltaDeg) {
 
 std::vector<Shape> Keepout::shapes() const {
   std::vector<Shape> out;
-  for (const Graphic& g : shape) switch (g.kind) {
-      case GraphicKind::Line: out.push_back(Shape::capsule(g.a, g.b, 0)); break;
-      case GraphicKind::Arc: {
-        auto arc = ArcGeom::fromThreePoints(g.a, g.m, g.b);
-        auto pts = arc.valid ? arc.tessellate(5000) : Polyline{g.a, g.b};
-        for (size_t i = 1; i < pts.size(); ++i) out.push_back(Shape::capsule(pts[i - 1], pts[i], 0));
-        break;
-      }
-      case GraphicKind::Circle:
-        if (g.filled) out.push_back(Shape::circle(g.a, (g.b - g.a).len()));
-        else out.push_back(Shape::polygon(Shape::circle(g.a, (g.b - g.a).len()).outline(5000)));
-        break;
-      case GraphicKind::Rect: out.push_back(Shape::polygon({g.a, {g.b.x, g.a.y}, g.b, {g.a.x, g.b.y}})); break;
-      case GraphicKind::Poly:
-        if (g.pts.size() >= 3) out.push_back(Shape::polygon(g.pts));
-        break;
+  for (const Graphic& g : shape) {
+    if (g.kind == GraphicKind::Circle && g.filled) {
+      out.push_back(Shape::circle(g.a, (g.b - g.a).len()));
+      continue;
     }
+    auto pts = g.path();
+    if (g.closed()) {
+      if (pts.size() >= 3) out.push_back(Shape::polygon(pts));
+    } else {
+      for (size_t i = 1; i < pts.size(); ++i) out.push_back(Shape::capsule(pts[i - 1], pts[i], 0));
+    }
+  }
   return out;
 }
 

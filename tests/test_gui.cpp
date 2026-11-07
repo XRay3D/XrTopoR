@@ -558,6 +558,84 @@ TEST(Gui, PropertiesEditWireWidth) {
   EXPECT_EQ(f.b().tracks[0].width, w0);
 }
 
+// «Форма (Многоугольник)» of the board outline in «Свойства»: the vertices in the unit, y up, the arcs' angles; a
+// value edited moves the vertex and the outline with it, an angle makes the side an arc, «Добавить» / «Удалить» a
+// vertex; each an undoable step. A circle's page has its centre and radius.
+TEST(Gui, ShapeEditor) {
+  Fixture f("topor/Example_05/MinVia_standard_routing.fst");
+  PropertiesPanel props(&f.doc);
+  f.doc.setUnit(Unit::Mm);
+  int poly = -1;
+  for (int i = 0; i < int(f.b().graphics.size()); ++i)
+    if (f.b().isEdge(f.b().graphics[i].layer) && f.b().graphics[i].kind == GraphicKind::Poly) poly = i;
+  ASSERT_GE(poly, 0);
+  f.doc.setSelection({{ItemType::Detail, poly}}, {});
+  auto* tabs = props.findChild<QTabWidget*>();
+  ASSERT_TRUE(tabs);
+  EXPECT_EQ(tabs->tabText(1), "Форма (Многоугольник)");
+  auto table = [&] { return props.findChild<QTableWidget*>("shape"); };
+  ASSERT_TRUE(table());
+  const auto pts = f.b().graphics[poly].pts;
+  ASSERT_EQ(table()->rowCount(), int(pts.size()));
+  EXPECT_NEAR(table()->item(0, 1)->text().toDouble(), pts[0].x / kNmPerMm, 1e-3);
+  EXPECT_NEAR(table()->item(0, 2)->text().toDouble(), -pts[0].y / kNmPerMm, 1e-3);
+  tabs->setCurrentIndex(1);
+
+  table()->item(0, 1)->setText(QString::number(pts[0].x / kNmPerMm + 1));
+  EXPECT_NEAR(f.b().graphics[poly].pts[0].x, pts[0].x + kNmPerMm, 1);
+  EXPECT_TRUE(std::ranges::any_of(f.b().outline[0], [&](Vec2 v) { return (v - f.b().graphics[poly].pts[0]).len() < 1000; }));
+  EXPECT_EQ(props.findChild<QTabWidget*>()->currentIndex(), 1) << "the page stays on the shape";
+
+  table()->item(1, 3)->setText("90");
+  ASSERT_EQ(f.b().graphics[poly].arcOf(1), 90);
+  EXPECT_GT(f.b().outline[0].size(), pts.size() + 4) << "the arc in chords";
+  Vec2 a = f.b().graphics[poly].pts[1], c = f.b().graphics[poly].pts[2];
+  Vec2 mid = arcMiddle(a, c, 90);
+  EXPECT_NEAR(std::abs(orient(a, c, mid)) / (c - a).len(), (c - a).len() / 2 * std::tan(kPi / 8), 1000);
+
+  if (const char* dir = std::getenv("XR_SHOT_DIR")) {
+    props.resize(520, 300);
+    props.grab().save(QString(dir) + "/shape.png");
+  }
+  table()->selectRow(1);
+  props.findChild<QPushButton*>("addVertex")->click();
+  QCoreApplication::processEvents();
+  ASSERT_EQ(f.b().graphics[poly].pts.size(), pts.size() + 1);
+  ASSERT_EQ(table()->rowCount(), int(pts.size()) + 1);
+  EXPECT_NEAR((f.b().graphics[poly].pts[2] - mid).len(), 0, 1000) << "on the arc's middle";
+  EXPECT_EQ(f.b().graphics[poly].arcOf(1), 45);
+  EXPECT_EQ(f.b().graphics[poly].arcOf(2), 45);
+  table()->selectRow(2);
+  props.findChild<QPushButton*>("deleteVertex")->click();
+  QCoreApplication::processEvents();
+  EXPECT_EQ(f.b().graphics[poly].pts.size(), pts.size());
+  for (int i = 0; i < 4; ++i) f.doc.undoStack()->undo();
+  EXPECT_EQ(f.b().graphics[poly].pts, pts);
+  EXPECT_FALSE(f.b().graphics[poly].hasArcs());
+
+  // A copper area drawn as a circle stays one: its centre and radius.
+  {
+    auto snap = f.doc.beginEdit();
+    Zone z;
+    z.layer = f.b().topCopper();
+    Graphic g;
+    g.kind = GraphicKind::Circle;
+    g.a = pts[0] + Vec2{5 * kNmPerMm, 5 * kNmPerMm};
+    g.b = g.a + Vec2{2 * kNmPerMm, 0};
+    z.setShape(g);
+    f.doc.board()->zones.push_back(z);
+    f.doc.commitEdit(snap, "zone");
+  }
+  int zi = int(f.b().zones.size()) - 1;
+  f.doc.setSelection({{ItemType::Zone, zi}}, {});
+  tabs = props.findChild<QTabWidget*>();
+  EXPECT_EQ(tabs->tabText(tabs->count() - 1), "Форма (Круг)");
+  ASSERT_EQ(table()->rowCount(), 2);
+  table()->item(1, 1)->setText("3");
+  EXPECT_NEAR(f.b().zones[zi].outline.front().x - f.b().zones[zi].shape->a.x, 3 * kNmPerMm, 1000);
+  EXPECT_EQ(f.b().zones[zi].shape->kind, GraphicKind::Circle);
+}
+
 // «Окно сообщений»: unrouted nets and DRC results are listed by kind.
 TEST(Gui, MessagesWindow) {
   Fixture f("tt.kicad_pcb");

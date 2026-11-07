@@ -399,7 +399,7 @@ Node graphicNode(const Board& b, const Graphic& g, const char* prefix, Vec2 orig
     case GraphicKind::Poly: {
       n = Node::list(h + "poly");
       Node pts = Node::list("pts");
-      for (auto& p : g.pts) pts.add(xyNode("xy", loc(p)));
+      for (auto& p : g.path(2000)) pts.add(xyNode("xy", loc(p)));  // arcs of the sides in chords
       n.add(std::move(pts));
       break;
     }

@@ -169,8 +169,8 @@ void addGraphic(Gerber& g, const Graphic& gr) {
       g.stroke({gr.a, {gr.b.x, gr.a.y}, gr.b, {gr.a.x, gr.b.y}, gr.a}, w);
       break;
     case GraphicKind::Poly: {
-      if (gr.filled) { g.region(gr.pts); break; }
-      auto pts = gr.pts;
+      auto pts = gr.path(2000);  // arcs of the sides in chords
+      if (gr.filled) { g.region(pts); break; }
       if (!pts.empty()) pts.push_back(pts.front());
       g.stroke(pts, w);
       break;

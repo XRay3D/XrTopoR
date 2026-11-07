@@ -162,14 +162,34 @@ struct Pad {
 
 enum class GraphicKind { Line, Arc, Circle, Rect, Poly };
 
+// A drawn figure: a board outline's piece, a detail, a keepout's figure, a copper area's shape. Rectangles and
+// circles stay what they are (TopoR edits them as such); a polygon's sides may be arcs, as TopoR's contours.
 struct Graphic {
   GraphicKind kind = GraphicKind::Line;
   LayerId layer = -1;
   Vec2 a, b, m;           // Line: a-b; Arc: a (start), m (mid), b (end); Circle: a centre, b on circle; Rect: a-b
   std::vector<Vec2> pts;  // Poly
+  // Poly: the side from pts[k] to pts[k + 1] (the last one back to pts[0]) is an arc turning by arcs[k] degrees,
+  // + counter-clockwise on screen (TopoR's «Arc Angle»); missing or 0: straight.
+  std::vector<double> arcs;
   Coord width = 0;
   bool filled = false;
+
+  bool closed() const { return kind == GraphicKind::Circle || kind == GraphicKind::Rect || kind == GraphicKind::Poly; }
+  double arcOf(size_t k) const { return k < arcs.size() ? arcs[k] : 0; }
+  bool hasArcs() const;
+  // The points along the figure, arcs in chords at most `tol` off: a closed figure's loop (its first point not
+  // repeated), an open one's line.
+  Polyline path(double tol = 5000) const;
+  BBox bbox() const;
+  // A mirror image of the figure turns its arcs the other way.
+  void mirrorArcs();
 };
+
+// The middle of an arc from a to b turning by `deg` degrees (+ counter-clockwise on screen); the angle an arc
+// through m turns by (0: m on the chord).
+Vec2 arcMiddle(Vec2 a, Vec2 b, double deg);
+double arcAngle(Vec2 a, Vec2 m, Vec2 b);
 
 struct Component {
   std::string ref;
@@ -215,6 +235,10 @@ struct Zone {
   LayerId layer = 0;
   std::string name;
   std::vector<Vec2> outline;
+  // The figure the area was drawn as (a circle, a rectangle, a polygon with arcs); outline is its path. None: the
+  // outline is all there is (imported as a polygon).
+  std::optional<Graphic> shape;
+  void setShape(Graphic g);
   std::vector<std::vector<Vec2>> cutouts;  // «Вырезы в металлизации»: never poured
   std::vector<std::vector<Vec2>> filled;
   Coord clearance = 0;

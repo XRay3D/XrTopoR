@@ -213,6 +213,7 @@ uint64_t boardHashOf(const Board& b) {
         f.v(g.b);
         f.v(g.m);
         for (Vec2 p : g.pts) f.v(p);
+        for (double a : g.arcs) f.i(std::llround(a * 1e6));
       }
     });
   report("keepouts");

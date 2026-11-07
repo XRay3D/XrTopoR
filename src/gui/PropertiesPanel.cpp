@@ -15,10 +15,12 @@
 #include <QTableWidget>
 #include <QVBoxLayout>
 
+#include "core/Edit.h"
 #include "core/Padstack.h"
 #include "core/ZoneFill.h"
 #include "gui/PadstackDialogs.h"
 #include "gui/SpinBox.h"
+#include "io/BoardIO.h"
 
 namespace xr::gui {
 
@@ -39,6 +41,36 @@ std::optional<T> common(const std::vector<int>& idx, F&& get) {
 QLabel* title(const QString& text) {
   auto* l = new QLabel(QString("<b><font color=\"#3060a0\">%1</font></b>").arg(text.toHtmlEscaped()));
   return l;
+}
+
+// The cells of «Форма»: a name and up to three values (x, y in the unit — y up, as the board is shown — a length,
+// an angle).
+enum class Val { X, Y, Len, Deg, None };
+
+// The point a row of the shape table stands for.
+Vec2 rowPoint(const Graphic& f, int row) {
+  switch (f.kind) {
+    case GraphicKind::Line:
+    case GraphicKind::Arc:
+    case GraphicKind::Rect: return row == 0 ? f.a : f.b;
+    case GraphicKind::Circle: return f.a;
+    case GraphicKind::Poly: return row < int(f.pts.size()) ? f.pts[row] : Vec2{};
+  }
+  return {};
+}
+
+QString cellText(const Graphic& g, int row, Val val, Unit u) {
+  switch (val) {
+    case Val::X: return formatLength(rowPoint(g, row).x, u);
+    case Val::Y: return formatLength(-rowPoint(g, row).y, u);
+    case Val::Len: return formatLength((g.b - g.a).len(), u);
+    case Val::Deg: {
+      double deg = g.kind == GraphicKind::Arc ? arcAngle(g.a, g.m, g.b) : g.arcOf(size_t(row));
+      return deg == 0 && g.kind == GraphicKind::Poly ? QString() : QString::number(deg, 'g', 8);
+    }
+    case Val::None: return {};
+  }
+  return {};
 }
 
 }  // namespace
@@ -137,6 +169,15 @@ void PropertiesPanel::rebuild() {
     else page = pads.size() == 1 ? padPage(pads[0]) : message(tr("Контакты (%1)").arg(pads.size()));
     (void)b;
   }
+  // The same objects again (a value edited, a vertex added): the same tab.
+  auto* before = qobject_cast<QTabWidget*>(area_->widget());
+  auto* now = qobject_cast<QTabWidget*>(page);
+  auto items = doc_->hasBoard() ? doc_->selectedItems() : std::vector<ItemRef>{};
+  auto comps = doc_->hasBoard() ? doc_->selectedComponents() : std::vector<int>{};
+  if (before && now && items == shownItems_ && comps == shownComps_ && before->currentIndex() < now->count())
+    now->setCurrentIndex(before->currentIndex());
+  shownItems_ = std::move(items);
+  shownComps_ = std::move(comps);
   area_->setWidget(page);
 }
 
@@ -145,7 +186,14 @@ void PropertiesPanel::rebuild() {
 QWidget* PropertiesPanel::keepoutPage(int ki) {
   const Board& b = *doc_->board();
   const Keepout& k = b.keepouts[ki];
+  auto* tabs = new QTabWidget;
   auto* w = new QWidget;
+  tabs->addTab(w, tr("Общие"));
+  for (int i = 0; i < int(k.shape.size()); ++i) {
+    QString name = shapeTitle(k.shape[i]);
+    if (k.shape.size() > 1) name.insert(name.indexOf(' '), QString(" %1").arg(i + 1));
+    tabs->addTab(shapePage({ItemType::Keepout, ki}, i), name);
+  }
   auto* f = new QFormLayout(w);
   f->addRow(title(tr("Запрет")));
   auto* role = new QComboBox;
@@ -196,7 +244,7 @@ QWidget* PropertiesPanel::keepoutPage(int ki) {
     });
     f->addRow(tr("Сторона:"), side);
   }
-  return w;
+  return tabs;
 }
 
 QWidget* PropertiesPanel::textPage(int ti) {
@@ -271,6 +319,180 @@ QWidget* PropertiesPanel::detailPage(const std::vector<int>& details) {
                 for (int d : details) bd.graphics[d].width = Coord(std::llround(nm));
               });
             }));
+  if (details.size() != 1) return w;
+  auto* tabs = new QTabWidget;
+  tabs->addTab(w, tr("Общие"));
+  tabs->addTab(shapePage({ItemType::Detail, details[0]}, 0), shapeTitle(b.graphics[details[0]]));
+  return tabs;
+}
+
+QString PropertiesPanel::shapeTitle(const Graphic& g) {
+  switch (g.kind) {
+    case GraphicKind::Line: return tr("Форма (Линия)");
+    case GraphicKind::Arc: return tr("Форма (Дуга)");
+    case GraphicKind::Circle: return g.filled ? tr("Форма (Круг)") : tr("Форма (Окружность)");
+    case GraphicKind::Rect: return tr("Форма (Прямоугольник)");
+    case GraphicKind::Poly: return tr("Форма (Многоугольник)");
+  }
+  return tr("Форма");
+}
+
+void PropertiesPanel::editShape(ItemRef r, int part, const QString& t, const std::function<void(Graphic&)>& fn) {
+  edit(t, [&](Board& bd) {
+    edit::editFigure(bd, r, part, [&](std::vector<Graphic>& list, int i) { fn(list[i]); });
+    if (r.type == ItemType::Detail && bd.isEdge(bd.graphics[r.index].layer)) io::rebuildOutline(bd);
+    if (r.type == ItemType::Zone && !bd.zones[r.index].filled.empty()) {
+      bd.zones[r.index].filled.clear();
+      ZoneFillOptions o;
+      o.only = {r.index};
+      fillZones(bd, o);
+    }
+  });
+}
+
+QWidget* PropertiesPanel::shapePage(ItemRef r, int part) {
+  auto fig = edit::figureOf(*doc_->board(), r, part);
+  auto* w = new QWidget;
+  auto* v = new QVBoxLayout(w);
+  if (!fig) return w;
+  const Graphic g = *fig;
+  Unit u = doc_->unit();
+  QString un = unitName(u);
+  struct Row {
+    QString name;
+    Val c1, c2, c3 = Val::None;
+  };
+  std::vector<Row> rows;
+  QStringList head{"#", QString("X (%1)").arg(un), QString("Y (%1)").arg(un)};
+  bool poly = g.kind == GraphicKind::Poly;
+  switch (g.kind) {
+    case GraphicKind::Line: rows = {{tr("Начало"), Val::X, Val::Y}, {tr("Конец"), Val::X, Val::Y}}; break;
+    case GraphicKind::Arc:
+      rows = {{tr("Начало"), Val::X, Val::Y}, {tr("Конец"), Val::X, Val::Y}, {tr("Угол дуги"), Val::Deg, Val::None}};
+      break;
+    case GraphicKind::Circle: rows = {{tr("Центр"), Val::X, Val::Y}, {tr("Радиус"), Val::Len, Val::None}}; break;
+    case GraphicKind::Rect: rows = {{tr("Угол 1"), Val::X, Val::Y}, {tr("Угол 2"), Val::X, Val::Y}}; break;
+    case GraphicKind::Poly:
+      head << tr("Угол дуги (− по часовой)");
+      for (size_t k = 0; k < g.pts.size(); ++k) rows.push_back({QString::number(k + 1), Val::X, Val::Y, Val::Deg});
+      break;
+  }
+  auto* t = new QTableWidget(int(rows.size()), int(head.size()));
+  t->setObjectName("shape");
+  t->setHorizontalHeaderLabels(head);
+  t->verticalHeader()->hide();
+  t->setSelectionBehavior(QAbstractItemView::SelectRows);
+  t->setSelectionMode(QAbstractItemView::SingleSelection);
+  t->horizontalHeader()->setStretchLastSection(true);
+  for (int i = 0; i < int(rows.size()); ++i) {
+    auto* name = new QTableWidgetItem(rows[i].name);
+    name->setFlags(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
+    t->setItem(i, 0, name);
+    Val vals[] = {rows[i].c1, rows[i].c2, rows[i].c3};
+    for (int c = 0; c < int(head.size()) - 1; ++c) {
+      auto* it = new QTableWidgetItem(cellText(g, i, vals[c], u));
+      it->setData(Qt::UserRole, int(vals[c]));
+      if (vals[c] == Val::None) it->setFlags(Qt::ItemIsEnabled);
+      t->setItem(i, c + 1, it);
+    }
+  }
+  t->resizeColumnsToContents();
+  v->addWidget(t, 1);
+  // An edited cell changes the figure and shows what it came to; what cannot be read is put back.
+  connect(t, &QTableWidget::itemChanged, this, [this, t, r, part, u](QTableWidgetItem* it) {
+    if (it->column() == 0) return;
+    Val val = Val(it->data(Qt::UserRole).toInt());
+    int row = it->row();
+    QString s = it->text().trimmed().replace(',', '.');
+    bool ok = true;
+    double x = s.isEmpty() && val == Val::Deg ? 0 : s.toDouble(&ok);
+    auto shown = [&] {
+      QSignalBlocker block(t);
+      if (auto f = edit::figureOf(*doc_->board(), r, part)) it->setText(cellText(*f, row, val, u));
+    };
+    if (!ok || (val == Val::Len && x <= 0)) {
+      shown();
+      return;
+    }
+    editShape(r, part, tr("Изменить форму"), [&](Graphic& f) {
+      Vec2 p = rowPoint(f, row);
+      if (val == Val::X) p.x = fromUnit(x, u);
+      if (val == Val::Y) p.y = -fromUnit(x, u);
+      switch (val) {
+        case Val::X:
+        case Val::Y:
+          switch (f.kind) {
+            case GraphicKind::Line: (row == 0 ? f.a : f.b) = p; break;
+            case GraphicKind::Arc: {
+              // The arc keeps its angle.
+              double deg = arcAngle(f.a, f.m, f.b);
+              (row == 0 ? f.a : f.b) = p;
+              f.m = arcMiddle(f.a, f.b, deg);
+              break;
+            }
+            case GraphicKind::Circle: f.b += p - f.a; f.a = p; break;
+            case GraphicKind::Rect: (row == 0 ? f.a : f.b) = p; break;
+            case GraphicKind::Poly: f.pts[row] = p; break;
+          }
+          break;
+        case Val::Len: f.b = f.a + Vec2{fromUnit(x, u), 0}; break;
+        case Val::Deg:
+          if (f.kind == GraphicKind::Arc) {
+            if (x == 0) f.kind = GraphicKind::Line;
+            else f.m = arcMiddle(f.a, f.b, x);
+          } else if (f.kind == GraphicKind::Poly) {
+            f.arcs.resize(f.pts.size(), 0);
+            f.arcs[row] = std::clamp(x, -359.0, 359.0);
+            if (!f.hasArcs()) f.arcs.clear();
+          }
+          break;
+        case Val::None: break;
+      }
+    });
+    shown();
+  });
+  if (poly) {
+    // «Добавить»: a vertex in the middle of the side from the current one (on its arc); «Удалить»: the current one.
+    auto* buttons = new QHBoxLayout;
+    auto* add = new QPushButton(tr("Добавить"));
+    auto* del = new QPushButton(tr("Удалить"));
+    add->setObjectName("addVertex");
+    del->setObjectName("deleteVertex");
+    buttons->addWidget(add);
+    buttons->addWidget(del);
+    buttons->addStretch(1);
+    v->addLayout(buttons);
+    del->setEnabled(g.pts.size() > 3);
+    connect(add, &QPushButton::clicked, this, [this, t, r, part] {
+      int row = t->currentRow();
+      editShape(r, part, tr("Добавить вершину"), [&](Graphic& f) {
+        int n = int(f.pts.size());
+        int k = row >= 0 && row < n ? row : n - 1;
+        Vec2 p = f.pts[k], q = f.pts[(k + 1) % n];
+        double deg = f.arcOf(k);
+        f.pts.insert(f.pts.begin() + k + 1, deg != 0 ? arcMiddle(p, q, deg) : (p + q) * 0.5);
+        if (!f.arcs.empty()) {
+          f.arcs.resize(n, 0);
+          f.arcs[k] = deg / 2;  // an arc splits into two halves
+          f.arcs.insert(f.arcs.begin() + k + 1, deg / 2);
+        }
+      });
+      QMetaObject::invokeMethod(this, &PropertiesPanel::rebuild, Qt::QueuedConnection);  // not from the button itself
+    });
+    connect(del, &QPushButton::clicked, this, [this, t, r, part] {
+      int row = t->currentRow();
+      if (row < 0) return;
+      editShape(r, part, tr("Удалить вершину"), [&](Graphic& f) {
+        if (f.pts.size() <= 3 || row >= int(f.pts.size())) return;
+        f.pts.erase(f.pts.begin() + row);
+        if (!f.arcs.empty()) {
+          f.arcs.resize(f.pts.size() + 1, 0);
+          f.arcs.erase(f.arcs.begin() + row);
+        }
+      });
+      QMetaObject::invokeMethod(this, &PropertiesPanel::rebuild, Qt::QueuedConnection);
+    });
+  }
   return w;
 }
 
@@ -606,6 +828,7 @@ QWidget* PropertiesPanel::zonePage(int zi) {
   fl->addRow(tr("Зазор:"), zoneLength(&Zone::clearance, tr("Зазор области")));
   fl->addRow(tr("Мин. ширина:"), zoneLength(&Zone::minWidth, tr("Минимальная ширина")));
   tabs->addTab(fill, tr("Заливка"));
+  if (auto g = edit::figureOf(b, {ItemType::Zone, zi})) tabs->addTab(shapePage({ItemType::Zone, zi}, 0), shapeTitle(*g));
   return tabs;
 }
 

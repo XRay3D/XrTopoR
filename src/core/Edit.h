@@ -76,25 +76,27 @@ int splitTrack(Board& b, int track, Vec2 at);
 // The middle of an arc moves to `to` (a straight segment becomes an arc through it).
 bool bendTrack(Board& b, int track, Vec2 to);
 
-// Drawings (board outline, details, keepouts' figures, a copper area's outline as a polygon) are edited by the
-// same handles as wires: vertices (ends of a line or an arc, corners of a rectangle or a polygon, the point on a
-// circle's rim that gives its radius) and middles (of a line, an arc, a polygon's sides). The ends of the list's
-// drawings of one layer that meet at a vertex move with it, as the ends of one wire's tracks do.
+// Drawings (board outline, details, keepouts' figures, a copper area's shape) are edited by the same handles as
+// wires: vertices (ends of a line or an arc, corners of a rectangle or a polygon, a circle's centre and its rim
+// point) and middles (of a line, an arc, a rectangle's or a polygon's sides). The ends of the list's drawings of
+// one layer that meet at a vertex move with it, as the ends of one wire's tracks do. A rectangle stays one, a
+// circle stays one: a corner, a side, the rim keep their kind.
 std::vector<Vec2> figureVertices(const Graphic& g);
 std::vector<Vec2> figureMiddles(const Graphic& g);
 // Vertex k of drawing i goes to `to` with whatever of `list` meets it there.
 void moveFigureVertex(std::vector<Graphic>& list, int i, int k, Vec2 to);
-// Middle k of drawing i goes to `to`: an arc bends through it (straight again on the chord), a line breaks there
-// into two (the second appended to `list`), a polygon gets a vertex.
+// Middle k of drawing i goes to `to`: an arc (an arc side of a polygon) bends through it, straight again on the
+// chord; a line breaks there into two (the second appended to `list`); a polygon's straight side gets a vertex; a
+// rectangle's side moves across itself.
 void bendFigure(std::vector<Graphic>& list, int i, int k, Vec2 to);
 // Parallel transfer of a line or an arc by d, the ends meeting its ends stretched.
 void moveFigureSide(std::vector<Graphic>& list, int i, Vec2 d);
 // A polygon loses vertices dragged onto their neighbours.
 void tidyFigure(Graphic& g);
-// The figure of an object the handles edit: a board drawing, figure `part` of a keepout, the outline of an
-// unpoured copper area (a poured one is not edited, as in TopoR); nullopt for anything else.
+// The figure of an object: a board drawing, figure `part` of a keepout, a copper area's shape (its outline as a
+// polygon when it has none); nullopt for anything else.
 std::optional<Graphic> figureOf(const Board& b, ItemRef r, int part = 0);
-// fn(list, index) on the list that figure lives in; a copper area's outline is written back.
+// fn(list, index) on the list that figure lives in; a copper area takes the figure as its shape.
 void editFigure(Board& b, ItemRef r, int part, const std::function<void(std::vector<Graphic>&, int)>& fn);
 
 // «Спрямить» (C): every chain of the given tracks (one net and layer, joined end to end, no branches)

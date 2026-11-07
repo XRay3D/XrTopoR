@@ -46,6 +46,7 @@ void transform(Graphic& g, const Motion& m, bool rightAngle) {
   g.b = m.apply(g.b);
   g.m = m.apply(g.m);
   for (auto& p : g.pts) p = m.apply(p);
+  if (m.mirror) g.mirrorArcs();
 }
 
 bool onPad(const Pad& p, Vec2 pt, LayerId l, int net) {
@@ -312,6 +313,7 @@ bool move(Board& b, const Fragment& f, const Motion& m) {
   for (int zi : f.zones) {
     Zone& z = b.zones[zi];
     for (auto& p : z.outline) p = m.apply(p);
+    if (z.shape) transform(*z.shape, m, rightAngle);
     for (auto* polys : {&z.filled, &z.cutouts})
       for (auto& poly : *polys)
         for (auto& p : poly) p = m.apply(p);
@@ -415,7 +417,7 @@ std::vector<Vec2> figureVertices(const Graphic& g) {
   switch (g.kind) {
     case GraphicKind::Line:
     case GraphicKind::Arc: return {g.a, g.b};
-    case GraphicKind::Circle: return {g.b};
+    case GraphicKind::Circle: return {g.a, g.b};  // the centre, the rim
     case GraphicKind::Rect: return {g.a, {g.b.x, g.a.y}, g.b, {g.a.x, g.b.y}};
     case GraphicKind::Poly: return g.pts;
   }
@@ -426,12 +428,17 @@ std::vector<Vec2> figureMiddles(const Graphic& g) {
   switch (g.kind) {
     case GraphicKind::Line: return {(g.a + g.b) * 0.5};
     case GraphicKind::Arc: return {g.m};
-    case GraphicKind::Circle:
-    case GraphicKind::Rect: return {};
+    case GraphicKind::Circle: return {};
+    case GraphicKind::Rect:
     case GraphicKind::Poly: {
+      // A closed figure's sides, an arc's middle on its arc.
+      auto vs = figureVertices(g);
       std::vector<Vec2> out;
-      size_t n = g.pts.size(), sides = n >= 3 ? n : n - 1;  // a polygon is closed
-      for (size_t k = 0; n >= 2 && k < sides; ++k) out.push_back((g.pts[k] + g.pts[(k + 1) % n]) * 0.5);
+      for (size_t k = 0; vs.size() >= 3 && k < vs.size(); ++k) {
+        Vec2 p = vs[k], q = vs[(k + 1) % vs.size()];
+        double deg = g.arcOf(k);
+        out.push_back(deg != 0 ? arcMiddle(p, q, deg) : (p + q) * 0.5);
+      }
       return out;
     }
   }
@@ -440,7 +447,8 @@ std::vector<Vec2> figureMiddles(const Graphic& g) {
 
 namespace {
 
-// Vertex k of a drawing set to p; an arc keeps its shape, a rectangle stays one (its neighbouring corners follow).
+// Vertex k of a drawing set to p; an arc keeps its shape, a rectangle stays one (its neighbouring corners follow),
+// a circle's centre takes the circle along.
 void setFigureVertex(Graphic& g, int k, Vec2 p) {
   switch (g.kind) {
     case GraphicKind::Line:
@@ -453,7 +461,10 @@ void setFigureVertex(Graphic& g, int k, Vec2 p) {
       g.b = b;
       break;
     }
-    case GraphicKind::Circle: g.b = p; break;
+    case GraphicKind::Circle:
+      if (k == 0) g.b += p - g.a;
+      (k ? g.b : g.a) = p;
+      break;
     case GraphicKind::Rect:
       // Corners a, (b.x, a.y), b, (a.x, b.y).
       if (k == 0 || k == 3) g.a.x = p.x;
@@ -474,7 +485,7 @@ void moveFigureVertex(std::vector<Graphic>& list, int i, int k, Vec2 to) {
   if (k < 0 || k >= int(vs.size())) return;
   Vec2 p = vs[k];
   LayerId layer = list[i].layer;
-  // A circle's rim point is no end of anything.
+  // A circle has no ends for anything to meet.
   bool joins = list[i].kind != GraphicKind::Circle;
   for (int j = 0; j < int(list.size()); ++j) {
     if (j == i) {
@@ -499,18 +510,37 @@ void bendFigure(std::vector<Graphic>& list, int i, int k, Vec2 to) {
       break;
     }
     case GraphicKind::Arc:
-      if (std::abs(orient(g.a, g.b, to)) < 1e-6 * (g.b - g.a).len2()) {
+      if (arcAngle(g.a, to, g.b) == 0) {
         g.kind = GraphicKind::Line;  // a mid point on the chord makes no arc
         g.m = {};
       } else {
         g.m = to;
       }
       break;
-    case GraphicKind::Poly:
-      if (k >= 0 && k < int(g.pts.size())) g.pts.insert(g.pts.begin() + k + 1, to);
+    case GraphicKind::Rect:
+      // A side moves across itself: the rectangle stays one. Sides: a.y, b.x, b.y, a.x.
+      if (k == 0) g.a.y = to.y;
+      else if (k == 1) g.b.x = to.x;
+      else if (k == 2) g.b.y = to.y;
+      else if (k == 3) g.a.x = to.x;
       break;
-    case GraphicKind::Circle:
-    case GraphicKind::Rect: break;
+    case GraphicKind::Poly: {
+      int n = int(g.pts.size());
+      if (k < 0 || k >= n) break;
+      Vec2 p = g.pts[k], q = g.pts[(k + 1) % n];
+      if (g.arcOf(k) != 0) {
+        // An arc's side bends through the point (straight again on the chord).
+        g.arcs[k] = arcAngle(p, to, q);
+      } else {
+        if (!g.arcs.empty()) {
+          g.arcs.resize(n, 0);
+          g.arcs.insert(g.arcs.begin() + k + 1, 0);
+        }
+        g.pts.insert(g.pts.begin() + k + 1, to);
+      }
+      break;
+    }
+    case GraphicKind::Circle: break;
   }
 }
 
@@ -525,9 +555,14 @@ void moveFigureSide(std::vector<Graphic>& list, int i, Vec2 d) {
 void tidyFigure(Graphic& g) {
   if (g.kind != GraphicKind::Poly) return;
   auto& p = g.pts;
+  if (!g.arcs.empty()) g.arcs.resize(p.size(), 0);
   for (size_t k = 0; k < p.size() && p.size() > 3;)
-    if (sameVertex(p[k], p[(k + 1) % p.size()])) p.erase(p.begin() + k);
-    else ++k;
+    if (sameVertex(p[k], p[(k + 1) % p.size()])) {
+      p.erase(p.begin() + k);
+      if (!g.arcs.empty()) g.arcs.erase(g.arcs.begin() + k);
+    } else {
+      ++k;
+    }
 }
 
 std::optional<Graphic> figureOf(const Board& b, ItemRef r, int part) {
@@ -540,11 +575,13 @@ std::optional<Graphic> figureOf(const Board& b, ItemRef r, int part) {
     }
     case ItemType::Zone: {
       const Zone& z = b.zones[r.index];
-      if (!z.filled.empty() || z.outline.size() < 3) return std::nullopt;
+      if (z.shape) return z.shape;
+      if (z.outline.size() < 3) return std::nullopt;
       Graphic g;
       g.kind = GraphicKind::Poly;
       g.layer = z.layer;
       g.pts = z.outline;
+      g.filled = true;
       return g;
     }
     default: return std::nullopt;
@@ -560,7 +597,7 @@ void editFigure(Board& b, ItemRef r, int part, const std::function<void(std::vec
       if (!g) break;
       std::vector<Graphic> list{*g};
       fn(list, 0);
-      b.zones[r.index].outline = list[0].pts;
+      b.zones[r.index].setShape(list[0]);
       break;
     }
     default: break;
@@ -775,6 +812,7 @@ Fragment paste(Board& b, const Clip& c, Vec2 at) {
     if (z.layer < 0) continue;
     z.net = net(z.net);
     for (auto& p : z.outline) p = m.apply(p);
+    if (z.shape) transform(*z.shape, m, true);
     for (auto& poly : z.filled)
       for (auto& p : poly) p = m.apply(p);
     for (auto& poly : z.cutouts)

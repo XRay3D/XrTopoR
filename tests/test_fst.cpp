@@ -173,6 +173,59 @@ TEST(FstIO, ReadAllExamples) {
   EXPECT_GT((*s)->copperCount(), 2);
 }
 
+// Figures keep their kind through a .fst: a rectangle of the outline, a polygon's arcs, a copper area's circle.
+TEST(FstIO, FiguresKeepTheirKind) {
+  auto r = io::loadBoard(data("topor/Example_03/arz_2L.fst"));
+  ASSERT_TRUE(r) << r.error();
+  Board& a = **r;
+  LayerId edge = -1;
+  for (LayerId l = 0; l < LayerId(a.layers.size()); ++l)
+    if (a.isEdge(l)) edge = l;
+  ASSERT_GE(edge, 0);
+  std::erase_if(a.graphics, [&](const Graphic& g) { return g.layer == edge; });
+  Graphic rect;
+  rect.kind = GraphicKind::Rect;
+  rect.layer = edge;
+  rect.width = mmToNm(0.1);
+  rect.a = {0, -112.0 * kNmPerMm};
+  rect.b = {102.0 * kNmPerMm, 0};
+  a.graphics.push_back(rect);
+  Graphic hole;
+  hole.kind = GraphicKind::Poly;
+  hole.layer = edge;
+  hole.width = mmToNm(0.1);
+  hole.pts = {{40e6, -40e6}, {60e6, -40e6}, {60e6, -60e6}, {40e6, -60e6}};
+  hole.arcs = {0, -90, 0, 180};
+  a.graphics.push_back(hole);
+  io::rebuildOutline(a);
+  ASSERT_EQ(a.outline.size(), 2u);
+  Zone z;
+  z.layer = a.topCopper();
+  Graphic c;
+  c.kind = GraphicKind::Circle;
+  c.a = {20e6, -20e6};
+  c.b = {23e6, -20e6};
+  z.setShape(c);
+  a.zones.push_back(z);
+  auto again = io::readFst(io::writeFst(a), "rt.fst");
+  ASSERT_TRUE(again) << again.error();
+  const Board& b = **again;
+  std::vector<const Graphic*> edges;
+  for (auto& g : b.graphics)
+    if (b.isEdge(g.layer)) edges.push_back(&g);
+  ASSERT_EQ(edges.size(), 2u);
+  EXPECT_EQ(edges[0]->kind, GraphicKind::Rect);
+  EXPECT_EQ(edges[1]->kind, GraphicKind::Poly);
+  ASSERT_EQ(edges[1]->pts.size(), 4u);
+  ASSERT_EQ(edges[1]->arcs.size(), 4u);
+  EXPECT_NEAR(edges[1]->arcs[1], -90, 1e-6);
+  EXPECT_NEAR(edges[1]->arcs[3], 180, 1e-6);
+  EXPECT_EQ(b.outline.size(), 2u);
+  ASSERT_TRUE(b.zones.back().shape);
+  EXPECT_EQ(b.zones.back().shape->kind, GraphicKind::Circle);
+  EXPECT_NEAR((b.zones.back().shape->b - b.zones.back().shape->a).len(), 3e6, 10);
+}
+
 TEST(FstIO, RoundTrip) {
   auto r = io::loadBoard(data("topor/Example_03/arz_2L.fst"));
   ASSERT_TRUE(r) << r.error();

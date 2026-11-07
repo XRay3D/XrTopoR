@@ -94,35 +94,22 @@ Result<void> saveBoard(const Board& b, const std::string& path) {
   }
 }
 
+void rebuildOutline(Board& b) {
+  for (LayerId l = 0; l < LayerId(b.layers.size()); ++l)
+    if (b.isEdge(l)) {
+      buildOutline(b, l);
+      return;
+    }
+}
+
 void buildOutline(Board& b, LayerId edgeLayer) {
   // Collect open chains and closed loops from graphics on the edge layer.
   std::vector<Polyline> chains;
   auto collect = [&](const Graphic& g) {
     if (g.layer != edgeLayer) return;
-    switch (g.kind) {
-      case GraphicKind::Line: chains.push_back({g.a, g.b}); break;
-      case GraphicKind::Arc: {
-        auto arc = ArcGeom::fromThreePoints(g.a, g.m, g.b);
-        if (arc.valid) chains.push_back(arc.tessellate(5000));
-        break;
-      }
-      case GraphicKind::Circle: {
-        double r = (g.b - g.a).len();
-        auto pl = Shape::circle(g.a, r).outline(5000);
-        pl.push_back(pl.front());
-        chains.push_back(pl);
-        break;
-      }
-      case GraphicKind::Rect:
-        chains.push_back({g.a, {g.b.x, g.a.y}, g.b, {g.a.x, g.b.y}, g.a});
-        break;
-      case GraphicKind::Poly: {
-        auto p = g.pts;
-        if (!p.empty()) p.push_back(p.front());
-        chains.push_back(p);
-        break;
-      }
-    }
+    auto p = g.path();
+    if (g.closed() && !p.empty()) p.push_back(p.front());
+    if (p.size() >= 2) chains.push_back(std::move(p));
   };
   for (auto& g : b.graphics) collect(g);
   for (auto& c : b.components)

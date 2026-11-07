@@ -47,33 +47,19 @@ std::vector<Shape> itemShapes(const Board& b, ItemRef r, double expand, LayerId 
     case ItemType::Detail: {
       const Graphic& g = b.graphics[r.index];
       double w = g.width / 2.0 + expand;
-      switch (g.kind) {
-        case GraphicKind::Line: out.push_back(Shape::capsule(g.a, g.b, w)); break;
-        case GraphicKind::Arc: {
-          auto arc = ArcGeom::fromThreePoints(g.a, g.m, g.b);
-          auto pts = arc.valid ? arc.tessellate(2000) : Polyline{g.a, g.b};
-          for (size_t i = 1; i < pts.size(); ++i) out.push_back(Shape::capsule(pts[i - 1], pts[i], w));
-          break;
-        }
-        case GraphicKind::Circle: {
-          double rad = (g.b - g.a).len();
-          if (b.drawnFilled(g)) out.push_back(Shape::circle(g.a, rad + w));
-          else {
-            auto pts = Shape::circle(g.a, rad).outline(2000);
-            for (size_t i = 0; i < pts.size(); ++i) out.push_back(Shape::capsule(pts[i], pts[(i + 1) % pts.size()], w));
-          }
-          break;
-        }
-        case GraphicKind::Rect:
-        case GraphicKind::Poly: {
-          Polyline pts = g.kind == GraphicKind::Rect ? Polyline{g.a, {g.b.x, g.a.y}, g.b, {g.a.x, g.b.y}} : g.pts;
-          if (b.drawnFilled(g) && pts.size() >= 3) out.push_back(Shape::polygon(pts, w));
-          else
-            for (size_t i = 0; i + 1 < pts.size() + (pts.size() >= 3); ++i)
-              out.push_back(Shape::capsule(pts[i], pts[(i + 1) % pts.size()], w));
-          break;
-        }
+      bool filled = b.drawnFilled(g);
+      if (g.kind == GraphicKind::Circle && filled) {
+        out.push_back(Shape::circle(g.a, (g.b - g.a).len() + w));
+        break;
       }
+      auto pts = g.path(2000);
+      if (filled && pts.size() >= 3) {
+        out.push_back(Shape::polygon(pts, w));
+        break;
+      }
+      // A line along the figure; a closed one goes back to its start.
+      size_t sides = g.closed() && pts.size() >= 3 ? pts.size() : pts.size() - 1;
+      for (size_t i = 0; pts.size() >= 2 && i < sides; ++i) out.push_back(Shape::capsule(pts[i], pts[(i + 1) % pts.size()], w));
       break;
     }
   }
