@@ -1267,7 +1267,7 @@ struct Reader {
       std::map<int, Vec2> firstPoint;
       for (const Track& t : b.tracks)
         if (t.zip == z) {
-          if (!std::ranges::contains(nets, t.net)) nets.push_back(t.net);
+          if (!r::contains(nets, t.net)) nets.push_back(t.net);
           if (!firstPoint.contains(t.net)) firstPoint[t.net] = t.a.v();
         }
       if (nets.empty()) continue;
@@ -1275,7 +1275,7 @@ struct Reader {
       if (zip.pair >= 0)
         if (const SignalCluster* c = b.hispeed.clusterOf(b.hispeed.diffSignals[size_t(zip.pair)].signalA))
           for (const std::string& n : c->nets)
-            if (int ni = b.findNet(n); std::ranges::contains(nets, ni)) p = ni;
+            if (int ni = b.findNet(n); r::contains(nets, ni)) p = ni;
       if (p < 0) p = nets.front();
       zip.netP = p;
       for (int n : nets)

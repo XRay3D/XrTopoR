@@ -474,7 +474,7 @@ std::vector<int> settleClasps(Board& b, Topology& t, const std::vector<int>& cho
         for (int e = 0; e < 2; ++e)
           if (s.end[e] == owner) {
             singles[s.net == t.owners[size_t(owner)].net].push_back(wj);
-            lockedSingle |= s.locked || !std::ranges::contains(chosen, wj);
+            lockedSingle |= s.locked || !r::contains(chosen, wj);
           }
       }
       auto vertexPos = [&](int sd) {
@@ -577,7 +577,7 @@ void drawModel(Board& b, Topology& t, bool direct, RealizeStats& stats, int& nWi
   // The single wires at a clasp that turned were drawn round its ends as they were: drawn again from the turned
   // ones, the rest as they lie (a single of SCL at AMK310's clasp came 0.02 mm inside the rule from SDA's end).
   std::vector<int> again = settleClasps(b, t, chosen);
-  std::ranges::sort(again);
+  r::sort(again);
   again.erase(std::unique(again.begin(), again.end()), again.end());
   if (!again.empty() && direct) {
     std::set<uint32_t> old;

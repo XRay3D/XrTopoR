@@ -188,7 +188,7 @@ void PropertiesPanel::rebuild() {
       // All of one zipped section: the section's page (TopoR's «Свойства застёгнутой пары проводников»).
       const Board& bd = *doc_->board();
       const int z = bd.tracks[size_t(tracks.front())].zip;
-      const bool oneZip = z >= 0 && std::ranges::all_of(tracks, [&](int t) { return bd.tracks[size_t(t)].zip == z; });
+      const bool oneZip = z >= 0 && r::all_of(tracks, [&](int t) { return bd.tracks[size_t(t)].zip == z; });
       page = oneZip ? zipPage(z) : wirePage(tracks);
     }
     else if (!vias.empty()) page = viaPage(vias);

@@ -128,7 +128,7 @@ std::expected<int, std::string> zipTracks(Board& b, const std::vector<int>& sel)
     const Track& t = b.tracks[size_t(i)];
     if (t.layer != layer) return std::unexpected(std::string("проводники должны быть на одном слое"));
     if (t.zip >= 0) return std::unexpected(std::string("проводник уже застёгнут"));
-    if (!std::ranges::contains(nets, t.net)) nets.push_back(t.net);
+    if (!r::contains(nets, t.net)) nets.push_back(t.net);
   }
   if (nets.size() != 2) return std::unexpected(std::string("нужны проводники двух цепей"));
   const int pair = b.pairOfNet(nets[0]);
@@ -185,7 +185,7 @@ std::expected<int, std::string> zipTracks(Board& b, const std::vector<int>& sel)
   };
   // Both runs the same way: the N run starts nearer the P run's start.
   if ((runN->front().a.v() - runP->front().a.v()).len() > (runN->back().b.v() - runP->front().a.v()).len()) {
-    std::ranges::reverse(*runN);
+    r::reverse(*runN);
     for (Track& t : *runN) std::swap(t.a, t.b);
   }
   const bool fromP = length(*runP) >= length(*runN);

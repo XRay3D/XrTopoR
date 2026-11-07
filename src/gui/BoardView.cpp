@@ -2206,7 +2206,7 @@ std::vector<int> BoardView::selectedZips() const {
   if (!doc_->hasBoard()) return out;
   const Board& b = *doc_->board();
   for (ItemRef r : doc_->selectedItems())
-    if (r.type == ItemType::Track && b.tracks[r.index].zip >= 0 && !std::ranges::contains(out, b.tracks[r.index].zip)) out.push_back(b.tracks[r.index].zip);
+    if (r.type == ItemType::Track && b.tracks[r.index].zip >= 0 && !r::contains(out, b.tracks[r.index].zip)) out.push_back(b.tracks[r.index].zip);
   return out;
 }
 
@@ -2237,7 +2237,7 @@ void BoardView::unzipSelection() {
   if (zips.empty()) return;
   Board& b = *doc_->board();
   auto before = doc_->beginEdit();
-  std::ranges::sort(zips, std::greater<>());
+  r::sort(zips, std::greater<>());
   for (int z : zips) unzip(b, z);
   doc_->commitEdit(before, tr("Расстегнуть проводники"));
   emit status(tr("Проводники расстёгнуты: %1").arg(zips.size()));

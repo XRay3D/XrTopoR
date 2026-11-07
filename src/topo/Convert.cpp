@@ -389,14 +389,14 @@ void Topology::convertWires(const Board& b, BuildScratch& scratch) {
     w.end[0] = ends[ci][0].owner;
     w.end[1] = ends[ci][1].owner;
     for (int ti : c.tracks) w.tracks.push_back(b.tracks[ti].id);
-    w.locked = std::ranges::any_of(c.tracks, [&](int ti) { return b.tracks[ti].locked || b.tracks[ti].serp >= 0; });
+    w.locked = r::any_of(c.tracks, [&](int ti) { return b.tracks[ti].locked || b.tracks[ti].serp >= 0; });
     w.dirty = true;
     if (chainZip[ci] >= 0) {  // the pair's wire: as wide as the pair, never narrower
       const ZippedWire& zip = b.zips[size_t(chainZip[ci])];
       w.pair = zip.pair;
       w.zip = chainZip[ci];
       w.widthMin = w.width;
-      w.locked |= zip.fixed || std::ranges::any_of(zip.axis, [](const Track& t) { return t.serp >= 0; });
+      w.locked |= zip.fixed || r::any_of(zip.axis, [](const Track& t) { return t.serp >= 0; });
     }
     if (w.end[0] < 0 || w.end[1] < 0 || m.ownerVerts[w.end[0]].empty() || m.ownerVerts[w.end[1]].empty()) {
       ++noEnd;
