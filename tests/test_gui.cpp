@@ -1058,6 +1058,29 @@ TEST(Gui, FreestyleDrag) {
   EXPECT_EQ(f.view.mode(), Mode::Select);
 }
 
+// A keepout drawn over a track, then F5 with nothing selected: the track goes round it (the model is built
+// anew with the keepout, its wire laid round, and every wire is drawn from the model).
+TEST(Gui, KeepoutDrawnOverATrackThenF5) {
+  Fixture f("topor/Example_01/SingleLayer.fst");
+  auto keepouts = [&] {
+    int n = 0;
+    for (const DrcViolation& v : runDrc(f.b())) n += v.type == DrcViolation::Type::Keepout;
+    return n;
+  };
+  auto before = f.doc.beginEdit();
+  Keepout k;
+  Graphic g;
+  g.kind = GraphicKind::Circle;
+  g.a = {20.5 * kNmPerMm, -9.7 * kNmPerMm};  // on the wire of NET00015 between the ring and R8
+  g.b = g.a + Vec2{1.5 * kNmPerMm, 0};
+  k.shape.push_back(g);
+  f.doc.board()->keepouts.push_back(k);
+  f.doc.commitEdit(before, "keepout");
+  ASSERT_GE(keepouts(), 1) << "drawn over the track";
+  f.view.recomputeShapes();
+  EXPECT_EQ(keepouts(), 0) << "F5 laid the wire round the keepout";
+}
+
 // «Вставка»: a keepout rectangle, a copper polygon with a cutout and another board contour.
 TEST(Gui, DrawingTools) {
   Fixture f("tt.kicad_pcb");

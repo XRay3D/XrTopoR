@@ -235,7 +235,7 @@ LayerObstacles collect(const Board& b, LayerId layer, const std::vector<RealVia>
       if (!inRegion(s.bbox())) continue;
       bool closed = s.kind != Shape::Kind::Segment;
       Polyline pts = s.kind == Shape::Kind::Polygon ? s.poly
-                     : closed                       ? s.outline(std::max(2000.0, s.r * 0.02))
+                     : closed                       ? s.outline(1000.0)
                                                     : Polyline{s.a, s.b};
       int prev = -1, first = -1;
       size_t n = pts.size(), segs = closed ? n : n - 1;

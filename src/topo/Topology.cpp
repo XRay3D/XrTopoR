@@ -272,8 +272,10 @@ void Topology::buildOwners(const Board& b, BuildScratch& scratch) {
     LayerMask layers = (k.layers ? k.layers : cuMask) & cuMask;
     for (const Shape& s : k.shapes()) {
       const bool area = s.kind != Shape::Kind::Segment;
+      // (A round keepout as a polygon within 1 um of the circle: the DRC measures against the circle itself,
+      // and a wire along a chord 30 um inside it was 30 um into the keepout.)
       wall(s.kind == Shape::Kind::Polygon ? s.poly
-           : s.kind == Shape::Kind::Point ? s.outline(std::max(2000.0, s.r * 0.02))
+           : s.kind == Shape::Kind::Point ? s.outline(1000.0)
                                           : Polyline{s.a, s.b},
            area, false, layers);
     }

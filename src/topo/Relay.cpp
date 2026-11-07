@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <print>
 #include <queue>
 #include <set>
 #include <unordered_map>
@@ -251,14 +252,23 @@ std::optional<RelayPath> findRelay(const Topology& t, int wi, const std::vector<
   };
   constexpr double kSqueeze = 200;  // a 0.1 mm deficit costs as much as a 20 mm detour
   std::map<std::pair<int, int>, Fit> fitCache;
+  int dbg[6] = {0, 0, 0, 0, 0, 0};
   auto fit = [&](int e, const std::vector<int>& cids, int gap) -> const Fit& {
     auto [it, fresh] = fitCache.try_emplace({e, gap});
     if (!fresh) return it->second;
+    ++dbg[0];
     const Edge& E = m.edges[e];
-    if (E.constrained) return it->second;
+    if (E.constrained) return ++dbg[1], it->second;
     if (avoid)
       for (int v : E.v)
         if (const int o = m.verts[v].owner; o >= 0 && o < int(avoid->size()) && (*avoid)[size_t(o)]) return it->second;
+    // A side of the wire's own end pad (its corner ring): crossed on the way out of the pad, whatever the
+    // edge's capacity says (an owner's own edges have no room by rule).
+    if (m.verts[E.v[0]].owner == m.verts[E.v[1]].owner && (m.verts[E.v[0]].owner == w.end[0] || m.verts[E.v[0]].owner == w.end[1])) {
+      it->second.ok = true;
+      it->second.p = (m.verts[E.v[0]].p + m.verts[E.v[1]].p) * 0.5;
+      return it->second;
+    }
     std::vector<int> ws;
     for (int cid : cids) ws.push_back(t.crossings[cid].wire);
     ws.insert(ws.begin() + gap, wi);
@@ -273,6 +283,7 @@ std::optional<RelayPath> findRelay(const Topology& t, int wi, const std::vector<
       return k == Owner::Kind::Outline || k == Owner::Kind::Keepout;
     });
     it->second.ok = c.cls < 3 && (squeeze ? (!atWall || c.deficit <= 0) : (c.deficit <= 0 && !c.narrowed));
+    if (!it->second.ok) { if (c.cls >= 3) ++dbg[2]; else if (c.deficit > 0) ++dbg[3]; else if (c.narrowed) ++dbg[4]; if (atWall) ++dbg[5]; }
     if (squeeze) it->second.penalty = kSqueeze * std::max(0.0, c.deficit) + (c.narrowed ? kSqueeze * 10000 : 0);
     it->second.p = pointOn(m, E, slotOf(c, gap).mid(), c.L);
     return it->second;
@@ -377,7 +388,10 @@ std::optional<RelayPath> findRelay(const Topology& t, int wi, const std::vector<
       }
     }
   }
-  if (goal < 0) return std::nullopt;
+  if (goal < 0) {
+    if (std::getenv("XR_RELAY_DEBUG")) std::println(stderr, "findRelay wire {}: no goal, {} nodes, fits tried {}, refused: constrained {}, cls3 {}, deficit {}, narrowed {}, wall {}", wi, nodes.size(), dbg[0], dbg[1], dbg[2], dbg[3], dbg[4], dbg[5]);
+    return std::nullopt;
+  }
   out.length = goalCost;
   std::set<int> edges;
   for (int ni = goal; ni >= 0; ni = nodes[size_t(ni)].parent) {
