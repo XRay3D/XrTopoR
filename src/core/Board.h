@@ -302,6 +302,9 @@ struct Board {
   LayerId topCopper() const { return copperByIndex(0); }
   LayerId bottomCopper() const { return copperByIndex(copperCount() - 1); }
   LayerMask allCopperMask() const;
+  // The board outline's layer: its drawings are contours, drawn and picked by their lines, never filled.
+  bool isEdge(LayerId l) const { return l >= 0 && l < LayerId(layers.size()) && layers[l].kind == LayerKind::Edge; }
+  bool drawnFilled(const Graphic& g) const { return g.filled && !isEdge(g.layer); }
 
   // Nets
   int findNet(const std::string& name) const;

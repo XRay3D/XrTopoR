@@ -800,6 +800,96 @@ TEST(Gui, DragKeepsWiresConnected) {
   EXPECT_EQ(Connectivity::compute(f.b()).ratsnest.size(), unrouted);
 }
 
+// The board outline is picked by its line, not inside it (its contour is never filled), and edited by handles as a
+// wire is: a corner drags the ends of the outline's lines meeting there, a side's middle adds a vertex.
+TEST(Gui, BoardOutlineByItsHandles) {
+  Fixture f("topor/Example_05/MinVia_standard_routing.fst");
+  const Board& b = f.b();
+  int poly = -1;
+  for (int i = 0; i < int(b.graphics.size()); ++i)
+    if (b.isEdge(b.graphics[i].layer) && b.graphics[i].kind == GraphicKind::Poly) poly = i;
+  ASSERT_GE(poly, 0);  // TopoR's FilledContour beside the four lines
+  EXPECT_TRUE(b.graphics[poly].filled);
+  auto isOutline = [&](ItemRef r) { return r.type == ItemType::Detail && f.b().isEdge(f.b().graphics[r.index].layer); };
+  BBox bb;
+  for (Vec2 v : b.outline[0]) bb.add(v);
+  Vec2 lo{bb.minX, bb.minY}, hi{bb.maxX, bb.maxY};
+  Vec2 left{lo.x, (lo.y + hi.y) / 2};
+
+  // Inside the board, 1 mm off its left side: not the outline.
+  f.look(left, 20);
+  QTest::mouseClick(&f.view, Qt::LeftButton, {}, f.at(left + Vec2{kNmPerMm, 0}));
+  EXPECT_FALSE(std::ranges::any_of(f.doc.selectedItems(), isOutline));
+  QTest::mouseClick(&f.view, Qt::LeftButton, {}, f.at(left));
+  ASSERT_EQ(f.doc.selectedItems().size(), 1u);
+  EXPECT_TRUE(isOutline(f.doc.selectedItems()[0]));
+  if (const char* dir = std::getenv("XR_SHOT_DIR")) {
+    f.doc.setSelection({{ItemType::Detail, poly}}, {});
+    f.view.fitBoard();
+    f.view.grab().save(QString(dir) + "/outline.png");
+  }
+
+  // A corner of the contour: the polygon's vertex and the two lines' ends meeting there go to the new place.
+  f.doc.setSelection({{ItemType::Detail, poly}}, {});
+  auto pts = b.graphics[poly].pts;
+  int k = int(std::ranges::find_if(pts, [&](Vec2 v) { return (v - lo).len() < 1000; }) - pts.begin());
+  ASSERT_LT(k, int(pts.size()));
+  f.look(lo, 20);
+  Vec2 to = lo + Vec2{2 * kNmPerMm, 1 * kNmPerMm};
+  f.drag(f.at(lo), f.at(to));
+  Vec2 moved = f.b().graphics[poly].pts[k];
+  EXPECT_NEAR((moved - to).len(), 0, 0.05 * kNmPerMm);
+  int ends = 0;
+  for (auto& g : f.b().graphics)
+    if (g.kind == GraphicKind::Line && f.b().isEdge(g.layer)) {
+      ends += g.a == moved;
+      ends += g.b == moved;
+      EXPECT_GT((g.a - lo).len(), 1000);
+      EXPECT_GT((g.b - lo).len(), 1000);
+    }
+  EXPECT_EQ(ends, 2);
+  EXPECT_TRUE(std::ranges::any_of(f.b().outline[0], [&](Vec2 v) { return (v - moved).len() < 1000; }));
+  f.doc.undoStack()->undo();
+  EXPECT_EQ(f.b().graphics[poly].pts[k], lo);
+
+  // The middle of a side: a new vertex there.
+  f.doc.setSelection({{ItemType::Detail, poly}}, {});
+  Vec2 a = pts[k], c = pts[(k + 1) % pts.size()];
+  Vec2 mid = (a + c) * 0.5;
+  f.look(mid, 20);
+  Vec2 out = mid + (c - a).perp().normalized() * (2 * kNmPerMm);
+  f.drag(f.at(mid), f.at(out));
+  ASSERT_EQ(f.b().graphics[poly].pts.size(), pts.size() + 1);
+  EXPECT_NEAR((f.b().graphics[poly].pts[k + 1] - out).len(), 0, 0.05 * kNmPerMm);
+  f.doc.undoStack()->undo();
+  EXPECT_EQ(f.b().graphics[poly].pts.size(), pts.size());
+
+  // One line of the contour moves across itself, the lines meeting its ends stretch.
+  int line = -1;
+  for (int i = 0; i < int(b.graphics.size()) && line < 0; ++i)
+    if (b.isEdge(b.graphics[i].layer) && b.graphics[i].kind == GraphicKind::Line &&
+        std::abs(b.graphics[i].a.x - lo.x) < 1000 && std::abs(b.graphics[i].b.x - lo.x) < 1000)
+      line = i;
+  ASSERT_GE(line, 0);
+  f.look(left, 20);
+  QTest::mouseClick(&f.view, Qt::LeftButton, {}, f.at(left));
+  ASSERT_EQ(f.doc.selectedItems().size(), 1u);
+  f.doc.setSelection({{ItemType::Detail, line}}, {});
+  Vec2 lmid = (b.graphics[line].a + b.graphics[line].b) * 0.5;
+  // Off the middle marker: the line itself.
+  Vec2 grab = lmid + Vec2{0, 3 * kNmPerMm};
+  f.drag(f.at(grab), f.at(grab + Vec2{-1.5 * kNmPerMm, 2 * kNmPerMm}));
+  const Graphic& g = f.b().graphics[line];
+  EXPECT_NEAR(g.a.x, lo.x - 1.5 * kNmPerMm, 0.05 * kNmPerMm);
+  EXPECT_NEAR(g.b.x, lo.x - 1.5 * kNmPerMm, 0.05 * kNmPerMm);
+  EXPECT_NEAR(std::abs(g.b.y - g.a.y), hi.y - lo.y, 1000);  // across itself only
+  int joined = 0;
+  for (auto& h : f.b().graphics)
+    if (&h != &g && f.b().isEdge(h.layer) && h.kind == GraphicKind::Line)
+      joined += (h.a == g.a) + (h.b == g.a) + (h.a == g.b) + (h.b == g.b);
+  EXPECT_EQ(joined, 2);
+}
+
 // S flips a component to the other side; its SMD wires stay behind, a second S brings it back.
 TEST(Gui, FlipComponent) {
   Fixture f("topor/Example_05/MinVia_standard_routing.fst");

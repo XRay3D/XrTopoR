@@ -57,7 +57,7 @@ std::vector<Shape> itemShapes(const Board& b, ItemRef r, double expand, LayerId 
         }
         case GraphicKind::Circle: {
           double rad = (g.b - g.a).len();
-          if (g.filled) out.push_back(Shape::circle(g.a, rad + w));
+          if (b.drawnFilled(g)) out.push_back(Shape::circle(g.a, rad + w));
           else {
             auto pts = Shape::circle(g.a, rad).outline(2000);
             for (size_t i = 0; i < pts.size(); ++i) out.push_back(Shape::capsule(pts[i], pts[(i + 1) % pts.size()], w));
@@ -67,7 +67,7 @@ std::vector<Shape> itemShapes(const Board& b, ItemRef r, double expand, LayerId 
         case GraphicKind::Rect:
         case GraphicKind::Poly: {
           Polyline pts = g.kind == GraphicKind::Rect ? Polyline{g.a, {g.b.x, g.a.y}, g.b, {g.a.x, g.b.y}} : g.pts;
-          if (g.filled && pts.size() >= 3) out.push_back(Shape::polygon(pts, w));
+          if (b.drawnFilled(g) && pts.size() >= 3) out.push_back(Shape::polygon(pts, w));
           else
             for (size_t i = 0; i + 1 < pts.size() + (pts.size() >= 3); ++i)
               out.push_back(Shape::capsule(pts[i], pts[(i + 1) % pts.size()], w));

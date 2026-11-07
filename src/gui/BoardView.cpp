@@ -238,8 +238,10 @@ BoardView::Pick BoardView::pick(QPointF screen) const {
       if (l < 0 || l >= LayerId(b.layers.size())) continue;
       bool edge = b.layers[l].kind == LayerKind::Edge;
       if (edge ? !(filter & SelBoard) || !d.flag("showBoardOutline") : !(filter & SelMechDetails) || !layerVisible(l)) continue;
+      // Drawings lying on one another (TopoR's contour beside the outline's lines): the selected one is taken.
+      bool chosen = std::ranges::contains(doc_->selectedItems(), ItemRef{ItemType::Detail, i});
       for (auto& sh : itemShapes(b, {ItemType::Detail, i}))
-        if (double dd = std::max(0.0, sh.distance(w)); dd <= bd) {
+        if (double dd = std::max(0.0, sh.distance(w)); dd < bd || (dd == bd && (chosen || !pk.item))) {
           bd = dd;
           pk.item = ItemRef{ItemType::Detail, i};
         }
@@ -454,7 +456,8 @@ void BoardView::drawVia(QPainter& p, const Via& v, const QColor& c) {
 void BoardView::drawGraphic(QPainter& p, const Graphic& g, const QColor& c) {
   QPen pen(c, std::max(1.0, px(double(g.width))), Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
   p.setPen(pen);
-  p.setBrush(g.filled ? QBrush(c) : Qt::NoBrush);
+  bool filled = doc_->board()->drawnFilled(g);
+  p.setBrush(filled ? QBrush(c) : Qt::NoBrush);
   switch (g.kind) {
     case GraphicKind::Line: p.drawLine(toScreen(g.a), toScreen(g.b)); break;
     case GraphicKind::Arc: {
@@ -479,7 +482,7 @@ void BoardView::drawGraphic(QPainter& p, const Graphic& g, const QColor& c) {
     case GraphicKind::Poly: {
       if (g.pts.size() < 2) break;
       QPolygonF poly = toPoly(g.pts, [&](Vec2 v) { return toScreen(v); });
-      if (g.filled) p.drawPolygon(poly);
+      if (filled) p.drawPolygon(poly);
       else {
         poly << poly.first();
         p.drawPolyline(poly);
@@ -565,15 +568,7 @@ void BoardView::drawLayer(QPainter& p, LayerId l) {
   }
   if (!showDetails || (group == 0 && !d.flag("showTopMechDetails")) || (group == 2 && !d.flag("showBotMechDetails")))
     return;
-  auto draw = [&](const Graphic& g) {
-    if (L.kind == LayerKind::Edge && g.filled) {  // board contours are never filled
-      Graphic h = g;
-      h.filled = false;
-      drawGraphic(p, h, details);
-    } else {
-      drawGraphic(p, g, details);
-    }
-  };
+  auto draw = [&](const Graphic& g) { drawGraphic(p, g, details); };  // board contours are never filled
   for (int ci = 0; ci < int(b.components.size()); ++ci)
     if (componentVisible(ci))
       for (auto& g : b.components[ci].graphics)
@@ -944,7 +939,12 @@ void BoardView::mousePressEvent(QMouseEvent* e) {
       else clickSelect(pk, {});
       edit::Fragment f = selectedFragment();
       if (!f.empty()) {
-        bool segment = f.tracks.size() == 1 && f.components.empty() && f.vias.empty() && f.zones.empty();
+        // One straight segment of a wire, or one drawn line or arc, moves across itself.
+        bool alone = f.components.empty() && f.vias.empty() && f.zones.empty() && f.keepouts.empty() && f.texts.empty();
+        bool segment = alone && ((f.tracks.size() == 1 && f.details.empty()) ||
+                                 (f.tracks.empty() && f.details.size() == 1 &&
+                                  (doc_->board()->graphics[f.details[0]].kind == GraphicKind::Line ||
+                                   doc_->board()->graphics[f.details[0]].kind == GraphicKind::Arc)));
         startDrag(segment ? Drag::Segment : Drag::Fragment, w);
       }
       break;
@@ -1353,7 +1353,7 @@ void BoardView::mouseMoveEvent(QMouseEvent* e) {
       const Board& b = *doc_->board();
       bool locked = drag_ == Drag::Freestyle ? edit::hasLocked(b, fsTarget_.fragment)
                     : drag_ == Drag::Fragment || drag_ == Drag::Segment ? edit::hasLocked(b, dragFragment_)
-                                                                        : b.tracks[dragMarker_.track].locked;
+                                                                        : dragMarker_.item.type == ItemType::Track && b.tracks[dragMarker_.item.index].locked;
       if (locked) {
         emit status(tr("Среди выделенных объектов есть зафиксированные: перемещение запрещено"));
         cancelDrag();
@@ -1599,6 +1599,12 @@ edit::Fragment BoardView::selectedFragment() const {
   return f;
 }
 
+void BoardView::editMarked(const std::function<void(std::vector<Graphic>&, int)>& fn) {
+  Board& b = *doc_->board();
+  edit::editFigure(b, dragMarker_.item, dragMarker_.part, fn);
+  if (dragMarker_.item.type == ItemType::Detail && b.isEdge(b.graphics[dragMarker_.item.index].layer)) syncOutline();
+}
+
 void BoardView::syncOutline() {
   Board& b = *doc_->board();
   for (LayerId l = 0; l < LayerId(b.layers.size()); ++l)
@@ -1646,21 +1652,46 @@ std::vector<BoardView::Marker> BoardView::markers() const {
   const Board& b = *doc_->board();
   auto items = doc_->selectedItems();
   if (items.size() > 200) return out;  // markers of a whole board would hide it
+  // The middle marker only when the side is long enough on screen to hold three.
+  auto roomy = [&](Vec2 a, Vec2 c) { return px((c - a).len()) > 30; };
+  auto figure = [&](ItemRef r, int part, const Graphic& g) {
+    auto vs = edit::figureVertices(g);
+    for (int k = 0; k < int(vs.size()); ++k) out.push_back({r, part, Marker::End, k});
+    auto ms = edit::figureMiddles(g);
+    for (int k = 0; k < int(ms.size()); ++k) {
+      // A side's ends: a line's or an arc's own, a polygon's k and k + 1.
+      Vec2 a = g.kind == GraphicKind::Poly ? vs[k] : g.a, c = g.kind == GraphicKind::Poly ? vs[(k + 1) % vs.size()] : g.b;
+      if (roomy(a, c)) out.push_back({r, part, Marker::Middle, k});
+    }
+  };
   for (ItemRef r : items) {
-    if (r.type != ItemType::Track || r.index >= int(b.tracks.size())) continue;
-    out.push_back({r.index, Marker::End, 0});
-    out.push_back({r.index, Marker::End, 1});
-    // The middle marker only when the segment is long enough on screen to hold three.
-    const Track& t = b.tracks[r.index];
-    if (px((t.b.v() - t.a.v()).len()) > 30) out.push_back({r.index, Marker::Middle, 0});
+    if (r.type == ItemType::Track) {
+      if (r.index >= int(b.tracks.size())) continue;
+      const Track& t = b.tracks[r.index];
+      out.push_back({r, 0, Marker::End, 0});
+      out.push_back({r, 0, Marker::End, 1});
+      if (roomy(t.a.v(), t.b.v())) out.push_back({r, 0, Marker::Middle, 0});
+    } else if (r.type == ItemType::Keepout) {
+      const auto& sh = b.keepouts[r.index].shape;
+      for (int k = 0; k < int(sh.size()); ++k) figure(r, k, sh[k]);
+    } else if (auto g = edit::figureOf(b, r)) {
+      figure(r, 0, *g);
+    }
   }
   return out;
 }
 
 Vec2 BoardView::markerPos(const Marker& m) const {
-  const Track& t = doc_->board()->tracks[m.track];
-  if (m.kind == Marker::End) return m.end ? t.b.v() : t.a.v();
-  return t.mid ? t.mid->v() : (t.a.v() + t.b.v()) * 0.5;
+  const Board& b = *doc_->board();
+  if (m.item.type == ItemType::Track) {
+    const Track& t = b.tracks[m.item.index];
+    if (m.kind == Marker::End) return m.vertex ? t.b.v() : t.a.v();
+    return t.mid ? t.mid->v() : (t.a.v() + t.b.v()) * 0.5;
+  }
+  auto g = edit::figureOf(b, m.item, m.part);
+  if (!g) return {};
+  auto pts = m.kind == Marker::End ? edit::figureVertices(*g) : edit::figureMiddles(*g);
+  return m.vertex < int(pts.size()) ? pts[m.vertex] : Vec2{};
 }
 
 std::optional<BoardView::Marker> BoardView::markerAt(QPointF screen) const {
@@ -1708,32 +1739,54 @@ void BoardView::applyDrag() {
       if (dragFragment_.touchesOutline(b)) syncOutline();
       break;
     case Drag::Segment: {
-      // A straight segment moves across itself, so its neighbours keep their directions roughly.
-      const Track& t = b.tracks[dragFragment_.tracks[0]];
-      Vec2 n = (t.b.v() - t.a.v()).perp().normalized();
-      m.shift = t.isArc() || n.len2() == 0 ? d : n * d.dot(n);
-      edit::move(b, dragFragment_, m);
+      // A straight segment (of a wire or a drawn line) moves across itself, so its neighbours keep their
+      // directions roughly.
+      bool track = !dragFragment_.tracks.empty();
+      Vec2 a = track ? b.tracks[dragFragment_.tracks[0]].a.v() : b.graphics[dragFragment_.details[0]].a;
+      Vec2 c = track ? b.tracks[dragFragment_.tracks[0]].b.v() : b.graphics[dragFragment_.details[0]].b;
+      bool arc = track ? b.tracks[dragFragment_.tracks[0]].isArc() : b.graphics[dragFragment_.details[0]].kind == GraphicKind::Arc;
+      Vec2 n = (c - a).perp().normalized();
+      m.shift = arc || n.len2() == 0 ? d : n * d.dot(n);
+      if (track) edit::move(b, dragFragment_, m);
+      else edit::moveFigureSide(b.graphics, dragFragment_.details[0], m.shift);
+      if (dragFragment_.touchesOutline(b)) syncOutline();
       break;
     }
-    case Drag::Vertex: {
-      const Track& t = b.tracks[dragMarker_.track];
-      Vec2 other = dragMarker_.end ? t.a.v() : t.b.v();
-      edit::moveVertex(b, dragMarker_.track, dragMarker_.end, constrained(other, to));
-      break;
-    }
-    case Drag::Bend: {
-      const Track& t = b.tracks[dragMarker_.track];
-      if (t.isArc()) {
-        edit::bendTrack(b, dragMarker_.track, to);
+    case Drag::Vertex:
+      if (dragMarker_.item.type == ItemType::Track) {
+        const Track& t = b.tracks[dragMarker_.item.index];
+        Vec2 other = dragMarker_.vertex ? t.a.v() : t.b.v();
+        edit::moveVertex(b, dragMarker_.item.index, dragMarker_.vertex, constrained(other, to));
       } else {
-        // The middle of a straight segment becomes a new bend of the wire.
-        Vec2 mid = (t.a.v() + t.b.v()) * 0.5;
-        Vec2 a = t.a.v();
-        edit::splitTrack(b, dragMarker_.track, mid);
-        edit::moveVertex(b, dragMarker_.track, 1, constrained(a, to));
+        editMarked([&](std::vector<Graphic>& list, int i) {
+          // The angle mode holds the dragged vertex to its previous neighbour, as a wire's end to the other.
+          auto vs = edit::figureVertices(list[i]);
+          int k = dragMarker_.vertex;
+          Vec2 from = vs.size() > 1 ? vs[(k + vs.size() - 1) % vs.size()] : vs[k];
+          edit::moveFigureVertex(list, i, k, list[i].kind == GraphicKind::Circle ? to : constrained(from, to));
+        });
       }
       break;
-    }
+    case Drag::Bend:
+      if (dragMarker_.item.type == ItemType::Track) {
+        int ti = dragMarker_.item.index;
+        const Track& t = b.tracks[ti];
+        if (t.isArc()) {
+          edit::bendTrack(b, ti, to);
+        } else {
+          // The middle of a straight segment becomes a new bend of the wire.
+          Vec2 mid = (t.a.v() + t.b.v()) * 0.5;
+          Vec2 a = t.a.v();
+          edit::splitTrack(b, ti, mid);
+          edit::moveVertex(b, ti, 1, constrained(a, to));
+        }
+      } else {
+        editMarked([&](std::vector<Graphic>& list, int i) {
+          Vec2 from = list[i].kind == GraphicKind::Poly ? list[i].pts[dragMarker_.vertex] : list[i].a;
+          edit::bendFigure(list, i, dragMarker_.vertex, list[i].kind == GraphicKind::Arc ? to : constrained(from, to));
+        });
+      }
+      break;
   }
   doc_->invalidate();
   update();
@@ -2066,6 +2119,8 @@ void BoardView::finishDrag() {
     return;
   }
   Board& b = *doc_->board();
+  if (kind == Drag::Vertex && dragMarker_.item.type != ItemType::Track)
+    editMarked([](std::vector<Graphic>& list, int i) { edit::tidyFigure(list[i]); });
   auto map = edit::removeDegenerate(b);
   auto items = doc_->selectedItems();
   std::erase_if(items, [&](ItemRef& r) {
@@ -2076,7 +2131,8 @@ void BoardView::finishDrag() {
   QString title = kind == Drag::Freestyle ? tr("Перемещение Freestyle")
                   : kind == Drag::Fragment ? (dragFragment_.components.empty() ? tr("Переместить") : tr("Переместить компонент"))
                   : kind == Drag::Segment ? tr("Переместить сегмент")
-                                          : tr("Изменить форму проводника");
+                  : dragMarker_.item.type == ItemType::Track ? tr("Изменить форму проводника")
+                                                             : tr("Изменить форму");
   doc_->commitEdit(*dragBefore_, title);
   dragBefore_.reset();
   doc_->setSelection(std::move(items), doc_->selectedComponents());

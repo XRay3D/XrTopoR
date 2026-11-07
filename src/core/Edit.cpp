@@ -105,10 +105,7 @@ LayerMask mirrorMask(const Board& b, LayerMask m) {
 }
 
 bool Fragment::touchesOutline(const Board& b) const {
-  return std::ranges::any_of(details, [&](int i) {
-    LayerId l = b.graphics[i].layer;
-    return l >= 0 && l < LayerId(b.layers.size()) && b.layers[l].kind == LayerKind::Edge;
-  });
+  return std::ranges::any_of(details, [&](int i) { return b.isEdge(b.graphics[i].layer); });
 }
 
 BBox bboxOf(const Board& b, const Fragment& f) {
@@ -412,6 +409,162 @@ bool bendTrack(Board& b, int track, Vec2 to) {
   }
   t.mid = Point(to);
   return true;
+}
+
+std::vector<Vec2> figureVertices(const Graphic& g) {
+  switch (g.kind) {
+    case GraphicKind::Line:
+    case GraphicKind::Arc: return {g.a, g.b};
+    case GraphicKind::Circle: return {g.b};
+    case GraphicKind::Rect: return {g.a, {g.b.x, g.a.y}, g.b, {g.a.x, g.b.y}};
+    case GraphicKind::Poly: return g.pts;
+  }
+  return {};
+}
+
+std::vector<Vec2> figureMiddles(const Graphic& g) {
+  switch (g.kind) {
+    case GraphicKind::Line: return {(g.a + g.b) * 0.5};
+    case GraphicKind::Arc: return {g.m};
+    case GraphicKind::Circle:
+    case GraphicKind::Rect: return {};
+    case GraphicKind::Poly: {
+      std::vector<Vec2> out;
+      size_t n = g.pts.size(), sides = n >= 3 ? n : n - 1;  // a polygon is closed
+      for (size_t k = 0; n >= 2 && k < sides; ++k) out.push_back((g.pts[k] + g.pts[(k + 1) % n]) * 0.5);
+      return out;
+    }
+  }
+  return {};
+}
+
+namespace {
+
+// Vertex k of a drawing set to p; an arc keeps its shape, a rectangle stays one (its neighbouring corners follow).
+void setFigureVertex(Graphic& g, int k, Vec2 p) {
+  switch (g.kind) {
+    case GraphicKind::Line:
+      (k ? g.b : g.a) = p;
+      break;
+    case GraphicKind::Arc: {
+      Vec2 a = k ? g.a : p, b = k ? p : g.b;
+      g.m = similar(g.m, g.a, g.b, a, b);
+      g.a = a;
+      g.b = b;
+      break;
+    }
+    case GraphicKind::Circle: g.b = p; break;
+    case GraphicKind::Rect:
+      // Corners a, (b.x, a.y), b, (a.x, b.y).
+      if (k == 0 || k == 3) g.a.x = p.x;
+      else g.b.x = p.x;
+      if (k == 0 || k == 1) g.a.y = p.y;
+      else g.b.y = p.y;
+      break;
+    case GraphicKind::Poly:
+      if (k >= 0 && k < int(g.pts.size())) g.pts[k] = p;
+      break;
+  }
+}
+
+}  // namespace
+
+void moveFigureVertex(std::vector<Graphic>& list, int i, int k, Vec2 to) {
+  auto vs = figureVertices(list[i]);
+  if (k < 0 || k >= int(vs.size())) return;
+  Vec2 p = vs[k];
+  LayerId layer = list[i].layer;
+  // A circle's rim point is no end of anything.
+  bool joins = list[i].kind != GraphicKind::Circle;
+  for (int j = 0; j < int(list.size()); ++j) {
+    if (j == i) {
+      setFigureVertex(list[j], k, to);
+      continue;
+    }
+    if (!joins || list[j].layer != layer || list[j].kind == GraphicKind::Circle) continue;
+    auto other = figureVertices(list[j]);
+    for (int q = 0; q < int(other.size()); ++q)
+      if (sameVertex(other[q], p)) setFigureVertex(list[j], q, to);
+  }
+}
+
+void bendFigure(std::vector<Graphic>& list, int i, int k, Vec2 to) {
+  Graphic& g = list[i];
+  switch (g.kind) {
+    case GraphicKind::Line: {
+      Graphic second = g;
+      g.b = to;
+      second.a = to;
+      list.push_back(second);
+      break;
+    }
+    case GraphicKind::Arc:
+      if (std::abs(orient(g.a, g.b, to)) < 1e-6 * (g.b - g.a).len2()) {
+        g.kind = GraphicKind::Line;  // a mid point on the chord makes no arc
+        g.m = {};
+      } else {
+        g.m = to;
+      }
+      break;
+    case GraphicKind::Poly:
+      if (k >= 0 && k < int(g.pts.size())) g.pts.insert(g.pts.begin() + k + 1, to);
+      break;
+    case GraphicKind::Circle:
+    case GraphicKind::Rect: break;
+  }
+}
+
+void moveFigureSide(std::vector<Graphic>& list, int i, Vec2 d) {
+  if (list[i].kind != GraphicKind::Line && list[i].kind != GraphicKind::Arc) return;
+  Vec2 a = list[i].a, b = list[i].b;
+  // Both ends in turn: the arc's middle follows each similarity, a translation in all.
+  moveFigureVertex(list, i, 0, a + d);
+  moveFigureVertex(list, i, 1, b + d);
+}
+
+void tidyFigure(Graphic& g) {
+  if (g.kind != GraphicKind::Poly) return;
+  auto& p = g.pts;
+  for (size_t k = 0; k < p.size() && p.size() > 3;)
+    if (sameVertex(p[k], p[(k + 1) % p.size()])) p.erase(p.begin() + k);
+    else ++k;
+}
+
+std::optional<Graphic> figureOf(const Board& b, ItemRef r, int part) {
+  switch (r.type) {
+    case ItemType::Detail: return b.graphics[r.index];
+    case ItemType::Keepout: {
+      const auto& sh = b.keepouts[r.index].shape;
+      if (part >= 0 && part < int(sh.size())) return sh[part];
+      return std::nullopt;
+    }
+    case ItemType::Zone: {
+      const Zone& z = b.zones[r.index];
+      if (!z.filled.empty() || z.outline.size() < 3) return std::nullopt;
+      Graphic g;
+      g.kind = GraphicKind::Poly;
+      g.layer = z.layer;
+      g.pts = z.outline;
+      return g;
+    }
+    default: return std::nullopt;
+  }
+}
+
+void editFigure(Board& b, ItemRef r, int part, const std::function<void(std::vector<Graphic>&, int)>& fn) {
+  switch (r.type) {
+    case ItemType::Detail: fn(b.graphics, r.index); break;
+    case ItemType::Keepout: fn(b.keepouts[r.index].shape, part); break;
+    case ItemType::Zone: {
+      auto g = figureOf(b, r, part);
+      if (!g) break;
+      std::vector<Graphic> list{*g};
+      fn(list, 0);
+      b.zones[r.index].outline = list[0].pts;
+      break;
+    }
+    default: break;
+  }
 }
 
 int straighten(Board& b, const std::vector<int>& tracks) {

@@ -287,3 +287,45 @@ TEST(Edit, FlippedPartRoundTrips) {
     }
   }
 }
+
+// Figures by their handles: a rectangle's corner keeps it a rectangle, ends meeting at a vertex go with it, an
+// arc's side moved keeps its shape, a line's middle breaks it, a polygon's side gets a vertex.
+TEST(Edit, FiguresByTheirHandles) {
+  auto mm = [](double x, double y) { return Vec2{x * kNmPerMm, y * kNmPerMm}; };
+  std::vector<Graphic> list(4);
+  list[0].kind = GraphicKind::Rect;
+  list[0].a = mm(0, 0);
+  list[0].b = mm(10, 10);
+  list[1].kind = GraphicKind::Line;
+  list[1].a = mm(10, 0);
+  list[1].b = mm(20, 0);
+  list[2].kind = GraphicKind::Arc;
+  list[2].a = mm(20, 0);
+  list[2].m = mm(25, 5);
+  list[2].b = mm(30, 0);
+  list[3].kind = GraphicKind::Poly;
+  list[3].pts = {mm(0, 20), mm(10, 20), mm(10, 30)};
+  list[3].layer = 1;  // another layer: nothing of it joins
+  edit::moveFigureVertex(list, 0, 1, mm(12, -2));  // the corner (b.x, a.y)
+  EXPECT_EQ(list[0].a, (mm(0, -2)));
+  EXPECT_EQ(list[0].b, (mm(12, 10)));
+  EXPECT_EQ(list[1].a, (mm(12, -2)));
+  edit::moveFigureSide(list, 2, mm(0, 4));
+  EXPECT_EQ(list[2].a, (mm(20, 4)));
+  EXPECT_EQ(list[2].b, (mm(30, 4)));
+  EXPECT_NEAR((list[2].m - mm(25, 9)).len(), 0, 1);
+  EXPECT_EQ(list[1].b, (mm(20, 4)));  // the line's end met the arc's
+  edit::bendFigure(list, 1, 0, mm(16, 6));
+  ASSERT_EQ(list.size(), 5u);
+  EXPECT_EQ(list[1].b, (mm(16, 6)));
+  EXPECT_EQ(list[4].a, (mm(16, 6)));
+  EXPECT_EQ(list[4].b, (mm(20, 4)));
+  auto mids = edit::figureMiddles(list[3]);
+  ASSERT_EQ(mids.size(), 3u);  // closed
+  edit::bendFigure(list, 3, 2, mm(0, 30));
+  EXPECT_EQ(list[3].pts.size(), 4u);
+  EXPECT_EQ(list[3].pts[3], (mm(0, 30)));
+  edit::moveFigureVertex(list, 3, 3, mm(0, 20));  // onto its neighbour
+  edit::tidyFigure(list[3]);
+  EXPECT_EQ(list[3].pts.size(), 3u);
+}

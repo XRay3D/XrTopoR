@@ -4,6 +4,7 @@
 // the ruler — with TopoR's mouse conventions.
 #include <QElapsedTimer>
 #include <QWidget>
+#include <functional>
 #include <optional>
 #include <vector>
 
@@ -110,12 +111,15 @@ class BoardView : public QWidget {
   void resizeEvent(QResizeEvent*) override;
 
  private:
+  // A handle of a selected wire segment or figure (board outline, detail, keepout, unpoured copper area): squares
+  // at the vertices drag them, circles at the middles bend.
   struct Marker {
-    int track = -1;
+    ItemRef item{ItemType::Track, -1};
+    int part = 0;  // a keepout's figure
     enum Kind { End, Middle } kind = End;
-    int end = 0;  // End: 0 = a, 1 = b
+    int vertex = 0;  // End: a track's end (0 = a, 1 = b) or a figure's vertex; Middle: a figure's side
   };
-  std::optional<Marker> markerAt(QPointF screen) const;  // markers of the selected tracks
+  std::optional<Marker> markerAt(QPointF screen) const;  // markers of the selected objects
   std::vector<Marker> markers() const;
   Vec2 markerPos(const Marker& m) const;
 
@@ -169,6 +173,8 @@ class BoardView : public QWidget {
   void createShape(std::vector<Graphic> figure);  // what the drawing tool makes of a finished figure
   bool keepoutVisible(const Keepout& k) const;
   void syncOutline();  // board outline from its drawings, after they changed
+  // fn(list, index) on the figure of the dragged marker (edit::editFigure), the outline built again after it.
+  void editMarked(const std::function<void(std::vector<Graphic>&, int)>& fn);
 
   // Routing tool state
   void routeStart(const Pick& pk, Vec2 at);

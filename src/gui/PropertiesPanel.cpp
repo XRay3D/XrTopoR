@@ -247,10 +247,7 @@ QWidget* PropertiesPanel::textPage(int ti) {
 
 QWidget* PropertiesPanel::detailPage(const std::vector<int>& details) {
   const Board& b = *doc_->board();
-  bool outline = std::ranges::all_of(details, [&](int i) {
-    LayerId l = b.graphics[i].layer;
-    return l >= 0 && b.layers[l].kind == LayerKind::Edge;
-  });
+  bool outline = std::ranges::all_of(details, [&](int i) { return b.isEdge(b.graphics[i].layer); });
   auto* w = new QWidget;
   auto* f = new QFormLayout(w);
   f->addRow(title(outline ? tr("Контур платы") : tr("Деталь")));
