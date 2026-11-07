@@ -62,9 +62,15 @@ ViaResult removeVias(Board& b, Topology& t, const ViaOptions& o) {
       if (w.end[0] < 0 || w.end[1] < 0) continue;
       for (int e = 0; e < 2; ++e) at[size_t(w.end[e])].push_back({wi, e});
     }
+    // (A via of a differential pair's net with a wire to a clasp is the pair's change of layer, clasp, two vias,
+    // clasp, as TopoR makes it: it stays.)
+    std::set<int> pairVias;
+    for (const Wire& w : t.wires)
+      for (int e = 0; e < 2; ++e)
+        if (t.owners[size_t(w.end[e])].kind == Owner::Kind::Clasp && t.owners[size_t(w.end[1 - e])].kind == Owner::Kind::Via) pairVias.insert(w.end[1 - e]);
     auto free = [&](const Owner& x) {
       return x.kind == Owner::Kind::Via && x.layers != 0 && !x.locked && x.via >= 0 && x.via < int(b.vias.size()) && !b.flexFixed(x.net) &&
-             edit::viaHeldBy(b, b.vias[size_t(x.via)]) == 0;
+             !pairVias.contains(int(&x - t.owners.data())) && edit::viaHeldBy(b, b.vias[size_t(x.via)]) == 0;
     };
     if (debug && refused.empty()) {
       // The paper's extension: vias that are not adjacent — a planar pad with three wires and more, or a branch

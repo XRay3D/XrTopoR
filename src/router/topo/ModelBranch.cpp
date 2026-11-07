@@ -119,7 +119,7 @@ BranchResult splitBranches(Board& b, Topology& t, const BranchOptions& o) {
   std::map<std::pair<int, LayerId>, std::vector<Leg>> atPoly;  // the legs at the polygon pads
   for (int wi = 0; wi < int(t.wires.size()); ++wi) {
     const Wire& w = t.wires[wi];
-    if (w.locked || b.flexFixed(w.net) || w.net < 0) continue;  // a flexibly fixed net keeps its wires
+    if (w.locked || w.pair >= 0 || b.flexFixed(w.net) || w.net < 0) continue;  // a flexibly fixed net keeps its wires
     for (int end = 0; end < 2; ++end) {
       if (w.end[end] < 0) continue;
       const Owner& V = t.owners[w.end[end]];
@@ -330,7 +330,7 @@ BranchResult splitBranches(Board& b, Topology& t, const BranchOptions& o) {
     double gReattach = 0;
     for (int wi = 0; wi < int(t.wires.size()); ++wi) {
       const Wire& w = t.wires[size_t(wi)];
-      if (w.locked || w.net < 0 || b.flexFixed(w.net) || w.end[0] < 0 || w.end[1] < 0) continue;
+      if (w.locked || w.pair >= 0 || w.net < 0 || b.flexFixed(w.net) || w.end[0] < 0 || w.end[1] < 0) continue;
       for (int end = 0; end < 2; ++end) {
         const Owner& T = t.owners[size_t(w.end[end])];
         const int ji = w.end[1 - end];
@@ -472,7 +472,7 @@ BranchResult reattachBranches(Board& b, Topology& t, const BranchOptions& o) {
   std::vector<Cand> cands;
   for (int wi = 0; wi < int(t.wires.size()); ++wi) {
     const Wire& w = t.wires[size_t(wi)];
-    if (w.locked || w.net < 0 || b.flexFixed(w.net) || w.end[0] < 0 || w.end[1] < 0 || w.tracks.empty()) continue;
+    if (w.locked || w.pair >= 0 || w.net < 0 || b.flexFixed(w.net) || w.end[0] < 0 || w.end[1] < 0 || w.tracks.empty()) continue;
     for (int end = 0; end < 2; ++end) {
       const int ti = w.end[end], ji = w.end[1 - end];
       const Owner& T = t.owners[size_t(ti)];

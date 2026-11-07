@@ -242,20 +242,30 @@ RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int
         if (v != centre && !(m.verts[v].t == 0 && m.verts[v].off.len2() < 1)) ob.cornersOf[centre].push_back(v);
     // A round wall (a hole, a round keepout) as one obstacle at its centre: round it as one arc.
     for (const RoundWall& rw : roundWalls(b, layer)) ob.pts[ob.add(rw.c, rw.r, rw.clr, kBoardEdge)].round = true;
-    // A wire locked without crossings (through a keepout with no way round, one the mesh does not hold)
-    // is in no slot, and a serpent's copper reaches far beyond its slot: their tracks are obstacles, as on
-    // the sketch path.
+    // The wires not drawn in this pass stay as they lie, and the realiser packs the edges with the wires it
+    // draws only: their crossings are no slots to it, their tracks are its obstacles, as on the sketch path,
+    // near the wires drawn (a locked wire; one not edited in an F5 of the edited ones; the rest when the
+    // single wires at a turned clasp are drawn again). Two passes without this laid a 2 mm GND track of
+    // AMK310 over a pair: 46 shorts.
+    BBox region;
+    for (int k = 0; k < NW; ++k)
+      if (wires[k].layer == layer)
+        for (Vec2 q : wires[k].sketch) region.add(q);
+    region = region.inflated(3 * kNmPerMm);
     std::map<uint32_t, const Track*> trackById;
     for (const Track& tr : b.tracks)
       if (tr.id && tr.layer == layer) trackById[tr.id] = &tr;
     for (const Wire& w : t.wires) {
-      if (w.layer != layer || !w.locked || localOf.contains(int(&w - t.wires.data()))) continue;
-      bool serpent = false;
+      if (w.layer != layer || localOf.contains(int(&w - t.wires.data()))) continue;
       for (uint32_t id : w.tracks)
-        if (auto it = trackById.find(id); it != trackById.end()) serpent |= it->second->serp >= 0;
-      if (!w.cross.empty() && !serpent) continue;
-      for (uint32_t id : w.tracks)
-        if (auto it = trackById.find(id); it != trackById.end()) ob.addTrack(*it->second, double(b.clearance(it->second->net, layer)));
+        if (auto it = trackById.find(id); it != trackById.end()) {
+          const Track& tr = *it->second;
+          BBox tb;
+          tb.add(tr.a.v());
+          tb.add(tr.b.v());
+          if (tr.mid) tb.add(tr.mid->v());
+          if (region.intersects(tb.inflated(tr.width))) ob.addTrack(tr, double(b.clearance(tr.net, layer)));
+        }
     }
     // The stubs' copper, as the realiser adds it.
     for (int k = 0; k < NW; ++k)
@@ -417,7 +427,8 @@ namespace {
 // single wires drawn from the vertices as they were follow them to the conductors' ends (a turn of the
 // offset times the angle: tens of microns). A clasp that cannot turn (a locked single wire, the mesh in the
 // way) keeps its place, and the conductors' ends go to its vertices instead.
-void settleClasps(Board& b, Topology& t, const std::vector<int>& chosen) {
+std::vector<int> settleClasps(Board& b, Topology& t, const std::vector<int>& chosen) {
+  std::vector<int> moved;  // the single wires whose start went with a turned clasp
   std::map<uint32_t, size_t> trackOf;
   for (size_t i = 0; i < b.tracks.size(); ++i)
     if (b.tracks[i].id) trackOf[b.tracks[i].id] = i;
@@ -476,10 +487,15 @@ void settleClasps(Board& b, Topology& t, const std::vector<int>& chosen) {
       for (int sd = 0; sd < 2; ++sd) {
         const Vec2 now = vertexPos(sd);
         moveEnds(w.tracks, drawn[sd], now);  // nothing when the turn was made in full
-        for (int wj : singles[sd]) moveEnds(t.wires[size_t(wj)].tracks, was[sd], now);
+        if ((now - was[sd]).len() < 1000) continue;
+        for (int wj : singles[sd]) {
+          moveEnds(t.wires[size_t(wj)].tracks, was[sd], now);
+          moved.push_back(wj);
+        }
       }
     }
   }
+  return moved;
 }
 
 }  // namespace
@@ -558,7 +574,22 @@ void drawModel(Board& b, Topology& t, bool direct, RealizeStats& stats, int& nWi
     t.wires[wi].tracks.push_back(b.tracks[before + k].id);
     t.wires[wi].dirty = false;
   }
-  settleClasps(b, t, chosen);
+  // The single wires at a clasp that turned were drawn round its ends as they were: drawn again from the turned
+  // ones, the rest as they lie (a single of SCL at AMK310's clasp came 0.02 mm inside the rule from SDA's end).
+  std::vector<int> again = settleClasps(b, t, chosen);
+  std::ranges::sort(again);
+  again.erase(std::unique(again.begin(), again.end()), again.end());
+  if (!again.empty() && direct) {
+    std::set<uint32_t> old;
+    for (int wi : again)
+      for (uint32_t id : t.wires[size_t(wi)].tracks) old.insert(id);
+    std::erase_if(b.tracks, [&](const Track& tr) { return tr.id && old.contains(tr.id); });
+    const size_t from = b.tracks.size();
+    RealizeStats st2 = realizeFromModel(b, t, again, opt);
+    Topology::assignIds(b);
+    for (int wi : again) t.wires[size_t(wi)].tracks.clear();
+    for (size_t k = 0; k < st2.trackWire.size(); ++k) t.wires[size_t(again[st2.trackWire[k]])].tracks.push_back(b.tracks[from + k].id);
+  }
   nWires = int(wires.size());
 }
 
@@ -573,6 +604,7 @@ F5ModelResult runF5Model(Board& b, Topology& t, const F5ModelOptions& o) {
     OptimizeModelOptions mo;
     mo.flips = false;
     mo.vias = false;
+    mo.clasps = false;
     mo.merge = false;
     mo.hold = 3;
     mo.decay = 0.6;

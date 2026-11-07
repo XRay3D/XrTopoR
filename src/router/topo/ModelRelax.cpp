@@ -125,21 +125,40 @@ void viaBarPush(const Topology& t, int oi, Vec2 at, CopperPush& out) {
   out.shortfall += depth - 1000;
   out.push = out.push + way * (depth + 2000);
 }
+// The part of a mover standing at p that keeps off copper o, and its net: a clasp's end of the other net (its
+// own net's end may sit on its copper: AMK310's clasp went onto the via of SCL, its SDA end 0.1 mm off that via),
+// the whole of it against a third net; the rest their centre. Nothing: o is the mover's own.
+struct KeepOff {
+  Shape probe;
+  int net;
+};
+std::optional<KeepOff> keepingOff(const Owner& mover, const Owner& o, Vec2 p) {
+  if (mover.kind == Owner::Kind::Clasp && mover.axis.len2() > 0) {
+    if (o.net == mover.net) return KeepOff{Shape::circle(p - mover.axis, 0), mover.net2};
+    if (o.net == mover.net2) return KeepOff{Shape::circle(p + mover.axis, 0), mover.net};
+    return KeepOff{Shape::capsule(p - mover.axis, p + mover.axis, 0), mover.net};
+  }
+  if (o.net == mover.net) return std::nullopt;
+  return KeepOff{Shape::circle(p, 0), mover.net};
+}
+
 CopperPush copperPush(const Board& b, const Topology& t, const OwnerGrid& grid, int oi, Vec2 at) {
   const Owner& ob = t.owners[oi];
   CopperPush out;
   segmentPush(b, t, oi, at, out);
   viaBarPush(t, oi, at, out);
   const double maxClr = double(b.maxClearance());
-  grid.near(at, ob.halfWidth + maxClr + 1000, [&](int oj) {
+  grid.near(at, ob.halfWidth + ob.axis.len() + maxClr + 1000, [&](int oj) {
     if (oj == oi) return;
     const Owner& o = t.owners[oj];
-    if (o.net == ob.net || !(o.layers & ob.layers)) return;
-    double req = ob.halfWidth + requiredClearance(b, ob.net, o.net, ob.layers & o.layers);
+    if (!(o.layers & ob.layers)) return;
+    const auto k = keepingOff(ob, o, at);
+    if (!k) return;
+    double req = ob.halfWidth + requiredClearance(b, k->net, o.net, ob.layers & o.layers);
     if (o.kind == Owner::Kind::Zone) req = std::max(req, ob.halfWidth + double(b.zones[o.zone].clearance));  // a pour keeps its own clearance
-    double d = o.shape.distance(at);
+    double d = o.shape.distance(k->probe);
     if (d >= req - 1000) return;
-    Vec2 n = awayFrom(o.shape, at, o.c);
+    Vec2 n = awayFrom(o.shape, k->probe.kind == Shape::Kind::Point ? k->probe.a : at, o.c);  // (from the end that keeps off)
     if (n.len2() == 0) return;
     out.shortfall += req - 1000 - d;
     out.push = out.push + n * ((req - d + 2000) * (o.kind == Owner::Kind::Via ? 0.5 : 1.0));
@@ -196,17 +215,19 @@ std::optional<Vec2> blockerAt(const Board& b, const Topology& t, const OwnerGrid
       worst = p - there.push;
     }
   }
-  grid.near(p, ob.halfWidth + maxClr + 1000 + (p - ob.c).len(), [&](int oj) {
+  grid.near(p, ob.halfWidth + ob.axis.len() + maxClr + 1000 + (p - ob.c).len(), [&](int oj) {
     if (oj == oi) return;
     const Owner& o = t.owners[oj];
     if (!(o.layers & ob.layers)) return;
     double req = ownPadRule(ob, o, holdBranchPoints);
+    const auto kThere = keepingOff(ob, o, p), kHere = keepingOff(ob, o, ob.c);
     if (req < 0) {
-      if (o.net == ob.net) return;
-      req = ob.halfWidth + requiredClearance(b, ob.net, o.net, ob.layers & o.layers) + nominalExcess(b, ob.net, o.net, ob.layers & o.layers);
+      if (!kThere) return;
+      req = ob.halfWidth + requiredClearance(b, kThere->net, o.net, ob.layers & o.layers) + nominalExcess(b, kThere->net, o.net, ob.layers & o.layers);
       if (o.kind == Owner::Kind::Zone) req = std::max(req, ob.halfWidth + double(b.zones[o.zone].clearance));
     }
-    double there = std::max(0.0, req - 1000 - o.shape.distance(p)), here = std::max(0.0, req - 1000 - o.shape.distance(ob.c));
+    const double dThere = kThere ? o.shape.distance(kThere->probe) : o.shape.distance(p), dHere = kHere ? o.shape.distance(kHere->probe) : o.shape.distance(ob.c);
+    double there = std::max(0.0, req - 1000 - dThere), here = std::max(0.0, req - 1000 - dHere);
     shortThere += there;
     shortHere += here;
     if (there > worstShort) {
@@ -377,7 +398,9 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
       // The vias of a flexibly fixed net stand (its topology is fixed, its vias' places with it); its branch
       // points move: where they are is the shape of its wires.
       if (ow.kind == Owner::Kind::Via && b.flexFixed(ow.net)) continue;
-      if ((ow.kind == Owner::Kind::Via && o.vias) || (ow.kind == Owner::Kind::Junction && o.junctions)) objs.push_back({oi, {}, 1.0, ends[oi], ow.c});
+      // (A clasp moves as a branch point: the pair's wire and its two single wires pull it.)
+      if ((ow.kind == Owner::Kind::Via && o.vias) || (ow.kind == Owner::Kind::Junction && o.junctions) || (ow.kind == Owner::Kind::Clasp && o.junctions && o.clasps))
+        objs.push_back({oi, {}, 1.0, ends[oi], ow.c});
     }
   }
   std::map<int, size_t> objOf;

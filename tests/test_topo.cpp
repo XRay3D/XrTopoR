@@ -2053,6 +2053,48 @@ TEST(Topo, PairIsNeverNarrowed) {
   EXPECT_TRUE(overflow || p.drcOf(DrcViolation::Type::Clearance) > 0) << "the pair through a gap too narrow, and nothing said";
 }
 
+// F7 moves a clasp as a branch point, by the pull of the pair's wire and its two single wires: the pads of P
+// and N at the left end stand far below the section, the clasp goes down towards them, and the drawing stays
+// clean and connected. F6 re-lays the pair as one wire.
+TEST(Topo, ClaspMovesWithF7) {
+  PinBoard p;
+  p.b.netClasses[0].clearance = mmToNm(0.2);
+  p.pad("P", 4, 4, PadShapeKind::Circle, 1, 1);
+  p.pad("N", 6, 4, PadShapeKind::Circle, 1, 1);
+  p.pad("P", 36, 11, PadShapeKind::Circle, 1, 1);
+  p.pad("N", 36, 9, PadShapeKind::Circle, 1, 1);
+  p.pair("P", "N", 0.3, 0.2);
+  p.zip("P", "N", {{8, 10}, {32, 10}});
+  topo::Topology::assignIds(p.b);
+  Vec2 before;
+  {
+    topo::Topology t;
+    t.build(p.b);
+    for (const topo::Owner& o : t.owners)
+      if (o.kind == topo::Owner::Kind::Clasp && o.claspEnd == 0) before = o.c;
+  }
+  auto r = p.f7();
+  ASSERT_TRUE(r.drawn);
+  EXPECT_GE(r.junctionMoves, 1) << "the clasp moved";
+  topo::Topology::assignIds(p.b);
+  topo::Topology t;
+  t.build(p.b);
+  Vec2 after;
+  for (const topo::Owner& o : t.owners)
+    if (o.kind == topo::Owner::Kind::Clasp && o.claspEnd == 0) after = o.c;
+  EXPECT_LT(after.y, before.y - 500000) << "towards the pads below (board y down is +y up here)";
+  EXPECT_EQ(Connectivity::compute(p.b).ratsnest.size(), 0u);
+  EXPECT_EQ(p.violations(), 0);
+  for (const Track& tr : p.b.tracks)
+    if (tr.zip >= 0) EXPECT_EQ(tr.width, mmToNm(0.3));
+  // F6 after: the pair one wire still, the drawing as clean.
+  auto r6 = p.f6();
+  ASSERT_TRUE(r6.drawn);
+  EXPECT_EQ(p.b.zips.size(), 1u);
+  EXPECT_EQ(Connectivity::compute(p.b).ratsnest.size(), 0u);
+  EXPECT_EQ(p.violations(), 0);
+}
+
 // The clasp's copper is the pair wire's own and each single wire's own at its end: the capacity of an edge at
 // the clasp takes no clearance from it for them, and does for a wire of another net.
 TEST(Topo, ClaspIsOwnToItsThreeWires) {
