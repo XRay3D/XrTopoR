@@ -407,6 +407,52 @@ TEST(Refine, PlacementWithAKeepoutOverTracks) {
   EXPECT_LE(count(DrcViolation::Type::Clearance), clearances + 3) << clearances << " without the keepout";
 }
 
+// SingleLayer is a ring: TopoR wrote its hole as a second circle of the outline's Contour (as arz's Specctra
+// signal boundary is, with all the copper inside it: not a hole). With the hole known, F5 on the model keeps
+// every wire the clearance to the board edge off it (the wire of NET00015 along its bottom used to come
+// 0.13 mm inside). A track drawn by hand across the hole, from VD3-3 to R8-1 of NET00015, finds no way round
+// (the net's own wire runs along the hole there, no room for a second beside it on the one layer) and is
+// reported, not drawn into the hole.
+TEST(Refine, SingleLayerHoleIsACutout) {
+  auto lb = io::loadBoard(data("topor/Example_01/SingleLayer.fst"));
+  ASSERT_TRUE(lb.has_value());
+  Board& b = **lb;
+  ASSERT_EQ(b.outline.size(), 2u) << "the hole";
+  const Vec2 centre{13.975 * kNmPerMm, -14.141 * kNmPerMm};
+  const double hole = 6.985 * kNmPerMm;
+  auto nearestCopper = [&](int net) {
+    double nearest = 1e18;
+    for (const Track& tr : b.tracks) {
+      if (net >= 0 && tr.net != net) continue;
+      const Polyline path = tr.path();
+      for (size_t i = 0; i + 1 < path.size(); ++i) nearest = std::min(nearest, distPointSegment(centre, path[i], path[i + 1]) - tr.width / 2.0);
+    }
+    return nearest;
+  };
+  auto f5 = [&] {
+    topo::Topology::assignIds(b);
+    topo::Topology m;
+    m.build(b);
+    return topo::runF5Model(b, m);
+  };
+  ASSERT_TRUE(f5().drawn);
+  EXPECT_GE(nearestCopper(-1), hole + b.edgeClearance - 0.005 * kNmPerMm) << "the edge clearance off the hole";
+  const int net = b.findNet("NET00015");
+  ASSERT_GE(net, 0);
+  Track t;
+  t.a = Point(Vec2{9.8077 * kNmPerMm, -7.7011 * kNmPerMm});
+  t.b = Point(Vec2{22.9413 * kNmPerMm, -10.9147 * kNmPerMm});
+  t.width = mmToNm(0.4);
+  t.layer = b.topCopper();
+  t.net = net;
+  b.tracks.push_back(t);
+  auto res = f5();
+  ASSERT_TRUE(res.drawn);
+  int blocked = 0;
+  for (const topo::Violation& v : res.violations) blocked += v.kind == topo::Violation::Kind::Blocked;
+  EXPECT_EQ(blocked, 1) << "the hand-drawn track across the hole is reported";
+}
+
 // A board with poured planes (Signals: 7 zones of 6 power nets on INT_PWR, every connection made through
 // them) keeps them through F5 on the model: the fills used to be dropped on every layer drawn on, and 73
 // connections came out unrouted.

@@ -15,6 +15,7 @@
 
 #include "core/Padstack.h"
 #include "core/ZoneFill.h"
+#include "geom/Geometry.h"
 #include "io/topor/Fst.h"
 #include "io/xml/Xml.h"
 
@@ -80,6 +81,7 @@ struct Reader {
   std::string firstViastack;
   std::string preferredViastack;  // the type the design's own vias use (TopoR routes with it when any type is allowed)
   LayerId edge = -1;
+  std::vector<std::vector<Vec2>> contourHoles;  // the loops of Contour inside the outer one, cutouts if empty
 
   explicit Reader(Board& board) : b(board) {}
 
@@ -732,13 +734,16 @@ struct Reader {
       std::vector<Graphic> contour, voids;
       shapes(bo->find("Contour"), contour);
       shapes(bo->find("Voids"), voids);
-      // Several shapes in Contour (e.g. a Specctra pcb boundary plus its signal boundary) are not
-      // nested cutouts: keep the largest loop as the outer contour; Voids become holes.
+      // The largest loop of Contour is the outer contour. The other loops there are cutouts when nothing
+      // lies in them (SingleLayer: a ring, the hole drawn as a second circle of the Contour) and not when the
+      // copper does (arz: a Specctra pcb boundary plus its signal boundary inset 5 mm, everything inside it);
+      // decided once the components and tracks are read (contourHoles). Voids are always holes.
       Board tmp;
       tmp.layers = b.layers;
       tmp.graphics = contour;
       buildOutline(tmp, edge);
       if (!tmp.outline.empty()) b.outline.push_back(tmp.outline.front());
+      for (size_t i = 1; i < tmp.outline.size(); ++i) contourHoles.push_back(tmp.outline[i]);
       tmp.graphics = voids;
       buildOutline(tmp, edge);
       for (auto& h : tmp.outline) b.outline.push_back(h);
@@ -1278,6 +1283,13 @@ Result<BoardPtr> readFst(const std::string& text, const std::string& path) {
   else r.applyVia(b->netClasses[0], r.firstViastack);
   if (auto* cn = root.find("Connectivity")) r.readConnectivity(*cn);
   if (auto* dc = root.find("DisplayControl")) r.readDisplay(*dc);
+  // The inner loops of the Contour: cutouts where no pad and no track lies in them.
+  for (auto& loop : r.contourHoles) {
+    bool empty = true;
+    for (const Pad& p : b->pads) empty &= !pointInPolygon(p.pos.v(), loop);
+    for (const Track& t : b->tracks) empty &= !pointInPolygon(t.a.v(), loop) && !pointInPolygon(t.b.v(), loop);
+    if (empty) b->outline.push_back(loop);
+  }
   // Plane layers: board-wide zones of their net, poured right away (TopoR shows them solid).
   size_t zonesBefore = b->zones.size();
   addPlaneZones(*b);
