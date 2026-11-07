@@ -12,11 +12,14 @@
 #include <string>
 #include <set>
 #include <tuple>
+#include <unordered_map>
+#include <unordered_set>
 
 #include "core/Edit.h"
 #include "core/SpatialIndex.h"
 #include "topo/Build.h"
 #include "topo/Capacity.h"
+#include "topo/Move.h"
 #include "topo/Chains.h"
 #include "topo/Relay.h"
 #include "topo/Topology.h"
@@ -843,6 +846,360 @@ void Topology::relayDisplaced(const Board& b, BuildScratch& scratch) {
     violations.push_back(v);
     w.locked = true;
   }
+}
+
+
+bool Topology::relayTracks(const Board& b, const std::vector<uint32_t>& changedIds) {
+  const std::unordered_set<uint32_t> changed(changedIds.begin(), changedIds.end());
+  std::unordered_map<uint32_t, int> trackOf, wireOf;
+  for (int i = 0; i < int(b.tracks.size()); ++i)
+    if (b.tracks[size_t(i)].id) trackOf[b.tracks[size_t(i)].id] = i;
+  for (int wi = 0; wi < int(wires.size()); ++wi)
+    for (uint32_t id : wires[size_t(wi)].tracks) wireOf[id] = wi;
+  // The nets touched; a zipped pair's copper is the build's (its axis is its wire).
+  std::set<int> nets;
+  for (uint32_t id : changed) {
+    if (auto it = trackOf.find(id); it != trackOf.end()) {
+      if (b.tracks[size_t(it->second)].zip >= 0) return false;
+      nets.insert(b.tracks[size_t(it->second)].net);
+    }
+    if (auto it = wireOf.find(id); it != wireOf.end()) {
+      if (wires[size_t(it->second)].pair >= 0) return false;
+      nets.insert(wires[size_t(it->second)].net);
+    }
+  }
+  if (nets.empty()) return true;
+  std::unordered_set<uint32_t> ids = changed;
+  std::set<int> out;
+  auto takeOut = [&](int wi) {
+    if (wires[size_t(wi)].pair >= 0) return false;
+    if (out.insert(wi).second) {
+      nets.insert(wires[size_t(wi)].net);
+      for (uint32_t id : wires[size_t(wi)].tracks) ids.insert(id);
+    }
+    return true;
+  };
+  for (uint32_t id : changed)
+    if (auto it = wireOf.find(id); it != wireOf.end() && !takeOut(it->second)) return false;
+  // ... and with a wire taken out the wires at its branch points (a branch taken away joins the two through it).
+  for (int w : std::set<int>(out))
+    for (int o : wires[size_t(w)].end)
+      if (o >= 0 && owners[size_t(o)].kind == Owner::Kind::Junction)
+        for (int wj = 0; wj < int(wires.size()); ++wj)
+          if ((wires[size_t(wj)].end[0] == o || wires[size_t(wj)].end[1] == o) && !takeOut(wj)) return false;
+  OwnCopper copper(b);
+  WireGraph g;
+  std::vector<WireChain> chains;
+  std::vector<char> take;
+  std::vector<std::array<int, 2>> ends;
+  auto claspAt = [&](Vec2 p, int net, LayerId layer, Coord width) {
+    const double tol = std::max(edit::kJoinTol, 0.1 * double(width));
+    for (int oi = 0; oi < int(owners.size()); ++oi) {
+      const Owner& o = owners[size_t(oi)];
+      if (o.kind != Owner::Kind::Clasp || !((o.layers >> layer) & 1)) continue;
+      if (o.net == net && (o.c + o.axis - p).len() <= tol) return oi;
+      if (o.net2 == net && (o.c - o.axis - p).len() <= tol) return oi;
+    }
+    return -1;
+  };
+  auto zoneAt = [&](Vec2 p, int net, LayerId layer) {
+    for (int oi = 0; oi < int(owners.size()); ++oi) {
+      const Owner& o = owners[size_t(oi)];
+      if (o.kind == Owner::Kind::Zone && o.net == net && ((o.layers >> layer) & 1) && o.shape.distance(p) <= edit::kJoinTol) return oi;
+    }
+    return -1;
+  };
+  auto junctionNear = [&](Vec2 p, int net, LayerId layer, double tol) {
+    for (int oi = 0; oi < int(owners.size()); ++oi) {
+      const Owner& o = owners[size_t(oi)];
+      if (o.kind == Owner::Kind::Junction && o.layers && o.net == net && ((o.layers >> layer) & 1) && (o.c - p).len() <= tol) return oi;
+    }
+    return -1;
+  };
+  // What is laid again, grown until it holds still: the chains of the touched nets holding a changed track (or one
+  // meeting a changed track at a vertex: a branch drawn to a wire's joint cuts it there), the wires sharing a track
+  // with one of those; the ends the chains need, a new branch point put into the mesh where there is none — and the
+  // wires crossing the edges round a new branch point taken too, laid again by their tracks (the insertion would
+  // pass them round it on the side the split triangle says, the build by where they are drawn).
+  for (int pass = 0;; ++pass) {
+    if (pass > 8) return false;
+    std::vector<char> chosen(b.tracks.size(), 0);
+    for (size_t i = 0; i < b.tracks.size(); ++i) chosen[i] = nets.contains(b.tracks[i].net);
+    g = wireGraph(b, chosen);
+    effectiveWidths(b, g, copper);
+    chains = wireChains(b, g, chosen, copper);
+    std::erase_if(chains, [](const WireChain& c) { return c.closed || c.path.size() < 2; });
+    for (uint32_t id : changed)
+      if (auto it = trackOf.find(id); it != trackOf.end())
+        for (int v : g.vid[size_t(it->second)])
+          if (v >= 0)
+            for (int j : g.ends[size_t(v)]) ids.insert(b.tracks[size_t(j)].id);
+    take.assign(chains.size(), 0);
+    for (size_t before = 0; before != ids.size();) {
+      before = ids.size();
+      for (size_t ci = 0; ci < chains.size(); ++ci)
+        if (!take[ci] && r::any_of(chains[ci].tracks, [&](int ti) { return ids.contains(b.tracks[size_t(ti)].id); })) {
+          take[ci] = 1;
+          for (int ti : chains[ci].tracks) ids.insert(b.tracks[size_t(ti)].id);
+        }
+      for (int wi = 0; wi < int(wires.size()); ++wi)
+        if (!out.contains(wi) && r::any_of(wires[size_t(wi)].tracks, [&](uint32_t id) { return ids.contains(id); }) && !takeOut(wi)) return false;
+    }
+    // The ends: a pad or via of the net, a clasp, a poured zone, a branch point (one per glued vertex of the
+    // graph, as the build has them).
+    std::map<std::tuple<int, LayerId, int>, double> junctionWidth;
+    std::vector<std::array<std::tuple<int, LayerId, int>, 2>> keys(chains.size());
+    ends.assign(chains.size(), {-1, -1});
+    for (size_t ci = 0; ci < chains.size(); ++ci) {
+      if (!take[ci]) continue;
+      const WireChain& c = chains[ci];
+      for (int end = 0; end < 2; ++end) {
+        const Vec2 p = end ? c.b() : c.a();
+        if (auto r = copper.at(p, c.net, c.layer)) ends[ci][size_t(end)] = r->type == ItemType::Pad ? padOwner[size_t(r->index)] : viaOwner[size_t(r->index)];
+        else if (int co = claspAt(p, c.net, c.layer, c.width); co >= 0) ends[ci][size_t(end)] = co;
+        else if (int zo = zoneAt(p, c.net, c.layer); zo >= 0) ends[ci][size_t(end)] = zo;
+        else {
+          keys[ci][size_t(end)] = {c.vertex[end], c.layer, c.net};
+          double& wdt = junctionWidth[keys[ci][size_t(end)]];
+          wdt = std::max(wdt, double(c.width));
+        }
+      }
+    }
+    std::map<std::tuple<int, LayerId, int>, int> junctionAt;
+    std::vector<int> made;  // the branch points put in on this pass
+    for (size_t ci = 0; ci < chains.size(); ++ci) {
+      if (!take[ci]) continue;
+      const WireChain& c = chains[ci];
+      for (int end = 0; end < 2; ++end) {
+        if (ends[ci][size_t(end)] >= 0) continue;
+        const auto key = keys[ci][size_t(end)];
+        auto it = junctionAt.find(key);
+        if (it == junctionAt.end()) {
+          const Vec2 p = end ? c.b() : c.a();
+          const double wdt = junctionWidth[key];
+          int oi = junctionNear(p, c.net, c.layer, std::max(edit::kJoinTol, kWireGlue * wdt));
+          if (oi < 0) {
+            Owner o;
+            o.kind = Owner::Kind::Junction;
+            o.net = c.net;
+            o.c = p;
+            o.halfWidth = wdt / 2.0;
+            o.shape = Shape::circle(p, o.halfWidth);
+            o.layers = LayerMask(1) << c.layer;
+            o.junction = int(junctions.size());
+            oi = insertOwner(*this, o);
+            if (oi < 0) return false;
+            junctions.push_back({p, c.net, c.layer, oi, 0});
+            made.push_back(oi);
+          }
+          it = junctionAt.emplace(key, oi).first;
+        }
+        ends[ci][size_t(end)] = it->second;
+      }
+    }
+    bool more = false;
+    for (int oi : made)
+      for (LayerMesh& m : layers) {
+        if (oi >= int(m.ownerVerts.size())) continue;
+        for (int v : m.ownerVerts[size_t(oi)])
+          for (int e : starEdges(m, v))
+            for (int cid : m.edges[size_t(e)].cross)
+              if (const int wi = crossings[size_t(cid)].wire; wi >= 0 && !out.contains(wi)) {
+                if (!takeOut(wi)) return false;
+                more = true;
+              }
+      }
+    if (!more) break;
+  }
+  // Out: their crossings off the edges, their ends' branch points one wire fewer.
+  std::set<int> endsOut;  // the branch points the wires taken out ended at
+  for (int wi : out) {
+    Wire& w = wires[size_t(wi)];
+    LayerMesh& m = *mesh(w.layer);
+    for (int cid : w.cross) {
+      Edge& E = m.edges[size_t(crossings[size_t(cid)].edge)];
+      std::erase(E.cross, cid);
+      crossings[size_t(cid)] = Crossing{};
+    }
+    for (int end = 0; end < 2; ++end)
+      if (w.end[end] >= 0 && owners[size_t(w.end[end])].kind == Owner::Kind::Junction) endsOut.insert(w.end[end]);
+    w.cross.clear();
+    w.tracks.clear();
+  }
+  for (LayerMesh& m : layers)
+    for (int e = 0; e < int(m.edges.size()); ++e) {
+      Edge& E = m.edges[size_t(e)];
+      if (E.along >= 0 && out.contains(E.along)) E.along = -1;
+    }
+  // Laid in, as the build lays them.
+  SpatialIndex idx;
+  idx.build(b, false, false);
+  BuildScratch scratch;
+  std::map<LayerId, std::vector<int>> zonesOn;
+  for (int oi = 0; oi < int(owners.size()); ++oi)
+    if (owners[size_t(oi)].kind == Owner::Kind::Zone)
+      for (LayerId l = 0; l < 64; ++l)
+        if ((owners[size_t(oi)].layers >> l) & 1) zonesOn[l].push_back(oi);
+  LayContext lay{b, idx, zonesOn, scratch.displaced};
+  std::map<int, std::vector<Laid>> laidOn;  // per mesh, the new wires
+  for (size_t ci = 0; ci < chains.size(); ++ci) {
+    if (!take[ci]) continue;
+    const LayerMesh* mp = mesh(chains[ci].layer);
+    if (!mp) continue;
+    if (auto l = layChain(*this, lay, chains[ci], -1, ends[ci][0], ends[ci][1])) laidOn[int(mp - layers.data())].push_back(std::move(*l));
+  }
+  // Their crossings put in among those on the edges: the wires already there as the model has them (their hits
+  // from their crossings: the triangles they pass, their place on the edge for the position).
+  std::set<std::pair<int, int>> crossed;
+  for (auto& [li, fresh] : laidOn) {
+    LayerMesh& m = layers[size_t(li)];
+    std::vector<Laid> laid = fresh;  // the new ones first, the wires already there appended as met
+    std::map<int, int> laidOfWire;
+    auto shared = [&](int e1, int e2) {
+      for (int ta : m.edges[size_t(e1)].t)
+        if (ta >= 0 && (ta == m.edges[size_t(e2)].t[0] || ta == m.edges[size_t(e2)].t[1])) return ta;
+      return -1;
+    };
+    auto holding = [&](int e, int v) {
+      for (int ta : m.edges[size_t(e)].t)
+        if (ta >= 0 && m.localVertex(ta, v) >= 0) return ta;
+      return -1;
+    };
+    auto apex = [&](int tri, int e) {
+      if (tri < 0) return -1;
+      for (int v : m.tris[size_t(tri)].v)
+        if (v != m.edges[size_t(e)].v[0] && v != m.edges[size_t(e)].v[1]) return v;
+      return -1;
+    };
+    auto existing = [&](int wi) {
+      if (auto it = laidOfWire.find(wi); it != laidOfWire.end()) return it->second;
+      const Wire& w = wires[size_t(wi)];
+      Laid L{wi, {}, m.verts[size_t(w.endVertex[0])].p, m.verts[size_t(w.endVertex[1])].p};
+      // The wire as drawn: where its tracks cross an edge is its position there, as the build's walk has it (the
+      // order decides by it where the topology does not); its place in the edge's order when they do not.
+      std::vector<std::pair<Vec2, Vec2>> drawn;
+      for (uint32_t id : w.tracks)
+        if (auto it = trackOf.find(id); it != trackOf.end()) {
+          const Polyline pts = b.tracks[size_t(it->second)].path(20000);
+          for (size_t q = 1; q < pts.size(); ++q) drawn.push_back({pts[q - 1], pts[q]});
+        }
+      const int n = int(w.cross.size());
+      for (int i = 0; i < n; ++i) {
+        const int e = crossings[size_t(w.cross[size_t(i)])].edge;
+        const Edge& E = m.edges[size_t(e)];
+        const int k = int(r::find(E.cross, w.cross[size_t(i)]) - E.cross.begin());
+        const double place = double(k + 1) / double(E.cross.size() + 1);
+        double at = place, best = 1e300;
+        const Vec2 a = m.verts[size_t(E.v[0])].p, c = m.verts[size_t(E.v[1])].p;
+        for (auto [p, q] : drawn) {
+          const double den = (c - a).cross(q - p);
+          if (std::abs(den) < 1e-9) continue;
+          const double tt = (p - a).cross(q - p) / den, ss = (p - a).cross(c - a) / den;
+          if (tt < 0 || tt > 1 || ss < 0 || ss > 1) continue;
+          if (std::abs(tt - place) < best) best = std::abs(tt - place), at = tt;
+        }
+        const int fwd = i + 1 < n ? shared(e, crossings[size_t(w.cross[size_t(i + 1)])].edge) : holding(e, w.endVertex[1]);
+        const int back = i > 0 ? shared(e, crossings[size_t(w.cross[size_t(i - 1)])].edge) : holding(e, w.endVertex[0]);
+        bool uLeft = false;
+        if (fwd >= 0) {
+          const int j = m.localVertex(fwd, E.v[0]);
+          uLeft = j >= 0 && m.tris[size_t(fwd)].v[size_t((j + 1) % 3)] == E.v[1];
+        }
+        L.hits.push_back({e, at, uLeft, apex(back, e), apex(fwd, e)});
+      }
+      laid.push_back(std::move(L));
+      return laidOfWire[wi] = int(laid.size() - 1);
+    };
+    std::map<int, std::vector<std::pair<int, int>>> newOnEdge;
+    for (int k = 0; k < int(laid.size()); ++k)
+      for (int h = 0; h < int(laid[size_t(k)].hits.size()); ++h) newOnEdge[laid[size_t(k)].hits[size_t(h)].edge].push_back({k, h});
+    const int nNew = int(laid.size());
+    std::vector<std::vector<int>> newCross(static_cast<size_t>(nNew));
+    for (int k = 0; k < nNew; ++k) newCross[size_t(k)].assign(laid[size_t(k)].hits.size(), -1);
+    for (auto& [e, mine] : newOnEdge) {
+      std::vector<std::pair<int, int>> list;
+      for (int cid : m.edges[size_t(e)].cross) list.push_back({existing(crossings[size_t(cid)].wire), crossings[size_t(cid)].idx});
+      const size_t firstNew = list.size();
+      list.insert(list.end(), mine.begin(), mine.end());
+      orderOnEdge(*this, b, m, laid, e, list, firstNew, crossed);
+      std::vector<int> cross;
+      for (auto [k, h] : list) {
+        if (k >= nNew) {
+          cross.push_back(wires[size_t(laid[size_t(k)].wire)].cross[size_t(h)]);
+          continue;
+        }
+        const int cid = int(crossings.size());
+        crossings.push_back({laid[size_t(k)].wire, e, h, double(wires[size_t(laid[size_t(k)].wire)].width)});
+        newCross[size_t(k)][size_t(h)] = cid;
+        cross.push_back(cid);
+      }
+      m.edges[size_t(e)].cross = std::move(cross);
+    }
+    for (int k = 0; k < nNew; ++k) wires[size_t(laid[size_t(k)].wire)].cross = std::move(newCross[size_t(k)]);
+    for (int e = 0; e < int(m.edges.size()); ++e)
+      if (!m.edges[size_t(e)].cross.empty()) refreshEdge(*this, m, e);
+    // A new wire across an edge with no room at all, at another net's copper: through it (as the build says).
+    for (auto& [e, mine] : newOnEdge) {
+      const Edge& E = m.edges[size_t(e)];
+      if (E.cls != 3) continue;
+      for (auto [k, h] : mine) {
+        const Wire& w = wires[size_t(laid[size_t(k)].wire)];
+        if (w.zone >= 0) continue;
+        for (int end = 0; end < 2; ++end) {
+          const Owner& o = owners[size_t(m.verts[size_t(E.v[end])].owner)];
+          if (own(m, E.v[end], w) || o.kind == Owner::Kind::Junction || o.kind == Owner::Kind::Outline || o.kind == Owner::Kind::Keepout) continue;
+          Violation v;
+          v.kind = Violation::Kind::ThroughPad;
+          v.wireA = laid[size_t(k)].wire;
+          v.owner = m.verts[size_t(E.v[end])].owner;
+          v.layer = m.layer;
+          v.edge = e;
+          v.pos = (m.verts[size_t(E.v[0])].p + m.verts[size_t(E.v[1])].p) * 0.5;
+          violations.push_back(v);
+          break;
+        }
+      }
+    }
+  }
+  relayDisplaced(b, scratch);
+  // The wires taken out go from the table; the violations of theirs with them; the model's crossings found again.
+  std::vector<int> map(wires.size(), -1);
+  {
+    std::vector<Wire> kept;
+    for (int wi = 0; wi < int(wires.size()); ++wi)
+      if (!out.contains(wi)) {
+        map[size_t(wi)] = int(kept.size());
+        kept.push_back(std::move(wires[size_t(wi)]));
+      }
+    wires = std::move(kept);
+  }
+  for (Crossing& c : crossings)
+    if (c.wire >= 0) c.wire = map[size_t(c.wire)];
+  for (LayerMesh& m : layers)
+    for (Edge& E : m.edges)
+      if (E.along >= 0) E.along = map[size_t(E.along)];
+  std::erase_if(violations, [&](const Violation& v) {
+    return (v.wireA >= 0 && map[size_t(v.wireA)] < 0) || (v.wireB >= 0 && map[size_t(v.wireB)] < 0);
+  });
+  std::set<std::pair<int, int>> pairs;  // the crossings known, a pair of wires once
+  for (Violation& v : violations) {
+    if (v.wireA >= 0) v.wireA = map[size_t(v.wireA)];
+    if (v.wireB >= 0) v.wireB = map[size_t(v.wireB)];
+    if (v.kind == Violation::Kind::Crossing) pairs.insert(std::minmax(v.wireA, v.wireB));
+  }
+  for (const LayerMesh& m : layers)
+    for (Violation v : findCrossings(m))
+      if (pairs.insert(std::minmax(v.wireA, v.wireB)).second) violations.push_back(v);
+  // Branch points no wire ends at any more go; the others count their wires again.
+  std::map<int, int> degree;
+  for (const Wire& w : wires)
+    for (int o : w.end)
+      if (o >= 0) ++degree[o];
+  for (int oi : endsOut)
+    if (!degree.contains(oi) && owners[size_t(oi)].layers) removeOwner(*this, oi);
+  for (Junction& j : junctions) j.degree = degree.contains(j.owner) ? degree[j.owner] : 0;
+  std::erase_if(ownerTracks, [&](const std::pair<int, uint32_t>& ot) { return !trackOf.contains(ot.second); });
+  return true;
 }
 
 }  // namespace xr::topo

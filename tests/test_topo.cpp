@@ -3557,3 +3557,127 @@ TEST(Topo, ClinchWithTwoHinderingWires) {
   expectSoundModel(t);
   EXPECT_EQ(p.violations(), 0);
 }
+
+namespace {
+
+// The live model against one built anew from the board: the same wires (by their tracks), the same crossings and
+// wires through copper.
+void expectLikeBuilt(Board& b, const topo::Topology& live, const char* how) {
+  topo::Topology::assignIds(b);
+  topo::Topology built;
+  built.build(b);
+  auto wiresOf = [](const topo::Topology& t) {
+    std::multiset<std::vector<uint32_t>> out;
+    for (const topo::Wire& w : t.wires) {
+      std::vector<uint32_t> ids = w.tracks;
+      r::sort(ids);
+      out.insert(ids);
+    }
+    return out;
+  };
+  EXPECT_EQ(live.wires.size(), built.wires.size()) << how;
+  EXPECT_TRUE(wiresOf(live) == wiresOf(built)) << how;
+  auto stops = [](const topo::Topology& t) {
+    int n = 0;
+    for (const topo::Violation& v : t.violations) n += v.kind == topo::Violation::Kind::Crossing || v.kind == topo::Violation::Kind::ThroughPad;
+    return n;
+  };
+  EXPECT_EQ(stops(live), stops(built)) << how;
+  for (const std::string& p : live.check()) ADD_FAILURE() << how << ": " << p;
+  for (const topo::Wire& w : live.wires) {
+    ASSERT_GE(w.end[0], 0) << how;
+    ASSERT_GE(w.end[1], 0) << how;
+    for (int cid : w.cross) EXPECT_EQ(live.crossings[size_t(cid)].wire, int(&w - live.wires.data())) << how;
+  }
+}
+
+}  // namespace
+
+// The live model (Topology::relayTracks): a vertex in the middle of a wire moved, a branch drawn off it (the wire
+// cut at a new branch point), the branch taken away (the two joined again), a track taken out of a wire's middle
+// (two dangling ends) — each time the wires of the touched tracks laid again from the board, and the model as one
+// built anew from it.
+TEST(Topo, LiveModelRelaysEditedTracks) {
+  auto r = io::loadBoard(data("topor/Example_03/arz_2L.fst"));
+  ASSERT_TRUE(r) << r.error();
+  Board& b = **r;
+  topo::Topology::assignIds(b);
+  topo::Topology t;
+  t.build(b);
+  // A wire of three or more straight tracks, unlocked: the joint after its first track.
+  int wi = -1;
+  for (int k = 0; k < int(t.wires.size()) && wi < 0; ++k) {
+    const topo::Wire& w = t.wires[size_t(k)];
+    if (w.locked || w.tracks.size() < 3 || w.pair >= 0) continue;
+    bool straight = true;
+    for (uint32_t id : w.tracks)
+      for (const Track& tr : b.tracks)
+        if (tr.id == id && tr.isArc()) straight = false;
+    if (straight) wi = k;
+  }
+  ASSERT_GE(wi, 0);
+  auto indexOf = [&](uint32_t id) {
+    for (int i = 0; i < int(b.tracks.size()); ++i)
+      if (b.tracks[size_t(i)].id == id) return i;
+    return -1;
+  };
+  const int t0 = indexOf(t.wires[size_t(wi)].tracks[0]);
+  ASSERT_GE(t0, 0);
+  // Its end shared with the wire's next track: a joint inside the wire.
+  const Track first = b.tracks[size_t(t0)];
+  const int t1 = indexOf(t.wires[size_t(wi)].tracks[1]);
+  ASSERT_GE(t1, 0);
+  int joint = -1;
+  for (int e = 0; e < 2; ++e) {
+    const Vec2 p = e ? first.b.v() : first.a.v();
+    if ((b.tracks[size_t(t1)].a.v() - p).len() < 1000 || (b.tracks[size_t(t1)].b.v() - p).len() < 1000) joint = e;
+  }
+  ASSERT_GE(joint, 0);
+  const Vec2 at = joint ? first.b.v() : first.a.v();
+  auto changedAt = [&](Vec2 p) {
+    std::vector<uint32_t> ids;
+    for (const Track& tr : b.tracks)
+      if ((tr.a.v() - p).len() < 1000 || (tr.b.v() - p).len() < 1000) ids.push_back(tr.id);
+    return ids;
+  };
+  // Moved by 10 um.
+  {
+    const std::vector<uint32_t> ids = changedAt(at);
+    edit::moveVertex(b, t0, joint, at + Vec2{10000, 0});
+    topo::Topology::assignIds(b);
+    ASSERT_TRUE(t.relayTracks(b, ids));
+    expectLikeBuilt(b, t, "vertex moved");
+  }
+  const Vec2 at2 = at + Vec2{10000, 0};
+  // A branch off the joint, 1 mm along the normal of the first track.
+  Vec2 dir = (first.b.v() - first.a.v()).perp().normalized();
+  Track br = first;
+  br.a = Point(at2);
+  br.b = Point(at2 + dir * 1000000.0);
+  br.id = 0;
+  br.mid.reset();
+  b.tracks.push_back(br);
+  topo::Topology::assignIds(b);
+  const uint32_t brId = b.tracks.back().id;
+  const size_t wiresBefore = t.wires.size();
+  ASSERT_TRUE(t.relayTracks(b, {brId}));
+  expectLikeBuilt(b, t, "branch drawn");
+  EXPECT_EQ(t.wires.size(), wiresBefore + 2) << "the wire cut at the branch point, and the branch";
+  // The branch taken away.
+  b.tracks.pop_back();
+  ASSERT_TRUE(t.relayTracks(b, {brId}));
+  expectLikeBuilt(b, t, "branch taken away");
+  // A track taken out of the wire's middle.
+  const uint32_t midId = t.wires[size_t(wi)].tracks.size() > 1 ? t.wires[size_t(wi)].tracks[1] : 0;
+  for (const topo::Wire& w : t.wires)
+    if (r::contains(w.tracks, first.id)) {
+      const uint32_t id = w.tracks[w.tracks.size() / 2];
+      const int ti = indexOf(id);
+      ASSERT_GE(ti, 0);
+      b.tracks.erase(b.tracks.begin() + ti);
+      ASSERT_TRUE(t.relayTracks(b, {id}));
+      expectLikeBuilt(b, t, "middle track taken out");
+      break;
+    }
+  (void)midId;
+}

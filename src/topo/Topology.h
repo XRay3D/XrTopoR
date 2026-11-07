@@ -201,6 +201,12 @@ struct Topology {
   // The wires of different nets that cross each other on a layer: chords interleaving on a triangle, a
   // wire across the edge another runs along.
   std::vector<Violation> findCrossings(const LayerMesh& m) const;
+  // The live model (gui/Document keeps it through the edits): the wires of the tracks of `changed` ids (changed,
+  // added or gone on the board) laid again from the board as it now is — the chains of their nets that hold one
+  // of them, and every wire sharing a chain with one, taken out and laid in (Convert.cpp: the same chains, ends,
+  // walks and edge order as the build; branch points made and taken out as the ends need them). False when the
+  // model cannot be kept (a zipped pair among them, a branch point the mesh refuses): build it anew.
+  bool relayTracks(const Board& b, const std::vector<uint32_t>& changed);
   // Checks the invariants: the meshes (orientation, neighbours, edges, vertex lists) and the wires (every
   // consecutive pair of crossings on one triangle, the ends at their owners, the edge lists and the wires'
   // lists agreeing). Returns what is wrong.
