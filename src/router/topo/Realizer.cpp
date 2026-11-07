@@ -859,6 +859,43 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
   return drawRealized(b, wires, vias, opt, in, st);
 }
 
+void LayerObstacles::around(const BBox& box, std::vector<int>& out) const {
+  out.clear();
+  Grid& g = grid_;
+  if (g.built != pts.size() || g.cells.empty()) {
+    g = Grid{};
+    g.built = pts.size();
+    BBox all;
+    for (const OPt& o : pts) all.add(o.p);
+    if (!all.valid()) return;
+    // About two points a cell, no finer than 0.5 mm.
+    const double w = std::max(all.maxX - all.minX, 1.0), h = std::max(all.maxY - all.minY, 1.0);
+    g.cell = std::max(0.5 * kNmPerMm, std::sqrt(w * h * 2 / double(std::max<size_t>(pts.size(), 1))));
+    g.x0 = all.minX;
+    g.y0 = all.minY;
+    g.nx = std::max(1, int(w / g.cell) + 1);
+    g.ny = std::max(1, int(h / g.cell) + 1);
+    g.cells.assign(size_t(g.nx) * size_t(g.ny), {});
+    for (int i = 0; i < int(pts.size()); ++i) {
+      const int cx = std::clamp(int((pts[size_t(i)].p.x - g.x0) / g.cell), 0, g.nx - 1);
+      const int cy = std::clamp(int((pts[size_t(i)].p.y - g.y0) / g.cell), 0, g.ny - 1);
+      g.cells[size_t(cy) * size_t(g.nx) + size_t(cx)].push_back(i);
+      if (pts[size_t(i)].r >= kFarRadius) g.far.push_back(i);
+    }
+  }
+  if (!box.valid() || g.cells.empty()) return;
+  const int x1 = std::clamp(int(std::floor((box.minX - g.x0) / g.cell)), 0, g.nx - 1), x2 = std::clamp(int(std::floor((box.maxX - g.x0) / g.cell)), 0, g.nx - 1);
+  const int y1 = std::clamp(int(std::floor((box.minY - g.y0) / g.cell)), 0, g.ny - 1), y2 = std::clamp(int(std::floor((box.maxY - g.y0) / g.cell)), 0, g.ny - 1);
+  for (int cy = y1; cy <= y2; ++cy)
+    for (int cx = x1; cx <= x2; ++cx) {
+      const auto& c = g.cells[size_t(cy) * size_t(g.nx) + size_t(cx)];
+      out.insert(out.end(), c.begin(), c.end());
+    }
+  out.insert(out.end(), g.far.begin(), g.far.end());
+  r::sort(out);
+  out.erase(std::unique(out.begin(), out.end()), out.end());
+}
+
 RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const std::vector<RealVia>& vias,
                           const RealizeOptions& opt, RealizeInput& in, RealizeStats st) {
   const int NW = int(wires.size());
@@ -906,6 +943,12 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
   // alone; an edge that the bends of a later round overfill takes its ends' shares back and the rounds begin
   // again.
   static const bool kNoNominal = std::getenv("XR_NO_NOMINAL") != nullptr;
+  // The debugging switches, read once (a getenv per wire and round was 0.4 % of F5).
+  static const bool kOvf = std::getenv("XR_OVF") != nullptr, kNoCorner = std::getenv("XR_NOCORNER") != nullptr,
+                    kDebug2 = std::getenv("XR_DEBUG2") != nullptr, kDebug2Sk = std::getenv("XR_DEBUG2SK") != nullptr,
+                    kDebug4 = std::getenv("XR_DEBUG4") != nullptr;
+  static const std::optional<int> kDebug7 = std::getenv("XR_DEBUG7") ? std::optional(std::atoi(std::getenv("XR_DEBUG7"))) : std::nullopt;
+  std::vector<int> guardNear;  // the obstacle points near a chord (LayerObstacles::around)
   const bool nominal = opt.nominal && !kNoNominal && b.hasNominal();
   std::map<LayerId, std::vector<double>> nominalShare;
   std::map<LayerId, std::vector<std::array<double, 2>>> stackReach;  // per obstacle: the outermost wire's far side, at the minimum and at the nominal
@@ -1152,7 +1195,7 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
       }
       if (slack < 0) {
         if (round == 0) ++st.overflowEdges;
-        if (round == 0 && std::getenv("XR_OVF")) {
+        if (round == 0 && kOvf) {
           std::print(stderr, "ovf L{:.3f} need{:.3f} U({:.3f},{:.3f} r{:.2f} net{}) V({:.3f},{:.3f} r{:.2f} net{}) wires:", L / 1e6,
                      (a[n - 1] + bb[n - 1]) / 1e6, U.p.x / 1e6, -U.p.y / 1e6, U.r / 1e6, U.net, V.p.x / 1e6, -V.p.y / 1e6, V.r / 1e6, V.net);
           for (int k = 0; k < n; ++k) std::print(stderr, " {}/w{:.2f}", wires[list[k].first].net, wAt(k) / 1e6);
@@ -1245,7 +1288,7 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
       Vec2 prev = i == 0 ? sk.front() : at(i - 1), next = i + 1 == apexes.size() ? sk.back() : at(i + 1);
       if (double o = orient(prev, l, next); o != 0) apexes[i].side = o > 0 ? +1 : -1;
     }
-    if (const char* d = std::getenv("XR_DEBUG7"); d && std::atoi(d) == wi) {
+    if (kDebug7 && *kDebug7 == wi) {
       std::println(stderr, "wire {} portals:", wi);
       for (size_t k = 0; k < portals.size(); ++k) {
         const auto& [l, r] = portals[k];
@@ -1285,7 +1328,7 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
       double R = atU ? sl.ru : sl.rv;
       Vec2 c = atU ? sl.cu : sl.cv;
       double width = hw[wi][ap.portal - 1];
-      if (auto it = ob.cornersOf.find(o); it != ob.cornersOf.end() && (c - ob.pts[o].p).len2() < 1 && !std::getenv("XR_NOCORNER")) {
+      if (auto it = ob.cornersOf.find(o); it != ob.cornersOf.end() && (c - ob.pts[o].p).len2() < 1 && !kNoCorner) {
         // The bend goes around the corner nearest to where the taut path meets the slot.
         Vec2 at = h.uLeft == atU ? ob.pts[h.u].p + (ob.pts[h.v].p - ob.pts[h.u].p).normalized() * sl.lo
                                  : ob.pts[h.v].p + (ob.pts[h.u].p - ob.pts[h.v].p).normalized() * (L_of(h) - sl.hi);
@@ -1311,9 +1354,9 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
       }
     }
     cs.push_back({sk.back(), 0, -1, int(portals.size()) - 1, double(w.width)});
-    if (std::getenv("XR_DEBUG2")) {
+    if (kDebug2) {
       std::print(stderr, "wire {} net {} sketch {} hits {} bends:", wi, b.nets[w.net].name, sk.size(), hits[wi].size());
-      if (std::getenv("XR_DEBUG2SK")) {
+      if (kDebug2Sk) {
         std::print(stderr, "\n  sketch:");
         for (Vec2 q : sk) std::print(stderr, " ({:.2f},{:.2f})", q.x / 1e6, -q.y / 1e6);
         std::print(stderr, "\n  obstacles within 3 mm of the end:");
@@ -1411,7 +1454,7 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
         if (std::abs(sweepOf(cs[k], ti[k], to[k])) > 1.6 * kPi) bad = int(k);
       if (bad > 0 && bad < int(n) - 1) {
         dropped.insert(cs[bad].obst);
-        if (std::getenv("XR_DEBUG4")) {
+        if (kDebug4) {
           auto joined = [&](int o1, int o2) {
             return o1 >= 0 && o2 >= 0 && cdtEdges[w.layer].contains({std::min(o1, o2), std::max(o1, o2)});
           };
@@ -1584,7 +1627,8 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
           bb.add(q);
           bb = bb.inflated(3 * kNmPerMm + w.width);
           double width = std::min(cs[k].width, cs[k + 1].width);
-          for (int o = 0; o < int(ob.pts.size()); ++o) {
+          ob.around(bb, guardNear);  // (the points the test below can let through, in the same order)
+          for (int o : guardNear) {
             const OPt& op = ob.pts[o];
             if (op.net == kTransparent || (op.net == w.net && w.net != kNoNet)) continue;
             // (A large round obstacle, a hole in the board, reaches the chord from far outside the box.)
@@ -1611,7 +1655,7 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
       if (at < 0) break;
       cs.insert(cs.begin() + at, ins);
     }
-    if (std::getenv("XR_DEBUG2")) {
+    if (kDebug2) {
       std::print(stderr, "  final {}:", wi);
       for (size_t k = 0; k < cs.size(); ++k)
         std::print(stderr, " [o{} rho{:+.3f} in({:.3f},{:.3f}) out({:.3f},{:.3f})]", cs[k].obst, cs[k].rho / 1e6,

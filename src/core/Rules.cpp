@@ -60,6 +60,15 @@ Coord Board::minTrackWidth(int net, LayerId layer) const {
   const Board& b = *this;
   if (Coord w = pairWidth(net, layer); w > 0) return w;  // a pair's conductor: the rule's width, no narrower
   if (!b.rules) return b.trackWidth(net, layer);
+  if (b.minWidthsFor == std::pair(b.nets.size(), b.layers.size())) {
+    Coord w = 0;
+    for (const MinWidthRule& mr : b.minWidthRules) {
+      if (mr.layers && !((mr.layers >> layer) & 1)) continue;
+      if (!mr.every && !std::binary_search(mr.nets.begin(), mr.nets.end(), net)) continue;
+      w = mr.width;
+    }
+    return w > 0 ? w : b.trackWidth(net, layer);
+  }
   const DesignRules& r = *b.rules;
   Coord w = 0;
   for (auto& rule : r.widths) {
@@ -229,6 +238,34 @@ void compileRules(Board& b) {
         }
       }
   }
+  // The width rules resolved once for minTrackWidth (it ran netsOf, names to nets, on every query).
+  b.minWidthRules.clear();
+  for (auto& rule : r.widths) {
+    if (!rule.enabled) continue;
+    Board::MinWidthRule mr;
+    mr.layers = layersOf(b, rule.layers);
+    auto nets = netsOf(b, r, rule.nets);
+    mr.every = !nets;
+    if (nets) {
+      mr.nets = std::move(*nets);
+      r::sort(mr.nets);
+    }
+    mr.width = rule.min > 0 ? rule.min : rule.nom;
+    b.minWidthRules.push_back(std::move(mr));
+  }
+  b.minWidthsFor = {b.nets.size(), b.layers.size()};
+  // The sorted copies of the lists the lookups bisect (Board::clearance and the rest).
+  auto sorted = [](const std::vector<int>& v) {
+    std::vector<int> s = v;
+    r::sort(s);
+    return s;
+  };
+  for (LayerRule& lr : layerRules) lr.sorted = sorted(lr.nets);
+  for (auto* list : {&pairRules, &nominalRules})
+    for (ClearancePair& p : *list) {
+      p.sortedA = sorted(p.netsA);
+      p.sortedB = sorted(p.netsB);
+    }
   b.layerRules = std::move(layerRules);
   b.pairRules = std::move(pairRules);
   b.nominalRules = std::move(nominalRules);

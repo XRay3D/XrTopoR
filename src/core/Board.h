@@ -1,6 +1,7 @@
 #pragma once
 // Board data model. Internal frame follows KiCad: Y axis points down, units are nanometres,
 // angles are degrees counter-clockwise as seen on screen.
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <functional>
@@ -64,6 +65,15 @@ struct LayerRule {
   LayerMask layers = 0;  // 0 = all copper layers
   Coord width = 0;       // 0 = keep
   Coord clearance = 0;   // 0 = keep
+  // `nets` sorted by compileRules, for the lookups (the list keeps the rules' order: the sidecar's fingerprint
+  // reads it); empty for a rule made otherwise, then the list is searched as it is.
+  std::vector<int> sorted = {};
+  bool names(int net) const { return namesNet(nets, sorted, net); }
+  // (empty = every net)
+  static bool namesNet(const std::vector<int>& nets, const std::vector<int>& sorted, int net) {
+    if (nets.empty()) return true;
+    return sorted.empty() ? r::contains(nets, net) : std::binary_search(sorted.begin(), sorted.end(), net);
+  }
 };
 
 // The clearance between two sets of nets (TopoR's «зазор между группами цепей»), applied in order after
@@ -72,6 +82,11 @@ struct ClearancePair {
   std::vector<int> netsA, netsB;  // empty = all nets
   LayerMask layers = 0;           // 0 = all copper layers
   Coord clearance = 0;
+  std::vector<int> sortedA = {}, sortedB = {};  // as LayerRule::sorted
+  bool namesA(int net) const { return LayerRule::namesNet(netsA, sortedA, net); }
+  bool namesB(int net) const { return LayerRule::namesNet(netsB, sortedB, net); }
+  // The rule is for the two nets, in either order.
+  bool namesBoth(int a, int b) const { return (namesA(a) && namesB(b)) || (namesA(b) && namesB(a)); }
 };
 
 // The last pair rule naming both nets on the layer (-1: only a rule of all layers counts), or 0.
@@ -326,6 +341,17 @@ struct Board {
   // tight spots): every clearance rule whose nominal is above its minimum, in the rules' order, the last one
   // naming both nets wins. Empty: the design has no nominal clearance above the minimum.
   std::vector<ClearancePair> nominalRules;
+  // The width rules of `rules` as compileRules resolved them (minTrackWidth): the layers, the nets sorted (all:
+  // `every`), the narrowest width; valid for the nets and layers there were then (`minWidthsFor`: their counts;
+  // else, as for rules not compiled, resolved at each query).
+  struct MinWidthRule {
+    LayerMask layers = 0;
+    bool every = false;
+    std::vector<int> nets;
+    Coord width = 0;
+  };
+  std::vector<MinWidthRule> minWidthRules;
+  std::pair<size_t, size_t> minWidthsFor{SIZE_MAX, SIZE_MAX};
   std::vector<Net> nets;
   std::vector<Component> components;
   std::vector<Pad> pads;

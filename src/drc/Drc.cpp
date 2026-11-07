@@ -1,6 +1,10 @@
 #include "drc/Drc.h"
 
+#include <bit>
 #include <cstdio>
+#include <deque>
+#include <optional>
+#include <unordered_set>
 #include <set>
 #include <unordered_map>
 
@@ -25,8 +29,7 @@ constexpr double kDrcTolerance = 2000;
 double requiredClearance(const Board& b, int netA, int netB, LayerMask layers) {
   if (!layers) return double(b.clearance(netA, netB, -1));
   Coord req = 0;
-  for (LayerId l = 0; l < 64; ++l)
-    if ((layers >> l) & 1) req = std::max(req, b.clearance(netA, netB, l));
+  for (LayerMask m = layers; m; m &= m - 1) req = std::max(req, b.clearance(netA, netB, LayerId(std::countr_zero(m))));
   return double(req);
 }
 
@@ -188,46 +191,78 @@ std::vector<DrcViolation> runDrc(const Board& b, const DrcOptions& opt) {
   double maxClr = double(b.maxClearance());
 
   if (opt.clearance) {
-    std::set<std::pair<int, int>> seen;
-    auto gid = [&](ItemRef r) { return int(r.type) * 10'000'000 + r.index; };
+    // Each pair once; and the shapes of every item and whether a track is its pad's copper once, not once per
+    // pair (they were half of the check).
+    std::unordered_set<uint64_t> seen;
+    auto gid = [&](ItemRef r) { return uint64_t(int(r.type) * 10'000'000 + r.index); };
+    using Cache = std::vector<std::optional<std::vector<Shape>>>;
+    Cache shapeCache[4] = {Cache(b.tracks.size()), Cache(b.vias.size()), Cache(b.pads.size()), Cache(b.zones.size())};
+    auto slot = [](ItemRef r) {
+      switch (r.type) {
+        case ItemType::Track: return 0;
+        case ItemType::Via: return 1;
+        case ItemType::Pad: return 2;
+        case ItemType::Zone: return 3;
+        default: return -1;
+      }
+    };
+    std::deque<std::vector<Shape>> scratch;  // (other kinds: kept while the check runs)
+    auto shapesOf = [&](ItemRef r) -> const std::vector<Shape>& {
+      const int k = slot(r);
+      if (k < 0 || r.index < 0 || size_t(r.index) >= shapeCache[k].size()) return scratch.emplace_back(itemShapes(b, r));
+      auto& c = shapeCache[k][size_t(r.index)];
+      if (!c) c = itemShapes(b, r);
+      return *c;
+    };
+    std::vector<signed char> ownCopper(b.tracks.size(), -1);
+    auto inOwn = [&](ItemRef r) {
+      if (r.type != ItemType::Track) return false;
+      signed char& o = ownCopper[size_t(r.index)];
+      if (o < 0) o = inOwnCopper(b, idx, r);
+      return o > 0;
+    };
     auto check = [&](ItemRef a) {
       if (out.size() >= opt.maxViolations) return;
-      auto shapes = itemShapes(b, a);
+      const std::vector<Shape>& shapes = shapesOf(a);
       BBox bb;
       for (auto& s : shapes) bb.add(s.bbox());
       LayerMask lm = itemLayers(b, a);
-      if (inOwnCopper(b, idx, a)) return;
+      if (inOwn(a)) return;
       idx.query(bb.inflated(maxClr), lm, [&](ItemRef c) {
-        if (c == a || skipPair(b, a, c) || inOwnCopper(b, idx, c)) return;
-        int ka = gid(a), kc = gid(c);
-        if (!seen.insert({std::min(ka, kc), std::max(ka, kc)}).second) return;
+        if (c == a || skipPair(b, a, c) || inOwn(c)) return;
+        const uint64_t ka = gid(a), kc = gid(c);
+        if (!seen.insert(std::min(ka, kc) << 32 | std::max(ka, kc)).second) return;
         int na = itemNet(b, a), nc = itemNet(b, c);
         LayerMask common = lm & itemLayers(b, c);
-        // The closest points of two lists of shapes: the distance and a marker near the contact.
-        auto measure = [](const std::vector<Shape>& as, const std::vector<Shape>& cs, Vec2& where) {
+        // The closest points of two lists of shapes: the distance and a marker near the contact (of the pair
+        // of shapes nearest, found only when the pair is reported).
+        auto measure = [&](const std::vector<Shape>& as, const std::vector<Shape>& cs, Vec2& where) {
           double best = std::numeric_limits<double>::max();
+          const Shape *n1 = nullptr, *n2 = nullptr;
           for (auto& s1 : as)
-            for (auto& s2 : cs) {
-              double d = s1.distance(s2);
-              if (d < best) {
+            for (auto& s2 : cs)
+              if (double d = s1.distance(s2); d < best) {
                 best = d;
-                // Marker near the actual contact: the closest of the shapes' key points to the other shape.
-                auto keyPts = [](const Shape& s) {
-                  if (s.kind == Shape::Kind::Point) return Polyline{s.a};
-                  if (s.kind == Shape::Kind::Segment) return Polyline{s.a, (s.a + s.b) * 0.5, s.b};
-                  return s.poly;
-                };
-                double bd = std::numeric_limits<double>::max();
-                for (auto& p : keyPts(s1)) {
-                  double dd = s2.distance(p);
-                  if (dd < bd) { bd = dd; where = p; }
-                }
-                for (auto& p : keyPts(s2)) {
-                  double dd = s1.distance(p);
-                  if (dd < bd) { bd = dd; where = p; }
-                }
+                n1 = &s1;
+                n2 = &s2;
               }
+          if (n1) {
+            // Marker near the actual contact: the closest of the shapes' key points to the other shape.
+            auto keyPts = [](const Shape& s) {
+              if (s.kind == Shape::Kind::Point) return Polyline{s.a};
+              if (s.kind == Shape::Kind::Segment) return Polyline{s.a, (s.a + s.b) * 0.5, s.b};
+              return s.poly;
+            };
+            double bd = std::numeric_limits<double>::max();
+            for (auto& p : keyPts(*n1)) {
+              double dd = n2->distance(p);
+              if (dd < bd) { bd = dd; where = p; }
             }
+            for (auto& p : keyPts(*n2)) {
+              double dd = n1->distance(p);
+              if (dd < bd) { bd = dd; where = p; }
+            }
+          }
           return best;
         };
         Vec2 where;
@@ -253,7 +288,7 @@ std::vector<DrcViolation> runDrc(const Board& b, const DrcOptions& opt) {
           if (worstLayer < 0) return;
         } else {
           req = requiredClearance(b, na, nc, common);
-          best = measure(shapes, itemShapes(b, c), where);
+          best = measure(shapes, shapesOf(c), where);
         }
         if (best >= req - opt.tolerance) return;
         DrcViolation v;

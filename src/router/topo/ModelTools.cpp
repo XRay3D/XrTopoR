@@ -366,11 +366,15 @@ RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int
     }
     // Along every edge the list runs from u to v, as Edge::cross does, but by hit indices of the wires
     // in that order (the wires not drawn left out).
+    // (The first edge of the mesh with the pair of vertices, found in one pass: a scan of all edges for
+    // every crossed one was quadratic.)
+    std::map<std::pair<int, int>, const Edge*> edgeOf;
+    for (const Edge& E : m.edges)
+      if (onEdge.contains({E.v[0], E.v[1]})) edgeOf.try_emplace({E.v[0], E.v[1]}, &E);
     for (auto& [uv, list] : onEdge) {
-      const Edge* E = nullptr;
-      for (int e = 0; e < int(m.edges.size()) && !E; ++e)
-        if (m.edges[e].v[0] == uv.first && m.edges[e].v[1] == uv.second) E = &m.edges[e];
-      if (!E) continue;
+      auto found = edgeOf.find(uv);
+      if (found == edgeOf.end()) continue;
+      const Edge* E = found->second;
       std::vector<std::pair<int, int>> ordered;
       for (int cid : E->cross) {
         auto it = localOf.find(t.crossings[cid].wire);
@@ -521,9 +525,14 @@ void drawModel(Board& b, Topology& t, bool direct, RealizeStats& stats, int& nWi
   }
   for (auto [owner, id] : t.ownerTracks)
     if (redrawnAt.contains(owner)) gone.insert(id);
+  // The sketches here only for the drawing by the tracks (`direct` off) and the debugging output:
+  // realizeFromModel makes its own (sketchOf was a tenth of F5, done twice).
+  static const char* const kNear = std::getenv("XR_TOPO_NEAR");
+  static const char* const kNet = std::getenv("XR_TOPO_NET");
   std::vector<RealWire> wires;
-  for (int wi : chosen) wires.push_back(sketchOf(b, t, wi));
-  if (const char* dbg = std::getenv("XR_TOPO_NEAR")) {
+  if (!direct || kNear || kNet)
+    for (int wi : chosen) wires.push_back(sketchOf(b, t, wi));
+  if (const char* dbg = kNear) {
     double nx = 0, ny = 0;
     std::sscanf(dbg, "%lf,%lf", &nx, &ny);
     Vec2 near{nx * kNmPerMm, ny * kNmPerMm};
@@ -547,7 +556,7 @@ void drawModel(Board& b, Topology& t, bool direct, RealizeStats& stats, int& nWi
       std::println(stderr, "");
     }
   }
-  if (const char* dbg = std::getenv("XR_TOPO_NET"))
+  if (const char* dbg = kNet)
     for (size_t k = 0; k < wires.size(); ++k)
       if (b.nets[wires[k].net].name == dbg) {
         const Wire& w = t.wires[chosen[k]];
@@ -590,7 +599,7 @@ void drawModel(Board& b, Topology& t, bool direct, RealizeStats& stats, int& nWi
     for (int wi : again) t.wires[size_t(wi)].tracks.clear();
     for (size_t k = 0; k < st2.trackWire.size(); ++k) t.wires[size_t(again[st2.trackWire[k]])].tracks.push_back(b.tracks[from + k].id);
   }
-  nWires = int(wires.size());
+  nWires = int(chosen.size());
 }
 
 F5ModelResult runF5Model(Board& b, Topology& t, const F5ModelOptions& o) {

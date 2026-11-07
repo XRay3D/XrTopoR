@@ -84,6 +84,22 @@ struct LayerObstacles {
       if ((pts[i].p - p).len2() <= bd) { bd = (pts[i].p - p).len2(); best = i; }
     return best;
   }
+  // The points that may lie in `box` (those of the grid's cells over it, a superset) and every point of
+  // radius kFarRadius or more (round copper that reaches far: a hole in the board), in increasing order: a
+  // scan of all of them for every chord of every wire was a sixth of the drawing. The grid is made on the
+  // first query and again after points were added (a point added is not moved).
+  static constexpr double kFarRadius = 3 * kNmPerMm;
+  void around(const BBox& box, std::vector<int>& out) const;
+
+ private:
+  struct Grid {
+    size_t built = 0;  // the points it holds
+    double x0 = 0, y0 = 0, cell = 1;
+    int nx = 0, ny = 0;
+    std::vector<std::vector<int>> cells;
+    std::vector<int> far;
+  };
+  mutable Grid grid_;
 };
 
 // Constrained Delaunay triangulation of the obstacle points of one layer, optionally without
