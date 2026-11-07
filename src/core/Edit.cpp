@@ -1,5 +1,7 @@
 #include "core/Edit.h"
 
+#include "core/DiffPairs.h"
+
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -688,8 +690,32 @@ int changeLayer(Board& b, const std::vector<int>& tracks, LayerId layer) {
     ends.push_back({t.a.v(), t.layer, t.net});
     ends.push_back({t.b.v(), t.layer, t.net});
   }
+  // A zipped section whose conductors all go goes with them: its axis to the layer, its conductors made again
+  // by the pair's rule there.
+  std::vector<std::pair<int, ZipEnds>> zipsMoved;
+  for (int z = 0; z < int(b.zips.size()); ++z) {
+    bool any = false, all = true;
+    for (size_t ti = 0; ti < b.tracks.size(); ++ti)
+      if (b.tracks[ti].zip == z) {
+        any = true;
+        all &= bool(moved[ti]);
+      }
+    if (any && all) zipsMoved.push_back({z, zipEnds(b, z)});
+  }
   for (int ti : tracks)
     if (moved[ti]) b.tracks[ti].layer = layer;
+  for (auto& [z, was] : zipsMoved) {
+    ZippedWire& zw = b.zips[size_t(z)];
+    zw.layer = layer;
+    for (Track& t : zw.axis) t.layer = layer;
+    Coord w = 0, gap = 0;
+    if (b.pairRule(zw.pair, layer, w, gap)) {
+      zw.condWidth = w;
+      zw.gap = gap;
+      for (Track& t : zw.axis) t.width = zw.width();
+    }
+    rebuildZip(b, z, was);
+  }
   std::vector<Vec2> placed;
   int added = 0;
   for (auto [p, from, net] : ends) {
@@ -870,6 +896,8 @@ Fragment paste(Board& b, const Clip& c, Vec2 at) {
   return f;
 }
 
+void stretchEnds(Track& t, Vec2 a2, Vec2 b2) { stretch(t, a2, b2); }
+
 void erase(Board& b, const Fragment& f) {
   auto drop = [](auto& list, std::vector<int> idx) {
     r::sort(idx, std::greater{});
@@ -883,6 +911,9 @@ void erase(Board& b, const Fragment& f) {
   drop(b.keepouts, f.keepouts);
   drop(b.texts, f.texts);
   drop(b.graphics, f.details);
+  // A zipped section with no conductor left goes too.
+  for (int z = int(b.zips.size()) - 1; z >= 0; --z)
+    if (r::none_of(b.tracks, [&](const Track& t) { return t.zip == z; })) b.removeZip(z);
 }
 
 std::vector<int> removeDegenerate(Board& b) {

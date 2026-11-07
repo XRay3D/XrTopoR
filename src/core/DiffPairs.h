@@ -25,6 +25,26 @@ std::vector<Track> offsetRun(const std::vector<Track>& run, double d, double max
 std::expected<int, std::string> zipTracks(Board& b, const std::vector<int>& tracks);
 // The section goes, its conductors stay as tracks of their nets.
 void unzip(Board& b, int zip);
+
+// The conductors' free ends at the two ends of a section's axis: [side][end], side 0 the negative net's, 1 the
+// positive's; end 0 at the axis's start. Taken before the axis is edited, for rebuildZip.
+struct ZipEnds {
+  Vec2 p[2][2];
+  bool ok = false;
+};
+ZipEnds zipEnds(const Board& b, int zip);
+// The section's conductors made again from its axis (offsetRun, the pair's rule on its layer), written over the
+// old ones in place (the tracks keep their indices and ids; pieces more are appended, pieces fewer erased), and
+// the single tracks that ended at the old conductors' ends (`was`) taken to the new ones (a locked one gets a
+// connecting piece). False for a section without an axis.
+bool rebuildZip(Board& b, int zip, const ZipEnds& was);
+// The pair edited by its axis (TopoR: the zipped pair is laid and edited as one wire), each followed by
+// rebuildZip; false for a fixed section. Vertex k: 0 the start clasp, n the end clasp, between them the joint of
+// pieces k - 1 and k; the pieces either side stretch (an arc keeps its shape). bendAxis: an arc's middle to `to`
+// (on the chord: a line), a line split at its middle with the new vertex at `to`. moveAxisPiece: piece k by d.
+bool moveAxisVertex(Board& b, int zip, int k, Vec2 to);
+bool bendAxis(Board& b, int zip, int k, Vec2 to);
+bool moveAxisPiece(Board& b, int zip, int k, Vec2 d);
 // The two nets change sides: each conductor takes the other's net, and the single tracks at the section's
 // ends move over to the conductor of their net (TopoR's «Поменять цепи местами», against wires crossing at
 // a clasp).

@@ -69,6 +69,8 @@ bool move(Board& b, const Fragment& f, const Motion& m);
 // there. A vertex on a pad or via stays: the grabbed track breaks off it with a new segment.
 // False if a locked track ends there.
 bool moveVertex(Board& b, int track, int end, Vec2 to);
+// A track's ends to a2 and b2, an arc keeping its shape (the similarity taking the old ends to the new).
+void stretchEnds(Track& t, Vec2 a2, Vec2 b2);
 // Parallel transfer of one segment by d (neighbours stretch, as in move()).
 bool moveSegment(Board& b, int track, Vec2 d);
 // Splits a track at the point nearest to `at`; returns the index of the second part (appended).

@@ -84,6 +84,153 @@ std::vector<Track> offsetRun(const std::vector<Track>& in, double d, double maxJ
 
 void unzip(Board& b, int zip) { b.removeZip(zip); }
 
+ZipEnds zipEnds(const Board& b, int zip) {
+  ZipEnds out;
+  if (zip < 0 || zip >= int(b.zips.size()) || b.zips[size_t(zip)].axis.empty()) return out;
+  const ZippedWire& z = b.zips[size_t(zip)];
+  const Vec2 at[2] = {z.axis.front().a.v(), z.axis.back().b.v()};
+  for (int side = 0; side < 2; ++side) {
+    const int net = side ? z.netP : z.netN;
+    // The free ends: an end no other conductor of the net shares.
+    std::vector<Vec2> ends;
+    for (const Track& t : b.tracks)
+      if (t.zip == zip && t.net == net) {
+        ends.push_back(t.a.v());
+        ends.push_back(t.b.v());
+      }
+    std::vector<Vec2> free;
+    for (size_t i = 0; i < ends.size(); ++i) {
+      int same = 0;
+      for (size_t j = 0; j < ends.size(); ++j) same += (ends[i] - ends[j]).len() <= edit::kJoinTol;
+      if (same == 1) free.push_back(ends[i]);
+    }
+    if (free.empty()) return out;
+    for (int e = 0; e < 2; ++e) {
+      double bd = 1e300;
+      for (Vec2 q : free)
+        if (double d = (q - at[e]).len(); d < bd) bd = d, out.p[side][e] = q;
+    }
+  }
+  out.ok = true;
+  return out;
+}
+
+bool rebuildZip(Board& b, int zip, const ZipEnds& was) {
+  if (zip < 0 || zip >= int(b.zips.size())) return false;
+  ZippedWire& z = b.zips[size_t(zip)];
+  if (z.axis.empty()) return false;
+  Coord w = z.condWidth, gap = z.gap;
+  if (b.pairRule(z.pair, z.layer, w, gap)) {
+    z.condWidth = w;
+    z.gap = gap;
+  }
+  const double off = double(z.condWidth + z.gap) / 2.0;
+  const double pairWidth = double(z.width());
+  std::vector<int> drop;
+  for (int side = 0; side < 2; ++side) {
+    const int net = side ? z.netP : z.netN;
+    const double sg = (side ? 1.0 : -1.0) * (z.pSide ? z.pSide : 1);
+    std::vector<Track> run = offsetRun(z.axis, sg * off, 4 * pairWidth);
+    if (run.empty()) continue;
+    // The single tracks at the old ends follow to the new ones.
+    if (was.ok)
+      for (int e = 0; e < 2; ++e) {
+        const Vec2 from = was.p[side][e], to = e ? run.back().b.v() : run.front().a.v();
+        if ((from - to).len() <= 1) continue;
+        std::vector<Track> connectors;
+        for (Track& t : b.tracks) {
+          if (t.zip == zip || t.net != net || t.layer != z.layer) continue;
+          const bool atA = (t.a.v() - from).len() <= edit::kJoinTol, atB = (t.b.v() - from).len() <= edit::kJoinTol;
+          if (!atA && !atB) continue;
+          if (t.locked) {  // stays, joined by a piece
+            Track c = t;
+            c.mid.reset();
+            c.locked = false;
+            c.a = Point(from);
+            c.b = Point(to);
+            c.edited = true;
+            connectors.push_back(c);
+            continue;
+          }
+          edit::stretchEnds(t, atA ? to : t.a.v(), atB ? to : t.b.v());
+          t.edited = true;
+        }
+        for (Track& c : connectors) b.tracks.push_back(c);
+      }
+    // Over the old conductors of the net, in place.
+    std::vector<int> slots;
+    for (int i = 0; i < int(b.tracks.size()); ++i)
+      if (b.tracks[size_t(i)].zip == zip && b.tracks[size_t(i)].net == net) slots.push_back(i);
+    for (size_t k = 0; k < run.size(); ++k) {
+      Track t = run[k];
+      t.width = z.condWidth;
+      t.layer = z.layer;
+      t.net = net;
+      t.zip = zip;
+      t.edited = true;
+      t.locked = z.fixed;
+      if (k < slots.size()) {
+        Track& o = b.tracks[size_t(slots[k])];
+        t.id = o.id;
+        t.serp = o.serp;
+        o = t;
+      } else {
+        t.id = 0;
+        b.tracks.push_back(t);
+      }
+    }
+    for (size_t k = run.size(); k < slots.size(); ++k) drop.push_back(slots[k]);
+  }
+  r::sort(drop, std::greater{});
+  for (int i : drop) b.tracks.erase(b.tracks.begin() + i);
+  return true;
+}
+
+bool moveAxisVertex(Board& b, int zip, int k, Vec2 to) {
+  if (zip < 0 || zip >= int(b.zips.size()) || b.zips[size_t(zip)].fixed) return false;
+  std::vector<Track>& axis = b.zips[size_t(zip)].axis;
+  const int n = int(axis.size());
+  if (k < 0 || k > n || n == 0) return false;
+  const ZipEnds was = zipEnds(b, zip);
+  if (k > 0) edit::stretchEnds(axis[size_t(k - 1)], axis[size_t(k - 1)].a.v(), to);
+  if (k < n) edit::stretchEnds(axis[size_t(k)], to, axis[size_t(k)].b.v());
+  std::erase_if(axis, [](const Track& t) { return t.a == t.b; });
+  return rebuildZip(b, zip, was);
+}
+
+bool bendAxis(Board& b, int zip, int k, Vec2 to) {
+  if (zip < 0 || zip >= int(b.zips.size()) || b.zips[size_t(zip)].fixed) return false;
+  std::vector<Track>& axis = b.zips[size_t(zip)].axis;
+  if (k < 0 || k >= int(axis.size())) return false;
+  const ZipEnds was = zipEnds(b, zip);
+  Track& t = axis[size_t(k)];
+  if (t.mid) {
+    if (distPointSegment(to, t.a.v(), t.b.v()) < 1000) t.mid.reset();  // on the chord: a line
+    else t.mid = Point(to);
+  } else {
+    Track second = t;
+    t.b = Point(to);
+    second.a = Point(to);
+    axis.insert(axis.begin() + k + 1, second);
+  }
+  return rebuildZip(b, zip, was);
+}
+
+bool moveAxisPiece(Board& b, int zip, int k, Vec2 d) {
+  if (zip < 0 || zip >= int(b.zips.size()) || b.zips[size_t(zip)].fixed) return false;
+  std::vector<Track>& axis = b.zips[size_t(zip)].axis;
+  const int n = int(axis.size());
+  if (k < 0 || k >= n) return false;
+  const ZipEnds was = zipEnds(b, zip);
+  Track& t = axis[size_t(k)];
+  t.a = Point(t.a.v() + d);
+  t.b = Point(t.b.v() + d);
+  if (t.mid) t.mid = Point(t.mid->v() + d);
+  if (k > 0) edit::stretchEnds(axis[size_t(k - 1)], axis[size_t(k - 1)].a.v(), t.a.v());
+  if (k + 1 < n) edit::stretchEnds(axis[size_t(k + 1)], t.b.v(), axis[size_t(k + 1)].b.v());
+  return rebuildZip(b, zip, was);
+}
+
 void swapZipNets(Board& b, int zip) {
   if (zip < 0 || zip >= int(b.zips.size())) return;
   ZippedWire& z = b.zips[size_t(zip)];

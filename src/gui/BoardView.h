@@ -124,6 +124,7 @@ class BoardView : public QWidget {
     int part = 0;  // a keepout's figure
     enum Kind { End, Middle } kind = End;
     int vertex = 0;  // End: a track's end (0 = a, 1 = b) or a figure's vertex; Middle: a figure's side
+    int zip = -1;    // the axis of a zipped section (item unused): End its vertex k, Middle the middle of piece k
   };
   std::optional<Marker> markerAt(QPointF screen) const;  // markers of the selected objects
   std::vector<Marker> markers() const;
@@ -132,7 +133,7 @@ class BoardView : public QWidget {
   edit::Fragment selectedFragment() const;
   // Moves the selection by an edit::Motion built around its pivot (rotations and flips).
   void transformSelection(double rotate, bool mirror, const QString& title);
-  enum class Drag { None, Fragment, Segment, Vertex, Bend, Freestyle };
+  enum class Drag { None, Fragment, Segment, Vertex, Bend, Freestyle, AxisPiece };
   void freestyleBy(Vec2 shift, double rotate);  // one Freestyle move of fsTarget_
   void startDrag(Drag kind, Vec2 at, std::optional<Marker> marker = {});
   void applyDrag();
@@ -229,6 +230,10 @@ class BoardView : public QWidget {
   double dragRotate_ = 0;
   bool dragMirror_ = false;
   Marker dragMarker_;
+  int dragZip_ = -1, dragPiece_ = -1;  // Drag::AxisPiece: the section and the piece of its axis
+  // The tracks of a zipped section (its conductors); the selection made them after its axis was edited.
+  std::vector<ItemRef> sectionTracks(int zip) const;
+  void selectSection(int zip);
   std::optional<EditSnapshot> dragBefore_;
   std::optional<Pick> pendingClick_;  // press on a selected object: selects it alone if not dragged
   bool placing_ = false;                // a pasted fragment follows the cursor

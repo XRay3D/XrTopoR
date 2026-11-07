@@ -588,12 +588,11 @@ TEST(Gui, ZippedPairSelectionAndProperties) {
   EXPECT_EQ(f.b().zips.size(), 1u);
 }
 
-// «Ручная прокладка дифф. пары»: a click on a pad of a pair's net starts from it and its partner on the same
-// component, the second click places the clasp, the pair is laid by clicks as one wire, a click on a pad of the
-// pair at the far end ends it at a clasp with the conductors to that pad and its partner. One section, its
-// conductors 0.3 wide and 0.5 apart, every connection made, no violation.
-TEST(Gui, RoutePairByClicks) {
-  Fixture f("tt.kicad_pcb");
+namespace {
+
+// The pair P/N (0.3 wide, 0.2 apart) between U1's pads (4,11)/(4,9) and U2's (36,11)/(36,9) on one layer,
+// laid by clicks with «Ручная прокладка дифф. пары»: the clasp at (8,10), the axis by (20,12) to (32,10).
+void layPairByClicks(Fixture& f) {
   auto board = std::make_unique<Board>();
   Board& b = *board;
   const LayerId top = b.addLayer("Top", LayerKind::Copper, Side::Top);
@@ -651,6 +650,19 @@ TEST(Gui, RoutePairByClicks) {
   click(at(32, 10));
   click(at(36, 11));  // P of U2: the end
   EXPECT_FALSE(f.view.isRouting());
+  f.view.setRoutePair(false);
+  f.view.setMode(Mode::Select);
+}
+
+}  // namespace
+
+// «Ручная прокладка дифф. пары»: a click on a pad of a pair's net starts from it and its partner on the same
+// component, the second click places the clasp, the pair is laid by clicks as one wire, a click on a pad of the
+// pair at the far end ends it at a clasp with the conductors to that pad and its partner. One section, its
+// conductors 0.3 wide and 0.5 apart, every connection made, no violation.
+TEST(Gui, RoutePairByClicks) {
+  Fixture f("tt.kicad_pcb");
+  layPairByClicks(f);
   const Board& nb = f.b();
   ASSERT_EQ(nb.zips.size(), 1u);
   EXPECT_EQ(nb.zips[0].axis.size(), 2u) << "(8,10) -> (20,12) -> (32,10)";
@@ -670,6 +682,80 @@ TEST(Gui, RoutePairByClicks) {
   EXPECT_EQ(Connectivity::compute(f.b()).ratsnest.size(), 0u) << "after F5";
   for (const DrcViolation& v : runDrc(f.b(), d))
     if (v.type != DrcViolation::Type::Unconnected) ADD_FAILURE() << "after F5: " << v.message;
+}
+
+// The pair edited as a pair, by its axis (TopoR: the thin line between the conductors with its handles): a
+// click on a conductor takes the whole section, its handles are the axis's; the joint of the axis dragged goes
+// where it is put and the conductors are made from the axis again, at the offset either side, the connections
+// kept; dragged by a conductor, the piece of the axis there moves across itself; undo brings the axis back;
+// the width of the conductors is not changed by hand (the rule of the impedance gives it); Del takes the section
+// with its conductors.
+TEST(Gui, ZippedPairEditedByItsAxis) {
+  Fixture f("tt.kicad_pcb");
+  layPairByClicks(f);
+  auto at = [](double x, double y) { return Vec2{x * kNmPerMm, y * kNmPerMm}; };
+  ASSERT_EQ(f.b().zips.size(), 1u);
+  ASSERT_EQ(f.b().zips[0].axis.size(), 2u);
+  auto section = [&] {
+    int n = 0;
+    for (const Track& t : f.b().tracks) n += t.zip == 0;
+    return n;
+  };
+  // Each conductor piece's middle at the offset from the nearest piece of the axis.
+  auto offsetMiss = [&] {
+    const ZippedWire& z = f.b().zips[0];
+    double worst = 0;
+    for (const Track& t : f.b().tracks) {
+      if (t.zip != 0) continue;
+      const Vec2 m = t.mid ? t.mid->v() : (t.a.v() + t.b.v()) * 0.5;
+      double d = 1e300;
+      for (const Track& a : z.axis) d = std::min(d, distPointSegment(m, a.a.v(), a.b.v()));
+      worst = std::max(worst, std::abs(d - double(z.offset())));
+    }
+    return worst;
+  };
+  // A click on the positive conductor halfway along the first piece.
+  const Vec2 a0 = f.b().zips[0].axis[0].a.v(), a1 = f.b().zips[0].axis[0].b.v();
+  const Vec2 n = (a1 - a0).perp().normalized() * double(f.b().zips[0].offset());
+  const Vec2 onP = (a0 + a1) * 0.5 + n * double(f.b().zips[0].pSide);
+  QTest::mouseClick(&f.view, Qt::LeftButton, {}, f.at(onP));
+  EXPECT_EQ(int(f.doc.selectedItems().size()), section()) << "the whole section";
+  // The joint of the axis dragged from (20,12) to (20,13.5).
+  f.drag(f.at(at(20, 12)), f.at(at(20, 13.5)));
+  ASSERT_EQ(f.b().zips.size(), 1u);
+  ASSERT_EQ(f.b().zips[0].axis.size(), 2u);
+  EXPECT_LT((f.b().zips[0].axis[0].b.v() - at(20, 13.5)).len(), mmToNm(0.1));
+  EXPECT_EQ(f.b().zips[0].axis[0].b, f.b().zips[0].axis[1].a);
+  EXPECT_LT(offsetMiss(), 2000);
+  EXPECT_EQ(Connectivity::compute(f.b()).ratsnest.size(), 0u);
+  EXPECT_EQ(int(f.doc.selectedItems().size()), section()) << "still the section";
+  // By a conductor of the second piece: that piece of the axis moves across itself, down by 0.5.
+  {
+    const Vec2 b0 = f.b().zips[0].axis[1].a.v(), b1 = f.b().zips[0].axis[1].b.v();
+    const Vec2 m = (b0 + b1) * 0.5 - (b1 - b0).perp().normalized() * double(f.b().zips[0].offset() * f.b().zips[0].pSide);
+    const double before = distPointSegment(at(26, 10), b0, b1);
+    f.drag(f.at(m), f.at(m + at(0, -0.5)));
+    const Track& p1 = f.b().zips[0].axis[1];
+    EXPECT_GT(std::abs(distPointSegment(at(26, 10), p1.a.v(), p1.b.v()) - before), mmToNm(0.2)) << "moved";
+    EXPECT_LT(offsetMiss(), 2000);
+    EXPECT_EQ(Connectivity::compute(f.b()).ratsnest.size(), 0u);
+  }
+  f.doc.undoStack()->undo();
+  f.doc.undoStack()->undo();
+  EXPECT_EQ(f.b().zips[0].axis[0].b.v(), a1) << "undone";
+  EXPECT_LT(offsetMiss(), 2000);
+  // The width is the rule's.
+  QTest::mouseClick(&f.view, Qt::LeftButton, {}, f.at(onP));
+  ASSERT_FALSE(f.doc.selectedItems().empty());
+  const Coord w = f.b().tracks[f.doc.selectedItems()[0].index].width;
+  f.view.changeTrackWidth();
+  EXPECT_EQ(f.b().tracks[f.doc.selectedItems()[0].index].width, w);
+  // Del: the section and its conductors go.
+  f.view.deleteSelection();
+  EXPECT_TRUE(f.b().zips.empty());
+  for (const Track& t : f.b().tracks) EXPECT_EQ(t.zip, -1);
+  f.doc.undoStack()->undo();
+  EXPECT_EQ(f.b().zips.size(), 1u);
 }
 
 // The same with a change of layer (V): the section ends at a clasp, two vias abreast of it as far apart as the

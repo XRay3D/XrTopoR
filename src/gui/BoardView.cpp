@@ -315,6 +315,22 @@ void BoardView::drawTools(QPainter& p) {
     p.setBrush(Qt::NoBrush);
     for (Vec2 v : viaSites(snapped(cursor_))) p.drawEllipse(toScreen(v), std::max(r, 2.0), std::max(r, 2.0));
   }
+  // The axis of a selected zipped section, thin between its conductors (TopoR: the pair is edited by it).
+  if (doc_->hasBoard() && mode_ == Mode::Select) {
+    const Board& b = *doc_->board();
+    p.setPen(QPen(QColor(0xff, 0xff, 0xff), 1));
+    p.setBrush(Qt::NoBrush);
+    for (int z : selectedZips())
+      for (const Track& t : b.zips[size_t(z)].axis) {
+        if (!t.mid) {
+          p.drawLine(toScreen(t.a.v()), toScreen(t.b.v()));
+          continue;
+        }
+        QPolygonF pl;
+        for (Vec2 v : ArcGeom::fromThreePoints(t.a.v(), t.mid->v(), t.b.v()).tessellate(std::max(500.0, 0.3 / scale_))) pl << toScreen(v);
+        p.drawPolyline(pl);
+      }
+  }
   if (drag_ == Drag::None || !dragMoved_) {
     p.setPen(QPen(QColor(0x20, 0x20, 0x20), 1));
     p.setBrush(QColor(0xf0, 0xf0, 0xf0));
@@ -944,6 +960,23 @@ void BoardView::mousePressEvent(QMouseEvent* e) {
       if (selected) pendingClick_ = pk;
       else clickSelect(pk, {});
       edit::Fragment f = selectedFragment();
+      // A conductor of a zipped section, the section alone selected: the piece of its axis there moves across
+      // itself, the conductors made again from it.
+      if (pk.item && pk.item->type == ItemType::Track && f.components.empty() && f.vias.empty() && f.zones.empty() &&
+          f.keepouts.empty() && f.texts.empty() && f.details.empty())
+        if (const int z = doc_->board()->tracks[pk.item->index].zip;
+            z >= 0 && r::all_of(f.tracks, [&](int ti) { return doc_->board()->tracks[ti].zip == z; })) {
+          const auto& axis = doc_->board()->zips[size_t(z)].axis;
+          double bd = std::numeric_limits<double>::max();
+          dragPiece_ = -1;
+          for (int k = 0; k < int(axis.size()); ++k)
+            if (double dd = distPointSegment(w, axis[k].a.v(), axis[k].b.v()); dd < bd) bd = dd, dragPiece_ = k;
+          if (dragPiece_ >= 0) {
+            dragZip_ = z;
+            startDrag(Drag::AxisPiece, w);
+            break;
+          }
+        }
       if (!f.empty()) {
         // One straight segment of a wire, or one drawn line or arc, moves across itself.
         bool alone = f.components.empty() && f.vias.empty() && f.zones.empty() && f.keepouts.empty() && f.texts.empty();
@@ -1071,7 +1104,16 @@ void BoardView::clickSelect(const Pick& pk, Qt::KeyboardModifiers mods) {
     if (auto it = r::find(list, v); it != list.end()) list.erase(it);
     else list.push_back(v);
   };
-  if (pk.item && pk.item->type != ItemType::Pad) {
+  if (pk.item && pk.item->type == ItemType::Track && doc_->board()->tracks[pk.item->index].zip >= 0) {
+    // A conductor of a zipped section: the whole section, as a wire (X: both nets, then the piece alone).
+    const bool had = r::contains(items, *pk.item);
+    for (ItemRef r : sectionTracks(doc_->board()->tracks[pk.item->index].zip)) {
+      std::erase(items, r);
+      if (!had) items.push_back(r);
+    }
+    cycleSeed_ = pk.item->index;
+    cycleLevel_ = 1;
+  } else if (pk.item && pk.item->type != ItemType::Pad) {
     toggle(items, *pk.item);
     cycleSeed_ = pk.item->type == ItemType::Track ? pk.item->index : -1;
     cycleLevel_ = 0;
@@ -1371,6 +1413,8 @@ void BoardView::mouseMoveEvent(QMouseEvent* e) {
       const Board& b = *doc_->board();
       bool locked = drag_ == Drag::Freestyle ? edit::hasLocked(b, fsTarget_.fragment)
                     : drag_ == Drag::Fragment || drag_ == Drag::Segment ? edit::hasLocked(b, dragFragment_)
+                    : drag_ == Drag::AxisPiece                          ? b.zips[size_t(dragZip_)].fixed
+                    : dragMarker_.zip >= 0                              ? b.zips[size_t(dragMarker_.zip)].fixed
                                                                         : dragMarker_.item.type == ItemType::Track && b.tracks[dragMarker_.item.index].locked;
       if (locked) {
         emit status(tr("Среди выделенных объектов есть зафиксированные: перемещение запрещено"));
@@ -1617,7 +1661,29 @@ edit::Fragment BoardView::selectedFragment() const {
     if (r.type == ItemType::Text) f.texts.push_back(r.index);
     if (r.type == ItemType::Detail) f.details.push_back(r.index);
   }
+  // A zipped section goes whole: the pair is edited as a pair (its conductors are made from its axis).
+  const Board& b = *doc_->board();
+  std::vector<int> zips;
+  for (int ti : f.tracks)
+    if (b.tracks[ti].zip >= 0 && !r::contains(zips, b.tracks[ti].zip)) zips.push_back(b.tracks[ti].zip);
+  for (int z : zips)
+    for (ItemRef r : sectionTracks(z))
+      if (!r::contains(f.tracks, r.index)) f.tracks.push_back(r.index);
   return f;
+}
+
+std::vector<ItemRef> BoardView::sectionTracks(int zip) const {
+  std::vector<ItemRef> out;
+  const Board& b = *doc_->board();
+  for (int i = 0; i < int(b.tracks.size()); ++i)
+    if (b.tracks[i].zip == zip) out.push_back({ItemType::Track, i});
+  return out;
+}
+
+void BoardView::selectSection(int zip) {
+  auto items = sectionTracks(zip);
+  auto cur = doc_->selectedItems();
+  if (cur.size() != items.size() || !r::all_of(items, [&](ItemRef r) { return r::contains(cur, r); })) doc_->setSelection(std::move(items), {});
 }
 
 void BoardView::editMarked(const std::function<void(std::vector<Graphic>&, int)>& fn) {
@@ -1678,10 +1744,15 @@ std::vector<BoardView::Marker> BoardView::markers() const {
       ++k;
     }
   };
+  std::vector<int> zips;  // the sections of the selected conductors: their axes take the handles
   for (ItemRef r : items) {
     if (r.type == ItemType::Track) {
       if (r.index >= int(b.tracks.size())) continue;
       const Track& t = b.tracks[r.index];
+      if (t.zip >= 0) {
+        if (!r::contains(zips, t.zip)) zips.push_back(t.zip);
+        continue;
+      }
       out.push_back({r, 0, Marker::End, 0});
       out.push_back({r, 0, Marker::End, 1});
       if (roomy(t.a.v(), t.b.v())) out.push_back({r, 0, Marker::Middle, 0});
@@ -1694,11 +1765,25 @@ std::vector<BoardView::Marker> BoardView::markers() const {
       figure(r, 0, *g);
     }
   }
+  for (int z : zips) {
+    const auto& axis = b.zips[size_t(z)].axis;
+    for (int k = 0; k <= int(axis.size()) && !axis.empty(); ++k) out.push_back({{ItemType::Track, -1}, 0, Marker::End, k, z});
+    for (int k = 0; k < int(axis.size()); ++k)
+      if (roomy(axis[k].a.v(), axis[k].b.v())) out.push_back({{ItemType::Track, -1}, 0, Marker::Middle, k, z});
+  }
   return out;
 }
 
 Vec2 BoardView::markerPos(const Marker& m) const {
   const Board& b = *doc_->board();
+  if (m.zip >= 0) {
+    const auto& axis = b.zips[size_t(m.zip)].axis;
+    const int n = int(axis.size());
+    if (n == 0) return {};
+    if (m.kind == Marker::End) return m.vertex < n ? axis[size_t(m.vertex)].a.v() : axis.back().b.v();
+    const Track& t = axis[size_t(std::min(m.vertex, n - 1))];
+    return t.mid ? t.mid->v() : (t.a.v() + t.b.v()) * 0.5;
+  }
   if (m.item.type == ItemType::Track) {
     const Track& t = b.tracks[m.item.index];
     if (m.kind == Marker::End) return m.vertex ? t.b.v() : t.a.v();
@@ -1733,7 +1818,7 @@ void BoardView::startDrag(Drag kind, Vec2 at, std::optional<Marker> marker) {
   dragPivot_ = edit::pivotOf(*doc_->board(), dragFragment_);
   dragRotate_ = 0;
   dragMirror_ = false;
-  if (marker) dragMarker_ = *marker;
+  dragMarker_ = marker ? *marker : Marker{};
   dragBefore_.reset();
 }
 
@@ -1769,8 +1854,24 @@ void BoardView::applyDrag() {
       if (dragFragment_.touchesOutline(b)) syncOutline();
       break;
     }
+    case Drag::AxisPiece: {
+      // As a segment of a wire: a straight piece of the axis across itself, to the grid along its normal.
+      const Track& t = b.zips[size_t(dragZip_)].axis[size_t(dragPiece_)];
+      Vec2 n = (t.b.v() - t.a.v()).perp().normalized();
+      Vec2 shift = t.isArc() || n.len2() == 0 ? d : snappedOnLine(t.a.v() + n * d.dot(n), n) - t.a.v();
+      moveAxisPiece(b, dragZip_, dragPiece_, shift);
+      selectSection(dragZip_);
+      break;
+    }
     case Drag::Vertex:
-      if (dragMarker_.item.type == ItemType::Track) {
+      if (dragMarker_.zip >= 0) {
+        // A vertex of the axis (an end: the clasp), held to its neighbour in the angle mode.
+        const auto& axis = b.zips[size_t(dragMarker_.zip)].axis;
+        const int k = dragMarker_.vertex;
+        Vec2 other = k > 0 ? axis[size_t(k - 1)].a.v() : axis[0].b.v();
+        moveAxisVertex(b, dragMarker_.zip, k, constrained(other, to));
+        selectSection(dragMarker_.zip);
+      } else if (dragMarker_.item.type == ItemType::Track) {
         const Track& t = b.tracks[dragMarker_.item.index];
         Vec2 other = dragMarker_.vertex ? t.a.v() : t.b.v();
         edit::moveVertex(b, dragMarker_.item.index, dragMarker_.vertex, constrained(other, to));
@@ -1785,7 +1886,12 @@ void BoardView::applyDrag() {
       }
       break;
     case Drag::Bend:
-      if (dragMarker_.item.type == ItemType::Track) {
+      if (dragMarker_.zip >= 0) {
+        // The middle of a piece of the axis: an arc bends, a straight piece gets a new vertex there.
+        const Track& t = b.zips[size_t(dragMarker_.zip)].axis[size_t(dragMarker_.vertex)];
+        bendAxis(b, dragMarker_.zip, dragMarker_.vertex, t.isArc() ? to : constrained(t.a.v(), to));
+        selectSection(dragMarker_.zip);
+      } else if (dragMarker_.item.type == ItemType::Track) {
         int ti = dragMarker_.item.index;
         const Track& t = b.tracks[ti];
         if (t.isArc()) {
@@ -2136,9 +2242,12 @@ void BoardView::finishDrag() {
     r.index = r.index < int(map.size()) ? map[r.index] : -1;
     return r.index < 0;
   });
+  const int zip = kind == Drag::AxisPiece ? dragZip_ : dragMarker_.zip;
+  if ((kind == Drag::AxisPiece || ((kind == Drag::Vertex || kind == Drag::Bend) && zip >= 0)) && zip < int(b.zips.size())) items = sectionTracks(zip);
   QString title = kind == Drag::Freestyle ? tr("Перемещение Freestyle")
                   : kind == Drag::Fragment ? (dragFragment_.components.empty() ? tr("Переместить") : tr("Переместить компонент"))
                   : kind == Drag::Segment ? tr("Переместить сегмент")
+                  : kind == Drag::AxisPiece || dragMarker_.zip >= 0 ? tr("Изменить форму дифф. пары")
                   : dragMarker_.item.type == ItemType::Track ? tr("Изменить форму проводника")
                                                              : tr("Изменить форму");
   doc_->commitEdit(*dragBefore_, title);
@@ -2186,6 +2295,10 @@ void BoardView::changeTrackWidth() {
       if (!r::contains(nets, b.tracks[r.index].net)) nets.push_back(b.tracks[r.index].net);
     }
   if (!routing_ && nets.empty()) return;
+  if (!routing_ && r::any_of(doc_->selectedItems(), [&](ItemRef r) { return r.type == ItemType::Track && b.tracks[r.index].zip >= 0; })) {
+    emit status(tr("Ширина проводников застёгнутой дифф. пары задаётся правилом волнового сопротивления"));
+    return;
+  }
   std::erase(nets, kNoNet);
   auto w = askTrackWidth(this, doc_, nets, layer, cur > 0 ? cur : b.netClasses[0].trackWidth);
   if (!w) return;
@@ -2537,6 +2650,11 @@ void BoardView::changeLayer() {
     emit status(tr("Зафиксированные участки проводников остались на своём слое"));
   auto before = doc_->beginEdit();
   int vias = edit::changeLayer(b, tracks, layer);
+  {  // a section moved has its conductors made again: the selection by what is there
+    auto items = doc_->selectedItems();
+    std::erase_if(items, [&](ItemRef r) { return r.type == ItemType::Track && r.index >= int(b.tracks.size()); });
+    doc_->setSelection(std::move(items), doc_->selectedComponents());
+  }
   doc_->commitEdit(before, tr("Изменить слой"));
   if (vias) emit status(tr("Добавлено переходов: %1").arg(vias));
   update();

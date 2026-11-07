@@ -2154,6 +2154,128 @@ TEST(Topo, ZipSwapUnzip) {
   EXPECT_EQ(Connectivity::compute(p.b).ratsnest.size(), 0u);
 }
 
+namespace {
+
+// How far each conductor piece's middle lies from the section's axis (the nearest piece of it), the worst
+// miss of the offset; -1 when a conductor is missing.
+double axisMiss(const Board& b, int zip) {
+  const ZippedWire& z = b.zips[size_t(zip)];
+  double worst = 0;
+  int n = 0;
+  for (const Track& t : b.tracks) {
+    if (t.zip != zip) continue;
+    ++n;
+    const Vec2 m = t.mid ? t.mid->v() : (t.a.v() + t.b.v()) * 0.5;
+    double d = 1e300;
+    for (const Track& a : z.axis) {
+      if (a.mid) {
+        const ArcGeom arc = ArcGeom::fromThreePoints(a.a.v(), a.mid->v(), a.b.v());
+        d = std::min(d, std::abs((m - arc.center).len() - arc.radius));
+      } else d = std::min(d, distPointSegment(m, a.a.v(), a.b.v()));
+    }
+    worst = std::max(worst, std::abs(d - double(z.offset())));
+  }
+  return n ? worst : -1;
+}
+
+}  // namespace
+
+// The pair edited by its axis: a joint of the axis moved, a straight piece bent, an end (a clasp) moved; each
+// time the conductors are made again at the offset from the axis, in place (the tracks keep their indices),
+// and the single wires at a moved clasp follow it. A fixed section refuses.
+TEST(Topo, AxisEditRebuildsTheConductors) {
+  PinBoard p = pairBoard();
+  auto conductors = [&] {
+    std::vector<int> c;
+    for (int i = 0; i < int(p.b.tracks.size()); ++i)
+      if (p.b.tracks[i].zip == 0) c.push_back(i);
+    return c;
+  };
+  const std::vector<int> before = conductors();
+  ASSERT_EQ(before.size(), 4u);
+  EXPECT_LT(axisMiss(p.b, 0), 2000);
+  ASSERT_EQ(Connectivity::compute(p.b).ratsnest.size(), 0u);
+  ASSERT_EQ(p.violations(), 0);
+
+  ASSERT_TRUE(moveAxisVertex(p.b, 0, 1, PinBoard::at(20, 13)));
+  EXPECT_EQ(p.b.zips[0].axis[0].b.v(), PinBoard::at(20, 13));
+  EXPECT_EQ(conductors(), before) << "rewritten in place";
+  EXPECT_LT(axisMiss(p.b, 0), 2000);
+  EXPECT_EQ(Connectivity::compute(p.b).ratsnest.size(), 0u);
+  EXPECT_EQ(p.drcOf(DrcViolation::Type::Short), 0);
+
+  ASSERT_TRUE(bendAxis(p.b, 0, 1, PinBoard::at(26, 12.5)));
+  EXPECT_EQ(p.b.zips[0].axis.size(), 3u);
+  EXPECT_LT(axisMiss(p.b, 0), 2000);
+  EXPECT_EQ(Connectivity::compute(p.b).ratsnest.size(), 0u);
+  EXPECT_EQ(p.drcOf(DrcViolation::Type::Short), 0);
+
+  // The start clasp moved: the single wires from the pads go to the conductors' new ends.
+  ASSERT_TRUE(moveAxisVertex(p.b, 0, 0, PinBoard::at(10, 10)));
+  EXPECT_EQ(p.b.zips[0].axis.front().a.v(), PinBoard::at(10, 10));
+  EXPECT_LT(axisMiss(p.b, 0), 2000);
+  EXPECT_EQ(Connectivity::compute(p.b).ratsnest.size(), 0u);
+  EXPECT_EQ(p.drcOf(DrcViolation::Type::Short), 0);
+
+  ASSERT_TRUE(moveAxisPiece(p.b, 0, 0, PinBoard::at(0, -0.5)));
+  EXPECT_LT(axisMiss(p.b, 0), 2000);
+  EXPECT_EQ(Connectivity::compute(p.b).ratsnest.size(), 0u);
+  EXPECT_EQ(p.drcOf(DrcViolation::Type::Short), 0);
+
+  // Where a clasp turned with the axis the single wires leave it at an angle and come inside the rule of the
+  // other net's end: F5 lays them again (as TopoR after a change by hand).
+  auto f = p.f5Model();
+  ASSERT_TRUE(f.res.drawn);
+  EXPECT_EQ(Connectivity::compute(p.b).ratsnest.size(), 0u);
+  EXPECT_EQ(p.violations(), 0);
+
+  const auto axis = p.b.zips[0].axis;
+  p.b.zips[0].fixed = true;
+  EXPECT_FALSE(moveAxisVertex(p.b, 0, 1, PinBoard::at(20, 14)));
+  EXPECT_FALSE(bendAxis(p.b, 0, 0, PinBoard::at(14, 13)));
+  EXPECT_EQ(p.b.zips[0].axis.size(), axis.size());
+  EXPECT_EQ(p.b.zips[0].axis[0].b, axis[0].b);
+}
+
+// A section whose conductors are all erased goes with them; one whose conductors all change the layer goes
+// to it, the conductors made again by the pair's rule there, the wire still connected.
+TEST(Topo, ErasingAndChangingLayerOfASection) {
+  {
+    PinBoard p = pairBoard();
+    edit::Fragment f;
+    for (int i = 0; i < int(p.b.tracks.size()); ++i)
+      if (p.b.tracks[i].zip == 0) f.tracks.push_back(i);
+    edit::erase(p.b, f);
+    EXPECT_TRUE(p.b.zips.empty());
+    for (const Track& t : p.b.tracks) EXPECT_EQ(t.zip, -1);
+  }
+  PinBoard p;
+  p.twoLayers();
+  p.b.netClasses[0].clearance = mmToNm(0.2);
+  p.pad("P", 4, 11, PadShapeKind::Circle, 1, 1);
+  p.pad("N", 4, 9, PadShapeKind::Circle, 1, 1);
+  p.pad("P", 36, 11, PadShapeKind::Circle, 1, 1);
+  p.pad("N", 36, 9, PadShapeKind::Circle, 1, 1);
+  for (Pad& pd : p.b.pads) pd.copper = (LayerMask(1) << p.top) | (LayerMask(1) << p.bottom);
+  p.pair("P", "N", 0.3, 0.2);
+  ASSERT_EQ(p.zip("P", "N", {{8, 10}, {20, 12}, {32, 10}}), 0);
+  for (auto& r : p.b.hispeed.impedances[0].rules)
+    if (r.layer == "Bottom") r.gap = mmToNm(0.3);
+  std::vector<int> all;
+  for (int i = 0; i < int(p.b.tracks.size()); ++i) all.push_back(i);
+  edit::changeLayer(p.b, all, p.bottom);
+  ASSERT_EQ(p.b.zips.size(), 1u);
+  EXPECT_EQ(p.b.zips[0].layer, p.bottom);
+  EXPECT_EQ(p.b.zips[0].gap, mmToNm(0.3));
+  for (const Track& t : p.b.zips[0].axis) EXPECT_EQ(t.layer, p.bottom);
+  for (const Track& t : p.b.tracks) {
+    EXPECT_EQ(t.layer, p.bottom);
+  }
+  EXPECT_LT(axisMiss(p.b, 0), 2000);
+  EXPECT_EQ(Connectivity::compute(p.b).ratsnest.size(), 0u);
+  EXPECT_EQ(p.violations(), 0);
+}
+
 // The clasp's copper is the pair wire's own and each single wire's own at its end: the capacity of an edge at
 // the clasp takes no clearance from it for them, and does for a wire of another net.
 TEST(Topo, ClaspIsOwnToItsThreeWires) {
