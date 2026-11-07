@@ -6,6 +6,7 @@
 #include <print>
 #include <cmath>
 #include <map>
+#include <optional>
 #include <set>
 
 #include "core/Connectivity.h"
@@ -131,7 +132,10 @@ RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int
                               std::vector<RealWire>* wiresOut) {
   ProfScope pAll("realizeFromModel");
   std::vector<RealWire> wires;
-  for (int wi : chosen) wires.push_back(sketchOf(b, t, wi));
+  {
+    ProfScope p("realize prep: sketches");
+    for (int wi : chosen) wires.push_back(sketchOf(b, t, wi));
+  }
   if (wiresOut) *wiresOut = wires;
   RealizeInput in;
   // No stubs out of narrow pads yet (XR_TOPO_STUBS=1 tries them): which of the model's crossings a stub
@@ -142,6 +146,7 @@ RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int
   } else {
     for (const RealWire& w : wires) in.sketches.push_back(w.sketch);
     in.stubs.assign(wires.size(), {});
+    ProfScope p("realize prep: index");
     if (opt.region) in.oidx.build(b, *opt.region);
     else in.oidx.build(b);
     // A wire of an oval pad is laid from the pad's centre (TopoR: every wire ends at the centre of its pad):
@@ -171,7 +176,9 @@ RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int
   // as their shapes, the pads' corners and the outline's pieces as sides.
   std::set<LayerId> layersUsed;
   for (const RealWire& w : wires) layersUsed.insert(w.layer);
+  std::optional<ProfScope> phase;
   for (LayerId layer : layersUsed) {
+    phase.emplace("realize prep: obstacles");
     const LayerMesh& m = *t.mesh(layer);
     LayerObstacles& ob = in.obstacles[layer];
     std::map<int, int> centreOf;  // owner -> its centre point
@@ -277,10 +284,12 @@ RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int
             ob.link(i, j, r);
           }
     // The crossings, in the wires' order and in the edges' order.
+    phase.emplace("realize prep: crossings");
     auto& onEdge = in.edgeLists[layer];
     for (int e = 0; e < int(m.edges.size()); ++e) {
       const Edge& E = m.edges[e];
-      if (E.cross.empty()) continue;
+      // (The capacity only of an edge a drawn wire crosses: a few wires drawn again took it of every edge.)
+      if (r::none_of(E.cross, [&](int cid) { return localOf.contains(t.crossings[cid].wire); })) continue;
       EdgeCapacity cap = edgeCapacity(t, m, e);
       for (int k = 0; k < int(E.cross.size()); ++k) {
         const Crossing& c = t.crossings[E.cross[k]];
@@ -385,6 +394,7 @@ RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int
       list = std::move(ordered);
     }
   }
+  phase.reset();
   RealizeStats st = drawRealized(b, wires, {}, opt, in, RealizeStats{});
   // The wires' forces by owner: the push at the bends, and the pull at the ends.
   st.ownerForce = st.ownerPush;

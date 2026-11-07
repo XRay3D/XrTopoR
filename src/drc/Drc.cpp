@@ -1,8 +1,9 @@
 #include "drc/Drc.h"
 
+#include "core/Parallel.h"
+
 #include <bit>
 #include <cstdio>
-#include <deque>
 #include <optional>
 #include <unordered_set>
 #include <set>
@@ -191,14 +192,19 @@ std::vector<DrcViolation> runDrc(const Board& b, const DrcOptions& opt) {
   double maxClr = double(b.maxClearance());
 
   if (opt.clearance) {
-    // Each pair once; and the shapes of every item and whether a track is its pad's copper once, not once per
-    // pair (they were half of the check).
-    std::unordered_set<uint64_t> seen;
-    auto gid = [&](ItemRef r) { return uint64_t(int(r.type) * 10'000'000 + r.index); };
-    using Cache = std::vector<std::optional<std::vector<Shape>>>;
+    // Every item against its neighbours, in parallel; each pair is then taken once, from the item that comes
+    // first in the order of the items (tracks, vias, pads) and of its neighbours, as the check did one item
+    // after another. The shapes of every item and whether a track is its pad's copper are found first, once
+    // (they were half of the check, found again for every pair).
+    std::vector<ItemRef> order;
+    order.reserve(b.tracks.size() + b.vias.size() + b.pads.size());
+    for (int i = 0; i < int(b.tracks.size()); ++i) order.push_back({ItemType::Track, i});
+    for (int i = 0; i < int(b.vias.size()); ++i) order.push_back({ItemType::Via, i});
+    for (int i = 0; i < int(b.pads.size()); ++i) order.push_back({ItemType::Pad, i});
+    using Cache = std::vector<std::vector<Shape>>;
     Cache shapeCache[4] = {Cache(b.tracks.size()), Cache(b.vias.size()), Cache(b.pads.size()), Cache(b.zones.size())};
-    auto slot = [](ItemRef r) {
-      switch (r.type) {
+    auto slot = [](ItemType t) {
+      switch (t) {
         case ItemType::Track: return 0;
         case ItemType::Via: return 1;
         case ItemType::Pad: return 2;
@@ -206,36 +212,46 @@ std::vector<DrcViolation> runDrc(const Board& b, const DrcOptions& opt) {
         default: return -1;
       }
     };
-    std::deque<std::vector<Shape>> scratch;  // (other kinds: kept while the check runs)
-    auto shapesOf = [&](ItemRef r) -> const std::vector<Shape>& {
-      const int k = slot(r);
-      if (k < 0 || r.index < 0 || size_t(r.index) >= shapeCache[k].size()) return scratch.emplace_back(itemShapes(b, r));
-      auto& c = shapeCache[k][size_t(r.index)];
-      if (!c) c = itemShapes(b, r);
-      return *c;
+    std::vector<char> ownCopper(b.tracks.size(), 0);
+    parallelFor(order.size() + b.zones.size(), [&](size_t k) {
+      const ItemRef r = k < order.size() ? order[k] : ItemRef{ItemType::Zone, int(k - order.size())};
+      shapeCache[slot(r.type)][size_t(r.index)] = itemShapes(b, r);
+      if (r.type == ItemType::Track) ownCopper[size_t(r.index)] = inOwnCopper(b, idx, r);
+    });
+    // (The index holds pads, tracks, vias and zones only.)
+    auto shapesOf = [&](ItemRef r) -> const std::vector<Shape>& { return shapeCache[slot(r.type)][size_t(r.index)]; };
+    auto inOwn = [&](ItemRef r) { return r.type == ItemType::Track && ownCopper[size_t(r.index)]; };
+    auto gid = [&](ItemRef r) { return uint64_t(int(r.type) * 10'000'000 + r.index); };
+    // Per item: its neighbours in the order met, each with the violation the pair makes seen from it (-1 none).
+    struct Met {
+      uint64_t pair;
+      int violation;
     };
-    std::vector<signed char> ownCopper(b.tracks.size(), -1);
-    auto inOwn = [&](ItemRef r) {
-      if (r.type != ItemType::Track) return false;
-      signed char& o = ownCopper[size_t(r.index)];
-      if (o < 0) o = inOwnCopper(b, idx, r);
-      return o > 0;
+    struct Seen {
+      bool skip = false;  // the item is its pad's copper: it checks nothing
+      std::vector<Met> met;
+      std::vector<DrcViolation> found;
     };
-    auto check = [&](ItemRef a) {
-      if (out.size() >= opt.maxViolations) return;
+    std::vector<Seen> seenBy(order.size());
+    auto check = [&](size_t k) {
+      const ItemRef a = order[k];
+      Seen& me = seenBy[k];
       const std::vector<Shape>& shapes = shapesOf(a);
       BBox bb;
       for (auto& s : shapes) bb.add(s.bbox());
       LayerMask lm = itemLayers(b, a);
-      if (inOwn(a)) return;
+      if (inOwn(a)) {
+        me.skip = true;
+        return;
+      }
       idx.query(bb.inflated(maxClr), lm, [&](ItemRef c) {
         if (c == a || skipPair(b, a, c) || inOwn(c)) return;
         const uint64_t ka = gid(a), kc = gid(c);
-        if (!seen.insert(std::min(ka, kc) << 32 | std::max(ka, kc)).second) return;
+        me.met.push_back({std::min(ka, kc) << 32 | std::max(ka, kc), -1});
         int na = itemNet(b, a), nc = itemNet(b, c);
         LayerMask common = lm & itemLayers(b, c);
         // The closest points of two lists of shapes: the distance and a marker near the contact (of the pair
-        // of shapes nearest, found only when the pair is reported).
+        // of shapes nearest).
         auto measure = [&](const std::vector<Shape>& as, const std::vector<Shape>& cs, Vec2& where) {
           double best = std::numeric_limits<double>::max();
           const Shape *n1 = nullptr, *n2 = nullptr;
@@ -305,12 +321,19 @@ std::vector<DrcViolation> runDrc(const Board& b, const DrcOptions& opt) {
         v.message = std::string(v.type == DrcViolation::Type::Short ? "Short" : "Clearance") + " " + mm(best) +
                     " < " + mm(req) + " mm: " + itemName(b, a) + " [" + netName(b, na) + "] / " + itemName(b, c) +
                     " [" + netName(b, nc) + "]";
-        out.push_back(std::move(v));
+        me.met.back().violation = int(me.found.size());
+        me.found.push_back(std::move(v));
       });
     };
-    for (int i = 0; i < int(b.tracks.size()); ++i) check({ItemType::Track, i});
-    for (int i = 0; i < int(b.vias.size()); ++i) check({ItemType::Via, i});
-    for (int i = 0; i < int(b.pads.size()); ++i) check({ItemType::Pad, i});
+    parallelFor(order.size(), check);
+    std::unordered_set<uint64_t> seen;
+    for (size_t k = 0; k < order.size(); ++k) {
+      if (out.size() >= opt.maxViolations) break;
+      Seen& me = seenBy[k];
+      if (me.skip) continue;
+      for (const Met& m : me.met)
+        if (seen.insert(m.pair).second && m.violation >= 0) out.push_back(std::move(me.found[size_t(m.violation)]));
+    }
   }
 
   if (opt.edge && !b.outline.empty()) {

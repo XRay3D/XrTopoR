@@ -2,6 +2,7 @@
 #include "topo/Narrowing.h"
 #include "topo/PadExit.h"
 #include "router/topo/Realizer.h"
+#include "core/Parallel.h"
 
 #include "core/DiffPairs.h"
 #include "core/Prof.h"
@@ -948,7 +949,6 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
                     kDebug2 = std::getenv("XR_DEBUG2") != nullptr, kDebug2Sk = std::getenv("XR_DEBUG2SK") != nullptr,
                     kDebug4 = std::getenv("XR_DEBUG4") != nullptr;
   static const std::optional<int> kDebug7 = std::getenv("XR_DEBUG7") ? std::optional(std::atoi(std::getenv("XR_DEBUG7"))) : std::nullopt;
-  std::vector<int> guardNear;  // the obstacle points near a chord (LayerObstacles::around)
   const bool nominal = opt.nominal && !kNoNominal && b.hasNominal();
   std::map<LayerId, std::vector<double>> nominalShare;
   std::map<LayerId, std::vector<std::array<double, 2>>> stackReach;  // per obstacle: the outermost wire's far side, at the minimum and at the nominal
@@ -963,7 +963,10 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
         if (!ob.pts[i].round) nominalShare[layer][i] = 0;
       }
     }
-  double shareOfAll = -1;  // >= 0: every obstacle's share for now (the two trial packings of the first round)
+  // >= 0: every obstacle's share for now (the two trial packings of the first round); a thread's own (the
+  // layers of a round run at the same time).
+  thread_local double shareOfAll;
+  shareOfAll = -1;
   // The clearance between a wire and an obstacle, between two wires: the pair's rule when the board has
   // such rules (clearances between net groups), else the larger of their own.
   auto clrTo = [&](const OPt& o, const RealWire& w) {
@@ -990,12 +993,25 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
   std::vector<std::vector<double>> hw(NW);
   for (int wi = 0; wi < NW; ++wi) hw[wi].assign(hits[wi].size(), double(wires[wi].width));
   phase.emplace("realize: rounds+tangents");
+  // The layers of a round at the same time: a layer's edges, obstacles and wires are its own (the wires near a
+  // wire are of its layer). The rounds go in step as before: an edge of any layer that took its ends' shares
+  // back restarts them all, and they end when no wire of any layer changed its radii.
+  for (const auto& [layer, ids] : byLayer) edgeLists[layer];  // (made here, not by the threads)
+  std::vector<LayerId> layersDrawn;
+  for (const auto& [layer, ids] : byLayer) layersDrawn.push_back(layer);
+  const size_t NL = layersDrawn.size();
+  std::vector<RealizeStats> per(NL);  // the counts of each layer (st's are summed from them)
+  auto inLayers = [&](auto&& fn) { parallelFor(NL, [&](size_t i) { fn(layersDrawn[i], per[i]); }); };
   int restarts = 0;
   for (int round = 0; round < 6; ++round) {
+  std::vector<char> againOf(NL, 0), radiiOf(NL, 0);
+  inLayers([&](LayerId L, RealizeStats& st) {
+  shareOfAll = -1;
   bool again = false;  // an edge took its ends' shares of the nominal clearance back
   for (int pass = nominal && round == 0 ? 0 : 1; pass < 2; ++pass) {  // 0: the obstacles' shares of the nominal clearance
   if (pass == 1 && nominal && round == 0)
     for (auto&& [layer, of] : nominalShare) {
+      if (layer != L) continue;
       const LayerObstacles& ob = obstacles.at(layer);
       // The walls (the outline, a keepout's side): the slots keep a stack off their end points, not off the
       // wall between them — the arc of a larger radius between two edges of a fan came 12-27 um too near the
@@ -1034,6 +1050,7 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
         if (int k = key(ob.pts[i]); k != -1) of[i] = least[k];
     }
   for (auto&& [layer, ids] : byLayer) {
+    if (layer != L) continue;
     const LayerObstacles& ob = obstacles.at(layer);
     for (auto& [uv, list] : edgeLists[layer]) {
       const OPt& U = ob.pts[uv.first];
@@ -1245,6 +1262,9 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
     }
   }
   }  // pass
+  againOf[size_t(&st - per.data())] = again;
+  });
+  const bool again = r::any_of(againOf, [](char c) { return c != 0; });
   if (again && restarts < 4) {
     ++restarts;
     for (int wi = 0; wi < NW; ++wi) bendR[wi].assign(hits[wi].size(), {-1.0, -1.0});
@@ -1254,8 +1274,11 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
 
   // Taut path of every wire inside its slots: funnel over the slot segments, apexes become bends
   // around the edge end obstacles with the slot radius, consecutive bends around one obstacle merge.
+  inLayers([&](LayerId L, RealizeStats& st) {
+  shareOfAll = -1;
+  std::vector<int> guardNear;  // the obstacle points near a chord (LayerObstacles::around)
   bool radiiChanged = false;
-  for (int wi = 0; wi < NW; ++wi) {
+  for (int wi : byLayer.at(L)) {
     const RealWire& w = wires[wi];
     const LayerObstacles& ob = obstacles.at(w.layer);
     const Polyline& sk = sketches[wi];
@@ -1728,9 +1751,17 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
       }
     }
   }
-  if (!radiiChanged) break;
-  st.droppedApexes = 0;
+  radiiOf[size_t(&st - per.data())] = radiiChanged;
+  });
+  if (r::none_of(radiiOf, [](char c) { return c != 0; })) break;
+  for (RealizeStats& ls : per) ls.droppedApexes = 0;
   }  // rounds
+  for (const RealizeStats& ls : per) {
+    st.overflowEdges += ls.overflowEdges;
+    st.arcBends += ls.arcBends;
+    st.guardBends += ls.guardBends;
+    st.droppedApexes += ls.droppedApexes;
+  }
 
   phase.emplace("realize: emission");
   st.endDir.assign(size_t(NW), {});

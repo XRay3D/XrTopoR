@@ -1,6 +1,7 @@
 #include "router/topo/ModelRelax.h"
 
 #include <algorithm>
+#include <future>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -317,6 +318,7 @@ DrawingScore scoreDrawing(const Board& b) {
   DrawingScore s;
   DrcOptions d;
   d.unconnected = false;
+  auto unrouted = std::async(std::launch::async, [&] { return Connectivity::compute(b).ratsnest.size(); });  // (with the DRC)
   const std::vector<DrcViolation> vs = runDrc(b, d);
   s.conflicts = int(vs.size());
   for (const DrcViolation& v : vs) s.shortfall += std::max(0.0, v.required - v.actual);
@@ -330,7 +332,7 @@ DrawingScore scoreDrawing(const Board& b) {
   }
   s.length = b.tracksLength();
   s.vias = int(b.vias.size());
-  s.unrouted = Connectivity::compute(b).ratsnest.size();
+  s.unrouted = unrouted.get();
   return s;
 }
 
@@ -410,6 +412,8 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
     ProfScope pj("F7 model: judging");
     DrcOptions d;
     d.unconnected = false;
+    // The connections at the same time as the DRC (both read the board).
+    auto unrouted = std::async(std::launch::async, [&] { return Connectivity::compute(c.board).ratsnest.size(); });
     const std::vector<DrcViolation> vs = runDrc(c.board, d);
     c.conflicts = int(vs.size());
     c.shortfall = c.depth = 0;
@@ -423,7 +427,7 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
       if (p.shorted || p.depth > kNoise) ++c.real;
     }
     c.length = c.board.tracksLength();
-    c.unrouted = Connectivity::compute(c.board).ratsnest.size();
+    c.unrouted = unrouted.get();
   };
   auto draw = [&] {
     ProfScope p("F7 model: drawing");

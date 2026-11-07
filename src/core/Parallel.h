@@ -19,10 +19,16 @@ inline int parallelThreads() {
   return v;
 }
 
+// Whether this thread runs inside a parallelFor: a loop nested in one runs in place.
+inline bool& inParallel() {
+  thread_local bool v = false;
+  return v;
+}
+
 template <class Fn>
 void parallelFor(size_t n, Fn&& fn) {
   int threads = std::min<int>(parallelThreads(), int(n));
-  if (threads <= 1) {
+  if (threads <= 1 || inParallel()) {
     for (size_t i = 0; i < n; ++i) fn(i);
     return;
   }
@@ -30,6 +36,7 @@ void parallelFor(size_t n, Fn&& fn) {
   std::vector<std::thread> pool;
   for (int t = 0; t < threads; ++t)
     pool.emplace_back([&] {
+      inParallel() = true;
       for (size_t i = next.fetch_add(1); i < n; i = next.fetch_add(1)) fn(i);
     });
   for (auto& th : pool) th.join();
