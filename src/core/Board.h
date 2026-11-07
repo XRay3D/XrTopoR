@@ -9,6 +9,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "core/Display.h"
@@ -275,13 +276,14 @@ struct TextStyle {
   Coord lineWidth = 0;  // 0: a tenth of the height
   bool bold = false, italic = false;
   Coord stroke() const { return lineWidth > 0 ? lineWidth : height / 10; }
+  bool operator==(const TextStyle&) const = default;
 };
 
 // The point of a text that `pos` gives: Left/Centre/Right × Top/Middle/Bottom.
 enum class TextAlign { LT, CT, RT, LM, CM, RM, LB, CB, RB };
 
 struct Text {
-  std::string text;
+  std::string text;  // lines parted by "\n" (TopoR writes "\r\n")
   Vec2 pos;
   double angle = 0;  // degrees, counter-clockwise on screen
   bool mirror = false;
@@ -289,6 +291,27 @@ struct Text {
   int style = 0;     // into Board::textStyles
   TextAlign align = TextAlign::LB;
 };
+
+// A text laid out as TopoR draws it, in its own frame (about Text::pos, unturned, Y down): the lines one character
+// height apart, each from the block's left edge, a line's top the top of its capitals. The block TopoR aligns is the
+// widest line by all the lines, and higher by what the first line's glyphs rise above the capitals (the «/» of
+// «GOST type B» goes up to the font's ascent: a centred «27/2/25» stands lower by half that); its first line goes
+// where the block's last one would be (a top-aligned text of several lines hangs below its point by all of them
+// but one).
+struct TextLayout {
+  std::vector<std::string_view> lines;  // into Text::text, without the line ends
+  double left = 0, top = 0;             // the first line's top-left corner, at the top of its capitals
+  double width = 0, lineHeight = 0;
+  double rise = 0;                      // of the first line's glyphs above its top
+  double height() const { return lineHeight * double(lines.size()); }
+};
+// How a line of a text is drawn in its style (nm): its width, and how far its glyphs rise above the capitals. The
+// GUI measures by the font; without it the width is estimated at half the character height a character.
+struct TextExtent {
+  double width = 0, rise = 0;
+};
+using TextMeasure = std::function<TextExtent(const TextStyle&, std::string_view line)>;
+void setTextMeasure(TextMeasure m);
 
 struct SourceDoc;
 
@@ -368,7 +391,8 @@ struct Board {
   const TextStyle& styleOf(const Text& t) const;
   // Approximate extent of a text: characters 0.7 of the height wide (TopoR's vector fonts), as the
   // corners of its box in board coordinates.
-  std::array<Vec2, 4> textBox(const Text& t) const;
+  TextLayout textLayout(const Text& t) const;
+  std::array<Vec2, 4> textBox(const Text& t) const;  // round the laid-out lines, on the board
   void rebuildNetIndex();  // fixes cached lookup after edits
   // The routing goes; the locked tracks and vias stay (when asked), and so does what belongs to the flexibly
   // fixed nets.
@@ -378,6 +402,12 @@ struct Board {
  private:
   std::map<std::string, int> netIndex_;
 };
+
+// How many texts use each style.
+std::vector<int> textStyleUse(const Board& b);
+// Replaces the board's text styles; `origin[i]` is the index style i had on the board (-1: new). The texts follow
+// their styles; a style still in use must not be left out.
+void setTextStyles(Board& b, std::vector<TextStyle> styles, const std::vector<int>& origin);
 
 // Rotate a local vector by an angle in degrees using the board (Y-down, CCW on screen) convention.
 Vec2 rotateBoard(Vec2 v, double deg);

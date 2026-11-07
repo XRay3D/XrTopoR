@@ -401,11 +401,61 @@ const TextStyle& Board::styleOf(const Text& t) const {
   return t.style >= 0 && t.style < int(textStyles.size()) ? textStyles[size_t(t.style)] : def;
 }
 
-std::array<Vec2, 4> Board::textBox(const Text& t) const {
-  double h = double(styleOf(t).height), w = 0.7 * h * double(std::max<size_t>(1, t.text.size()));
+std::vector<int> textStyleUse(const Board& b) {
+  std::vector<int> n(b.textStyles.size());
+  for (const Text& t : b.texts)
+    if (t.style >= 0 && t.style < int(n.size())) ++n[size_t(t.style)];
+  return n;
+}
+
+void setTextStyles(Board& b, std::vector<TextStyle> styles, const std::vector<int>& origin) {
+  std::vector<int> to(b.textStyles.size(), 0);  // a text whose style went takes the first
+  for (auto [i, o] : v::enumerate(origin))
+    if (o >= 0 && o < int(to.size())) to[size_t(o)] = int(i);
+  for (Text& t : b.texts)
+    if (t.style >= 0 && t.style < int(to.size())) t.style = to[size_t(t.style)];
+  b.textStyles = std::move(styles);
+  if (b.textStyles.empty()) b.textStyles.push_back({});
+}
+
+namespace {
+
+TextMeasure& textMeasure() {
+  static TextMeasure m;
+  return m;
+}
+
+}  // namespace
+
+void setTextMeasure(TextMeasure m) { textMeasure() = std::move(m); }
+
+TextLayout Board::textLayout(const Text& t) const {
+  const TextStyle& st = styleOf(t);
+  TextLayout l;
+  l.lineHeight = double(st.height);
+  for (auto part : std::string_view(t.text) | v::split('\n')) {
+    std::string_view line(part.begin(), part.end());
+    while (line.ends_with('\r')) line.remove_suffix(1);
+    l.lines.push_back(line);
+  }
+  for (auto [i, line] : v::enumerate(l.lines)) {
+    // UTF-8: a character is a byte that does not continue one.
+    TextExtent e = textMeasure() ? textMeasure()(st, line)
+                                 : TextExtent{0.5 * l.lineHeight * double(r::count_if(line, [](char c) { return (c & 0xC0) != 0x80; }))};
+    l.width = std::max(l.width, e.width);
+    if (i == 0) l.rise = e.rise;
+  }
   int col = int(t.align) % 3, row = int(t.align) / 3;  // 0 left/top, 1 centre/middle, 2 right/bottom
-  double x0 = -w * col / 2.0, y0 = -h * row / 2.0;  // Y down: a bottom-aligned text rises above its point
-  std::array<Vec2, 4> c{Vec2{x0, y0}, Vec2{x0 + w, y0}, Vec2{x0 + w, y0 + h}, Vec2{x0, y0 + h}};
+  double h = l.height() + l.rise;                       // the block aligned
+  l.left = -l.width * col / 2.0;
+  l.top = -h * row / 2.0 + h - l.lineHeight;
+  return l;
+}
+
+std::array<Vec2, 4> Board::textBox(const Text& t) const {
+  TextLayout l = textLayout(t);
+  double x0 = l.left, y0 = l.top - l.rise, x1 = l.left + std::max(l.width, l.lineHeight / 2), y1 = l.top + l.height();
+  std::array<Vec2, 4> c{Vec2{x0, y0}, Vec2{x1, y0}, Vec2{x1, y1}, Vec2{x0, y1}};
   for (auto& p : c) {
     if (t.mirror) p.x = -p.x;
     p = t.pos + rotateBoard(p, t.angle);

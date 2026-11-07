@@ -226,6 +226,51 @@ TEST(FstIO, FiguresKeepTheirKind) {
   EXPECT_NEAR((b.zones.back().shape->b - b.zones.back().shape->a).len(), 3e6, 10);
 }
 
+// A text of several lines as TopoR writes it (the lines parted by "\r\r\n" in the file) and one without an
+// alignment (TopoR leaves out its default, the centre). The lines are laid out one character height apart, the
+// block placed as TopoR places it: a top-aligned one hangs below its point by all its lines but one.
+TEST(FstIO, TextsOfSeveralLines) {
+  auto file = io::readFile(data("topor/Example_01/SingleLayer.fst"));
+  ASSERT_TRUE(file) << file.error();
+  std::string text = *file;
+  size_t at = text.find("</Constructive>");
+  ASSERT_NE(at, std::string::npos);
+  text.insert(at, "<Texts>\r\n"
+                  "<Text text=\"Плата 1:\r\r\nТолщина 1,5 мм.\r\r\nTOP\" align=\"CT\"><LayerRef name=\"TopSilk\"/>"
+                  "<TextStyleRef name=\"(Default)\"/><Org x=\"10\" y=\"-20\"/></Text>\r\n"
+                  "<Text text=\"2\"><LayerRef name=\"TopSilk\"/><TextStyleRef name=\"(Default)\"/>"
+                  "<Org x=\"5\" y=\"5\"/></Text>\r\n</Texts>\r\n");
+  auto r = io::readFst(text, "texts.fst");
+  ASSERT_TRUE(r) << r.error();
+  const Board& b = **r;
+  ASSERT_EQ(b.texts.size(), 2u);
+  const Text& t = b.texts[0];
+  EXPECT_EQ(t.align, TextAlign::CT);
+  EXPECT_EQ(b.texts[1].align, TextAlign::CM);
+  const double h = mmToNm(2.54);
+  TextLayout l = b.textLayout(t);
+  ASSERT_EQ(l.lines.size(), 3u);
+  EXPECT_EQ(l.lines[0], "Плата 1:");
+  EXPECT_EQ(l.lines[1], "Толщина 1,5 мм.");
+  EXPECT_EQ(l.lines[2], "TOP");
+  EXPECT_EQ(l.lineHeight, h);
+  EXPECT_NEAR(l.top, 2 * h, 1);         // below its point by two lines of three
+  EXPECT_NEAR(l.left, -l.width / 2, 1);  // the block centred, its lines from its left edge
+  EXPECT_NEAR(l.width, 0.5 * h * 15, 1);  // without the GUI's fonts: half the height a character
+  auto box = b.textBox(t);
+  EXPECT_NEAR(box[0].y, t.pos.y + 2 * h, 1);
+  EXPECT_NEAR(box[3].y, t.pos.y + 5 * h, 1);
+  TextLayout one = b.textLayout(b.texts[1]);
+  EXPECT_NEAR(one.top, -h / 2, 1);  // the centre: on its point
+
+  // Written and read again: the same lines.
+  auto again = io::readFst(io::writeFst(b), "rt.fst");
+  ASSERT_TRUE(again) << again.error();
+  ASSERT_EQ((*again)->texts.size(), 2u);
+  EXPECT_EQ((*again)->textLayout((*again)->texts[0]).lines, l.lines);
+  EXPECT_EQ((*again)->texts[1].align, TextAlign::CM);
+}
+
 TEST(FstIO, RoundTrip) {
   auto r = io::loadBoard(data("topor/Example_03/arz_2L.fst"));
   ASSERT_TRUE(r) << r.error();

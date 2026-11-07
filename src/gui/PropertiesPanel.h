@@ -28,8 +28,13 @@ class PropertiesPanel : public QWidget {
   QWidget* viaPage(const std::vector<int>& vias);
   QWidget* zonePage(int zone);
   QWidget* keepoutPage(int keepout);
-  QWidget* textPage(int text);
+  // «Надпись»: «Общие» (the text, its layer, place, mirror, angle, the point it is aligned by) and «Стиль» (the
+  // style, its font, height, bold, italic — saved into the style — and «Редактор стилей»); several texts are
+  // edited together, but for the alignment.
+  QWidget* textPage(const std::vector<int>& texts);
   QWidget* detailPage(const std::vector<int>& details);
+  // «Редактор стилей надписей» with the style `current` selected; «Применить» is an undoable edit.
+  void openTextStyles(int current);
   // «Форма (...)»: the figure of a drawing, a keepout (figure `part`) or a copper area, point by point, as TopoR
   // shows it: a polygon's vertices with the angles of the arcs from them, a circle's centre and radius...
   QWidget* shapePage(ItemRef r, int part);

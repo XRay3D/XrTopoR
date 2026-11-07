@@ -8,6 +8,7 @@
 #include <QSettings>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QFontMetricsF>
 #include <QPainterPath>
 #include <QWheelEvent>
 #include <algorithm>
@@ -19,6 +20,7 @@
 
 #include "gui/Schemes.h"
 #include "gui/SmallDialogs.h"
+#include "gui/TextFont.h"
 #include "io/BoardIO.h"
 #include "router/topo/Optimizer.h"
 #include "router/topo/ModelTools.h"
@@ -551,24 +553,25 @@ void BoardView::drawText(QPainter& p, const Text& t, const QColor& c) {
     p.drawPolygon(poly);
     return;
   }
-  // TopoR's vector fonts are drawn with a sans font scaled to the style's character height.
-  QFont f("Sans");
-  f.setPixelSize(100);
-  f.setBold(st.bold);
-  f.setItalic(st.italic);
+  // The lines as the board lays them out (Board::textLayout), each in the style's font with its cell (ascent and
+  // descent) one character height; a line's top is the top of its capitals, as TopoR has it (a centred «2» in a
+  // circle: the top of the digit half the height above the point, its baseline under it by the rest).
+  TextLayout l = doc_->board()->textLayout(t);
+  QFont f = textFont(st);
+  QFontMetricsF fm(f);
+  double k = l.lineHeight / (fm.ascent() + fm.descent());  // nm per font pixel
   QPainterPath path;
-  path.addText(0, 0, f, QString::fromStdString(t.text));
-  QRectF r = path.boundingRect();
-  constexpr double cap = 72;  // cap height of a 100 px font
-  double k = h / cap;
-  int col = int(t.align) % 3, row = int(t.align) / 3;
+  for (auto [i, line] : v::enumerate(l.lines)) {
+    QPainterPath one;
+    one.addText(0, fm.capHeight(), f, QString::fromUtf8(line.data(), qsizetype(line.size())));
+    path.addPath(QTransform().translate(l.left, l.top + double(i) * l.lineHeight).scale(k, k).map(one));
+  }
   QTransform tr;
   QPointF at = toScreen(t.pos);
   tr.translate(at.x(), at.y());
   tr.rotate(-t.angle);
   if (t.mirror) tr.scale(-1, 1);
-  tr.scale(k, k);
-  tr.translate(-(r.left() + r.width() * col / 2.0), cap * (2 - row) / 2.0);
+  tr.scale(scale_, scale_);
   p.save();
   p.setTransform(tr, true);
   p.setPen(Qt::NoPen);

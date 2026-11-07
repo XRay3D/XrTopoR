@@ -788,7 +788,7 @@ struct Reader {
     Text t;
     t.text = std::string(e.attr("text"));
     static const char* aligns[] = {"LT", "CT", "RT", "LM", "CM", "RM", "LB", "CB", "RB"};
-    std::string_view al = e.attr("align", "LB");
+    std::string_view al = e.attr("align", "CM");  // TopoR leaves out its default, the centre
     for (int i = 0; i < 9; ++i)
       if (al == aligns[i]) t.align = TextAlign(i);
     t.angle = e.num("angle");

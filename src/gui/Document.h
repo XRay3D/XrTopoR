@@ -45,9 +45,10 @@ struct EditSnapshot {
   std::vector<std::vector<Vec2>> outline;
   std::vector<Net> nets;  // their flags (the flexible fixation) are edited too
   std::vector<Padstack> padstacks;
+  std::vector<TextStyle> textStyles;
   static EditSnapshot take(const Board& b) {
     return {b.components, b.pads, b.tracks, b.vias, b.zones, b.keepouts, b.texts, b.graphics, b.outline, b.nets,
-            b.padstacks};
+            b.padstacks, b.textStyles};
   }
   void apply(Board& b) const {
     b.components = components;
@@ -61,6 +62,7 @@ struct EditSnapshot {
     b.outline = outline;
     b.nets = nets;
     b.padstacks = padstacks;
+    b.textStyles = textStyles;
   }
 };
 

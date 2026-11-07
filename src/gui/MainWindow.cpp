@@ -35,6 +35,7 @@
 #include "gui/DrcDialog.h"
 #include "gui/MessagesPanel.h"
 #include "gui/PropertiesPanel.h"
+#include "gui/TextStylesDialog.h"
 #include "gui/SearchPanel.h"
 #include "gui/SmallDialogs.h"
 #include "gui/ModeBar.h"
@@ -243,6 +244,20 @@ void MainWindow::bindCommands() {
   // Дизайн
   c.bind("Accel_ShowDPE", [this] {
     DesignParamsDialog dlg(doc_, this);
+    dlg.exec();
+  });
+  c.bind("Cmd_TextStyles", [this] {
+    if (!doc_->hasBoard()) return;
+    // The style of the selected text, if one is.
+    int current = 0;
+    for (ItemRef r : doc_->selectedItems())
+      if (r.type == ItemType::Text) current = doc_->board()->texts[size_t(r.index)].style;
+    TextStylesDialog dlg(*doc_->board(), doc_->unit(), current, this);
+    connect(&dlg, &TextStylesDialog::applied, this, [this](const std::vector<TextStyle>& st, const std::vector<int>& origin) {
+      auto before = doc_->beginEdit();
+      setTextStyles(*doc_->board(), st, origin);
+      doc_->commitEdit(before, tr("Изменить стили надписей"));
+    });
     dlg.exec();
   });
   c.bind("Cmd_Summary", [this] { showSummary(); });

@@ -4,8 +4,13 @@
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QFormLayout>
+#include <QGridLayout>
+#include <QKeyEvent>
+#include <QPlainTextEdit>
+#include <QToolButton>
 #include <QHBoxLayout>
 #include <QPushButton>
+#include <QRadioButton>
 #include <QHeaderView>
 #include <QLabel>
 #include <QLineEdit>
@@ -20,6 +25,7 @@
 #include "core/ZoneFill.h"
 #include "gui/PadstackDialogs.h"
 #include "gui/SpinBox.h"
+#include "gui/TextStylesDialog.h"
 #include "io/BoardIO.h"
 
 namespace xr::gui {
@@ -72,6 +78,22 @@ QString cellText(const Graphic& g, int row, Val val, Unit u) {
   }
   return {};
 }
+
+// A text of several lines: Enter applies it (TopoR: «изменения вступают в силу после нажатия Enter»), Shift+Enter
+// begins a new line.
+class TextBox : public QPlainTextEdit {
+ public:
+  std::function<void()> enter;
+
+ protected:
+  void keyPressEvent(QKeyEvent* e) override {
+    if ((e->key() == Qt::Key_Return || e->key() == Qt::Key_Enter) && !(e->modifiers() & Qt::ShiftModifier)) {
+      if (enter) enter();
+      return;
+    }
+    QPlainTextEdit::keyPressEvent(e);
+  }
+};
 
 }  // namespace
 
@@ -164,7 +186,7 @@ void PropertiesPanel::rebuild() {
     else if (!vias.empty()) page = viaPage(vias);
     else if (!zones.empty()) page = zones.size() == 1 ? zonePage(zones[0]) : message(tr("Области металлизации (%1)").arg(zones.size()));
     else if (!keepouts.empty()) page = keepouts.size() == 1 ? keepoutPage(keepouts[0]) : message(tr("Запреты (%1)").arg(keepouts.size()));
-    else if (!texts.empty()) page = texts.size() == 1 ? textPage(texts[0]) : message(tr("Надписи (%1)").arg(texts.size()));
+    else if (!texts.empty()) page = textPage(texts);
     else if (!details.empty()) page = detailPage(details);
     else page = pads.size() == 1 ? padPage(pads[0]) : message(tr("Контакты (%1)").arg(pads.size()));
     (void)b;
@@ -247,50 +269,203 @@ QWidget* PropertiesPanel::keepoutPage(int ki) {
   return tabs;
 }
 
-QWidget* PropertiesPanel::textPage(int ti) {
+QWidget* PropertiesPanel::textPage(const std::vector<int>& texts) {
   const Board& b = *doc_->board();
-  const Text& t = b.texts[ti];
-  auto* w = new QWidget;
-  auto* f = new QFormLayout(w);
-  f->addRow(title(tr("Надпись")));
-  auto* text = new QLineEdit(QString::fromStdString(t.text));
-  connect(text, &QLineEdit::returnPressed, this, [this, text, ti] {
-    if (text->text().isEmpty()) return;
-    edit(tr("Изменить надпись"), [&](Board& bd) { bd.texts[ti].text = text->text().toStdString(); });
-  });
+  Unit u = doc_->unit();
+  auto again = [this] { QMetaObject::invokeMethod(this, &PropertiesPanel::rebuild, Qt::QueuedConnection); };
+  auto* tabs = new QTabWidget;
+
+  // «Общие».
+  auto* general = new QWidget;
+  auto* f = new QFormLayout(general);
+  f->addRow(title(texts.size() == 1 ? tr("Надпись") : tr("Надписи (%1)").arg(texts.size())));
+  // The lines as they are shown (TopoR keeps "\r\n" between them: so are the edited ones written).
+  auto shown = [](const std::string& s) {
+    QStringList lines;
+    for (auto part : std::string_view(s) | v::split('\n')) {
+      std::string_view line(part.begin(), part.end());
+      while (line.ends_with('\r')) line.remove_suffix(1);
+      lines << QString::fromUtf8(line.data(), qsizetype(line.size()));
+    }
+    return lines.join('\n');
+  };
+  auto* text = new TextBox;
+  text->setObjectName("text");
+  if (auto t = common<std::string>(texts, [&](int i) { return b.texts[i].text; })) text->setPlainText(shown(*t));
+  text->setFixedHeight(text->fontMetrics().lineSpacing() * 4 + 10);
+  text->enter = [this, text, texts] {
+    QString t = text->toPlainText();
+    if (t.trimmed().isEmpty()) return;
+    std::string s = t.split('\n').join("\r\n").toStdString();
+    edit(tr("Изменить надпись"), [&](Board& bd) {
+      for (int i : texts) bd.texts[i].text = s;
+    });
+  };
   f->addRow(tr("Текст:"), text);
   auto* layer = new QComboBox;
   for (LayerId l = 0; l < LayerId(b.layers.size()); ++l)
     if (b.layers[l].kind != LayerKind::Edge) layer->addItem(QString::fromStdString(b.layers[l].name), int(l));
-  layer->setCurrentIndex(layer->findData(int(t.layer)));
-  connect(layer, &QComboBox::activated, this, [this, layer, ti](int i) {
-    edit(tr("Слой надписи"), [&](Board& bd) { bd.texts[ti].layer = LayerId(layer->itemData(i).toInt()); });
+  auto lc = common<LayerId>(texts, [&](int i) { return b.texts[i].layer; });
+  layer->setCurrentIndex(lc ? layer->findData(int(*lc)) : -1);
+  connect(layer, &QComboBox::activated, this, [this, layer, texts](int i) {
+    edit(tr("Слой надписи"), [&](Board& bd) {
+      for (int t : texts) bd.texts[t].layer = LayerId(layer->itemData(i).toInt());
+    });
   });
   f->addRow(tr("Слой:"), layer);
-  auto* style = new QComboBox;
-  for (auto& st : b.textStyles) style->addItem(QString::fromStdString(st.name));
-  style->setCurrentIndex(t.style);
-  connect(style, &QComboBox::activated, this, [this, ti](int i) {
-    edit(tr("Стиль надписи"), [&](Board& bd) { bd.texts[ti].style = i; });
-  });
-  f->addRow(tr("Стиль:"), style);
-  auto* angle = new DoubleSpinBox;
-  angle->setRange(-360, 360);
-  angle->setSuffix("°");
-  angle->setValue(t.angle);
-  angle->setKeyboardTracking(false);
-  connect(angle, &QDoubleSpinBox::editingFinished, this, [this, angle, ti] {
-    if (angle->value() == doc_->board()->texts[ti].angle) return;
-    edit(tr("Поворот надписи"), [&](Board& bd) { bd.texts[ti].angle = angle->value(); });
-  });
-  f->addRow(tr("Поворот:"), angle);
-  auto* mirror = new QCheckBox(tr("Зеркальность"));
-  mirror->setChecked(t.mirror);
-  connect(mirror, &QCheckBox::toggled, this, [this, ti](bool on) {
-    edit(tr("Зеркальность надписи"), [&](Board& bd) { bd.texts[ti].mirror = on; });
+  auto x = common<double>(texts, [&](int i) { return b.texts[i].pos.x; });
+  auto y = common<double>(texts, [&](int i) { return -b.texts[i].pos.y; });
+  f->addRow("x:", length(x, [this, texts](double v) {
+              edit(tr("Переместить надпись"), [&](Board& bd) {
+                for (int i : texts) bd.texts[i].pos.x = v;
+              });
+            }, -1));
+  f->addRow("y:", length(y, [this, texts](double v) {
+              edit(tr("Переместить надпись"), [&](Board& bd) {
+                for (int i : texts) bd.texts[i].pos.y = -v;
+              });
+            }, -1));
+  auto* mirror = new QToolButton;
+  mirror->setObjectName("mirror");
+  mirror->setText(tr("Зеркальность"));
+  mirror->setCheckable(true);
+  mirror->setChecked(r::all_of(texts, &Text::mirror, of(b.texts)));
+  connect(mirror, &QToolButton::clicked, this, [this, texts](bool on) {
+    edit(tr("Зеркальность надписи"), [&](Board& bd) {
+      for (int i : texts) bd.texts[i].mirror = on;
+    });
   });
   f->addRow(mirror);
-  return w;
+  auto* angle = new DoubleSpinBox;
+  angle->setObjectName("angle");
+  angle->setRange(-360, 360);
+  angle->setSuffix("°");
+  angle->setKeyboardTracking(false);
+  auto a = common<double>(texts, [&](int i) { return b.texts[i].angle; });
+  angle->setSpecialValueText(a ? QString() : QString(" "));
+  angle->setValue(a ? *a : angle->minimum());
+  double start = angle->value();
+  connect(angle, &QDoubleSpinBox::editingFinished, this, [this, angle, texts, start] {
+    if (angle->value() == start) return;
+    edit(tr("Поворот надписи"), [&](Board& bd) {
+      for (int i : texts) bd.texts[i].angle = angle->value();
+    });
+  });
+  f->addRow(tr("Поворот:"), angle);
+  // The point the text is aligned by: a 3 x 3 grid of radio buttons; not for several texts.
+  auto* grid = new QWidget;
+  grid->setObjectName("align");
+  grid->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+  auto* g = new QGridLayout(grid);
+  g->setSpacing(2);
+  g->setContentsMargins(0, 0, 0, 0);
+  for (int k = 0; k < 9; ++k) {
+    auto* rb = new QRadioButton;
+    rb->setObjectName(QString("align%1").arg(k));
+    rb->setChecked(texts.size() == 1 && int(b.texts[texts[0]].align) == k);
+    rb->setEnabled(texts.size() == 1);
+    connect(rb, &QRadioButton::clicked, this, [this, texts, k] {
+      if (doc_->board()->texts[texts[0]].align == TextAlign(k)) return;
+      edit(tr("Выравнивание надписи"), [&](Board& bd) { bd.texts[texts[0]].align = TextAlign(k); });
+    });
+    g->addWidget(rb, k / 3, k % 3);
+  }
+  f->addRow(tr("Привязка:"), grid);
+  tabs->addTab(general, tr("Общие"));
+
+  // «Стиль»: the style of the texts; its font and height edited here go into the style by the save button.
+  auto* stylePage = new QWidget;
+  auto* sf = new QFormLayout(stylePage);
+  auto sc = common<int>(texts, [&](int i) { return b.texts[i].style; });
+  auto* style = new QComboBox;
+  style->setObjectName("style");
+  for (auto& st : b.textStyles) style->addItem(QString::fromStdString(st.name));
+  style->setCurrentIndex(sc ? *sc : -1);
+  connect(style, &QComboBox::activated, this, [this, texts, again](int i) {
+    edit(tr("Стиль надписи"), [&](Board& bd) {
+      for (int t : texts) bd.texts[t].style = i;
+    });
+    again();
+  });
+  auto* save = new QToolButton;
+  save->setObjectName("saveStyle");
+  save->setIcon(QIcon(":/icons/save.svg"));
+  save->setToolTip(tr("Сохранить стиль"));
+  save->setEnabled(false);
+  auto* styleRow = new QHBoxLayout;
+  styleRow->addWidget(style, 1);
+  styleRow->addWidget(save);
+  sf->addRow(tr("Стиль:"), styleRow);
+  auto draft = std::make_shared<TextStyle>(sc ? b.textStyles[size_t(*sc)] : TextStyle{});
+  auto* font = new QComboBox;
+  font->setObjectName("font");
+  font->addItems(textFontNames(draft->font));
+  font->setCurrentText(QString::fromStdString(draft->font));
+  sf->addRow(tr("Шрифт:"), font);
+  auto* height = new DoubleSpinBox;
+  height->setObjectName("height");
+  height->setDecimals(u == Unit::Mil ? 2 : 4);
+  height->setRange(toUnit(1000, u), toUnit(100e6, u));
+  height->setSuffix(" " + unitName(u));
+  height->setKeyboardTracking(false);
+  height->setValue(toUnit(double(draft->height), u));
+  auto toggle = [](const QString& t, bool bold, bool italic) {
+    auto* tb = new QToolButton;
+    tb->setText(t);
+    tb->setCheckable(true);
+    QFont fo = tb->font();
+    fo.setBold(bold);
+    fo.setItalic(italic);
+    tb->setFont(fo);
+    return tb;
+  };
+  auto* bold = toggle("B", true, false);
+  auto* italic = toggle("I", false, true);
+  auto* underline = toggle("U", false, false);
+  bold->setObjectName("bold");
+  italic->setObjectName("italic");
+  underline->setEnabled(false);
+  bold->setChecked(draft->bold);
+  italic->setChecked(draft->italic);
+  auto* hRow = new QHBoxLayout;
+  hRow->addWidget(height, 1);
+  hRow->addWidget(bold);
+  hRow->addWidget(italic);
+  hRow->addWidget(underline);
+  sf->addRow("h:", hRow);
+  for (QWidget* w : std::initializer_list<QWidget*>{font, height, bold, italic}) w->setEnabled(sc.has_value());
+  auto changed = [this, draft, font, height, bold, italic, save, sc, u] {
+    draft->font = font->currentText().toStdString();
+    draft->height = Coord(std::llround(fromUnit(height->value(), u)));
+    draft->bold = bold->isChecked();
+    draft->italic = italic->isChecked();
+    save->setEnabled(sc && *draft != doc_->board()->textStyles[size_t(*sc)]);
+  };
+  connect(font, &QComboBox::activated, this, changed);
+  connect(height, &QDoubleSpinBox::valueChanged, this, changed);
+  connect(bold, &QToolButton::toggled, this, changed);
+  connect(italic, &QToolButton::toggled, this, changed);
+  connect(save, &QToolButton::clicked, this, [this, draft, sc, again] {
+    if (!sc) return;
+    edit(tr("Изменить стиль надписей"), [&](Board& bd) { bd.textStyles[size_t(*sc)] = *draft; });
+    again();
+  });
+  auto* editor = new QLabel(QString("<a href=\"#\">%1</a>").arg(tr("Редактор стилей")));
+  editor->setObjectName("styleEditor");
+  connect(editor, &QLabel::linkActivated, this, [this, sc, again] { openTextStyles(sc ? *sc : 0); });
+  sf->addRow(editor);
+  tabs->addTab(stylePage, tr("Стиль"));
+  return tabs;
+}
+
+void PropertiesPanel::openTextStyles(int current) {
+  if (!doc_->hasBoard()) return;
+  TextStylesDialog dlg(*doc_->board(), doc_->unit(), current, this);
+  connect(&dlg, &TextStylesDialog::applied, this, [this](const std::vector<TextStyle>& st, const std::vector<int>& origin) {
+    edit(tr("Изменить стили надписей"), [&](Board& bd) { setTextStyles(bd, st, origin); });
+  });
+  dlg.exec();
+  rebuild();
 }
 
 QWidget* PropertiesPanel::detailPage(const std::vector<int>& details) {

@@ -98,6 +98,8 @@ if(XR_BUILD_GUI)
     gui/SpinBox.cpp
     gui/SearchPanel.cpp
     gui/SmallDialogs.cpp
+    gui/TextFont.cpp
+    gui/TextStylesDialog.cpp
     gui/ToporConfig.cpp
     gui/Units.cpp
     gui/icons.qrc

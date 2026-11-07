@@ -8,6 +8,11 @@
 #include <QTableWidget>
 #include <QFile>
 #include <QDoubleSpinBox>
+#include <QPlainTextEdit>
+#include <QRadioButton>
+#include <QToolButton>
+#include <QComboBox>
+#include <QFontDatabase>
 #include <QLabel>
 #include <QLineEdit>
 #include <QTreeWidget>
@@ -39,6 +44,7 @@
 #include "gui/MainWindow.h"
 #include "gui/MessagesPanel.h"
 #include "gui/PropertiesPanel.h"
+#include "gui/TextStylesDialog.h"
 #include "gui/SearchPanel.h"
 #include "gui/Schemes.h"
 #include "gui/ToporConfig.h"
@@ -2083,4 +2089,147 @@ TEST(Gui, SelectionFilterLooks) {
     if (const char* dir = std::getenv("XR_SHOT_DIR"))
       panel.grab().save(QString(dir) + (dark ? "/filter-dark.png" : "/filter-light.png"));
   }
+}
+
+// A text in its style's font: «GOST type B» as TopoR draws the notes of AMK310_MCU_V2 (measured on TopoR's screen
+// at 9.5 px/mm: the block of the widest line «Толщина текстолита 1,5 - 1.6 мм.» at 4 mm is 53 mm wide).
+TEST(Gui, TextInItsFont) {
+  app();
+  if (!QFontDatabase::hasFamily("GOST type B")) GTEST_SKIP() << "no GOST type B font";
+  Document doc;  // gives the layout the fonts' widths
+  Board b;
+  b.addLayer("TopSilk", LayerKind::Silk, Side::Top);
+  TextStyle st;
+  st.name = "GOST_B_4";
+  st.font = "GOST type B";
+  st.height = mmToNm(4);
+  b.textStyles = {st};
+  Text t;
+  t.text = "Плата 1 (AMK310_MCU_M_V2.1):\r\nТолщина текстолита 1,5 - 1.6 мм.\r\nTOP SILK";
+  t.layer = 0;
+  t.align = TextAlign::CT;
+  TextLayout l = b.textLayout(t);
+  EXPECT_NEAR(l.width, mmToNm(53), mmToNm(0.5));
+  EXPECT_NEAR(l.top, 2 * mmToNm(4) + l.rise, 1);
+
+  // Centred, measured on TopoR's screen at 66 px/mm: the top of a «2» 1.98 mm above its point; the digits of a
+  // «27/2/25» at 2 mm 0.79 mm above it (its «/» rises above them, the block is the higher by that).
+  t.text = "2";
+  t.align = TextAlign::CM;
+  EXPECT_NEAR(b.textLayout(t).top, -mmToNm(1.98), mmToNm(0.03));
+  b.textStyles[0].height = mmToNm(2);
+  t.text = "27/2/25";
+  EXPECT_NEAR(b.textLayout(t).top, -mmToNm(0.79), mmToNm(0.03));
+}
+
+// «Надпись» in «Свойства», as TopoR has it: «Общие» — the text of several lines (Enter applies, the lines kept with
+// TopoR's "\r\n"), the point it is aligned by, its place; «Стиль» — the style's height edited and saved into the
+// style, another style taken; several texts edited together, but for the alignment; every change undone.
+TEST(Gui, TextProperties) {
+  Fixture f("topor/Example_01/SingleLayer.fst");
+  f.doc.setUnit(Unit::Mm);
+  Board& b = *f.doc.board();
+  LayerId silk = b.findLayer("TopSilk");
+  b.textStyles.push_back({.name = "GOST_B_4", .font = "GOST type B", .height = mmToNm(4)});
+  int big = int(b.textStyles.size()) - 1;
+  Text t{.text = "Плата 1:\r\r\nTOP", .pos = {mmToNm(10), -mmToNm(20)}, .layer = silk, .style = big, .align = TextAlign::CT};
+  b.texts.push_back(t);
+  b.texts.push_back(Text{.text = "2", .pos = {mmToNm(5), -mmToNm(5)}, .layer = silk, .style = big});
+  int t0 = int(b.texts.size()) - 2, t1 = t0 + 1;
+  f.doc.invalidate();
+  PropertiesPanel props(&f.doc);
+  f.doc.setSelection({{ItemType::Text, t0}}, {});
+  auto* text = props.findChild<QPlainTextEdit*>("text");
+  ASSERT_TRUE(text);
+  EXPECT_EQ(text->toPlainText(), "Плата 1:\nTOP");
+  text->setPlainText("Плата 2:\nTOP\nBOTTOM");
+  QTest::keyClick(text, Qt::Key_Return);
+  EXPECT_EQ(f.b().texts[t0].text, "Плата 2:\r\nTOP\r\nBOTTOM");
+  EXPECT_EQ(f.b().textLayout(f.b().texts[t0]).lines.size(), 3u);
+
+  // The alignment: the button of the top-centre point is down; the right-bottom one taken.
+  auto* align = props.findChild<QRadioButton*>("align1");
+  ASSERT_TRUE(align);
+  EXPECT_TRUE(align->isChecked());
+  props.findChild<QRadioButton*>("align8")->click();
+  EXPECT_EQ(f.b().texts[t0].align, TextAlign::RB);
+  EXPECT_TRUE(props.findChild<QRadioButton*>("align8")->isChecked());
+  EXPECT_FALSE(align->isChecked());
+
+  // «Стиль»: 4 -> 3 mm, saved into the style (the other text of the style follows).
+  auto* height = props.findChild<QDoubleSpinBox*>("height");
+  auto* save = props.findChild<QToolButton*>("saveStyle");
+  ASSERT_TRUE(height && save);
+  EXPECT_NEAR(height->value(), 4, 1e-9);
+  EXPECT_FALSE(save->isEnabled());
+  height->setValue(3);
+  EXPECT_TRUE(save->isEnabled());
+  EXPECT_EQ(f.b().textStyles[size_t(big)].height, mmToNm(4)) << "not before it is saved";
+  save->click();
+  EXPECT_EQ(f.b().textStyles[size_t(big)].height, mmToNm(3));
+  if (const char* dir = std::getenv("XR_SHOT_DIR")) {
+    QCoreApplication::processEvents();
+    props.resize(420, 360);
+    props.findChild<QTabWidget*>()->setCurrentIndex(0);
+    props.grab().save(QString(dir) + "/text-general.png");
+    props.findChild<QTabWidget*>()->setCurrentIndex(1);
+    props.grab().save(QString(dir) + "/text-style.png");
+  }
+  f.doc.undoStack()->undo();
+  EXPECT_EQ(f.b().textStyles[size_t(big)].height, mmToNm(4));
+  QCoreApplication::processEvents();
+  auto* style = props.findChild<QComboBox*>("style");
+  ASSERT_TRUE(style);
+  style->activated(0);
+  EXPECT_EQ(f.b().texts[t0].style, 0);
+
+  // Two texts: the alignment is not theirs to edit, the mirror is both's.
+  f.doc.setSelection({{ItemType::Text, t0}, {ItemType::Text, t1}}, {});
+  EXPECT_FALSE(props.findChild<QRadioButton*>("align0")->isEnabled());
+  EXPECT_TRUE(props.findChild<QPlainTextEdit*>("text")->toPlainText().isEmpty()) << "their texts differ";
+  props.findChild<QToolButton*>("mirror")->click();
+  EXPECT_TRUE(f.b().texts[t0].mirror);
+  EXPECT_TRUE(f.b().texts[t1].mirror);
+}
+
+// «Редактор стилей надписей»: «+» copies the selected style, «−» takes away one no text uses and never the first;
+// «Применить» gives the styles to the design, the texts keep theirs when one before them goes.
+TEST(Gui, TextStylesEditor) {
+  app();
+  Board b;
+  LayerId silk = b.addLayer("TopSilk", LayerKind::Silk, Side::Top);
+  b.textStyles = {TextStyle{}, {.name = "unused", .height = mmToNm(1)}, {.name = "GOST_B_4", .font = "GOST type B", .height = mmToNm(4)}};
+  b.texts.push_back(Text{.text = "XR", .layer = silk, .style = 2});
+  TextStylesDialog dlg(b, Unit::Mm, 2);
+  std::vector<TextStyle> got;
+  std::vector<int> origin;
+  QObject::connect(&dlg, &TextStylesDialog::applied, [&](auto& s, auto& o) { got = s, origin = o; });
+  auto* table = dlg.findChild<QTableWidget*>("styles");
+  auto* remove = dlg.findChild<QPushButton*>("remove");
+  auto* apply = dlg.findChild<QPushButton*>("apply");
+  ASSERT_TRUE(table && remove && apply);
+  EXPECT_EQ(table->rowCount(), 3);
+  EXPECT_EQ(table->item(2, 1)->text(), "GOST type B, 4 мм");
+  EXPECT_FALSE(remove->isEnabled()) << "used by a text";
+  EXPECT_FALSE(apply->isEnabled());
+  table->selectRow(0);
+  EXPECT_FALSE(remove->isEnabled()) << "(Default)";
+  table->selectRow(1);
+  ASSERT_TRUE(remove->isEnabled());
+  remove->click();
+  table->selectRow(1);
+  dlg.findChild<QPushButton*>("add")->click();
+  EXPECT_EQ(table->rowCount(), 3);
+  dlg.findChild<QToolButton*>("bold")->click();
+  EXPECT_EQ(table->item(2, 1)->text(), "GOST type B, 4 мм, Bold");
+  if (const char* dir = std::getenv("XR_SHOT_DIR")) dlg.grab().save(QString(dir) + "/text-styles.png");
+  ASSERT_TRUE(apply->isEnabled());
+  apply->click();
+  ASSERT_EQ(got.size(), 3u);
+  EXPECT_EQ(origin, (std::vector<int>{0, 2, -1}));
+  EXPECT_TRUE(got[2].bold);
+  EXPECT_EQ(got[2].font, "GOST type B");
+  setTextStyles(b, got, origin);
+  EXPECT_EQ(b.texts[0].style, 1) << "GOST_B_4 is the second now";
+  EXPECT_EQ(b.textStyles[1].name, "GOST_B_4");
 }

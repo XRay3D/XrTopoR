@@ -3,6 +3,7 @@
 #include <set>
 
 #include "gui/Schemes.h"
+#include "gui/TextFont.h"
 #include "topo/Sidecar.h"
 
 namespace xr::gui {
@@ -37,7 +38,7 @@ class SnapshotCommand : public QUndoCommand {
 
 }  // namespace
 
-Document::Document(QObject* parent) : QObject(parent) {}
+Document::Document(QObject* parent) : QObject(parent) { installTextMeasure(); }
 
 void Document::setBoard(std::unique_ptr<Board> b, const QString& path) {
   board_ = std::move(b);
