@@ -186,10 +186,9 @@ TEST(Gui, RecomputeShapesKeepsConnectivityAndClearance) {
   view.resize(800, 600);
   doc.setBoard(std::move(*b), "x");
   size_t tracksBefore = doc.board()->tracks.size();
-  // Zone fills are dropped by the recompute, so the baseline is the board without fills.
-  Board baseline = *doc.board();
-  for (auto& z : baseline.zones) z.filled.clear();
-  size_t unroutedBaseline = Connectivity::compute(baseline).ratsnest.size();
+  // The zone fills stay through the recompute (the model holds the poured zones, what lies in them is
+  // locked): the connectivity is the board's own.
+  size_t unroutedBaseline = Connectivity::compute(*doc.board()).ratsnest.size();
   view.recomputeShapes();  // nothing selected: every track becomes a sketch
   const Board& nb = *doc.board();
   EXPECT_NE(nb.tracks.size(), tracksBefore);

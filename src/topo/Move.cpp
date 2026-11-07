@@ -226,6 +226,7 @@ int insertVertex(Topology& t, LayerMesh& m, int owner, double at, Vec2 off, bool
     N.nb[2] = tri[k];
     N.inside = T.inside;
     N.blocked = T.blocked;
+    N.zone = T.zone;
     Edge& F = m.edges[T.e[i]];
     if (F.t[0] == ti) F.t[0] = tri[i];
     else if (F.t[1] == ti) F.t[1] = tri[i];

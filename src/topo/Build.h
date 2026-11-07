@@ -20,6 +20,7 @@ struct WallLoop {
 struct BuildScratch {
   std::vector<std::vector<Vec2>> corners;  // per owner: the fixed corners of a custom pad (else empty)
   std::vector<WallLoop> walls;
+  std::vector<int> zoneOwner;  // per board zone: its owner, -1 when unpoured or not on a copper layer
   std::vector<int> displaced;  // wires drawn through a keepout or a cutout: convertWires leaves them without crossings, relayDisplaced lays them round
 };
 

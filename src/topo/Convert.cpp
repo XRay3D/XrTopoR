@@ -13,6 +13,7 @@
 #include <set>
 #include <tuple>
 
+#include "core/Edit.h"
 #include "core/SpatialIndex.h"
 #include "topo/Build.h"
 #include "topo/Capacity.h"
@@ -228,12 +229,26 @@ void Topology::convertWires(const Board& b, BuildScratch& scratch) {
   // Keyed by the wire graph's glued vertex: the ends of the chains meeting at a branch point lie within
   // the glue of each other (a 50 um track between two of them on Arcs_master), one junction for all.
   std::map<std::tuple<int, LayerId, int>, int> junctionAt;
+  // The poured zones of a layer, as owners; a chain's end in one of its net is the zone's.
+  std::map<LayerId, std::vector<int>> zonesOn;
+  for (int zo : scratch.zoneOwner)
+    if (zo >= 0) zonesOn[b.zones[owners[zo].zone].layer].push_back(zo);
+  auto zoneAt = [&](Vec2 p, int net, LayerId layer) {
+    if (auto it = zonesOn.find(layer); it != zonesOn.end())
+      for (int zo : it->second)
+        if (owners[zo].net == net && owners[zo].shape.distance(p) <= edit::kJoinTol) return zo;
+    return -1;
+  };
   for (size_t ci = 0; ci < chains.size(); ++ci) {
     const WireChain& c = chains[ci];
     for (int end = 0; end < 2; ++end) {
       Vec2 p = end ? c.b() : c.a();
       if (auto r = copper.at(p, c.net, c.layer)) {
         ends[ci][end].owner = r->type == ItemType::Pad ? padOwner[r->index] : viaOwner[r->index];
+        continue;
+      }
+      if (int zo = zoneAt(p, c.net, c.layer); zo >= 0) {
+        ends[ci][end].owner = zo;
         continue;
       }
       auto key = std::tuple{c.vertex[end], c.layer, c.net};
@@ -311,10 +326,28 @@ void Topology::convertWires(const Board& b, BuildScratch& scratch) {
     // end, 470 mm over arz_2L), the rest have one vertex.
     const Owner& o0 = owners[w.end[0]];
     const Owner& o1 = owners[w.end[1]];
+    // In a pour nothing is touched (TopoR): a chain lying wholly inside a poured zone's outline on its
+    // layer is locked whatever its net, one of another net that reaches into the pour too (the pour was made
+    // round it). The wires of the zone's own net that cross its boundary are laid as any other: inside, the
+    // zone's copper is their own.
+    if (auto it = zonesOn.find(c.layer); it != zonesOn.end())
+      for (int zo : it->second) {
+        const Shape& zs = owners[zo].shape;
+        size_t inside = 0;
+        bool touches = false;
+        for (Vec2 p : c.path) inside += zs.distance(p) <= 0;
+        for (size_t k = 1; k < c.path.size() && !touches; ++k) touches = zs.distanceToSegment(c.path[k - 1], c.path[k]) <= 0;
+        if (inside == c.path.size() || (c.net != owners[zo].net && (inside > 0 || touches))) {
+          w.locked = true;
+          w.zone = zo;
+          break;
+        }
+      }
     // Where the path leaves each end's copper: the boundary point between the last point inside and the
     // first outside.
     for (int end = 0; end < 2; ++end) {
       const Owner& o = end ? o1 : o0;
+      if (o.kind == Owner::Kind::Zone) continue;  // the wire ends on the zone's ring, where the realiser puts it
       const Polyline& path = c.path;
       size_t n = path.size();
       for (size_t k = 1; k < n; ++k) {
@@ -336,10 +369,18 @@ void Topology::convertWires(const Board& b, BuildScratch& scratch) {
     // the next, when the drawn wire started at the right end).
     auto endVertexOf = [&](int owner, int end) {
       const Owner& o = owners[owner];
-      if (o.shape.kind == Shape::Kind::Polygon)
+      if (o.shape.kind == Shape::Kind::Polygon && o.kind != Owner::Kind::Zone)
         for (int v : m.ownerVerts[owner])
           if (m.verts[v].t == 0 && m.verts[v].off.len2() < 1) return v;
-      return nearestVertex(m, owner, w.hasExit[end] ? w.exit[end] : end ? c.b() : c.a());
+      // (A zone: the ring vertex nearest the path's end, or, for a path from outside, nearest where it enters.)
+      Vec2 at = w.hasExit[end] ? w.exit[end] : end ? c.b() : c.a();
+      if (o.kind == Owner::Kind::Zone)
+        for (size_t k = 0; k < c.path.size(); ++k) {
+          Vec2 p = end ? c.path[c.path.size() - 1 - k] : c.path[k];
+          if (o.shape.distance(p) > 0) break;
+          at = p;
+        }
+      return nearestVertex(m, owner, at);
     };
     int v0 = endVertexOf(w.end[0], 0), v1 = endVertexOf(w.end[1], 1);
     w.endVertex[0] = v0;
@@ -402,8 +443,9 @@ void Topology::convertWires(const Board& b, BuildScratch& scratch) {
       violations.push_back(v);
       w.locked = true;
     }
-    // A chain lying wholly inside the copper it starts and ends on is that copper, not a wire.
-    if (w.end[0] == w.end[1] && sk.size() <= 2 && (sk.front() - sk.back()).len2() < 1) {
+    // A chain lying wholly inside the copper it starts and ends on is that copper, not a wire (not in a
+    // pour: the tracks there stay as they are, the zone owns none of them).
+    if (w.end[0] == w.end[1] && o0.kind != Owner::Kind::Zone && sk.size() <= 2 && (sk.front() - sk.back()).len2() < 1) {
       ++insideOwn;
       for (int ti : c.tracks) ownerTracks.push_back({w.end[0], b.tracks[ti].id});
       continue;
@@ -411,9 +453,17 @@ void Topology::convertWires(const Board& b, BuildScratch& scratch) {
     bool ok = true;
     std::string why;
     int wall = -1;
-    std::vector<Hit> hits = walk(m, v0, v1, sk, ok, &why, &wall);
+    // A wire locked in a pour that ends on the zone itself crosses nothing of the model (a chord across the
+    // pour would take the room of its interior edges for nothing); one of another net is walked as any
+    // other, the ring being crossable, and silently left without crossings where the walk fails.
+    const bool inPour = w.zone >= 0 && (o0.kind == Owner::Kind::Zone || o1.kind == Owner::Kind::Zone);
+    std::vector<Hit> hits = inPour ? std::vector<Hit>{} : walk(m, v0, v1, sk, ok, &why, &wall);
+    if (!ok && w.zone >= 0) {
+      ok = true;
+      hits.clear();
+    }
     // Out of its copper and back without crossing anything: that copper, not a wire.
-    if (ok && hits.empty() && w.end[0] == w.end[1]) {
+    if (ok && hits.empty() && w.end[0] == w.end[1] && o0.kind != Owner::Kind::Zone) {
       ++loops;
       if (std::getenv("XR_TOPO_DEBUG") && loops <= 5)
         std::println(stderr, "loop: net {} L{} owner {} kind {} path {} points from ({:.3f},{:.3f}) to ({:.3f},{:.3f}), sketch {} points",
@@ -424,7 +474,7 @@ void Topology::convertWires(const Board& b, BuildScratch& scratch) {
     }
     // Nothing crossed between two different owners: the wire runs along the edge joining them.
     int along = -1;
-    if (ok && hits.empty()) {
+    if (ok && hits.empty() && !inPour && w.zone < 0) {
       for (int t : m.verts[v0].tris) {
         int i = m.localVertex(t, v1);
         if (i < 0) continue;
@@ -594,6 +644,7 @@ void Topology::convertWires(const Board& b, BuildScratch& scratch) {
       if (E.cls != 3) continue;
       for (int cid : E.cross) {
         const Wire& w = wires[crossings[cid].wire];
+        if (w.zone >= 0) continue;  // locked in a pour: the zone's interior edges have no room by rule, it lies there all the same
         for (int end = 0; end < 2; ++end) {
           const Owner& o = owners[m.verts[E.v[end]].owner];
           if (o.net == w.net || o.kind == Owner::Kind::Junction) continue;
@@ -611,6 +662,8 @@ void Topology::convertWires(const Board& b, BuildScratch& scratch) {
     }
     for (int e = 0; e < int(m.edges.size()); ++e)
       if (m.edges[e].cls == 2) {
+        // (Only locked wires there, a pad of another net inside a pour: nothing will move, nothing to report.)
+        if (std::ranges::all_of(m.edges[e].cross, [&](int cid) { return wires[crossings[cid].wire].locked; })) continue;
         Violation v;
         v.kind = Violation::Kind::Overflow;
         v.layer = m.layer;

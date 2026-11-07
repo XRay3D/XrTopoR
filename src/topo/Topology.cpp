@@ -220,11 +220,32 @@ void Topology::buildOwners(const Board& b, BuildScratch& scratch) {
     o.locked = v.locked;
     viaOwner[vi] = add(std::move(o));
   }
-  // The walls: the outline and its cutouts (the clearance to the board edge is kept from them), the
-  // keepouts (no clearance); all subdivided so that the clearance is sampled densely enough.
   double viaDia = 0;
   for (const NetClass& nc : b.netClasses) viaDia = std::max(viaDia, double(nc.viaDiameter));
   const double pitch = std::max(1.2 * (viaDia + double(b.maxClearance())), 1.0 * kNmPerMm);
+  // The poured zones: a pad of its net whose vertices are its outline, subdivided like the walls, and no
+  // centre (one could lie outside an L-shaped outline, in a cutout, on a pad's centre). The owner's shape
+  // is the outline; its cutouts are not taken off it (what lies in them lies in the zone).
+  scratch.zoneOwner.assign(b.zones.size(), -1);
+  for (int zi = 0; zi < int(b.zones.size()); ++zi) {
+    const Zone& z = b.zones[zi];
+    if (z.filled.empty() || z.outline.size() < 3 || z.layer < 0 || z.layer >= LayerId(b.layers.size()) || !((cuMask >> z.layer) & 1)) continue;
+    Owner o;
+    o.kind = Owner::Kind::Zone;
+    o.zone = zi;
+    o.net = z.net;
+    o.layers = LayerMask(1) << z.layer;
+    o.shape = Shape::polygon(z.outline);
+    for (Vec2 p : z.outline) o.c = o.c + p / double(z.outline.size());
+    const Vec2 c = o.c;
+    std::vector<Vec2> ring;
+    for (Vec2 p : subdivide(z.outline, true, pitch)) ring.push_back(p - c);
+    const int id = add(std::move(o));
+    corners[id] = std::move(ring);
+    scratch.zoneOwner[zi] = id;
+  }
+  // The walls: the outline and its cutouts (the clearance to the board edge is kept from them), the
+  // keepouts (no clearance); all subdivided so that the clearance is sampled densely enough.
   auto wall = [&](const Polyline& pts, bool area, bool border, LayerMask layers) {
     WallLoop wl{layers, {}, area, border};
     for (Vec2 p : subdivide(pts, area, pitch)) {
@@ -299,7 +320,7 @@ void Topology::buildMeshes(const Board& b, BuildScratch& scratch) {
         in.border.push_back(2);
         continue;
       }
-      vertex(oi, 0, {});
+      if (o.kind != Owner::Kind::Zone) vertex(oi, 0, {});
       if (hasCorners) {
         std::vector<int> ring;
         for (Vec2 c : corners[oi]) ring.push_back(vertex(oi, 0, c));
@@ -322,8 +343,33 @@ void Topology::buildMeshes(const Board& b, BuildScratch& scratch) {
       }
     }
     CdtResult r = triangulate(in);
-    // Points the constraints' intersections created: outline owners of this layer.
+    // Points the constraints' intersections created: a zone's vertex where it lies on the zone's ring and
+    // on no wall (a pad's corner ring across the pour's boundary), else an outline owner of this layer.
+    auto onWall = [&](Vec2 p) {
+      for (const WallLoop& wl : walls) {
+        if (!((wl.layers >> layer) & 1)) continue;
+        for (size_t i = 0; i < wl.owners.size(); ++i) {
+          if (i + 1 == wl.owners.size() && !wl.area) break;
+          if (distPointSegment(p, owners[wl.owners[i]].c, owners[wl.owners[(i + 1) % wl.owners.size()]].c) < 10) return true;
+        }
+      }
+      return false;
+    };
+    auto zoneRingAt = [&](Vec2 p) {
+      for (int oi = 0; oi < int(owners.size()); ++oi) {
+        const Owner& o = owners[oi];
+        if (o.kind != Owner::Kind::Zone || !((o.layers >> layer) & 1) || oi >= int(corners.size())) continue;
+        const std::vector<Vec2>& ring = corners[oi];
+        for (size_t i = 0; i < ring.size(); ++i)
+          if (distPointSegment(p, o.c + ring[i], o.c + ring[(i + 1) % ring.size()]) < 10) return oi;
+      }
+      return -1;
+    };
     for (Vec2 p : r.extra) {
+      if (int zo = onWall(p) ? -1 : zoneRingAt(p); zo >= 0) {
+        vertex(zo, 0, p - owners[zo].c);
+        continue;
+      }
       Owner o;
       o.kind = Owner::Kind::Outline;
       o.net = kBoardEdge;
@@ -387,6 +433,15 @@ void Topology::buildMeshes(const Board& b, BuildScratch& scratch) {
       for (Tri& t : m.tris)
         if (t.inside && pointInPolygon((m.verts[t.v[0]].p + m.verts[t.v[1]].p + m.verts[t.v[2]].p) / 3.0, poly)) t.blocked = true;
     }
+    // The triangles of a pour, by their centroids in its ring (the first zone wins where two overlap).
+    for (int oi = 0; oi < int(owners.size()); ++oi) {
+      const Owner& o = owners[oi];
+      if (o.kind != Owner::Kind::Zone || !((o.layers >> layer) & 1)) continue;
+      Polyline poly;
+      for (Vec2 c : corners[oi]) poly.push_back(o.c + c);
+      for (Tri& t : m.tris)
+        if (t.inside && t.zone < 0 && pointInPolygon((m.verts[t.v[0]].p + m.verts[t.v[1]].p + m.verts[t.v[2]].p) / 3.0, poly)) t.zone = oi;
+    }
     for (int ti = 0; ti < int(m.tris.size()); ++ti)
       if (m.tris[ti].inside)
         for (int i = 0; i < 3; ++i) m.verts[m.tris[ti].v[i]].tris.push_back(ti);
@@ -395,7 +450,8 @@ void Topology::buildMeshes(const Board& b, BuildScratch& scratch) {
       const Owner& o = owners[oi];
       m.ownerClr[oi] = o.kind == Owner::Kind::Outline ? double(b.edgeClearance)
                        : o.kind == Owner::Kind::Keepout ? 0.0
-                                                        : double(b.clearance(o.net, layer));
+                       : o.kind == Owner::Kind::Zone ? std::max(double(b.zones[o.zone].clearance), double(b.clearance(o.net, layer)))
+                                                     : double(b.clearance(o.net, layer));
     }
     layers.push_back(std::move(m));
   }

@@ -48,7 +48,7 @@ struct OwnerGrid {
     cells.clear();
     for (int oi = 0; oi < int(t.owners.size()); ++oi) {
       const Owner& o = t.owners[oi];
-      if (o.layers == 0 || (o.kind != Owner::Kind::Pad && o.kind != Owner::Kind::Via)) continue;
+      if (o.layers == 0 || (o.kind != Owner::Kind::Pad && o.kind != Owner::Kind::Via && o.kind != Owner::Kind::Zone)) continue;
       BBox bb = o.shape.bbox();
       for (long cx = long(std::floor(bb.minX / kCell)); cx <= long(std::floor(bb.maxX / kCell)); ++cx)
         for (long cy = long(std::floor(bb.minY / kCell)); cy <= long(std::floor(bb.maxY / kCell)); ++cy) cells[{cx, cy}].push_back(oi);
@@ -136,6 +136,7 @@ CopperPush copperPush(const Board& b, const Topology& t, const OwnerGrid& grid, 
     const Owner& o = t.owners[oj];
     if (o.net == ob.net || !(o.layers & ob.layers)) return;
     double req = ob.halfWidth + requiredClearance(b, ob.net, o.net, ob.layers & o.layers);
+    if (o.kind == Owner::Kind::Zone) req = std::max(req, ob.halfWidth + double(b.zones[o.zone].clearance));  // a pour keeps its own clearance
     double d = o.shape.distance(at);
     if (d >= req - 1000) return;
     Vec2 n = awayFrom(o.shape, at, o.c);
@@ -203,6 +204,7 @@ std::optional<Vec2> blockerAt(const Board& b, const Topology& t, const OwnerGrid
     if (req < 0) {
       if (o.net == ob.net) return;
       req = ob.halfWidth + requiredClearance(b, ob.net, o.net, ob.layers & o.layers) + nominalExcess(b, ob.net, o.net, ob.layers & o.layers);
+      if (o.kind == Owner::Kind::Zone) req = std::max(req, ob.halfWidth + double(b.zones[o.zone].clearance));
     }
     double there = std::max(0.0, req - 1000 - o.shape.distance(p)), here = std::max(0.0, req - 1000 - o.shape.distance(ob.c));
     shortThere += there;

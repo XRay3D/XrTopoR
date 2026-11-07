@@ -18,7 +18,10 @@ namespace xr::topo {
 constexpr int kBoardEdge = -2;  // the "net" of the outline: belongs to nobody, blocks everybody
 
 struct Owner {
-  enum class Kind { Pad, Via, Junction, Outline, Keepout };
+  // Zone: a poured copper area, from outside a pad of its net (its boundary ring is its vertices, no centre;
+  // the wires of its net may end anywhere on the ring, other nets keep the zone's clearance); what lies
+  // inside is locked (TopoR touches nothing in a pour). An unpoured zone is nothing to the model.
+  enum class Kind { Pad, Via, Junction, Outline, Keepout, Zone };
   Kind kind = Kind::Pad;
   Vec2 c;             // centre
   Vec2 axis;          // half-vector along the long axis; 0 for round owners
@@ -30,6 +33,7 @@ struct Owner {
   int via = -1;
   uint32_t viaId = 0;
   int junction = -1;
+  int zone = -1;
   bool locked = false;
 };
 
@@ -69,6 +73,7 @@ struct Tri {
   int nb[3] = {-1, -1, -1};  // across e[i] (-1: outside or a constrained edge)
   bool inside = false;
   bool blocked = false;      // inside a keepout area of this layer
+  int zone = -1;             // the zone owner whose ring holds the triangle (a pour: only its net's wires go there)
 };
 
 struct LayerMesh {
@@ -114,6 +119,7 @@ struct Wire {
   std::vector<uint32_t> tracks;  // the board tracks it is drawn as (empty: not drawn yet)
   bool locked = false;
   bool dirty = true;        // converted from hand-drawn tracks since it was last drawn
+  int zone = -1;            // the zone owner that locked it: its tracks lie in a pour (any net), or cross into one (another net)
 };
 
 struct Violation {

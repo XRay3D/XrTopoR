@@ -1702,15 +1702,21 @@ struct PinBoard {
     for (const auto& q : poly) loop.push_back(at(q.first, q.second));
     b.outline.push_back(loop);
   }
-  // A copper area of the net on the top layer; poured (the fill is its whole outline) unless told otherwise.
-  int zone(const std::string& n, std::initializer_list<std::pair<double, double>> poly, bool filled = true, double clearance = 0) {
+  // A copper area of the net on the top layer; poured round what the board has so far (fillZones) unless
+  // told otherwise, so add the pads and tracks first (an island keeps only the copper touching its net:
+  // a pour with no pad of its net in it is kept whole by removeIslands = false).
+  int zone(const std::string& n, std::initializer_list<std::pair<double, double>> poly, bool pour = true, double clearance = 0) {
     Zone z;
     z.net = net(n);
     z.layer = top;
     z.clearance = mmToNm(clearance);
     for (const auto& q : poly) z.outline.push_back(at(q.first, q.second));
-    if (filled) z.filled.push_back(z.outline);
     b.zones.push_back(z);
+    if (pour) {
+      ZoneFillOptions o;
+      o.removeIslands = false;
+      fillZones(b, o);
+    }
     return int(b.zones.size() - 1);
   }
   int drcOf(DrcViolation::Type kind) const {
@@ -1876,6 +1882,83 @@ TEST(Topo, ViaStaysOutOfAViaKeepout) {
     }
     EXPECT_EQ(p.drcOf(DrcViolation::Type::Keepout), 0) << y0;
   }
+}
+
+namespace {
+
+// A board with a zone of G over (10,5)-(30,15): N wholly inside it with a bend, N2 from outside into it.
+PinBoard zoneBoard(bool poured) {
+  PinBoard p;
+  p.pad("N", 12, 8, PadShapeKind::Circle, 1, 1);
+  p.pad("N", 28, 8, PadShapeKind::Circle, 1, 1);
+  p.track("N", {{12, 8}, {20, 12}, {28, 8}}, 0.3);
+  p.pad("N2", 2, 10, PadShapeKind::Circle, 1, 1);
+  p.pad("N2", 20, 13.5, PadShapeKind::Circle, 1, 1);
+  p.track("N2", {{2, 10}, {20, 13.5}}, 0.3);
+  p.zone("G", {{10, 5}, {30, 5}, {30, 15}, {10, 15}}, poured);
+  return p;
+}
+
+}  // namespace
+
+// In a poured zone nothing is touched (TopoR): the tracks lying wholly inside its outline are locked
+// whatever their net, so are those of another net reaching into it; F5 and F6 leave them as they are.
+TEST(Topo, TracksInsideAPouredZoneAreLocked) {
+  PinBoard p = zoneBoard(true);
+  topo::Topology::assignIds(p.b);
+  topo::Topology t;
+  t.build(p.b);
+  int zones = 0;
+  for (const topo::Owner& o : t.owners) zones += o.kind == topo::Owner::Kind::Zone;
+  EXPECT_EQ(zones, 1);
+  ASSERT_EQ(t.wires.size(), 2u);
+  for (const topo::Wire& w : t.wires) {
+    EXPECT_TRUE(w.locked) << p.b.nets[w.net].name;
+    EXPECT_GE(w.zone, 0) << p.b.nets[w.net].name;
+  }
+  EXPECT_TRUE(t.violations.empty());
+  const size_t tracks = p.b.tracks.size();
+  auto f = p.f5Model();
+  ASSERT_TRUE(f.res.drawn);
+  EXPECT_EQ(p.b.tracks.size(), tracks);
+  EXPECT_TRUE(p.vertexAt(20, 12)) << "the bend of N stays";
+  auto r = p.f6();
+  EXPECT_EQ(p.b.tracks.size(), tracks);
+  EXPECT_TRUE(p.vertexAt(20, 12)) << "F6 left the bend";
+  DrcOptions d;
+  d.unconnected = false;
+  d.widths = false;
+  for (const DrcViolation& v : runDrc(p.b, d)) ADD_FAILURE() << v.message << " at " << v.pos.x / 1e6 << "," << v.pos.y / 1e6;
+}
+
+// An unpoured zone is nothing to the model: the same tracks are free, F6 straightens N.
+TEST(Topo, UnpouredZoneIsNothing) {
+  PinBoard p = zoneBoard(false);
+  topo::Topology::assignIds(p.b);
+  topo::Topology t;
+  t.build(p.b);
+  for (const topo::Owner& o : t.owners) EXPECT_NE(o.kind, topo::Owner::Kind::Zone);
+  for (const topo::Wire& w : t.wires) EXPECT_FALSE(w.locked) << p.b.nets[w.net].name;
+  const double bent = p.length("N");
+  p.f6();
+  EXPECT_LT(p.length("N"), bent - 1) << "F6 straightened N";
+  EXPECT_FALSE(p.vertexAt(20, 12));
+}
+
+// From outside a poured zone is a pad of its net: a wire of another net along its edge keeps the zone's
+// clearance (0.5 here, above the net's 0.2) and is not locked.
+TEST(Topo, ForeignWireKeepsTheZoneClearance) {
+  PinBoard p;
+  p.pad("N", 5, 12.3, PadShapeKind::Circle, 1, 1);
+  p.pad("N", 35, 12.3, PadShapeKind::Circle, 1, 1);
+  p.track("N", {{5, 12.3}, {35, 12.3}}, 0.3);
+  p.zone("G", {{10, 5}, {30, 5}, {30, 12}, {10, 12}}, true, 0.5);
+  auto f = p.f5Model();
+  ASSERT_TRUE(f.res.drawn);
+  for (const topo::Wire& w : f.t.wires) EXPECT_FALSE(w.locked);
+  const Vec2 a = PinBoard::at(10, 12), c = PinBoard::at(30, 12);
+  EXPECT_GE(p.centreLineTo("N", a, c), 0.5 + 0.15 - 0.003) << "the zone's clearance plus half the width";
+  EXPECT_EQ(p.drcOf(DrcViolation::Type::Clearance), 0);
 }
 
 // The pins of a row are left through their ends only (TopoR's F5: 109 of the 110 exits of

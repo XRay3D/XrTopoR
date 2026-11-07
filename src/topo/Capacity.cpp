@@ -58,6 +58,9 @@ EdgeCapacity capacityOf(const Topology& t, const LayerMesh& m, int va, int vb, c
   Vec2 dir = c.L > 0 ? (V.p - U.p) / c.L : Vec2{};
   c.reachU = std::max(0.0, ou.shape.rayExit(U.p, dir));
   c.reachV = std::max(0.0, ov.shape.rayExit(V.p, dir * -1.0));
+  // A zone's ring vertex is a bare point (its polygon's rayExit from a point of its boundary is anything).
+  if (ou.kind == Owner::Kind::Zone) c.reachU = 0;
+  if (ov.kind == Owner::Kind::Zone) c.reachV = 0;
   if (U.owner == V.owner) c.reachU = c.reachV = c.L / 2;  // inside one owner: no room for anybody else
   if (along >= 0 && !ws.empty() && t.wires[ws[0]].net != t.wires[along].net)
     c.reachU = c.reachV = c.L / 2;  // a wire runs along it: no room for another net across

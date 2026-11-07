@@ -82,13 +82,14 @@ RealWire sketchOf(const Board& b, const Topology& t, int wi) {
       if (o.net == w.net && w.net != kNoNet) continue;
       Vec2 P = m.verts[v].p;
       const double rule = ownerClearance(t, m, m.verts[v].owner, w) + w.width / 2.0 + kRealizeMargin;
+      const Shape shape = o.kind == Owner::Kind::Zone ? Shape::circle(P, 0) : o.shape;  // a zone's ring vertex: a bare point
       // Only where the chord comes within the rule of the vertex's copper. The stack radius is the
       // realiser's business: samples on it rounded neighbouring vertices into one another (a via row,
       // arcs of 2 mm overlapping, the sketch crossing itself).
-      if (o.shape.distanceToSegment(x.p, y.p) >= rule) continue;
+      if (shape.distanceToSegment(x.p, y.p) >= rule) continue;
       // Along the copper's outline offset by the rule (a rectangle's corners rounded): a straight step
       // between two samples on it stays out of the copper.
-      const Shape offset = o.shape.inflated(rule);
+      const Shape offset = shape.inflated(rule);
       Vec2 d1 = (x.p - P).normalized(), d2 = (y.p - P).normalized();
       double a1 = std::atan2(d1.y, d1.x), sweep = std::atan2(d1.cross(d2), d1.dot(d2));
       // Round the vertex on the side the chord passes it: the arc from d1 to d2 must go through the
@@ -97,7 +98,7 @@ RealWire sketchOf(const Board& b, const Topology& t, int wi) {
       {
         Vec2 foot = closestPointOnSegment(P, x.p, y.p);
         Vec2 df = foot - P;
-        if (df.len() > 1 && o.shape.distance(foot) >= 0) {  // beside the copper; through it, the shorter way
+        if (df.len() > 1 && shape.distance(foot) >= 0) {  // beside the copper; through it, the shorter way
           double af = std::atan2(df.y, df.x);
           double rel = sweep >= 0 ? normalizeAngle(af - a1) : normalizeAngle(a1 - af);  // in [0, 2 pi)
           // The foot at x itself comes out as 0 or as a hair under 2 pi: both are on the arc.
@@ -199,6 +200,7 @@ RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int
           break;
         case Owner::Kind::Outline: id = ob.add(x.p, 0, clr, kBoardEdge); break;
         case Owner::Kind::Keepout: id = ob.add(x.p, 0, 0, kBoardEdge); break;
+        case Owner::Kind::Zone: id = ob.add(x.p, 0, clr, o.net); break;  // a bare point of the ring; the ring's pieces are sides
       }
       if (id >= 0) ob.pts[id].owner = x.owner;
     }
@@ -208,6 +210,10 @@ RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int
       const Vertex& c = m.verts[E.v[1]];
       const Owner& oa = t.owners[a.owner];
       if (a.owner == c.owner) {
+        if (oa.kind == Owner::Kind::Zone) {
+          ob.side(E.v[0], E.v[1], 0);
+          continue;
+        }
         if (oa.kind != Owner::Kind::Pad) continue;
         bool aCentre = a.t == 0 && a.off.len2() < 1, cCentre = c.t == 0 && c.off.len2() < 1;
         if (aCentre || cCentre) continue;  // a spoke, not a side
@@ -432,9 +438,7 @@ void drawModel(Board& b, Topology& t, bool direct, RealizeStats& stats, int& nWi
       }
   std::erase_if(b.tracks, [&](const Track& tr) { return tr.id && gone.contains(tr.id); });
   std::erase_if(t.ownerTracks, [&](const std::pair<int, uint32_t>& ot) { return gone.contains(ot.second); });  // or the model saved names tracks that are not there
-  for (auto& z : b.zones)
-    for (auto& w : wires)
-      if (z.layer == w.layer) { z.filled.clear(); break; }
+  // (The zone fills stay: the model holds the poured zones as owners, and what lies in a pour is locked.)
   RealizeOptions opt;
   opt.tracksAsObstacles = true;
   opt.nominal = true;

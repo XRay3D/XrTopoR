@@ -301,7 +301,12 @@ std::optional<RelayPath> findRelay(const Topology& t, int wi, const std::vector<
     nodes.push_back(nd);
     open.push({nd.g + (G.p - nd.p).len(), int(nodes.size()) - 1});
   };
-  auto usable = [&](int tri) { return tri >= 0 && m.tris[tri].inside && !m.tris[tri].blocked; };
+  // Not into a keepout area, nor into another net's pour.
+  auto usable = [&](int tri) {
+    if (tri < 0) return false;
+    const Tri& T = m.tris[tri];
+    return T.inside && !T.blocked && (T.zone < 0 || t.owners[T.zone].net == w.net);
+  };
   // The start: every triangle at the start vertex, or the triangle beyond the kept crossing.
   if (S.vertex >= 0) {
     for (int tri : m.verts[S.vertex].tris)

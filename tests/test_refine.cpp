@@ -407,6 +407,22 @@ TEST(Refine, PlacementWithAKeepoutOverTracks) {
   EXPECT_LE(count(DrcViolation::Type::Clearance), clearances + 3) << clearances << " without the keepout";
 }
 
+// A board with poured planes (Signals: 7 zones of 6 power nets on INT_PWR, every connection made through
+// them) keeps them through F5 on the model: the fills used to be dropped on every layer drawn on, and 73
+// connections came out unrouted.
+TEST(Refine, SignalsKeepsItsPlanes) {
+  auto lb = io::loadBoard(data("topor/Example_06/Signals.fst"));
+  ASSERT_TRUE(lb.has_value());
+  Board& b = **lb;
+  ASSERT_EQ(Connectivity::compute(b).ratsnest.size(), 0u);
+  topo::Topology::assignIds(b);
+  topo::Topology t;
+  t.build(b);
+  ASSERT_TRUE(topo::runF5Model(b, t).drawn);
+  EXPECT_EQ(Connectivity::compute(b).ratsnest.size(), 0u);
+  EXPECT_EQ(conflicts(b), 0);
+}
+
 // The wires widened past what the layout has room for (MinVia_standard_routing with every track 0.4 mm wide
 // in a layout drawn at 0.254: 756 clearance violations, none of them a short) are laid tight, the deficit
 // shared, as TopoR draws it: no wire through a pad and no loop. Three things used to go wrong: a bend round

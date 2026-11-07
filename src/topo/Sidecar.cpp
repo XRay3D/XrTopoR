@@ -104,7 +104,7 @@ std::string hex(uint64_t h) {
   return buf;
 }
 
-constexpr int kVersion = 1;
+constexpr int kVersion = 2;  // 2: the zones (owners, wires and triangles name theirs)
 
 }  // namespace
 
@@ -217,6 +217,16 @@ uint64_t boardHashOf(const Board& b) {
       }
     });
   report("keepouts");
+  // The zones: their place and whether they are poured, not the pour itself (a re-pour is no new model).
+  for (const Zone& z : b.zones)
+    item([&](Fnv& f) {
+      f.s(netName(b, z.net));
+      f.i(z.layer);
+      f.i(q(double(z.clearance)));
+      f.i(z.filled.empty() ? 0 : 1);
+      for (Vec2 p : z.outline) f.v(p);
+    });
+  report("zones");
   if (debug) std::fprintf(stderr, "hash: %zu pads %zu vias %zu tracks %zu nets %zu rules %zu classes\n", b.pads.size(), b.vias.size(), b.tracks.size(), b.nets.size(), b.layerRules.size(), b.netClasses.size());
   return sum;
 }
@@ -237,7 +247,7 @@ std::expected<void, std::string> saveTopology(Topology& t, const Board& b, const
   json::array owners;
   for (const Owner& o : t.owners) {
     json::object jo{{"kind", int(o.kind)}, {"c", vec(o.c)}, {"axis", vec(o.axis)}, {"hw", o.halfWidth}, {"shape", shape(o.shape)},
-                    {"net", o.net}, {"layers", int64_t(o.layers)}, {"junction", o.junction}, {"locked", o.locked}};
+                    {"net", o.net}, {"layers", int64_t(o.layers)}, {"junction", o.junction}, {"zone", o.zone}, {"locked", o.locked}};
     // The pads and vias by what names them in any order: the component and the pin, the place and the net.
     if (o.pad >= 0 && o.pad < int(b.pads.size())) {
       const Pad& p = b.pads[o.pad];
@@ -259,7 +269,7 @@ std::expected<void, std::string> saveTopology(Topology& t, const Board& b, const
     json::array verts, tris, edges, clr;
     for (const Vertex& x : m.verts) verts.push_back(json::array{x.owner, x.t, x.off.x, x.off.y});
     for (const Tri& T : m.tris)
-      tris.push_back(json::array{T.v[0], T.v[1], T.v[2], T.e[0], T.e[1], T.e[2], T.nb[0], T.nb[1], T.nb[2], T.inside, T.blocked});
+      tris.push_back(json::array{T.v[0], T.v[1], T.v[2], T.e[0], T.e[1], T.e[2], T.nb[0], T.nb[1], T.nb[2], T.inside, T.blocked, T.zone});
     for (const Edge& E : m.edges) {
       json::array cross;
       for (int c : E.cross) cross.push_back(c);
@@ -279,7 +289,7 @@ std::expected<void, std::string> saveTopology(Topology& t, const Board& b, const
     wires.push_back(json::object{{"net", w.net}, {"layer", int(w.layer)}, {"width", w.width}, {"widthMin", w.widthMin}, {"clr", w.clr},
                                  {"end", json::array{w.end[0], w.end[1]}}, {"endVertex", json::array{w.endVertex[0], w.endVertex[1]}},
                                  {"exit", json::array{vec(w.exit[0]), vec(w.exit[1])}}, {"hasExit", json::array{w.hasExit[0], w.hasExit[1]}},
-                                 {"cross", std::move(cross)}, {"tracks", std::move(tracks)}, {"locked", w.locked}, {"dirty", w.dirty}});
+                                 {"cross", std::move(cross)}, {"tracks", std::move(tracks)}, {"locked", w.locked}, {"dirty", w.dirty}, {"zone", w.zone}});
   }
   root["wires"] = std::move(wires);
   json::array crossings;
@@ -443,6 +453,7 @@ std::expected<Topology, std::string> loadTopology(const Board& b, const std::str
         t.viaOwner[ow.via] = int(t.owners.size());
       }
       ow.junction = o.at("junction").to_number<int>();
+      ow.zone = o.at("zone").to_number<int>();
       ow.locked = o.at("locked").as_bool();
       t.owners.push_back(std::move(ow));
     }
@@ -478,6 +489,7 @@ std::expected<Topology, std::string> loadTopology(const Board& b, const std::str
         }
         T.inside = a[9].as_bool();
         T.blocked = a[10].as_bool();
+        T.zone = a[11].to_number<int>();
         m.tris.push_back(T);
       }
       for (const json::value& x : o.at("edges").as_array()) {
@@ -532,6 +544,7 @@ std::expected<Topology, std::string> loadTopology(const Board& b, const std::str
       }
       w.locked = o.at("locked").as_bool();
       w.dirty = o.at("dirty").as_bool();
+      w.zone = o.at("zone").to_number<int>();
       t.wires.push_back(std::move(w));
     }
     for (const json::value& v : root.at("crossings").as_array()) {
