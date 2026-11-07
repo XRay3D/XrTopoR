@@ -225,6 +225,8 @@ RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int
     for (auto [owner, centre] : centreOf)
       for (int v : m.ownerVerts[owner])
         if (v != centre && !(m.verts[v].t == 0 && m.verts[v].off.len2() < 1)) ob.cornersOf[centre].push_back(v);
+    // A round wall (a hole, a round keepout) as one obstacle at its centre: round it as one arc.
+    for (const RoundWall& rw : roundWalls(b, layer)) ob.pts[ob.add(rw.c, rw.r, rw.clr, kBoardEdge)].round = true;
     // A wire locked without crossings (through a keepout with no way round, one the mesh does not hold)
     // is in no slot: its tracks are obstacles, as on the sketch path.
     for (const Wire& w : t.wires) {

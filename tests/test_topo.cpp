@@ -2006,6 +2006,58 @@ TEST(Topo, ForeignWireKeepsTheZoneClearance) {
   EXPECT_EQ(p.drcOf(DrcViolation::Type::Clearance), 0);
 }
 
+// A round wall is gone round as one arc, as a round pad is, not as a chord for every point of its rim: a
+// round keepout, and the rounded corner of a polygon keepout (its arc's circle lies within the polygon).
+// The wire of N, drawn straight through, comes out with one arc centred on the circle at half its width
+// off it, and no short piece beside it.
+TEST(Topo, RoundWallsAreGoneRoundAsOneArc) {
+  struct Case {
+    const char* how;
+    Vec2 centre;
+    double r;
+  };
+  for (int which = 0; which < 2; ++which) {
+    PinBoard p;
+    // Straight through the circle; diagonally through the rounded corner.
+    const double y0 = which == 0 ? 10 : 16, y1 = which == 0 ? 10 : 5;
+    p.pad("N", 5, y0, PadShapeKind::Circle, 1, 1);
+    p.pad("N", 35, y1, PadShapeKind::Circle, 1, 1);
+    p.track("N", {{5, y0}, {35, y1}}, 0.3);
+    Keepout k;
+    Graphic g;
+    Case c;
+    if (which == 0) {
+      g.kind = GraphicKind::Circle;
+      g.a = PinBoard::at(20, 11.5);
+      g.b = g.a + Vec2{2 * kNmPerMm, 0};
+      c = {"circle", g.a, 2 * kNmPerMm};
+    } else {
+      // A box from (17,10.3) to (23,16) with its lower left corner rounded by a quarter arc of radius 2:
+      // the corner is where the wire, pushed down, goes round.
+      g.kind = GraphicKind::Poly;
+      g.pts = {PinBoard::at(19, 10.3), PinBoard::at(23, 10.3), PinBoard::at(23, 16), PinBoard::at(17, 16), PinBoard::at(17, 12.3)};
+      g.arcs = {0, 0, 0, 0, -90};  // the side from (17,12.3) back to (19,10.3) turns by 90 degrees clockwise
+      c = {"rounded corner", PinBoard::at(19, 12.3), 2 * kNmPerMm};
+    }
+    k.shape.push_back(g);
+    p.b.keepouts.push_back(k);
+    auto f = p.f5Model();
+    ASSERT_TRUE(f.res.drawn) << c.how;
+    EXPECT_EQ(p.drcOf(DrcViolation::Type::Keepout), 0) << c.how;
+    int arcsOnIt = 0, piecesNear = 0;
+    for (const Track& t : p.b.tracks) {
+      if (p.b.nets[t.net].name != "N") continue;
+      const bool near = std::min((t.a.v() - c.centre).len(), (t.b.v() - c.centre).len()) < c.r + 0.5 * kNmPerMm;
+      if (t.isArc()) {
+        const ArcGeom arc = ArcGeom::fromThreePoints(t.a.v(), t.mid->v(), t.b.v());
+        if ((arc.center - c.centre).len() < 2000 && std::abs(arc.radius - (c.r + 0.15 * kNmPerMm)) < 3000) ++arcsOnIt;
+      } else if (near && t.length() < 0.5 * kNmPerMm) ++piecesNear;
+    }
+    EXPECT_EQ(arcsOnIt, 1) << c.how << ": one arc on the wall's circle";
+    EXPECT_EQ(piecesNear, 0) << c.how << ": no short pieces round the wall";
+  }
+}
+
 // The pins of a row are left through their ends only (TopoR's F5: 109 of the 110 exits of
 // Arcs_standard_routing, the one left is a dog-leg another wire runs round): a wire drawn out of the long
 // side is led from the pad's centre to the centre of the rounded end and straight out. Two pins of one net

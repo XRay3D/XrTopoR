@@ -101,6 +101,16 @@ struct RealizeOptions {
 int narrowToFit(Board& b, size_t firstTrack);
 
 // Appends tracks for the wires and vias to the board.
+// A round wall a wire goes round from outside, as one arc: a hole in the board drawn as a circle, a round
+// keepout for wires; its centre, radius and the clearance kept from it. (The board's outer contour, which a
+// wire would follow from inside, is not one: taut wires do not hug a concave wall.)
+struct RoundWall {
+  Vec2 c;
+  double r = 0;
+  double clr = 0;
+};
+std::vector<RoundWall> roundWalls(const Board& b, LayerId layer);
+
 RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::vector<RealVia>& vias,
                      const RealizeOptions& opt = {});
 

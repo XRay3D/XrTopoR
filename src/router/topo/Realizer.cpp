@@ -17,6 +17,7 @@
 #include <flat_set>
 #include <cstdlib>
 #include <map>
+#include <numbers>
 #include <memory>
 #include <numeric>
 #include <optional>
@@ -168,6 +169,72 @@ double sweepOf(const Circle& c, Vec2 in, Vec2 out) {
 }
 
 
+}  // namespace
+
+std::vector<RoundWall> roundWalls(const Board& b, LayerId layer) {
+  std::vector<RoundWall> out;
+  auto circle = [](const Graphic& g, Vec2& c, double& r) {
+    if (g.kind != GraphicKind::Circle) return false;
+    c = g.a;
+    r = (g.b - g.a).len();
+    return r > 0;
+  };
+  // A hole: a circle drawn on the edge layer that one of the outline's inner loops lies on.
+  for (const Graphic& g : b.graphics) {
+    Vec2 c;
+    double r;
+    if (!b.isEdge(g.layer) || !circle(g, c, r)) continue;
+    for (size_t i = 1; i < b.outline.size(); ++i) {
+      const double tol = std::max(2000.0, r * 0.01);
+      if (std::ranges::all_of(b.outline[i], [&](Vec2 p) { return std::abs((p - c).len() - r) <= tol; })) {
+        out.push_back({c, r, double(b.edgeClearance)});
+        break;
+      }
+    }
+  }
+  // An arc side of a polygon wall whose whole circle lies within the polygon (a rounded corner, a bulge): the
+  // circle is one obstacle, as a wire from outside never gets into the polygon anyway. An arc whose circle
+  // sticks out of its polygon (a shallow bulge, a notch) stays a chain of points.
+  auto arcsOf = [&](const Graphic& g, double clr) {
+    if (g.kind != GraphicKind::Poly || g.pts.size() < 3 || !g.hasArcs()) return;
+    const Polyline poly = g.path(100.0);  // the arcs in chords within 0.1 um: the circle is tested a micron inside
+    for (size_t k = 0; k < g.pts.size(); ++k) {
+      const double deg = g.arcOf(k);
+      const Vec2 p = g.pts[k], q = g.pts[(k + 1) % g.pts.size()];
+      if (deg == 0 || p == q) continue;
+      const ArcGeom arc = ArcGeom::fromThreePoints(p, arcMiddle(p, q, deg), q);
+      if (!arc.valid || arc.radius <= 0) continue;
+      bool inside = true;
+      for (int i = 0; i < 36 && inside; ++i) {
+        const double a = i * (2 * std::numbers::pi / 36);
+        inside = pointInPolygon(arc.center + Vec2{std::cos(a), std::sin(a)} * (arc.radius - 1000), poly);
+      }
+      if (inside) out.push_back({arc.center, arc.radius, clr});
+    }
+  };
+  for (const Graphic& g : b.graphics)
+    if (b.isEdge(g.layer)) {
+      // (Of the outline's drawings only a cutout's: the outer contour is followed from inside.)
+      const Polyline path = g.path();
+      bool cutout = false;
+      for (size_t i = 1; i < b.outline.size() && !cutout; ++i)
+        cutout = !path.empty() && std::ranges::any_of(b.outline[i], [&](Vec2 p) { return (p - path.front()).len() < 10; });
+      if (cutout) arcsOf(g, double(b.edgeClearance));
+    }
+  for (const Keepout& k : b.keepouts) {
+    if (!k.onLayer(layer) || !k.wires) continue;
+    for (const Graphic& g : k.shape) {
+      Vec2 c;
+      double r;
+      if (circle(g, c, r)) out.push_back({c, r, 0.0});
+      else arcsOf(g, 0.0);
+    }
+  }
+  return out;
+}
+
+namespace {
+
 LayerObstacles collect(const Board& b, LayerId layer, const std::vector<RealVia>& vias, const RealizeOptions& opt,
                        const SpatialIndex& idx) {
   LayerObstacles ob;
@@ -253,6 +320,10 @@ LayerObstacles collect(const Board& b, LayerId layer, const std::vector<RealVia>
       else ob.link(prev, ob.add(pts.back(), 0, 0, kBoardEdge), 0);
     }
   }
+  // A round wall as one obstacle at its centre: the wire goes round it as one arc, and the bends round the
+  // wall's own points, inside that circle, go.
+  for (const RoundWall& rw : roundWalls(b, layer))
+    if (BBox bb; (bb.add(rw.c - Vec2{rw.r, rw.r}), bb.add(rw.c + Vec2{rw.r, rw.r}), inRegion(bb))) ob.pts[ob.add(rw.c, rw.r, rw.clr, kBoardEdge)].round = true;
   if (opt.tracksAsObstacles)
     for (int ti : trackIds) {
       const Track& t = b.tracks[ti];
@@ -1274,6 +1345,27 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
     }
     for (int iter = 0; iter < 400; ++iter) {
       size_t n = cs.size();
+      // A bend round a point of a wall whose circle lies within the bend round the wall as a whole (a hole, a
+      // round keepout, a rounded corner: one obstacle at the centre) is no bend: one arc, not a chord for every
+      // point of the rim. Walls only: a pad's bend radius is the stack's on one edge and says nothing of the
+      // other side of the pad (so dropped, a bend of CPUCLK on MinVia let it through A1).
+      {
+        auto wallPoint = [&](const Circle& x) { return x.obst >= 0 && ob.pts[x.obst].net == kBoardEdge && ob.pts[x.obst].r <= 0; };
+        auto roundWall = [&](const Circle& x) { return x.obst >= 0 && ob.pts[x.obst].net == kBoardEdge && ob.pts[x.obst].r > 0; };
+        int inner = -1;
+        for (size_t k = 1; k + 1 < n && inner < 0; ++k) {
+          if (!wallPoint(cs[k])) continue;
+          for (size_t j = 0; j < n && inner < 0; ++j)
+            if (j != k && roundWall(cs[j]) && cs[j].rho * cs[k].rho > 0 && std::abs(cs[j].rho) > std::abs(cs[k].rho) &&
+                (cs[j].c - cs[k].c).len() + std::abs(cs[k].rho) <= std::abs(cs[j].rho) + 2000)
+              inner = int(k);
+        }
+        if (inner >= 0) {
+          dropped.insert(cs[inner].obst);
+          cs.erase(cs.begin() + inner);
+          continue;
+        }
+      }
       ti.assign(n, {});
       to.assign(n, {});
       int bad = -1;
@@ -1489,7 +1581,9 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
           double width = std::min(cs[k].width, cs[k + 1].width);
           for (int o = 0; o < int(ob.pts.size()); ++o) {
             const OPt& op = ob.pts[o];
-            if (op.net == kTransparent || (op.net == w.net && w.net != kNoNet) || !bb.contains(op.p)) continue;
+            if (op.net == kTransparent || (op.net == w.net && w.net != kNoNet)) continue;
+            // (A large round obstacle, a hole in the board, reaches the chord from far outside the box.)
+            if (!bb.contains(op.p) && (op.r < 3 * kNmPerMm || distPointSegment(op.p, p, q) > op.r + 3 * kNmPerMm + w.width)) continue;
             if (op.r <= 0 && op.shape < 0) continue;  // a bare point (outline, keepout) has sides handled elsewhere
             if (dropped.contains(o) || std::ranges::any_of(cs, [&](const Circle& x) { return x.obst == o; })) continue;
             Vec2 on = closestPointOnSegment(op.p, p, q);
