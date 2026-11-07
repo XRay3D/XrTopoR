@@ -421,6 +421,7 @@ int splitTrack(Board& b, int track, Vec2 at) {
     second.a = Point(q);
   }
   b.tracks[track] = first;
+  second.id = 0;  // a track of its own (the model's wires know a track by its id)
   b.tracks.push_back(second);
   return int(b.tracks.size()) - 1;
 }
@@ -813,6 +814,8 @@ Fragment paste(Board& b, const Clip& c, Vec2 at) {
     if (t.layer < 0) continue;
     t.net = net(t.net);
     t.locked = false;
+    t.id = 0;  // new copper: no id of the copied one's
+    t.zip = -1;
     t.a = m.apply(t.a);
     t.b = m.apply(t.b);
     if (t.mid) t.mid = m.apply(*t.mid);
@@ -828,6 +831,7 @@ Fragment paste(Board& b, const Clip& c, Vec2 at) {
     v.layers = lm;
     v.net = net(v.net);
     v.locked = false;
+    v.id = 0;
     v.pos = m.apply(v.pos);
     f.vias.push_back(int(b.vias.size()));
     b.vias.push_back(v);

@@ -1,6 +1,7 @@
 #include "topo/Topology.h"
 
 #include <algorithm>
+#include <unordered_set>
 #include <cmath>
 #include <format>
 #include <limits>
@@ -71,10 +72,13 @@ void Topology::assignIds(Board& b) {
   uint32_t next = 1;
   for (const Track& t : b.tracks) next = std::max(next, t.id + 1);
   for (const Via& v : b.vias) next = std::max(next, v.id + 1);
+  // A new id for every track and via without one and for the second of two with one id (each names one piece
+  // of copper to the model's wires and owners).
+  std::unordered_set<uint32_t> seen;
   for (Track& t : b.tracks)
-    if (!t.id) t.id = next++;
+    if (!t.id || !seen.insert(t.id).second) t.id = next++;
   for (Via& v : b.vias)
-    if (!v.id) v.id = next++;
+    if (!v.id || !seen.insert(v.id).second) v.id = next++;
 }
 
 const LayerMesh* Topology::mesh(LayerId layer) const {

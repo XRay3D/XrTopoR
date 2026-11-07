@@ -144,6 +144,7 @@ bool rebuildZip(Board& b, int zip, const ZipEnds& was) {
           if (!atA && !atB) continue;
           if (t.locked) {  // stays, joined by a piece
             Track c = t;
+            c.id = 0;  // a new track
             c.mid.reset();
             c.locked = false;
             c.a = Point(from);
