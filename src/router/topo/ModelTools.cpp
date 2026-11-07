@@ -483,6 +483,44 @@ std::vector<DrcViolation> topologyViolations(const Board& b, const Topology& t, 
     return std::nullopt;
   };
   auto netOf = [&](int wire) { return wire >= 0 && wire < int(t.wires.size()) ? b.nets[t.wires[wire].net].name : std::string("?"); };
+  // The place the model names for a crossing is the edge where the order of the two wires turns, which may
+  // be millimetres from where their tracks touch (MinVia_standard_routing, D4 through the pad of PA1: 7 mm).
+  // With tracks on both sides, the mark goes where the two come nearest.
+  auto polylines = [&](int wire, LayerId layer) {
+    std::vector<Polyline> out;
+    if (wire < 0 || wire >= int(t.wires.size())) return out;
+    for (uint32_t id : t.wires[size_t(wire)].tracks)
+      if (auto it = trackOfId.find(id); it != trackOfId.end() && b.tracks[it->second].layer == layer) out.push_back(b.tracks[it->second].path());
+    return out;
+  };
+  auto nearest = [&](int wireA, int wireB, LayerId layer) -> std::optional<Vec2> {
+    const std::vector<Polyline> pa = polylines(wireA, layer), pb = polylines(wireB, layer);
+    double best = std::numeric_limits<double>::max();
+    std::optional<Vec2> at;
+    for (const Polyline& x : pa)
+      for (size_t i = 0; i + 1 < x.size(); ++i)
+        for (const Polyline& y : pb)
+          for (size_t j = 0; j + 1 < y.size(); ++j) {
+            const double dd = distSegmentSegment(x[i], x[i + 1], y[j], y[j + 1]);
+            if (dd >= best) continue;
+            best = dd;
+            if (segmentsIntersect(x[i], x[i + 1], y[j], y[j + 1])) {
+              const Vec2 r = x[i + 1] - x[i], s = y[j + 1] - y[j];
+              const double den = r.cross(s);
+              at = std::abs(den) > 1e-9 ? x[i] + r * ((y[j] - x[i]).cross(s) / den) : x[i];
+            } else {
+              // The nearest pair of points: one is an end of a segment, the other its foot on the other.
+              Vec2 p = x[i], q = y[j];
+              double dmin = std::numeric_limits<double>::max();
+              for (Vec2 e : {x[i], x[i + 1]})
+                if (const Vec2 f = closestPointOnSegment(e, y[j], y[j + 1]); (f - e).len() < dmin) dmin = (f - e).len(), p = e, q = f;
+              for (Vec2 e : {y[j], y[j + 1]})
+                if (const Vec2 f = closestPointOnSegment(e, x[i], x[i + 1]); (f - e).len() < dmin) dmin = (f - e).len(), p = f, q = e;
+              at = (p + q) * 0.5;
+            }
+          }
+    return at;
+  };
   std::vector<DrcViolation> out;
   for (const Violation& v : vs) {
     DrcViolation d;
@@ -491,7 +529,10 @@ std::vector<DrcViolation> topologyViolations(const Board& b, const Topology& t, 
     d.layer = v.layer;
     using K = Violation::Kind;
     switch (v.kind) {
-      case K::Crossing: d.message = std::format("wires crossing: {} / {}", netOf(v.wireA), netOf(v.wireB)); break;
+      case K::Crossing:
+        d.message = std::format("wires crossing: {} / {}", netOf(v.wireA), netOf(v.wireB));
+        if (auto p = nearest(v.wireA, v.wireB, v.layer)) d.pos = *p;
+        break;
       case K::ThroughPad: d.message = std::format("wire {} through another net's copper", netOf(v.wireA)); break;
       case K::OutsideBoard: d.message = std::format("wire {} the mesh does not hold", netOf(v.wireA)); break;
       case K::Overflow: d.message = std::format("edge overflowing by {:.3f} mm", v.deficit / 1e6); break;

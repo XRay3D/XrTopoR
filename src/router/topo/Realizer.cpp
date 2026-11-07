@@ -146,8 +146,13 @@ bool tangent(const Circle& a, const Circle& b, Vec2& pa, Vec2& pb) {
   Vec2 D = b.c - a.c;
   double dr = b.rho - a.rho;
   double D2 = D.len2();
-  if (D2 <= dr * dr + 1e-6) return false;
-  double L = std::sqrt(D2 - dr * dr);
+  if (D2 < 1) return false;
+  // Two circles that touch (a wire between two pads at the rule's minimum: the pitch is the two radii
+  // exactly, MinVia_standard_routing U7-3 and U7-4) have their tangent at the point of touching, across
+  // the line of centres; a nanometre short of touching is the same line.
+  double L2 = D2 - dr * dr;
+  if (L2 < -2.0 * std::abs(dr) - 1) return false;
+  double L = std::sqrt(std::max(0.0, L2));
   Vec2 d{(L * D.x + dr * D.y) / D2, (-dr * D.x + L * D.y) / D2};
   Vec2 nL = d.perp();
   pa = a.c - nL * a.rho;

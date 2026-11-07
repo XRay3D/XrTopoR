@@ -315,3 +315,47 @@ TEST(Realizer, ArcsFollowsToporPadRules) {
     for (const Track& tr : b.tracks) EXPECT_TRUE(tr.width == mmToNm(0.3) || tr.width == mmToNm(0.8)) << "F7 narrowed a track to " << tr.width;
   }
 }
+
+// A wire between two pads of a DIP at what the rules take exactly, with a wire of another net between it and
+// the one pad: the circles the realiser bends it round touch (MinVia_standard_routing, D4 between U7-3 of
+// PA1 and U7-4, 1.016 + 1.524 = the pitch of 2.54). The tangent between two touching circles is the line
+// across the point of touching; it used to be no tangent, the bends were dropped and D4 drawn through the
+// pad of PA1 (and D0 through the pad of WR): shorts F5 made, that F7 then stopped at, marked 7 mm away.
+TEST(Refine, WireBetweenTwoPadsAtTheRulesExactly) {
+  auto lb = io::loadBoard(data("topor/Example_05/MinVia_standard_routing.fst"));
+  ASSERT_TRUE(lb.has_value());
+  Board& b = **lb;
+  ASSERT_EQ(conflicts(b), 0) << "the drawing fits the rules";
+  topo::Topology::assignIds(b);
+  topo::Topology t;
+  t.build(b);
+  ASSERT_TRUE(topo::runF5Model(b, t).drawn);
+  DrcOptions o;
+  o.unconnected = false;
+  o.widths = false;
+  int shorts = 0;
+  for (const DrcViolation& v : runDrc(b, o))
+    if (v.type == DrcViolation::Type::Short) {
+      ++shorts;
+      std::println("short: {} at ({:.3f}, {:.3f})", v.message, v.pos.x / 1e6, v.pos.y / 1e6);
+    }
+  EXPECT_EQ(shorts, 0);
+  // D4 passes between the two pads as it was drawn: 1.016 mm from U7-3 at (196.85, 222.504) of the file.
+  const Vec2 pa1{196.85 * kNmPerMm, -222.504 * kNmPerMm};
+  const int d4 = b.findNet("D4");
+  ASSERT_GE(d4, 0);
+  double nearest = 1e18;
+  for (const Track& tr : b.tracks)
+    if (tr.net == d4 && b.layers[tr.layer].name == "Bottom") {
+      const Polyline path = tr.path();
+      for (size_t i = 0; i + 1 < path.size(); ++i) nearest = std::min(nearest, distPointSegment(pa1, path[i], path[i + 1]));
+    }
+  EXPECT_NEAR(nearest, 1.016 * kNmPerMm, 0.01 * kNmPerMm);
+  // The model built from the drawing stands: F7 has something to work on.
+  topo::Topology t2;
+  t2.build(b);
+  int flips = 0;
+  std::vector<topo::Violation> vs;
+  EXPECT_TRUE(topo::prepareModel(t2, false, false, flips, vs));
+  for (const DrcViolation& v : topo::topologyViolations(b, t2, vs)) std::println("{} at ({:.3f}, {:.3f})", v.message, v.pos.x / 1e6, v.pos.y / 1e6);
+}

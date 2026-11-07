@@ -150,6 +150,13 @@ int cmdRoute(Board& b, const Args& a) {
 
 }  // namespace
 
+// The violations that stopped a tool on the model, as the GUI lists them (a crossing is marked where the
+// tracks come nearest, not at the edge the model names).
+static void printViolations(const xr::Board& b, const xr::topo::Topology& t, const std::vector<xr::topo::Violation>& vs) {
+  for (const xr::DrcViolation& d : xr::topo::topologyViolations(b, t, vs))
+    std::println("  {} at ({:.3f}, {:.3f}) on layer {}", d.message, d.pos.x / 1e6, d.pos.y / 1e6, b.layers[d.layer].name);
+}
+
 // The model next to the board when it is fresh, else built from the tracks.
 static xr::topo::Topology loadModel(const xr::Board& b, const std::string& boardPath) {
   if (auto t = xr::topo::loadTopology(b, xr::topo::sidecarPath(boardPath))) {
@@ -254,14 +261,7 @@ int main(int argc, char** argv) {
     auto res = topo::optimizeModel(b, t, mo);
     if (a.flag("--verbose"))
       for (auto& l : res.log) std::println("{}", l);
-    for (const topo::Violation& v : res.violations) {
-      using K = topo::Violation::Kind;
-      const char* what = v.kind == K::Crossing ? "wires crossing" : v.kind == K::ThroughPad ? "wire through another net's copper"
-                         : v.kind == K::OutsideBoard ? "wire the mesh does not hold" : "edge overflowing";
-      std::println("  {} at ({:.3f}, {:.3f}) on layer {}: {}{}{}", what, v.pos.x / 1e6, v.pos.y / 1e6, b.layers[v.layer].name,
-                   v.wireA >= 0 ? b.nets[t.wires[v.wireA].net].name : "", v.wireB >= 0 ? " / " + b.nets[t.wires[v.wireB].net].name : "",
-                   v.deficit > 0 ? std::format(" by {:.3f} mm", v.deficit / 1e6) : "");
-    }
+    printViolations(b, t, res.violations);
     if (!res.drawn) return fail("stopped by the violations above, nothing drawn");
     if (res.junctionsInCopper > 0)
       std::println("model: {} branch point(s) ended inside copper of their own net, {} merged with the pad or via there", res.junctionsInCopper, res.merged);
@@ -309,14 +309,7 @@ int main(int argc, char** argv) {
     fo.weighted = a.flag("--weighted");
     fo.junctions = !a.flag("--no-junctions");
     auto res = topo::runF5Model(b, t, fo);
-    for (const topo::Violation& v : res.violations) {
-      using K = topo::Violation::Kind;
-      const char* what = v.kind == K::Crossing ? "wires crossing" : v.kind == K::ThroughPad ? "wire through another net's copper"
-                         : v.kind == K::OutsideBoard ? "wire the mesh does not hold" : "edge overflowing";
-      std::println("  {} at ({:.3f}, {:.3f}) on layer {}: {}{}{}", what, v.pos.x / 1e6, v.pos.y / 1e6, b.layers[v.layer].name,
-                   v.wireA >= 0 ? b.nets[t.wires[v.wireA].net].name : "", v.wireB >= 0 ? " / " + b.nets[t.wires[v.wireB].net].name : "",
-                   v.deficit > 0 ? std::format(" by {:.3f} mm", v.deficit / 1e6) : "");
-    }
+    printViolations(b, t, res.violations);
     if (!res.drawn) return fail("stopped by the violations above, nothing drawn");
     std::println("model: {} wires, {} flips; realised {} wires, {} arcs, {} apexes dropped, {} overflowed edges, {} sketch crossings",
                  t.wires.size(), res.flips, res.stats.wires, res.stats.arcs, res.stats.droppedApexes, res.stats.overflowEdges,
