@@ -1903,7 +1903,7 @@ PinBoard pairBoard() {
   p.pad("N", 4, 9, PadShapeKind::Circle, 1, 1);
   p.pad("P", 36, 11, PadShapeKind::Circle, 1, 1);
   p.pad("N", 36, 9, PadShapeKind::Circle, 1, 1);
-  p.pad("X", 20, 16, PadShapeKind::Circle, 1, 1);
+  p.pad("X", 20, 6, PadShapeKind::Circle, 1, 1);
   p.pair("P", "N", 0.3, 0.2);
   p.zip("P", "N", {{8, 10}, {20, 12}, {32, 10}});
   return p;
@@ -1957,6 +1957,100 @@ TEST(Topo, PairIsOneWireBetweenClasps) {
   EXPECT_EQ(singlesAtClasps, 4);
   EXPECT_TRUE(t.violations.empty());
   EXPECT_TRUE(t.check().empty());
+}
+
+// F5 draws a pair's wire as its axis and two conductors offset either side of it (the positive on its side),
+// as wide as the rule says, their ends meeting the single wires at the clasps exactly: no clearance violation,
+// no short, every connection made.
+TEST(Topo, PairDrawnAsTwoConductors) {
+  PinBoard p = pairBoard();
+  auto f = p.f5Model();
+  ASSERT_TRUE(f.res.drawn);
+  ASSERT_EQ(p.b.zips.size(), 1u);
+  const ZippedWire& z = p.b.zips[0];
+  EXPECT_GE(z.axis.size(), 1u) << "the axis drawn";
+  int cond[2] = {0, 0};
+  for (const Track& t : p.b.tracks) {
+    if (t.zip != 0) continue;
+    EXPECT_EQ(t.width, mmToNm(0.3));
+    EXPECT_TRUE(t.net == z.netP || t.net == z.netN);
+    ++cond[t.net == z.netP];
+  }
+  EXPECT_GE(cond[0], 1) << "the negative conductor";
+  EXPECT_GE(cond[1], 1) << "the positive conductor";
+  // The conductors run at the offset either side of the axis, the pair's wire in the model as wide as both.
+  for (const Track& t : p.b.tracks) {
+    if (t.zip != 0) continue;
+    for (Vec2 q : {t.a.v(), t.b.v()}) {
+      double d = 1e18;
+      for (const Track& a : z.axis) {
+        const Polyline path = a.path();
+        for (size_t i = 0; i + 1 < path.size(); ++i) d = std::min(d, distPointSegment(q, path[i], path[i + 1]));
+      }
+      EXPECT_NEAR(d, z.offset(), 3000) << "conductor point off the axis";
+    }
+  }
+  EXPECT_EQ(Connectivity::compute(p.b).ratsnest.size(), 0u) << "the conductors meet the single wires at the clasps";
+  EXPECT_EQ(p.drcOf(DrcViolation::Type::Clearance), 0);
+  EXPECT_EQ(p.drcOf(DrcViolation::Type::Short), 0);
+  EXPECT_EQ(p.drcOf(DrcViolation::Type::Width), 0);
+  for (const topo::Wire& w : f.t.wires)
+    if (w.pair >= 0) EXPECT_EQ(int(w.tracks.size()), cond[0] + cond[1]) << "the conductors are the pair wire's tracks";
+  // Drawn again: as long, as clean.
+  const double length = p.length("P") + p.length("N");
+  auto f2 = p.f5Model();
+  ASSERT_TRUE(f2.res.drawn);
+  EXPECT_NEAR(p.length("P") + p.length("N"), length, 0.05);
+  EXPECT_EQ(Connectivity::compute(p.b).ratsnest.size(), 0u);
+  EXPECT_EQ(p.violations(), 0);
+}
+
+// A via of another net in the pair's way: the pair bends round it as one, both conductors keep the clearance,
+// and the clasps turn square to the pair's wire where it meets them.
+TEST(Topo, PairBendsRoundAnotherNetAsOne) {
+  PinBoard p = pairBoard();
+  p.via("X", 20, 11.6, 0.6);  // 0.4 off the kink of the axis at (20, 12): inside the pair's room
+  p.track("X", {{20, 11.6}, {20, 6}}, 0.3);
+  auto f = p.f5Model();
+  ASSERT_TRUE(f.res.drawn);
+  EXPECT_EQ(Connectivity::compute(p.b).ratsnest.size(), 0u);
+  EXPECT_EQ(p.drcOf(DrcViolation::Type::Clearance), 0);
+  EXPECT_EQ(p.drcOf(DrcViolation::Type::Short), 0);
+  const Vec2 via = PinBoard::at(20, 11.6);
+  for (const Track& t : p.b.tracks) {
+    if (t.net == p.net("X")) continue;
+    for (Vec2 q : {t.a.v(), t.b.v()}) EXPECT_GE((q - via).len(), mmToNm(0.3 + 0.2 + 0.15) - 3000) << "conductor into the via's room";
+  }
+  const ZippedWire& z = p.b.zips[0];
+  ASSERT_GE(z.axis.size(), 1u);
+  for (const topo::Owner& o : f.t.owners) {
+    if (o.kind != topo::Owner::Kind::Clasp) continue;
+    const Track& piece = o.claspEnd ? z.axis.back() : z.axis.front();
+    const Vec2 end = o.claspEnd ? piece.b.v() : piece.a.v();
+    Vec2 dir = o.claspEnd ? piece.b.v() - (piece.mid ? piece.mid->v() : piece.a.v()) : (piece.mid ? piece.mid->v() : piece.b.v()) - piece.a.v();
+    EXPECT_LT((end - o.c).len(), 3000) << "the axis ends at the clasp's centre";
+    const double cosine = std::abs(dir.normalized().dot(o.axis.normalized()));
+    EXPECT_LT(cosine, std::sin(3 * std::numbers::pi / 180)) << "the clasp square to the pair";
+  }
+}
+
+// A pair is never narrowed (TopoR's widths of a pair change only by its rule): between two pads of another net
+// with less room than the pair needs, the conductors keep their width and the edge is reported overflowing.
+TEST(Topo, PairIsNeverNarrowed) {
+  PinBoard p = pairBoard();
+  // Two pads of X either side of the axis at x = 26 (y 11): 0.9 of room between their copper where the pair
+  // needs 0.8 + 2 x 0.2.
+  p.pad("X", 26, 10.5, PadShapeKind::Circle, 0.5, 0.5);
+  p.pad("X", 26, 11.9, PadShapeKind::Circle, 0.5, 0.5);
+  auto f = p.f5Model();
+  ASSERT_TRUE(f.res.drawn);
+  for (const Track& t : p.b.tracks) {
+    if (t.zip >= 0) EXPECT_EQ(t.width, mmToNm(0.3)) << "a conductor narrowed";
+    EXPECT_FALSE(t.isArc() && t.a == t.b) << "an arc of no length";
+  }
+  bool overflow = false;
+  for (const topo::Violation& v : f.res.violations) overflow |= v.kind == topo::Violation::Kind::Overflow;
+  EXPECT_TRUE(overflow || p.drcOf(DrcViolation::Type::Clearance) > 0) << "the pair through a gap too narrow, and nothing said";
 }
 
 // The clasp's copper is the pair wire's own and each single wire's own at its end: the capacity of an edge at

@@ -13,6 +13,9 @@ namespace xr::topo {
 // counter-clockwise, with Lawson's loop over the star between them; a constrained or rigid edge in the
 // way stops it. Returns the fraction of d that went (1: all of it).
 double moveOwner(Topology& t, int owner, Vec2 d, const FlipGate& gate = {}, int rounds = 8);
+// Turns an owner's axis (a clasp across its pair) to `axis`, its centre standing: the vertices at t slide to
+// c + axis * t, as far as the triangles allow, as moveOwner steps. Returns the part of the turn made.
+double reshapeOwner(Topology& t, int owner, Vec2 axis, const FlipGate& gate = {}, int rounds = 8);
 
 // Puts a vertex of the owner (at its axis position `at`, offset `off`) into the layer's mesh: inside a
 // triangle it splits it in three; on an unconstrained edge the degenerate piece is flipped away. The

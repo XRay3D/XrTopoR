@@ -182,8 +182,10 @@ bool Topology::own(const LayerMesh& m, int v, const Wire& w) const {
   const Vertex& x = m.verts[size_t(v)];
   const Owner& o = owners[size_t(x.owner)];
   if (o.kind == Owner::Kind::Clasp) {
-    if (w.pair >= 0) return w.pair == o.pair;
-    return netAt(m, v) == w.net && w.net != kNoNet;
+    if (w.pair >= 0) return w.pair == o.pair;  // the pair's wire: all three
+    if (netAt(m, v) == w.net && w.net != kNoNet) return true;  // a single wire: its own end
+    // ... and the centre between (the pair's axis, no copper of the other net)
+    return x.t == 0 && w.net >= 0 && w.net < int(netPair.size()) && netPair[size_t(w.net)] == o.pair;
   }
   if (w.pair >= 0 && o.net >= 0 && o.net < int(netPair.size()) && netPair[size_t(o.net)] == w.pair) return true;
   return o.net == w.net && w.net != kNoNet;

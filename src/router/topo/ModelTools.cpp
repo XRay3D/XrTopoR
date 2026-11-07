@@ -30,6 +30,15 @@ RealWire sketchOf(const Board& b, const Topology& t, int wi) {
   r.width = w.width;
   r.widthMin = w.widthMin;
   r.clearance = w.clr;
+  r.pair = w.net >= 0 && w.net < int(t.netPair.size()) ? t.netPair[size_t(w.net)] : -1;
+  if (w.pair >= 0 && w.zip >= 0 && w.zip < int(b.zips.size())) {  // a pair's wire: drawn as its two conductors
+    const ZippedWire& z = b.zips[size_t(w.zip)];
+    r.zip = w.zip;
+    r.pair = w.pair;
+    r.condWidth = z.condWidth;
+    r.netN = z.netN;
+    r.pSide = z.pSide ? z.pSide : 1;
+  }
   // The slot midpoints of the crossings; between two consecutive points (a slot point, an end) the chord
   // lies in one triangle of the mesh, and where it would cut the copper of one of that triangle's corners
   // (a wide pad, a wide angle: the slot points keep their distance along their edges, the chord between
@@ -204,6 +213,8 @@ RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int
         case Owner::Kind::Clasp:  // the conductors' ends and the centre, round copper of their nets
           id = ob.add(x.p, o.halfWidth, clr, x.t < 0 ? o.net2 : o.net);
           ob.pts[id].round = true;
+          ob.pts[id].pair = o.pair;
+          ob.pts[id].claspCentre = x.t == 0;
           break;
       }
       if (id >= 0) ob.pts[id].owner = x.owner;
@@ -399,6 +410,80 @@ bool prepareModel(Topology& t, bool flips, bool weighted, int& nFlips, std::vect
   return true;
 }
 
+namespace {
+
+// After a drawing: every clasp of a pair's wire drawn turns square to the wire's drawn end, so that its
+// conductors' ends (the drawn axis's end offset either way along its normal) are its vertices again, and the
+// single wires drawn from the vertices as they were follow them to the conductors' ends (a turn of the
+// offset times the angle: tens of microns). A clasp that cannot turn (a locked single wire, the mesh in the
+// way) keeps its place, and the conductors' ends go to its vertices instead.
+void settleClasps(Board& b, Topology& t, const std::vector<int>& chosen) {
+  std::map<uint32_t, size_t> trackOf;
+  for (size_t i = 0; i < b.tracks.size(); ++i)
+    if (b.tracks[i].id) trackOf[b.tracks[i].id] = i;
+  auto moveEnds = [&](const std::vector<uint32_t>& ids, Vec2 from, Vec2 to) {
+    if ((from - to).len2() < 1) return;
+    for (uint32_t id : ids)
+      if (auto it = trackOf.find(id); it != trackOf.end()) {
+        Track& tr = b.tracks[it->second];
+        if ((tr.a.v() - from).len() < 2000) tr.a = Point(to);
+        if ((tr.b.v() - from).len() < 2000) tr.b = Point(to);
+      }
+  };
+  for (int wi : chosen) {
+    const Wire& w = t.wires[size_t(wi)];
+    if (w.pair < 0 || w.zip < 0 || w.zip >= int(b.zips.size())) continue;
+    const ZippedWire& z = b.zips[size_t(w.zip)];
+    if (z.axis.empty()) continue;
+    const double off = (double(z.condWidth) + double(z.gap)) / 2.0;
+    const double side = z.pSide ? z.pSide : 1;
+    LayerMesh& m = *t.mesh(w.layer);
+    for (int end = 0; end < 2; ++end) {
+      const int owner = w.end[end];
+      if (t.owners[size_t(owner)].kind != Owner::Kind::Clasp) continue;
+      const Track& piece = end ? z.axis.back() : z.axis.front();
+      const Vec2 at = end ? piece.b.v() : piece.a.v();
+      Vec2 travel;  // forward along the section at this end
+      if (piece.mid) {
+        const ArcGeom g = ArcGeom::fromThreePoints(piece.a.v(), piece.mid->v(), piece.b.v());
+        const Vec2 rad = (at - g.center).normalized();
+        travel = g.sweep > 0 ? rad.perp() : rad.perp() * -1.0;
+      } else {
+        travel = piece.b.v() - piece.a.v();
+      }
+      if (travel.len2() < 1) continue;
+      const Vec2 n = travel.normalized().perp() * off * side;  // towards the positive conductor
+      const Vec2 drawn[2] = {at - n, at + n};                 // the conductors' ends: [0] negative, [1] positive
+      // The single wires at this clasp, per side.
+      std::vector<int> singles[2];
+      bool lockedSingle = false;
+      for (int wj = 0; wj < int(t.wires.size()); ++wj) {
+        const Wire& s = t.wires[size_t(wj)];
+        if (s.pair >= 0) continue;
+        for (int e = 0; e < 2; ++e)
+          if (s.end[e] == owner) {
+            singles[s.net == t.owners[size_t(owner)].net].push_back(wj);
+            lockedSingle |= s.locked || !std::ranges::contains(chosen, wj);
+          }
+      }
+      auto vertexPos = [&](int sd) {
+        for (int v : m.ownerVerts[size_t(owner)])
+          if ((sd ? m.verts[v].t > 0 : m.verts[v].t < 0)) return m.verts[v].p;
+        return Vec2{};
+      };
+      const Vec2 was[2] = {vertexPos(0), vertexPos(1)};
+      if (!lockedSingle && (n - t.owners[size_t(owner)].axis).len() > 1000) reshapeOwner(t, owner, n);
+      for (int sd = 0; sd < 2; ++sd) {
+        const Vec2 now = vertexPos(sd);
+        moveEnds(w.tracks, drawn[sd], now);  // nothing when the turn was made in full
+        for (int wj : singles[sd]) moveEnds(t.wires[size_t(wj)].tracks, was[sd], now);
+      }
+    }
+  }
+}
+
+}  // namespace
+
 // Draws every unlocked wire of the model: their tracks go, and the hand-drawn runs inside the pads they
 // end at (the wire is drawn to the pad's connection point); the locked ones stay as obstacles.
 void drawModel(Board& b, Topology& t, bool direct, RealizeStats& stats, int& nWires, bool editedOnly) {
@@ -411,7 +496,7 @@ void drawModel(Board& b, Topology& t, bool direct, RealizeStats& stats, int& nWi
       if (tr.edited && tr.id) edited.insert(tr.id);
   for (int wi = 0; wi < int(t.wires.size()); ++wi) {
     const Wire& w = t.wires[wi];
-    if (w.locked || w.pair >= 0) continue;  // (a pair's wire is not drawn yet: its conductors stay as they lie)
+    if (w.locked) continue;
     if (editedOnly && r::none_of(w.tracks, [&](uint32_t id) { return edited.contains(id); })) continue;
     chosen.push_back(wi);
     for (uint32_t id : w.tracks) gone.insert(id);
@@ -473,6 +558,7 @@ void drawModel(Board& b, Topology& t, bool direct, RealizeStats& stats, int& nWi
     t.wires[wi].tracks.push_back(b.tracks[before + k].id);
     t.wires[wi].dirty = false;
   }
+  settleClasps(b, t, chosen);
   nWires = int(wires.size());
 }
 

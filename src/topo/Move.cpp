@@ -82,6 +82,54 @@ std::vector<int> starEdges(const LayerMesh& m, int v) {
 // The least height (nm) a move leaves to a triangle at the owner.
 constexpr double kMinHeight = 1000;
 
+double reshapeOwner(Topology& t, int owner, Vec2 axis, const FlipGate& gate, int rounds) {
+  Owner& o = t.owners[owner];
+  const Vec2 d = axis - o.axis;
+  if (d.len2() < 1) return 1;
+  double done = 0;
+  for (int round = 0; round < rounds && done < 1 - 1e-9; ++round) {
+    double lam = 1 - done;
+    for (LayerMesh& m : t.layers) {
+      if (owner >= int(m.ownerVerts.size())) continue;
+      for (int v : m.ownerVerts[owner])
+        for (int ti : m.verts[v].tris) {
+          const Tri& T = m.tris[ti];
+          Vec2 p[3], q[3];
+          for (int i = 0; i < 3; ++i) {
+            const Vertex& x = m.verts[T.v[i]];
+            p[i] = x.p;
+            q[i] = x.owner == owner ? x.p + d * (x.t * (1 - done)) : x.p;
+          }
+          double f0 = orient(p[0], p[1], p[2]), f1 = orient(q[0], q[1], q[2]) - f0;
+          const double base = std::max({(p[1] - p[0]).len(), (p[2] - p[1]).len(), (p[0] - p[2]).len()});
+          const double fmin = kMinHeight * base;
+          if (f1 < 0 && f0 > fmin) lam = std::min(lam, 0.9 * (f0 - fmin) / -f1 * (1 - done));
+          else if (f1 < 0) lam = 0;
+        }
+    }
+    if (lam > 0) {
+      o.axis = o.axis + d * lam;
+      if (o.shape.kind == Shape::Kind::Segment) o.shape = Shape::capsule(o.c - o.axis, o.c + o.axis, o.shape.r);
+    }
+    int flips = 0;
+    for (LayerMesh& m : t.layers) {
+      if (owner >= int(m.ownerVerts.size())) continue;
+      std::vector<int> seed;
+      for (int v : m.ownerVerts[owner]) {
+        t.placeVertex(m, v);
+        for (int e : starEdges(m, v)) seed.push_back(e);
+        for (int ti : m.verts[v].tris)
+          for (int e : m.tris[ti].e)
+            if ((m.edges[e].v[0] == v || m.edges[e].v[1] == v) && !m.edges[e].cross.empty()) refreshEdge(t, m, e);
+      }
+      flips += flipLoop(t, m, seed, gate, false);
+    }
+    done += lam;
+    if (lam <= 1e-9 && flips == 0) break;
+  }
+  return std::min(done, 1.0);
+}
+
 double moveOwner(Topology& t, int owner, Vec2 d, const FlipGate& gate, int rounds) {
   if (d.len2() == 0) return 1;
   Owner& o = t.owners[owner];

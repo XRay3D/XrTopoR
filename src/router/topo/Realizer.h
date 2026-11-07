@@ -31,6 +31,13 @@ struct RealWire {
   // (topo/PadExit.h): the pattern is drawn there again. The chains are cut at every vertex inside the
   // copper, so the sketch itself begins a little further on.
   std::optional<Vec2> inner[2];
+  // A differential pair's wire: its zipped section (Board::zips, the axis is written there), the conductors'
+  // width and nets (net is the positive), which side the positive conductor runs on. `pair`: the pair of the
+  // wire's net, a single wire's too (the clasp's centre is its own copper).
+  int zip = -1, pair = -1;
+  Coord condWidth = 0;
+  int netN = kNoNet;
+  int pSide = 1;
 };
 
 struct RealVia {

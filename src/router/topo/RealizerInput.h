@@ -28,6 +28,8 @@ struct OPt {
   int shape = -1;  // index into LayerObstacles::shapes: the copper the point belongs to (pads)
   int via = -1;    // the board via this point is (for the squeeze report)
   int owner = -1;  // the model's owner the point belongs to (the model's input only)
+  int pair = -1;   // a clasp's point: the differential pair it belongs to (own copper to the pair's wire)
+  bool claspCentre = false;  // ... the centre, own copper to the pair's single wires as well
   bool round = false;  // round copper of its own (a via, a round pad, a branch point): what the nominal clearance is kept from
 };
 
