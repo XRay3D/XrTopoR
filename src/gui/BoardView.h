@@ -152,7 +152,6 @@ class BoardView : public QWidget {
   void drawLabels(QPainter& p);
   std::optional<QColor> netColor(int net, bool enabledForKind) const;
   bool componentVisible(int ci) const;
-  BBox componentBounds(int ci) const;  // «Габариты»: pads and drawings on every layer
   static BBox graphicBBox(const Graphic& g);
   Vec2 snapped(Vec2 w) const;  // «Привязка к сетке»
   void pushView();             // records the view for Alt+← / Alt+→

@@ -3,11 +3,45 @@
 #include <algorithm>
 #include <cmath>
 
+#include "core/Padstack.h"
+
 namespace xr {
 
 Vec2 rotateBoard(Vec2 v, double deg) {
   // Y-down frame: a CCW rotation on screen is a CW rotation in math terms.
   return v.rotated(-degToRad(deg));
+}
+
+Vec2 Component::toLocal(Vec2 board) const { return rotateBoard(board - pos.v(), -angle); }
+Vec2 Component::toBoard(Vec2 local) const { return pos.v() + rotateBoard(local, angle); }
+
+BBox componentBounds(const Board& b, int ci, const std::function<bool(LayerId)>& layerShown) {
+  const Component& c = b.components[size_t(ci)];
+  BBox bb;
+  // Points each with a radius (a shape's core with its rounding, a line with half its width): exact for circles,
+  // capsules and round-capped lines in any frame.
+  auto add = [&](Vec2 p, double r) {
+    Vec2 q = c.toLocal(p);
+    bb.add(q - Vec2{r, r});
+    bb.add(q + Vec2{r, r});
+  };
+  auto addShape = [&](const Shape& s) {
+    if (s.kind != Shape::Kind::Polygon) add(s.a, s.r);
+    if (s.kind == Shape::Kind::Segment) add(s.b, s.r);
+    for (Vec2 v : s.poly) add(v, s.r);
+  };
+  for (int pi : c.pads) {
+    const Pad& p = b.pads[size_t(pi)];
+    addShape(p.shapeGeom());
+    for (LayerId l = 0; l < LayerId(b.layers.size()); ++l)
+      if (LayerKind k = b.layers[size_t(l)].kind; (k == LayerKind::Mask || k == LayerKind::Paste) &&
+                                                  (!layerShown || layerShown(l)))
+        if (auto s = padShapeOn(b, p, l)) addShape(*s);
+  }
+  for (auto& g : c.graphics)
+    if (!layerShown || layerShown(g.layer))
+      for (Vec2 v : g.path(2000)) add(v, double(g.width) / 2);
+  return bb;
 }
 
 Polyline rectCornersOutline(Coord fullW, Coord fullH, CornerHandling handling, Coord value, std::uint8_t mask) {

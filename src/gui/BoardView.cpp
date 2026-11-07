@@ -244,16 +244,12 @@ BoardView::Pick BoardView::pick(QPointF screen) const {
     }
     if (pk.item) return pk;
   }
-  // Component by its drawings or pad bounding box.
+  // Component by the rectangle round its pads and visible drawings, in its own frame (turned with it).
   if ((filter & SelComponents) && d.flag("showComponents"))
     for (int ci = 0; ci < int(b.components.size()); ++ci) {
       if (!componentVisible(ci)) continue;
-      const Component& c = b.components[ci];
-      BBox bb;
-      for (int pi : c.pads) bb.add(b.pads[pi].shapeGeom().bbox());
-      for (auto& g : c.graphics)
-        if (g.layer >= 0 && layerVisible(g.layer)) bb.add(graphicBBox(g));
-      if (bb.valid() && bb.inflated(tol).contains(w)) {
+      BBox bb = componentBounds(b, ci, [&](LayerId l) { return l >= 0 && layerVisible(l); });
+      if (bb.valid() && bb.inflated(tol).contains(b.components[ci].toLocal(w))) {
         pk.component = ci;
         return pk;
       }
@@ -277,15 +273,6 @@ bool BoardView::componentVisible(int ci) const {
   const DisplayControl& d = doc_->display();
   if (!d.flag("showComponents")) return false;
   return doc_->board()->components[ci].side == Side::Bottom ? d.flag("showCompBot") : d.flag("showCompTop");
-}
-
-BBox BoardView::componentBounds(int ci) const {
-  const Board& b = *doc_->board();
-  const Component& c = b.components[ci];
-  BBox bb;
-  for (int pi : c.pads) bb.add(b.pads[pi].shapeGeom().bbox());
-  for (auto& g : c.graphics) bb.add(graphicBBox(g));
-  return bb;
 }
 
 // ---------------------------------------------------------------- painting
@@ -719,14 +706,17 @@ void BoardView::drawBoard(QPainter& p) {
       if (groupOf(l) == -1) drawLayer(p, l);
   }
   drawKeepouts(p);
-  // «Габариты»: the rectangle enclosing the component's pads and drawings, as TopoR draws it.
+  // «Габариты»: the rectangle round the component's pads and drawings in its own frame, turned with it (TopoR
+  // draws the rectangle round the turned component, which grows at an odd angle).
   if (d.flag("showCompsBound", false)) {
     p.setPen(QPen(doc_->color("compsBound", 0xffffff), 1));
     p.setBrush(Qt::NoBrush);
     for (int ci = 0; ci < int(b.components.size()); ++ci) {
       if (!componentVisible(ci)) continue;
-      BBox bb = componentBounds(ci);
-      if (bb.valid()) p.drawRect(QRectF(toScreen({bb.minX, bb.minY}), toScreen({bb.maxX, bb.maxY})).normalized());
+      const Component& c = b.components[ci];
+      if (BBox bb = componentBounds(b, ci); bb.valid())
+        p.drawPolygon(QPolygonF{toScreen(c.toBoard({bb.minX, bb.minY})), toScreen(c.toBoard({bb.maxX, bb.minY})),
+                                toScreen(c.toBoard({bb.maxX, bb.maxY})), toScreen(c.toBoard({bb.minX, bb.maxY}))});
     }
   }
   drawLabels(p);

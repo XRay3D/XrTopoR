@@ -1036,6 +1036,40 @@ TEST(Gui, HandlesSnapToTheGrid) {
   }
 }
 
+// «Габариты» turn with the component: one turned by 45 degrees is drawn and picked by its own rectangle, not by
+// the box round it (a click beside its side is no click on it).
+TEST(Gui, ComponentBoundsTurnWithIt) {
+  Fixture f("topor/Example_04/Arcs_master_f5.fst");
+  Board& b = *f.doc.board();
+  int ci = int(std::ranges::find_if(b.components, [](const Component& c) { return c.ref == "D1"; }) - b.components.begin());
+  ASSERT_LT(ci, int(b.components.size()));
+  edit::Fragment fr;
+  fr.components = {ci};
+  edit::Motion m;
+  m.pivot = b.components[ci].pos.v();
+  m.rotate = 45;
+  b.components[ci].locked = false;
+  ASSERT_TRUE(edit::move(b, fr, m));
+  f.doc.invalidate();
+  const Component& c = b.components[ci];
+  BBox bb = componentBounds(b, ci);
+  ASSERT_TRUE(bb.valid());
+  bool wide = bb.width() >= bb.height();
+  Vec2 centre = c.toBoard(bb.center());
+  f.look(centre, std::max(bb.width(), bb.height()) / kNmPerMm * 2);
+  f.doc.display().show["showCompsBound"] = true;
+  if (const char* dir = std::getenv("XR_SHOT_DIR")) f.view.grab().save(QString(dir) + "/bounds-turned.png");
+
+  // 1 mm off the middle of the long side: inside the box round the turned component (at 45 degrees a side's
+  // middle lies half the other side within it), outside its rectangle. Components only: tracks run over D1.
+  f.doc.setSelectionFilter(SelComponents);
+  Vec2 beside = c.toBoard(wide ? Vec2{bb.center().x, bb.maxY + kNmPerMm} : Vec2{bb.maxX + kNmPerMm, bb.center().y});
+  QTest::mouseClick(&f.view, Qt::LeftButton, {}, f.at(beside));
+  EXPECT_FALSE(std::ranges::contains(f.doc.selectedComponents(), ci));
+  QTest::mouseClick(&f.view, Qt::LeftButton, {}, f.at(centre));
+  EXPECT_TRUE(std::ranges::contains(f.doc.selectedComponents(), ci));
+}
+
 // S flips a component to the other side; its SMD wires stay behind, a second S brings it back.
 TEST(Gui, FlipComponent) {
   Fixture f("topor/Example_05/MinVia_standard_routing.fst");

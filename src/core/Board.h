@@ -3,6 +3,7 @@
 // angles are degrees counter-clockwise as seen on screen.
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <inplace_vector>
 #include <map>
 #include <memory>
@@ -201,6 +202,9 @@ struct Component {
   bool locked = false;
   std::vector<int> pads;
   std::vector<Graphic> graphics;  // absolute coordinates
+  // The component's own frame: about its origin, unturned (a bottom-side component's stays mirrored).
+  Vec2 toLocal(Vec2 board) const;
+  Vec2 toBoard(Vec2 local) const;
 };
 
 struct Track {
@@ -377,6 +381,10 @@ struct Board {
 
 // Rotate a local vector by an angle in degrees using the board (Y-down, CCW on screen) convention.
 Vec2 rotateBoard(Vec2 v, double deg);
+// «Габариты»: the rectangle round a component in its own frame (Component::toLocal), turned with it on the board:
+// its pads on the copper, their details on the mask and paste layers, its drawings with their line width.
+// `layerShown` (if given) leaves out the drawings and the mask and paste details of the layers it refuses.
+BBox componentBounds(const Board& b, int ci, const std::function<bool(LayerId)>& layerShown = {});
 // Outline of a w x h rectangle with the corners in `mask` cut (Chamfer) or rounded (Rounding) by `value`, in
 // the pad frame (unrotated, centred, Y down).
 Polyline rectCornersOutline(Coord w, Coord h, CornerHandling handling, Coord value, std::uint8_t mask);

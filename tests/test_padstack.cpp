@@ -6,6 +6,7 @@
 #include <fstream>
 #include <sstream>
 
+#include "core/Edit.h"
 #include "core/Padstack.h"
 #include "drc/Drc.h"
 #include "io/gerber/GerberWriter.h"
@@ -179,6 +180,74 @@ TEST(Padstack, MaskAndPasteDetails) {
   auto m = padShapeOn(b, *pi, topMask);
   ASSERT_TRUE(m);
   EXPECT_NEAR(m->bbox().width(), double(mmToNm(1.7)), 10);
+}
+
+// «Габариты»: the rectangle in the component's own frame, turned with it — the same at 30 degrees as at its own
+// angle; the mask openings of its pads and the line width of its drawings count.
+TEST(Padstack, ComponentBoundsTurnWithIt) {
+  auto r = io::loadBoard(data("topor/Example_04/Arcs_master_f5.fst"));
+  ASSERT_TRUE(r) << r.error();
+  Board& b = **r;
+  LayerId topMask = b.findLayer("TopMask");
+  auto only = [&](LayerKind k) { return [&b, k](LayerId l) { return l >= 0 && b.layers[size_t(l)].kind == k; }; };
+  // A top-side component with pads and drawings of a width (Arcs_master's are on TopAssy, 0.01 mm).
+  int ci = -1;
+  LayerKind drawn = LayerKind::Silk;
+  for (int i = 0; i < int(b.components.size()) && ci < 0; ++i) {
+    const Component& c = b.components[size_t(i)];
+    if (c.side != Side::Top || c.pads.size() < 2) continue;
+    for (auto& g : c.graphics)
+      if (g.layer >= 0 && g.width > 0) {
+        ci = i;
+        drawn = b.layers[size_t(g.layer)].kind;
+        break;
+      }
+  }
+  ASSERT_GE(ci, 0);
+  const Component& c = b.components[size_t(ci)];
+
+  // The drawings: their lines' points in the component's frame, half the width out; wider than the points alone.
+  BBox silk = componentBounds(b, ci, only(drawn)), pts, wide;
+  for (auto& g : c.graphics)
+    if (only(drawn)(g.layer))
+      for (Vec2 v : g.path(2000)) {
+        Vec2 q = c.toLocal(v), h{double(g.width) / 2, double(g.width) / 2};
+        pts.add(q);
+        wide.add(q - h);
+        wide.add(q + h);
+      }
+  EXPECT_GT(silk.width(), pts.width());
+  EXPECT_NEAR(silk.minX, wide.minX, 1);
+  EXPECT_NEAR(silk.maxX, wide.maxX, 1);
+  EXPECT_NEAR(silk.minY, wide.minY, 1);
+  EXPECT_NEAR(silk.maxY, wide.maxY, 1);
+
+  // The mask: an opening 0.3 mm round every pad widens the pads' rectangle by 0.3 mm on each side.
+  BBox pads = componentBounds(b, ci, only(LayerKind::Mask));
+  std::vector<Padstack> stacks = b.padstacks;
+  std::vector<int> all(stacks.size()), origin(stacks.size());
+  for (size_t i = 0; i < all.size(); ++i) all[i] = origin[i] = int(i);
+  createLayerDetails(b, stacks, all, topMask, mmToNm(0.3), true);
+  setPadstacks(b, stacks, origin);
+  BBox mask = componentBounds(b, ci, only(LayerKind::Mask));
+  EXPECT_NEAR(mask.minX, pads.minX - mmToNm(0.3), 1000);
+  EXPECT_NEAR(mask.maxY, pads.maxY + mmToNm(0.3), 1000);
+  EXPECT_EQ(componentBounds(b, ci, only(drawn)).width(), silk.width());  // a hidden mask layer is left out
+
+  // Turned by 30 degrees: the same rectangle in its frame, not the box round the turned component.
+  BBox before = componentBounds(b, ci);
+  edit::Fragment f;
+  f.components = {ci};
+  edit::Motion m;
+  m.pivot = c.pos.v();
+  m.rotate = 30;
+  b.components[size_t(ci)].locked = false;
+  ASSERT_TRUE(edit::move(b, f, m));
+  BBox after = componentBounds(b, ci);
+  EXPECT_NEAR(after.minX, before.minX, 5);
+  EXPECT_NEAR(after.minY, before.minY, 5);
+  EXPECT_NEAR(after.maxX, before.maxX, 5);
+  EXPECT_NEAR(after.maxY, before.maxY, 5);
 }
 
 // The chamfer and the rounding grow with the offset like the outline does.
