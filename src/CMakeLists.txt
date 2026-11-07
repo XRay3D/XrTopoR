@@ -12,6 +12,7 @@ add_library(xrcore STATIC
   core/HiSpeed.cpp
   core/Padstack.cpp
   core/Rules.cpp
+  core/Runs.cpp
   core/SpatialIndex.cpp
   core/ZoneFill.cpp
   io/sexpr/SExpr.cpp

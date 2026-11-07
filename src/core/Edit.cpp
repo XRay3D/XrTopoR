@@ -1,6 +1,7 @@
 #include "core/Edit.h"
 
 #include "core/DiffPairs.h"
+#include "core/Runs.h"
 
 #include <algorithm>
 #include <bit>
@@ -628,46 +629,23 @@ void editFigure(Board& b, ItemRef r, int part, const std::function<void(std::vec
 }
 
 int straighten(Board& b, const std::vector<int>& tracks) {
-  // Chains: tracks of one net and layer joined at vertices where exactly two of them meet.
-  std::vector<int> parent(tracks.size());
-  r::iota(parent, 0);
-  auto find = [&](int i) {
-    while (parent[i] != i) i = parent[i] = parent[parent[i]];
-    return i;
-  };
-  for (size_t i = 0; i < tracks.size(); ++i)
-    for (size_t k = i + 1; k < tracks.size(); ++k) {
-      const Track &s = b.tracks[tracks[i]], &t = b.tracks[tracks[k]];
-      if (s.net != t.net || s.layer != t.layer) continue;
-      if (sameVertex(s.a.v(), t.a.v()) || sameVertex(s.a.v(), t.b.v()) || sameVertex(s.b.v(), t.a.v()) ||
-          sameVertex(s.b.v(), t.b.v()))
-        parent[find(int(i))] = find(int(k));
-    }
-  std::map<int, std::vector<int>> chains;
-  for (size_t i = 0; i < tracks.size(); ++i) chains[find(int(i))].push_back(tracks[i]);
+  // The runs of the given tracks (core/Runs.h: one net, layer, width and fixation, ended at branch points, vias
+  // and pads' centres): each one straight segment between its ends (a new track: no id of a piece it replaces).
+  std::vector<char> chosen(b.tracks.size(), 0);
+  for (int ti : tracks) chosen[size_t(ti)] = 1;
   std::vector<int> remove;
   std::vector<Track> made;
-  for (auto& [root, chain] : chains) {
-    // Ends of the chain: vertices used once within it.
-    std::vector<Vec2> ends;
-    bool branched = false;
-    for (int ti : chain)
-      for (int e : {0, 1}) {
-        Vec2 p = endOf(b.tracks[ti], e);
-        int uses = 0;
-        for (int tj : chain) uses += sameVertex(b.tracks[tj].a.v(), p) + sameVertex(b.tracks[tj].b.v(), p);
-        if (uses == 1) ends.push_back(p);
-        branched |= uses > 2;
-      }
-    if (branched || ends.size() != 2) continue;
-    if (chain.size() == 1 && !b.tracks[chain[0]].isArc()) continue;
-    if (r::any_of(chain, &Track::locked, of(b.tracks))) continue;
-    Track t = b.tracks[chain[0]];
-    t.a = Point(ends[0]);
-    t.b = Point(ends[1]);
+  for (const Run& r : buildRuns(b, {}, &chosen)) {
+    if (r.closed || r.locked) continue;
+    if (r.steps.size() == 1 && !b.tracks[size_t(r.steps[0].track)].isArc()) continue;
+    const Track& last = b.tracks[size_t(r.steps.back().track)];
+    Track t = b.tracks[size_t(r.steps.front().track)];
+    t.a = r.start(b);
+    t.b = r.steps.back().reversed ? last.a : last.b;
     t.mid.reset();
+    t.id = 0;
     made.push_back(t);
-    remove.insert(remove.end(), chain.begin(), chain.end());
+    for (const ChainStep& st : r.steps) remove.push_back(st.track);
   }
   r::sort(remove, std::greater{});
   for (int ti : remove) b.tracks.erase(b.tracks.begin() + ti);

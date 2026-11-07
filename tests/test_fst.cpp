@@ -636,6 +636,25 @@ TEST(FstIO, AMK310PairsRoundTrip) {
   check(**again, "written and read again");
 }
 
+// The wires are written as TopoR writes them: a Wire of one Subwire each, ended on vias, at pads' centres and at
+// branch points (core/Runs.h). AMK310: about as many as TopoR's file has (830; ours splits where the widths of a
+// TopoR wire differ), and read again the same copper: as many tracks, the same length.
+TEST(FstIO, WiresAsTopoRWritesThem) {
+  auto r = io::loadBoard(data("topor/AMK310/AMK310_MCU_V2.fst"));
+  ASSERT_TRUE(r) << r.error();
+  const std::string text = io::writeFst(**r);
+  int wires = 0, subwires = 0;
+  for (size_t at = text.find("<Wire>"); at != std::string::npos; at = text.find("<Wire>", at + 1)) ++wires;
+  for (size_t at = text.find("<Subwire"); at != std::string::npos; at = text.find("<Subwire", at + 1)) ++subwires;
+  EXPECT_EQ(wires, subwires) << "a Wire of one Subwire";
+  EXPECT_GT(wires, 800);
+  EXPECT_LT(wires, 900);
+  auto again = io::readFst(text, "rt.fst");
+  ASSERT_TRUE(again) << again.error();
+  EXPECT_EQ((*again)->tracks.size(), (*r)->tracks.size());
+  EXPECT_NEAR((*again)->tracksLength(), (*r)->tracksLength(), 1000.0);
+}
+
 // The routing report lists the differential pairs: the lengths of the two nets, their difference, the allowed
 // one (AMK310: USB 2.144 mm apart against 0.2 allowed; TopoR measures 1.981 by the signal's path, from its
 // source to its receiver, where this sums the net's tracks).

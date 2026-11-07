@@ -7,46 +7,16 @@
 #include <vector>
 
 #include "core/Board.h"
+#include "core/Runs.h"
 #include "core/SpatialIndex.h"
 
 namespace xr::topo {
 
-// Ends of one net and layer closer than this fraction of the width (never under 1 µm) are one vertex: a
-// wire drawn by hand up to the end of another misses it by a few µm, the copper overlaps all the same.
-// Env XR_GLUE overrides it.
-constexpr double kWireGlue = 0.1;
-
-// The vertices of the chains: the ends of the tracks of the chosen nets.
-struct WireGraph {
-  std::vector<char> relevant;           // tracks of the chosen nets (the vertex set is theirs)
-  std::vector<std::array<int, 2>> vid;  // per track: vertex of a and of b (-1: not relevant)
-  std::vector<std::vector<int>> ends;   // per vertex: the tracks ending there
-  std::vector<char> tiny;               // per track: both ends glued into one vertex
-  // Per track: the width its wire is laid with. The track's own, until effectiveWidths() has looked at the
-  // runs: a neck goes back to the width of the wire it is a piece of, a short wide stub takes the width
-  // of the thin branch that goes on from it.
-  std::vector<Coord> width;
-  int count = 0;
-};
-WireGraph wireGraph(const Board& b, const std::vector<char>& chosen, double glue = kWireGlue);
-
-// The pads and vias a wire may end on.
-class OwnCopper {
- public:
-  explicit OwnCopper(const Board& b);
-  // On a pad or via of the net.
-  bool touches(Point p, int net, LayerId layer) const;
-  // The pad or via of the net at p, if any.
-  std::optional<ItemRef> at(Vec2 p, int net, LayerId layer) const;
-  // The via or round pad of the net at p: its centre and radius.
-  std::optional<std::pair<Vec2, double>> roundAt(Vec2 p, int net, LayerId layer) const;
-  // The points where p->q runs through a pad or via of the net, not at an end, ordered along it.
-  std::vector<Vec2> crossedBetween(Vec2 p, Vec2 q, int net, LayerId layer, Coord width) const;
-
- private:
-  const Board& b_;
-  SpatialIndex idx_;
-};
+// (The graph of the tracks' ends and the pads and vias a wire may end on: core/Runs.h.)
+using xr::kWireGlue;
+using xr::OwnCopper;
+using xr::WireGraph;
+using xr::wireGraph;
 
 struct WireChain {
   std::vector<int> tracks;  // the tracks of the wire, the short ones glued inside it too
@@ -67,7 +37,6 @@ struct WireChain {
 // and 14 widths; eight is a choice within that.
 constexpr double kStubAbsorb = 8.0;
 
-class OwnCopper;
 // The widths the wires are laid with (WireGraph::width), from the runs of equal width between the nodes:
 // - a neck — a run in series between two runs of one larger width, off the copper — is a piece of that
 //   wire the realiser narrowed, and is laid with the wire's width again (narrowing does not stick);

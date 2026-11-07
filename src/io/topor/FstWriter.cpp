@@ -10,6 +10,7 @@
 #include <set>
 
 #include "core/Padstack.h"
+#include "core/Runs.h"
 #include "io/topor/Fst.h"
 #include "io/xml/Xml.h"
 
@@ -1214,72 +1215,29 @@ struct Writer {
     x.close();
   }
 
-  // Groups tracks by layer and net, chains touching segments into Subwires.
+  // The runs of the tracks (core/Runs.h: equal ends, one width, fixation and section, ended on a via of the net,
+  // at a pad's centre and at branch points, as TopoR ends its wires), each a Wire of one Subwire as TopoR writes
+  // them; by layer and net.
   void writeWires() {
-    std::map<std::pair<LayerId, int>, std::vector<int>> groups;
-    for (size_t i = 0; i < b.tracks.size(); ++i) {
-      const Track& t = b.tracks[i];
-      if (t.layer < 0 || t.layer >= int(b.layers.size()) || layerName[t.layer].empty()) continue;
-      groups[{t.layer, t.net}].push_back(int(i));
-    }
-    for (auto& [key, idx] : groups) {
-      x.open("Wire");
-      x.empty("LayerRef", {{"name", layerName[key.first]}});
-      if (key.second >= 0) x.empty("NetRef", {{"name", netName(key.second)}});
-      // Endpoint index for chaining.
-      std::multimap<std::pair<Coord, Coord>, int> ends;
-      for (int i : idx) {
-        ends.emplace(std::make_pair(b.tracks[i].a.x, b.tracks[i].a.y), i);
-        ends.emplace(std::make_pair(b.tracks[i].b.x, b.tracks[i].b.y), i);
-      }
-      std::set<int> used;
-      struct Seg { int track; bool reversed; };
-      auto nextFrom = [&](Point p, const Track& ref, int& out) {
-        int found = -1, count = 0;
-        auto range = ends.equal_range({p.x, p.y});
-        for (auto it = range.first; it != range.second; ++it) {
-          if (used.count(it->second)) continue;
-          const Track& t = b.tracks[it->second];
-          if (t.width != ref.width || t.locked != ref.locked || t.zip != ref.zip) continue;
-          found = it->second;
-          ++count;
-        }
-        if (count != 1) return false;  // junctions start a new subwire
-        out = found;
-        return true;
-      };
-      for (int start : idx) {
-        if (used.count(start)) continue;
-        used.insert(start);
-        std::vector<Seg> chain{{start, false}};
-        // Extend forward from b, then backward from a.
-        for (int dir = 0; dir < 2; ++dir) {
-          for (;;) {
-            const Seg& last = dir == 0 ? chain.back() : chain.front();
-            const Track& lt = b.tracks[last.track];
-            Point tip = dir == 0 ? (last.reversed ? lt.a : lt.b) : (last.reversed ? lt.b : lt.a);
-            int n;
-            if (!nextFrom(tip, b.tracks[start], n)) break;
-            used.insert(n);
-            const Track& nt = b.tracks[n];
-            bool rev = dir == 0 ? !(nt.a == tip) : !(nt.b == tip);
-            if (dir == 0) chain.push_back({n, rev});
-            else chain.insert(chain.begin(), {n, rev});
-          }
-        }
-        const Track& first = b.tracks[chain.front().track];
-        const Track& ref = b.tracks[start];
+    std::map<std::pair<LayerId, int>, std::vector<const Run*>> groups;
+    const std::vector<Run> runs = buildRuns(b, {.exact = true, .atCopper = true});
+    for (const Run& r : runs)
+      if (r.layer >= 0 && r.layer < int(b.layers.size()) && !layerName[r.layer].empty()) groups[{r.layer, r.net}].push_back(&r);
+    for (auto& [key, list] : groups)
+      for (const Run* r : list) {
+        x.open("Wire");
+        x.empty("LayerRef", {{"name", layerName[key.first]}});
+        if (key.second >= 0) x.empty("NetRef", {{"name", netName(key.second)}});
         std::vector<std::pair<std::string, std::string>> attrs;
-        if (ref.locked) attrs.push_back({"fixed", "on"});
-        attrs.push_back({"width", mm(ref.width)});
-        if (ref.zip >= 0 && ref.zip < int(b.zips.size())) attrs.push_back({"zipwireRef", zipId(ref.zip)});
+        if (r->locked) attrs.push_back({"fixed", "on"});
+        attrs.push_back({"width", mm(r->width)});
+        if (r->zip >= 0 && r->zip < int(b.zips.size())) attrs.push_back({"zipwireRef", zipId(r->zip)});
         x.openList("Subwire", attrs);
-        xy("Start", toFst(chain.front().reversed ? first.b : first.a));
-        for (auto& sg : chain) writeTrackPiece(b.tracks[sg.track], sg.reversed);
+        xy("Start", toFst(r->start(b)));
+        for (const ChainStep& sg : r->steps) writeTrackPiece(b.tracks[size_t(sg.track)], sg.reversed);
+        x.close();
         x.close();
       }
-      x.close();
-    }
   }
 
   void writeFilledContour(const std::vector<Vec2>& poly) {

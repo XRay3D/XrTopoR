@@ -16,6 +16,7 @@
 #include "core/DiffPairs.h"
 #include "core/Edit.h"
 #include "core/Rules.h"
+#include "core/Runs.h"
 #include "core/SpatialIndex.h"
 #include "core/ZoneFill.h"
 #include "drc/Drc.h"
@@ -1912,6 +1913,29 @@ PinBoard pairBoard() {
 }
 
 }  // namespace
+
+// The runs (core/Runs.h): a wire from a pad's centre, out of the pad and on to a via is one run (the lead inside
+// the pad is the wire's), and ends on the via; the next one from the via on is another; a width change starts a
+// third; an exact run splits where two ends miss each other by 0.5 um, a glued one does not.
+TEST(Topo, RunsEndOnViasPadCentresAndWidthChanges) {
+  PinBoard p;
+  p.pad("A", 4, 10, PadShapeKind::Rect, 2, 1);
+  p.via("A", 20, 10, 0.6);
+  p.pad("A", 36, 10, PadShapeKind::Circle, 1, 1);
+  p.track("A", {{4, 10}, {6, 10}, {12, 12}, {20, 10}}, 0.3);
+  p.track("A", {{20, 10}, {28, 10}}, 0.3);
+  p.track("A", {{28, 10}, {36, 10}}, 0.5);
+  const std::vector<xr::Run> runs = buildRuns(p.b);
+  ASSERT_EQ(runs.size(), 3u);
+  EXPECT_EQ(runs[0].steps.size(), 3u) << "pad centre to the via, the lead inside the pad with it";
+  EXPECT_EQ(runs[0].start(p.b), Point(PinBoard::at(4, 10)));
+  EXPECT_EQ(runs[1].steps.size(), 1u);
+  EXPECT_EQ(runs[2].width, mmToNm(0.5));
+  // Two ends 0.5 um apart: one vertex glued, two exact.
+  p.b.tracks[1].a = Point(PinBoard::at(6, 10) + Vec2{500, 0});
+  EXPECT_EQ(buildRuns(p.b).size(), 3u);
+  EXPECT_EQ(buildRuns(p.b, {.exact = true}).size(), 4u);
+}
 
 // A zipped section of a differential pair is one wire of the model, as wide as the pair (2w + gap), between
 // two clasps: owners with three vertices across the pair, the conductors' ends (where the single wires of
