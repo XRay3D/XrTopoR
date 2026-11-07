@@ -212,6 +212,359 @@ std::vector<int> Topology::walkEdges(const LayerMesh& m, int v0, int v1, const P
   return out;
 }
 
+namespace {
+
+struct Laid {
+  int wire;
+  std::vector<Hit> hits;
+  Vec2 from, to;
+};
+
+// One chain laid as a wire of the model: its ends' owners given (end0, end1), walked through its layer's mesh
+// from the sketch of its path (bent out of other nets' copper), pushed onto the model's wires with its hits for
+// the edges' order; nothing when it is no wire (no end owner, inside its own copper, a loop crossing nothing).
+// zipIndex: the zipped section the chain is the pair's wire of, -1 none.
+struct LayContext {
+  const Board& b;
+  const SpatialIndex& idx;
+  std::map<LayerId, std::vector<int>> zonesOn;  // the poured zones' owners per layer
+  std::vector<int>& displaced;                  // the wires walked through a keepout, to be laid round
+  int noEnd = 0, insideOwn = 0, loops = 0;
+};
+
+std::optional<Laid> layChain(Topology& self, LayContext& x, const WireChain& c, int zipIndex, int end0, int end1) {
+  const Board& b = x.b;
+  LayerMesh* mp = self.mesh(c.layer);
+  if (!mp) return std::nullopt;
+  LayerMesh& m = *mp;
+  Wire w;
+  w.net = c.net;
+  w.layer = c.layer;
+  w.width = c.width;
+  w.widthMin = std::min(c.width, b.minTrackWidth(c.net, c.layer));
+  w.clr = b.clearance(c.net, c.layer);
+  w.end[0] = end0;
+  w.end[1] = end1;
+  for (int ti : c.tracks) w.tracks.push_back(b.tracks[ti].id);
+  w.locked = r::any_of(c.tracks, [&](int ti) { return b.tracks[ti].locked || b.tracks[ti].serp >= 0; });
+  w.dirty = true;
+  if (zipIndex >= 0) {  // the pair's wire: as wide as the pair, never narrower
+    const ZippedWire& zip = b.zips[size_t(zipIndex)];
+    w.pair = zip.pair;
+    w.zip = zipIndex;
+    w.widthMin = w.width;
+    w.locked |= zip.fixed || r::any_of(zip.axis, [](const Track& t) { return t.serp >= 0; });
+  }
+  if (w.end[0] < 0 || w.end[1] < 0 || m.ownerVerts[w.end[0]].empty() || m.ownerVerts[w.end[1]].empty()) {
+    ++x.noEnd;
+    return std::nullopt;
+  }
+  // The sketch: from the end owner's vertex, through the path's points outside the own copper, to the
+  // other's. A polygon connects at its centre (TopoR's connection point; the realiser draws the wire
+  // from there, inside the copper): drawn to the corner nearest the path's end, the track's round end
+  // stuck out of the pad into the gap beside it (arz_2L: 13 self.violations at one connector). An oval is
+  // drawn to the end nearer the path's end (from the centre a wire ran the pad's length and out the other
+  // end, 470 mm over arz_2L), the rest have one vertex.
+  const Owner& o0 = self.owners[w.end[0]];
+  const Owner& o1 = self.owners[w.end[1]];
+  // In a pour nothing is touched (TopoR): a chain lying wholly inside a poured zone's outline on its
+  // layer is locked whatever its net, one of another net that reaches into the pour too (the pour was made
+  // round it). The self.wires of the zone's own net that cross its boundary are laid as any other: inside, the
+  // zone's copper is their own.
+  if (auto it = x.zonesOn.find(c.layer); it != x.zonesOn.end())
+    for (int zo : it->second) {
+      const Shape& zs = self.owners[zo].shape;
+      size_t inside = 0;
+      bool touches = false;
+      for (Vec2 p : c.path) inside += zs.distance(p) <= 0;
+      for (size_t k = 1; k < c.path.size() && !touches; ++k) touches = zs.distanceToSegment(c.path[k - 1], c.path[k]) <= 0;
+      if (inside == c.path.size() || (c.net != self.owners[zo].net && (inside > 0 || touches))) {
+        w.locked = true;
+        w.zone = zo;
+        break;
+      }
+    }
+  // Where the path leaves each end's copper: the boundary point between the last point inside and the
+  // first outside.
+  for (int end = 0; end < 2; ++end) {
+    const Owner& o = end ? o1 : o0;
+    if (o.kind == Owner::Kind::Zone || o.kind == Owner::Kind::Clasp) continue;  // the wire ends on the zone's ring / at the clasp's vertex
+    const Polyline& path = c.path;
+    size_t n = path.size();
+    for (size_t k = 1; k < n; ++k) {
+      Vec2 in = end ? path[n - k] : path[k - 1], out = end ? path[n - 1 - k] : path[k];
+      if (o.shape.contains(out)) continue;
+      if (!o.shape.contains(in)) break;  // starts outside: no exit to speak of
+      for (int it = 0; it < 30; ++it) {
+        Vec2 mid = (in + out) * 0.5;
+        (o.shape.contains(mid) ? in : out) = mid;
+      }
+      w.exit[end] = out;
+      w.hasExit[end] = true;
+      break;
+    }
+  }
+  // An oval's end is chosen by where the path leaves the copper, not by where it ends inside it: a track
+  // drawn to the pad's centre is as far from one end as from the other, and from the wrong one the wire
+  // ran the pad's length through its own far end (Arcs_master: 30 self.violations on the first pass, 24 on
+  // the next, when the drawn wire started at the right end).
+  auto endVertexOf = [&](int owner, int end) {
+    const Owner& o = self.owners[owner];
+    if (o.kind == Owner::Kind::Clasp && w.pair >= 0)  // the pair's wire ends at the clasp's centre
+      for (int v : m.ownerVerts[owner])
+        if (m.verts[v].t == 0) return v;
+    if (o.shape.kind == Shape::Kind::Polygon && o.kind != Owner::Kind::Zone)
+      for (int v : m.ownerVerts[owner])
+        if (m.verts[v].t == 0 && m.verts[v].off.len2() < 1) return v;
+    // (A zone: the ring vertex nearest the path's end, or, for a path from outside, nearest where it enters.)
+    Vec2 at = w.hasExit[end] ? w.exit[end] : end ? c.b() : c.a();
+    if (o.kind == Owner::Kind::Zone)
+      for (size_t k = 0; k < c.path.size(); ++k) {
+        Vec2 p = end ? c.path[c.path.size() - 1 - k] : c.path[k];
+        if (o.shape.distance(p) > 0) break;
+        at = p;
+      }
+    return self.nearestVertex(m, owner, at);
+  };
+  int v0 = endVertexOf(w.end[0], 0), v1 = endVertexOf(w.end[1], 1);
+  w.endVertex[0] = v0;
+  w.endVertex[1] = v1;
+  Polyline sk{m.verts[v0].p};
+  // Through the exits: from the pad's centre straight to the first point outside, the walk cut across the
+  // neighbouring pad where the tracks left near a corner.
+  auto push = [&](Vec2 p) {
+    if ((p - sk.back()).len2() >= 1) sk.push_back(p);
+  };
+  if (w.hasExit[0]) push(w.exit[0]);
+  for (size_t k = 0; k < c.path.size(); ++k) {
+    Vec2 p = c.path[k];
+    if (o0.shape.contains(p) || o1.shape.contains(p)) continue;
+    push(p);
+  }
+  if (w.hasExit[1]) push(w.exit[1]);
+  push(m.verts[v1].p);
+  // Through another net's copper: the sketch is bent out of it, at the point nearest that copper's
+  // centre, unless the wire is locked where it lies.
+  std::optional<ItemRef> through;
+  for (int round = 0; round < 60 && !through; ++round) {
+    bool bent = false;
+    for (size_t k = 1; k < sk.size() && !bent && !through; ++k) {
+      Vec2 p = sk[k - 1], q = sk[k];
+      BBox box;
+      box.add(p);
+      box.add(q);
+      x.idx.query(box.inflated(w.width), LayerMask(1) << c.layer, [&](ItemRef r) {
+        if (bent || through || (r.type != ItemType::Pad && r.type != ItemType::Via) || itemNet(b, r) == c.net) return;
+        for (const Shape& s : itemShapes(b, r)) {
+          if (s.distanceToSegment(p, q) >= 0) continue;
+          if (w.locked || round == 59) {
+            through = r;
+            return;
+          }
+          Vec2 at = closestPointOnSegment(s.center(), p, q);
+          Vec2 n = at - s.center();
+          if (n.len() < 1) n = (q - p).perp();
+          if (n.len() < 1) n = {1, 0};
+          n = n.normalized();
+          Vec2 x = at;
+          const double want = double(b.clearance(c.net, itemNet(b, r), c.layer)) + w.width / 2.0;
+          for (int it = 0; it < 40 && s.distance(x) < want; ++it) x = x + n * (want - s.distance(x) + 100);
+          sk.insert(sk.begin() + long(k), x);
+          bent = true;
+          return;
+        }
+      });
+    }
+    if (!bent) break;
+  }
+  if (through) {
+    Violation v;
+    v.kind = Violation::Kind::ThroughPad;
+    v.wireA = int(self.wires.size());
+    v.owner = through->type == ItemType::Pad ? self.padOwner[through->index] : self.viaOwner[through->index];
+    v.layer = c.layer;
+    v.pos = c.path[c.path.size() / 2];
+    self.violations.push_back(v);
+    w.locked = true;
+  }
+  // A chain lying wholly inside the copper it starts and ends on is that copper, not a wire (not in a
+  // pour: the tracks there stay as they are, the zone owns none of them).
+  if (w.end[0] == w.end[1] && o0.kind != Owner::Kind::Zone && sk.size() <= 2 && (sk.front() - sk.back()).len2() < 1) {
+    ++x.insideOwn;
+    for (int ti : c.tracks) self.ownerTracks.push_back({w.end[0], b.tracks[ti].id});
+    return std::nullopt;
+  }
+  bool ok = true;
+  std::string why;
+  int wall = -1;
+  // A wire locked in a pour that ends on the zone itself crosses nothing of the model (a chord across the
+  // pour would take the room of its interior edges for nothing); one of another net is walked as any
+  // other, the ring being crossable, and silently left without crossings where the walk fails.
+  const bool inPour = w.zone >= 0 && (o0.kind == Owner::Kind::Zone || o1.kind == Owner::Kind::Zone);
+  std::vector<Hit> hits = inPour ? std::vector<Hit>{} : walk(m, v0, v1, sk, ok, &why, &wall);
+  if (!ok && w.zone >= 0) {
+    ok = true;
+    hits.clear();
+  }
+  // Out of its copper and back without crossing anything: that copper, not a wire.
+  if (ok && hits.empty() && w.end[0] == w.end[1] && o0.kind != Owner::Kind::Zone) {
+    ++x.loops;
+    if (std::getenv("XR_TOPO_DEBUG") && x.loops <= 5)
+      std::println(stderr, "loop: net {} L{} owner {} kind {} path {} points from ({:.3f},{:.3f}) to ({:.3f},{:.3f}), sketch {} points",
+                   b.nets[c.net].name, int(c.layer), w.end[0], int(self.owners[w.end[0]].kind), c.path.size(), c.a().x / 1e6, c.a().y / 1e6,
+                   c.b().x / 1e6, c.b().y / 1e6, sk.size());
+    for (int ti : c.tracks) self.ownerTracks.push_back({w.end[0], b.tracks[ti].id});  // goes when the owner's self.wires are redrawn
+    return std::nullopt;
+  }
+  // Nothing crossed between two different self.owners: the wire runs along the edge joining them.
+  int along = -1;
+  if (ok && hits.empty() && !inPour && w.zone < 0) {
+    for (int t : m.verts[v0].tris) {
+      int i = m.localVertex(t, v1);
+      if (i < 0) continue;
+      const Tri& T = m.tris[t];
+      for (int k = 0; k < 3; ++k) {
+        const Edge& E = m.edges[T.e[k]];
+        if ((E.v[0] == v0 && E.v[1] == v1) || (E.v[0] == v1 && E.v[1] == v0)) along = T.e[k];
+      }
+    }
+    if (along < 0) ok = false, why = "crosses nothing, and its ends are not joined by an edge";
+  }
+  int wi = int(self.wires.size());
+  // Through a keepout (its wall, or an area's triangles), across a cutout, or out of the board and
+  // back: the wire is displaced, to be laid round by relayDisplaced once the mesh holds the rest. A wire
+  // locked where it lies, or one whose end is outside the board, stays: a violation.
+  bool displaced = false;
+  if (!w.locked) {
+    const bool endsInside = !m.verts[v0].tris.empty() && !m.verts[v1].tris.empty();
+    if (!ok) displaced = wall >= 0 && endsInside;
+    else {
+      auto blockedBeside = [&](int e) {
+        const Edge& E = m.edges[e];
+        return (E.t[0] >= 0 && m.tris[E.t[0]].blocked) || (E.t[1] >= 0 && m.tris[E.t[1]].blocked);
+      };
+      for (const Hit& h : hits) displaced |= blockedBeside(h.edge);
+      if (hits.empty() && endsInside && sk.size() >= 2) {
+        int f = fanTriangle(m, v0, sk[1] - sk[0]);
+        displaced |= f >= 0 && m.tris[f].blocked;
+      }
+    }
+  }
+  if (displaced) {
+    if (std::getenv("XR_TOPO_DEBUG"))
+      std::println(stderr, "wire {} net {} L{} from ({:.3f},{:.3f}) to ({:.3f},{:.3f}) is displaced: {}", wi, b.nets[c.net].name, int(c.layer),
+                   sk.front().x / 1e6, sk.front().y / 1e6, sk.back().x / 1e6, sk.back().y / 1e6, ok ? "through a keepout area" : why);
+    x.displaced.push_back(wi);
+    ok = true;
+    hits.clear();
+    along = -1;
+  } else if (!ok) {
+    if (std::getenv("XR_TOPO_DEBUG"))
+      std::println(stderr, "wire {} net {} L{} from ({:.3f},{:.3f}) to ({:.3f},{:.3f}), {} points: {}", wi, b.nets[c.net].name, int(c.layer),
+                   sk.front().x / 1e6, sk.front().y / 1e6, sk.back().x / 1e6, sk.back().y / 1e6, sk.size(), why);
+    Violation v;
+    v.kind = Violation::Kind::OutsideBoard;
+    v.wireA = wi;
+    v.layer = c.layer;
+    v.pos = c.path[c.path.size() / 2];
+    self.violations.push_back(v);
+    w.locked = true;
+    hits.clear();
+  }
+  if (along >= 0) m.edges[along].along = wi;
+  self.wires.push_back(std::move(w));
+  return Laid{wi, std::move(hits), m.verts[v0].p, m.verts[v1].p};
+}
+
+}  // namespace
+
+namespace {
+
+// The order of the wires on edge e: `list` (laid wire, hit), the entries from `firstNew` on put in among those
+// before them by the topology — an insertion sort, the order being pairwise, not a key: two wires sharing an edge
+// are ordered by where their paths part, the positions along the edge decide only where the topology does not.
+// Forward and backward verdicts that disagree mean the sketches cross each other: a crossing (a pair once).
+void orderOnEdge(Topology& self, const Board& b, const LayerMesh& m, const std::vector<Laid>& laid, int e,
+                 std::vector<std::pair<int, int>>& list, size_t firstNew, std::set<std::pair<int, int>>& crossed) {
+  auto hasVertex = [&](int e, int x) { return m.edges[e].v[0] == x || m.edges[e].v[1] == x; };
+  auto crossPt = [&](const Hit& h) {
+    const Edge& E = m.edges[h.edge];
+    return m.verts[E.v[0]].p + (m.verts[E.v[1]].p - m.verts[E.v[0]].p) * h.t;
+  };
+  // +1: A nearer u of the edge shared by hits (A,i) and (B,j), -1: B nearer u, 0: unknown.
+  auto side = [&](this auto&& self, int A, int i, int dA, int B, int j, int dB, int depth) -> int {
+    if (depth > 64) return 0;
+    const Hit& hA = laid[A].hits[i];
+    const Hit& hB = laid[B].hits[j];
+    int u = m.edges[hA.edge].v[0], v = m.edges[hA.edge].v[1];
+    int w = dA > 0 ? hA.wFwd : hA.wBack;
+    if (w < 0 || w != (dB > 0 ? hB.wFwd : hB.wBack)) return 0;
+    int nA = i + dA, nB = j + dB;
+    bool endA = nA < 0 || nA >= int(laid[A].hits.size()), endB = nB < 0 || nB >= int(laid[B].hits.size());
+    if (!endA && !endB) {
+      int eA = laid[A].hits[nA].edge, eB = laid[B].hits[nB].edge;
+      if (eA == eB) {
+        int sv = hasVertex(eA, u) ? u : v;  // the vertex the run keeps
+        int r = self(A, nA, dA, B, nB, dB, depth + 1);
+        if (r == 0) return 0;
+        bool aNearS = (r > 0) == (m.edges[eA].v[0] == sv);  // r: A nearer eA.v[0]
+        return aNearS == (sv == u) ? +1 : -1;
+      }
+      if (hasVertex(eA, u) && hasVertex(eB, v)) return +1;
+      if (hasVertex(eA, v) && hasVertex(eB, u)) return -1;
+      return 0;
+    }
+    auto endSide = [&](int X, int dX, int Y, int cY, int nY) -> int {  // X ends in the triangle, Y goes on
+      Vec2 P = dX > 0 ? laid[X].to : laid[X].from;
+      if ((P - m.verts[u].p).len2() < 1) return +1;
+      if ((P - m.verts[v].p).len2() < 1) return -1;
+      int eY = laid[Y].hits[nY].edge;
+      if ((P - m.verts[w].p).len2() < 1) return hasVertex(eY, u) ? -1 : +1;
+      Vec2 a = crossPt(laid[Y].hits[cY]), c = crossPt(laid[Y].hits[nY]);
+      double o = orient(a, c, P), ou = orient(a, c, m.verts[u].p);
+      if (o == 0 || ou == 0) return 0;
+      return (o > 0) == (ou > 0) ? +1 : -1;
+    };
+    if (endA && !endB) return endSide(A, dA, B, j, nB);
+    if (endB && !endA) return -endSide(B, dB, A, i, nA);
+    return hA.t < hB.t ? +1 : hA.t > hB.t ? -1 : 0;
+  };
+  auto before = [&](std::pair<int, int> a, std::pair<int, int> c) {
+    const Hit& hA = laid[a.first].hits[a.second];
+    const Hit& hB = laid[c.first].hits[c.second];
+    int dB = hA.uLeft == hB.uLeft ? +1 : -1;
+    int f = side(a.first, a.second, +1, c.first, c.second, dB, 0);
+    int bk = side(a.first, a.second, -1, c.first, c.second, -dB, 0);
+    if (f != 0 && bk != 0 && f != bk) {
+      int wa = laid[a.first].wire, wb = laid[c.first].wire;
+      if (self.wires[wa].net != self.wires[wb].net && crossed.insert(std::minmax(wa, wb)).second) {
+        Violation v;
+        v.kind = Violation::Kind::Crossing;
+        v.wireA = wa;
+        v.wireB = wb;
+        v.layer = m.layer;
+        v.edge = e;
+        v.pos = (crossPt(hA) + crossPt(hB)) * 0.5;
+        self.violations.push_back(v);
+      }
+      return hA.t < hB.t;
+    }
+    int r = f != 0 ? f : bk;
+    if (r != 0 && (r > 0) != (hA.t < hB.t) && std::getenv("XR_TOPO_DEBUG")) {
+      const Edge& E = m.edges[e];
+      std::println(stderr, "order against geometry on layer {} edge {} ({:.3f},{:.3f})-({:.3f},{:.3f}): {} (t {:.3f}, {}/{}) vs {} (t {:.3f}, {}/{}): fwd {} back {}",
+                   int(m.layer), e, m.verts[E.v[0]].p.x / 1e6, m.verts[E.v[0]].p.y / 1e6, m.verts[E.v[1]].p.x / 1e6, m.verts[E.v[1]].p.y / 1e6,
+                   b.nets[self.wires[laid[a.first].wire].net].name, hA.t, a.second, laid[a.first].hits.size(),
+                   b.nets[self.wires[laid[c.first].wire].net].name, hB.t, c.second, laid[c.first].hits.size(), f, bk);
+    }
+    return r != 0 ? r > 0 : hA.t < hB.t;
+  };
+  for (size_t k = std::max<size_t>(firstNew, 1); k < list.size(); ++k)
+    for (size_t q = k; q > 0 && before(list[q], list[q - 1]); --q) std::swap(list[q], list[q - 1]);
+}
+
+}  // namespace
+
 void Topology::convertWires(const Board& b, BuildScratch& scratch) {
   std::vector<char> all(b.tracks.size(), 1);
   WireGraph g = wireGraph(b, all);
@@ -367,257 +720,15 @@ void Topology::convertWires(const Board& b, BuildScratch& scratch) {
   const double kJoin = 1000;
   wires.clear();
   crossings.clear();
-  struct Laid {
-    int wire;
-    std::vector<Hit> hits;
-    Vec2 from, to;
-  };
   std::vector<std::vector<Laid>> laidOn(layers.size());
-  int noEnd = 0, insideOwn = 0, loops = 0;
+  LayContext lay{b, idx, zonesOn, scratch.displaced};
   for (size_t ci = 0; ci < chains.size(); ++ci) {
-    const WireChain& c = chains[ci];
-    LayerMesh* mp = mesh(c.layer);
+    const LayerMesh* mp = mesh(chains[ci].layer);
     if (!mp) continue;
-    LayerMesh& m = *mp;
-    const int li = int(mp - layers.data());
-    Wire w;
-    w.net = c.net;
-    w.layer = c.layer;
-    w.width = c.width;
-    w.widthMin = std::min(c.width, b.minTrackWidth(c.net, c.layer));
-    w.clr = b.clearance(c.net, c.layer);
-    w.end[0] = ends[ci][0].owner;
-    w.end[1] = ends[ci][1].owner;
-    for (int ti : c.tracks) w.tracks.push_back(b.tracks[ti].id);
-    w.locked = r::any_of(c.tracks, [&](int ti) { return b.tracks[ti].locked || b.tracks[ti].serp >= 0; });
-    w.dirty = true;
-    if (chainZip[ci] >= 0) {  // the pair's wire: as wide as the pair, never narrower
-      const ZippedWire& zip = b.zips[size_t(chainZip[ci])];
-      w.pair = zip.pair;
-      w.zip = chainZip[ci];
-      w.widthMin = w.width;
-      w.locked |= zip.fixed || r::any_of(zip.axis, [](const Track& t) { return t.serp >= 0; });
-    }
-    if (w.end[0] < 0 || w.end[1] < 0 || m.ownerVerts[w.end[0]].empty() || m.ownerVerts[w.end[1]].empty()) {
-      ++noEnd;
-      continue;
-    }
-    // The sketch: from the end owner's vertex, through the path's points outside the own copper, to the
-    // other's. A polygon connects at its centre (TopoR's connection point; the realiser draws the wire
-    // from there, inside the copper): drawn to the corner nearest the path's end, the track's round end
-    // stuck out of the pad into the gap beside it (arz_2L: 13 violations at one connector). An oval is
-    // drawn to the end nearer the path's end (from the centre a wire ran the pad's length and out the other
-    // end, 470 mm over arz_2L), the rest have one vertex.
-    const Owner& o0 = owners[w.end[0]];
-    const Owner& o1 = owners[w.end[1]];
-    // In a pour nothing is touched (TopoR): a chain lying wholly inside a poured zone's outline on its
-    // layer is locked whatever its net, one of another net that reaches into the pour too (the pour was made
-    // round it). The wires of the zone's own net that cross its boundary are laid as any other: inside, the
-    // zone's copper is their own.
-    if (auto it = zonesOn.find(c.layer); it != zonesOn.end())
-      for (int zo : it->second) {
-        const Shape& zs = owners[zo].shape;
-        size_t inside = 0;
-        bool touches = false;
-        for (Vec2 p : c.path) inside += zs.distance(p) <= 0;
-        for (size_t k = 1; k < c.path.size() && !touches; ++k) touches = zs.distanceToSegment(c.path[k - 1], c.path[k]) <= 0;
-        if (inside == c.path.size() || (c.net != owners[zo].net && (inside > 0 || touches))) {
-          w.locked = true;
-          w.zone = zo;
-          break;
-        }
-      }
-    // Where the path leaves each end's copper: the boundary point between the last point inside and the
-    // first outside.
-    for (int end = 0; end < 2; ++end) {
-      const Owner& o = end ? o1 : o0;
-      if (o.kind == Owner::Kind::Zone || o.kind == Owner::Kind::Clasp) continue;  // the wire ends on the zone's ring / at the clasp's vertex
-      const Polyline& path = c.path;
-      size_t n = path.size();
-      for (size_t k = 1; k < n; ++k) {
-        Vec2 in = end ? path[n - k] : path[k - 1], out = end ? path[n - 1 - k] : path[k];
-        if (o.shape.contains(out)) continue;
-        if (!o.shape.contains(in)) break;  // starts outside: no exit to speak of
-        for (int it = 0; it < 30; ++it) {
-          Vec2 mid = (in + out) * 0.5;
-          (o.shape.contains(mid) ? in : out) = mid;
-        }
-        w.exit[end] = out;
-        w.hasExit[end] = true;
-        break;
-      }
-    }
-    // An oval's end is chosen by where the path leaves the copper, not by where it ends inside it: a track
-    // drawn to the pad's centre is as far from one end as from the other, and from the wrong one the wire
-    // ran the pad's length through its own far end (Arcs_master: 30 violations on the first pass, 24 on
-    // the next, when the drawn wire started at the right end).
-    auto endVertexOf = [&](int owner, int end) {
-      const Owner& o = owners[owner];
-      if (o.kind == Owner::Kind::Clasp && w.pair >= 0)  // the pair's wire ends at the clasp's centre
-        for (int v : m.ownerVerts[owner])
-          if (m.verts[v].t == 0) return v;
-      if (o.shape.kind == Shape::Kind::Polygon && o.kind != Owner::Kind::Zone)
-        for (int v : m.ownerVerts[owner])
-          if (m.verts[v].t == 0 && m.verts[v].off.len2() < 1) return v;
-      // (A zone: the ring vertex nearest the path's end, or, for a path from outside, nearest where it enters.)
-      Vec2 at = w.hasExit[end] ? w.exit[end] : end ? c.b() : c.a();
-      if (o.kind == Owner::Kind::Zone)
-        for (size_t k = 0; k < c.path.size(); ++k) {
-          Vec2 p = end ? c.path[c.path.size() - 1 - k] : c.path[k];
-          if (o.shape.distance(p) > 0) break;
-          at = p;
-        }
-      return nearestVertex(m, owner, at);
-    };
-    int v0 = endVertexOf(w.end[0], 0), v1 = endVertexOf(w.end[1], 1);
-    w.endVertex[0] = v0;
-    w.endVertex[1] = v1;
-    Polyline sk{m.verts[v0].p};
-    // Through the exits: from the pad's centre straight to the first point outside, the walk cut across the
-    // neighbouring pad where the tracks left near a corner.
-    auto push = [&](Vec2 p) {
-      if ((p - sk.back()).len2() >= 1) sk.push_back(p);
-    };
-    if (w.hasExit[0]) push(w.exit[0]);
-    for (size_t k = 0; k < c.path.size(); ++k) {
-      Vec2 p = c.path[k];
-      if (o0.shape.contains(p) || o1.shape.contains(p)) continue;
-      push(p);
-    }
-    if (w.hasExit[1]) push(w.exit[1]);
-    push(m.verts[v1].p);
-    // Through another net's copper: the sketch is bent out of it, at the point nearest that copper's
-    // centre, unless the wire is locked where it lies.
-    std::optional<ItemRef> through;
-    for (int round = 0; round < 60 && !through; ++round) {
-      bool bent = false;
-      for (size_t k = 1; k < sk.size() && !bent && !through; ++k) {
-        Vec2 p = sk[k - 1], q = sk[k];
-        BBox box;
-        box.add(p);
-        box.add(q);
-        idx.query(box.inflated(w.width), LayerMask(1) << c.layer, [&](ItemRef r) {
-          if (bent || through || (r.type != ItemType::Pad && r.type != ItemType::Via) || itemNet(b, r) == c.net) return;
-          for (const Shape& s : itemShapes(b, r)) {
-            if (s.distanceToSegment(p, q) >= 0) continue;
-            if (w.locked || round == 59) {
-              through = r;
-              return;
-            }
-            Vec2 at = closestPointOnSegment(s.center(), p, q);
-            Vec2 n = at - s.center();
-            if (n.len() < 1) n = (q - p).perp();
-            if (n.len() < 1) n = {1, 0};
-            n = n.normalized();
-            Vec2 x = at;
-            const double want = double(b.clearance(c.net, itemNet(b, r), c.layer)) + w.width / 2.0;
-            for (int it = 0; it < 40 && s.distance(x) < want; ++it) x = x + n * (want - s.distance(x) + 100);
-            sk.insert(sk.begin() + long(k), x);
-            bent = true;
-            return;
-          }
-        });
-      }
-      if (!bent) break;
-    }
-    if (through) {
-      Violation v;
-      v.kind = Violation::Kind::ThroughPad;
-      v.wireA = int(wires.size());
-      v.owner = through->type == ItemType::Pad ? padOwner[through->index] : viaOwner[through->index];
-      v.layer = c.layer;
-      v.pos = c.path[c.path.size() / 2];
-      violations.push_back(v);
-      w.locked = true;
-    }
-    // A chain lying wholly inside the copper it starts and ends on is that copper, not a wire (not in a
-    // pour: the tracks there stay as they are, the zone owns none of them).
-    if (w.end[0] == w.end[1] && o0.kind != Owner::Kind::Zone && sk.size() <= 2 && (sk.front() - sk.back()).len2() < 1) {
-      ++insideOwn;
-      for (int ti : c.tracks) ownerTracks.push_back({w.end[0], b.tracks[ti].id});
-      continue;
-    }
-    bool ok = true;
-    std::string why;
-    int wall = -1;
-    // A wire locked in a pour that ends on the zone itself crosses nothing of the model (a chord across the
-    // pour would take the room of its interior edges for nothing); one of another net is walked as any
-    // other, the ring being crossable, and silently left without crossings where the walk fails.
-    const bool inPour = w.zone >= 0 && (o0.kind == Owner::Kind::Zone || o1.kind == Owner::Kind::Zone);
-    std::vector<Hit> hits = inPour ? std::vector<Hit>{} : walk(m, v0, v1, sk, ok, &why, &wall);
-    if (!ok && w.zone >= 0) {
-      ok = true;
-      hits.clear();
-    }
-    // Out of its copper and back without crossing anything: that copper, not a wire.
-    if (ok && hits.empty() && w.end[0] == w.end[1] && o0.kind != Owner::Kind::Zone) {
-      ++loops;
-      if (std::getenv("XR_TOPO_DEBUG") && loops <= 5)
-        std::println(stderr, "loop: net {} L{} owner {} kind {} path {} points from ({:.3f},{:.3f}) to ({:.3f},{:.3f}), sketch {} points",
-                     b.nets[c.net].name, int(c.layer), w.end[0], int(owners[w.end[0]].kind), c.path.size(), c.a().x / 1e6, c.a().y / 1e6,
-                     c.b().x / 1e6, c.b().y / 1e6, sk.size());
-      for (int ti : c.tracks) ownerTracks.push_back({w.end[0], b.tracks[ti].id});  // goes when the owner's wires are redrawn
-      continue;
-    }
-    // Nothing crossed between two different owners: the wire runs along the edge joining them.
-    int along = -1;
-    if (ok && hits.empty() && !inPour && w.zone < 0) {
-      for (int t : m.verts[v0].tris) {
-        int i = m.localVertex(t, v1);
-        if (i < 0) continue;
-        const Tri& T = m.tris[t];
-        for (int k = 0; k < 3; ++k) {
-          const Edge& E = m.edges[T.e[k]];
-          if ((E.v[0] == v0 && E.v[1] == v1) || (E.v[0] == v1 && E.v[1] == v0)) along = T.e[k];
-        }
-      }
-      if (along < 0) ok = false, why = "crosses nothing, and its ends are not joined by an edge";
-    }
-    int wi = int(wires.size());
-    // Through a keepout (its wall, or an area's triangles), across a cutout, or out of the board and
-    // back: the wire is displaced, to be laid round by relayDisplaced once the mesh holds the rest. A wire
-    // locked where it lies, or one whose end is outside the board, stays: a violation.
-    bool displaced = false;
-    if (!w.locked) {
-      const bool endsInside = !m.verts[v0].tris.empty() && !m.verts[v1].tris.empty();
-      if (!ok) displaced = wall >= 0 && endsInside;
-      else {
-        auto blockedBeside = [&](int e) {
-          const Edge& E = m.edges[e];
-          return (E.t[0] >= 0 && m.tris[E.t[0]].blocked) || (E.t[1] >= 0 && m.tris[E.t[1]].blocked);
-        };
-        for (const Hit& h : hits) displaced |= blockedBeside(h.edge);
-        if (hits.empty() && endsInside && sk.size() >= 2) {
-          int f = fanTriangle(m, v0, sk[1] - sk[0]);
-          displaced |= f >= 0 && m.tris[f].blocked;
-        }
-      }
-    }
-    if (displaced) {
-      if (std::getenv("XR_TOPO_DEBUG"))
-        std::println(stderr, "wire {} net {} L{} from ({:.3f},{:.3f}) to ({:.3f},{:.3f}) is displaced: {}", wi, b.nets[c.net].name, int(c.layer),
-                     sk.front().x / 1e6, sk.front().y / 1e6, sk.back().x / 1e6, sk.back().y / 1e6, ok ? "through a keepout area" : why);
-      scratch.displaced.push_back(wi);
-      ok = true;
-      hits.clear();
-      along = -1;
-    } else if (!ok) {
-      if (std::getenv("XR_TOPO_DEBUG"))
-        std::println(stderr, "wire {} net {} L{} from ({:.3f},{:.3f}) to ({:.3f},{:.3f}), {} points: {}", wi, b.nets[c.net].name, int(c.layer),
-                     sk.front().x / 1e6, sk.front().y / 1e6, sk.back().x / 1e6, sk.back().y / 1e6, sk.size(), why);
-      Violation v;
-      v.kind = Violation::Kind::OutsideBoard;
-      v.wireA = wi;
-      v.layer = c.layer;
-      v.pos = c.path[c.path.size() / 2];
-      violations.push_back(v);
-      w.locked = true;
-      hits.clear();
-    }
-    if (along >= 0) m.edges[along].along = wi;
-    wires.push_back(std::move(w));
-    laidOn[li].push_back({wi, std::move(hits), m.verts[v0].p, m.verts[v1].p});
+    if (auto l = layChain(*this, lay, chains[ci], chainZip[ci], ends[ci][0].owner, ends[ci][1].owner))
+      laidOn[size_t(mp - layers.data())].push_back(std::move(*l));
   }
+  const int noEnd = lay.noEnd, insideOwn = lay.insideOwn, loops = lay.loops;
 
   if (std::getenv("XR_TOPO_DEBUG"))
     std::println(stderr, "{} chains: {} wires, {} without an end owner, {} inside their own copper, {} loops without crossings",
@@ -632,84 +743,8 @@ void Topology::convertWires(const Board& b, BuildScratch& scratch) {
     std::map<int, std::vector<std::pair<int, int>>> onEdge;  // edge -> (laid index, hit index)
     for (int k = 0; k < int(laid.size()); ++k)
       for (int h = 0; h < int(laid[k].hits.size()); ++h) onEdge[laid[k].hits[h].edge].push_back({k, h});
-    auto hasVertex = [&](int e, int x) { return m.edges[e].v[0] == x || m.edges[e].v[1] == x; };
-    auto crossPt = [&](const Hit& h) {
-      const Edge& E = m.edges[h.edge];
-      return m.verts[E.v[0]].p + (m.verts[E.v[1]].p - m.verts[E.v[0]].p) * h.t;
-    };
-    // +1: A nearer u of the edge shared by hits (A,i) and (B,j), -1: B nearer u, 0: unknown.
-    auto side = [&](this auto&& self, int A, int i, int dA, int B, int j, int dB, int depth) -> int {
-      if (depth > 64) return 0;
-      const Hit& hA = laid[A].hits[i];
-      const Hit& hB = laid[B].hits[j];
-      int u = m.edges[hA.edge].v[0], v = m.edges[hA.edge].v[1];
-      int w = dA > 0 ? hA.wFwd : hA.wBack;
-      if (w < 0 || w != (dB > 0 ? hB.wFwd : hB.wBack)) return 0;
-      int nA = i + dA, nB = j + dB;
-      bool endA = nA < 0 || nA >= int(laid[A].hits.size()), endB = nB < 0 || nB >= int(laid[B].hits.size());
-      if (!endA && !endB) {
-        int eA = laid[A].hits[nA].edge, eB = laid[B].hits[nB].edge;
-        if (eA == eB) {
-          int sv = hasVertex(eA, u) ? u : v;  // the vertex the run keeps
-          int r = self(A, nA, dA, B, nB, dB, depth + 1);
-          if (r == 0) return 0;
-          bool aNearS = (r > 0) == (m.edges[eA].v[0] == sv);  // r: A nearer eA.v[0]
-          return aNearS == (sv == u) ? +1 : -1;
-        }
-        if (hasVertex(eA, u) && hasVertex(eB, v)) return +1;
-        if (hasVertex(eA, v) && hasVertex(eB, u)) return -1;
-        return 0;
-      }
-      auto endSide = [&](int X, int dX, int Y, int cY, int nY) -> int {  // X ends in the triangle, Y goes on
-        Vec2 P = dX > 0 ? laid[X].to : laid[X].from;
-        if ((P - m.verts[u].p).len2() < 1) return +1;
-        if ((P - m.verts[v].p).len2() < 1) return -1;
-        int eY = laid[Y].hits[nY].edge;
-        if ((P - m.verts[w].p).len2() < 1) return hasVertex(eY, u) ? -1 : +1;
-        Vec2 a = crossPt(laid[Y].hits[cY]), c = crossPt(laid[Y].hits[nY]);
-        double o = orient(a, c, P), ou = orient(a, c, m.verts[u].p);
-        if (o == 0 || ou == 0) return 0;
-        return (o > 0) == (ou > 0) ? +1 : -1;
-      };
-      if (endA && !endB) return endSide(A, dA, B, j, nB);
-      if (endB && !endA) return -endSide(B, dB, A, i, nA);
-      return hA.t < hB.t ? +1 : hA.t > hB.t ? -1 : 0;
-    };
     std::set<std::pair<int, int>> crossed;  // wire pairs reported
-    for (auto& [e, list] : onEdge) {
-      auto before = [&](std::pair<int, int> a, std::pair<int, int> c) {
-        const Hit& hA = laid[a.first].hits[a.second];
-        const Hit& hB = laid[c.first].hits[c.second];
-        int dB = hA.uLeft == hB.uLeft ? +1 : -1;
-        int f = side(a.first, a.second, +1, c.first, c.second, dB, 0);
-        int bk = side(a.first, a.second, -1, c.first, c.second, -dB, 0);
-        if (f != 0 && bk != 0 && f != bk) {
-          int wa = laid[a.first].wire, wb = laid[c.first].wire;
-          if (wires[wa].net != wires[wb].net && crossed.insert(std::minmax(wa, wb)).second) {
-            Violation v;
-            v.kind = Violation::Kind::Crossing;
-            v.wireA = wa;
-            v.wireB = wb;
-            v.layer = m.layer;
-            v.edge = e;
-            v.pos = (crossPt(hA) + crossPt(hB)) * 0.5;
-            violations.push_back(v);
-          }
-          return hA.t < hB.t;
-        }
-        int r = f != 0 ? f : bk;
-        if (r != 0 && (r > 0) != (hA.t < hB.t) && std::getenv("XR_TOPO_DEBUG")) {
-          const Edge& E = m.edges[e];
-          std::println(stderr, "order against geometry on layer {} edge {} ({:.3f},{:.3f})-({:.3f},{:.3f}): {} (t {:.3f}, {}/{}) vs {} (t {:.3f}, {}/{}): fwd {} back {}",
-                       int(m.layer), e, m.verts[E.v[0]].p.x / 1e6, m.verts[E.v[0]].p.y / 1e6, m.verts[E.v[1]].p.x / 1e6, m.verts[E.v[1]].p.y / 1e6,
-                       b.nets[wires[laid[a.first].wire].net].name, hA.t, a.second, laid[a.first].hits.size(),
-                       b.nets[wires[laid[c.first].wire].net].name, hB.t, c.second, laid[c.first].hits.size(), f, bk);
-        }
-        return r != 0 ? r > 0 : hA.t < hB.t;
-      };
-      for (size_t k = 1; k < list.size(); ++k)  // insertion sort: the order is pairwise, not a key
-        for (size_t q = k; q > 0 && before(list[q], list[q - 1]); --q) std::swap(list[q], list[q - 1]);
-    }
+    for (auto& [e, list] : onEdge) orderOnEdge(*this, b, m, laid, e, list, 1, crossed);
     // The crossing records, in edge order; the wires' lists in path order.
     std::vector<std::vector<int>> wireCross(laid.size());
     for (size_t k = 0; k < laid.size(); ++k) wireCross[k].assign(laid[k].hits.size(), -1);
