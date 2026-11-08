@@ -3,6 +3,7 @@
 // fragments with the wires attached to them, editing wires by their markers, manual routing, vias and
 // the ruler — with TopoR's mouse conventions.
 #include <QElapsedTimer>
+#include <QImage>
 #include <QWidget>
 #include <functional>
 #include <optional>
@@ -33,9 +34,12 @@ class BoardView : public QWidget {
   bool onlyActiveLayer() const;
   bool isRouting() const { return routing_; }
   topo::Push freestylePush() const { return push_; }
-  // Frame times of the rendering (xrtopor --render-bench): the whole board, zoomed in, panned, the cursor moved
-  // with the ruler (a frame of the tools only); `frames` of each, painted at once. A line per series.
+  // Frame times of the rendering (xrtopor --render-bench): the whole board and zoomed in (drawn anew), panned (the
+  // picture moved), the cursor moved with the ruler (the tools only); `frames` of each, painted at once.
   QString benchmark(int frames);
+  // The board's picture is drawn anew (an edit, the selection, the display settings); update() alone repaints only
+  // what is drawn over it (the tools, the handles, the route being laid) and pans it.
+  void refresh();
 
  public slots:
   void setMode(Mode m);
@@ -158,6 +162,11 @@ class BoardView : public QWidget {
   bool layerVisible(LayerId l) const;
 
   void drawBoard(QPainter& p);
+  // The board's picture (background, grid, drawBoard), kept between frames: drawn anew when dirty or zoomed, moved
+  // when panned by whole pixels (the strips uncovered drawn), else used as it is.
+  void updateCache();
+  void paintCache(const QRect& area);  // the part `area` (in the widget's pixels) of the picture
+  bool seen(const BBox& bb) const { return bb.intersects(cull_); }  // within the part being drawn
   void drawLayer(QPainter& p, LayerId l);
   void drawGrid(QPainter& p);
   void drawVias(QPainter& p);
@@ -201,6 +210,11 @@ class BoardView : public QWidget {
   RouteAngle angle_ = RouteAngle::Free;
   Vec2 center_;
   double scale_ = 1e-5;  // px per nm
+  QImage cache_;               // the board's picture (updateCache)
+  bool dirty_ = true;          // drawn anew at the next frame
+  Vec2 cacheCenter_;           // the view it was drawn for
+  double cacheScale_ = 0;
+  BBox cull_{-1e300, -1e300, 1e300, 1e300};  // the world's part being drawn, with a margin: what is outside is skipped
   QPointF lastMouse_;
   Vec2 cursor_;
   bool panning_ = false;

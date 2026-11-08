@@ -826,7 +826,7 @@ TEST(Gui, ZipAxisAndFlexFixDrawn) {
   const QColor bg = f.doc.color("background", 0x030b10);
   auto isBg = [&](QColor c) { return std::abs(c.red() - bg.red()) + std::abs(c.green() - bg.green()) + std::abs(c.blue() - bg.blue()) < 40; };
   auto grab = [&] {
-    f.view.update();
+    f.view.refresh();
     QTest::qWait(10);
     return f.view.grab().toImage();
   };
@@ -1831,7 +1831,7 @@ TEST(Gui, ComponentBounds) {
   EXPECT_FALSE(doc.display().flag("showCompsBound", false));
   EXPECT_FALSE(edgeIsBound());
   doc.display().show["showCompsBound"] = true;
-  view.update();
+  view.refresh();
   QTest::qWait(10);
   EXPECT_TRUE(edgeIsBound());
   if (const char* dir = std::getenv("XR_SHOT_DIR")) {
@@ -1839,6 +1839,7 @@ TEST(Gui, ComponentBounds) {
     view.grab().save(QString(dir) + "/bounds.png");
   }
   doc.display().show["showComponents"] = false;
+  doc.displayChanged();
   EXPECT_FALSE(edgeIsBound());
 }
 
@@ -2474,7 +2475,7 @@ TEST(Gui, MaskLayerShowsDetails) {
   QRgb bg = QColor(f.doc.color("background", 0x030b10)).rgb();
   auto at = [&](const Pad& p) {
     f.look(p.pos.v(), 10);
-    f.view.update();
+    f.view.refresh();
     QTest::qWait(10);
     return f.view.grab().toImage().pixel(f.at(p.pos.v()) + QPoint(int(f.scale * mmToNm(0.9)), 0));  // in the ring
   };
@@ -2887,7 +2888,7 @@ TEST(Gui, MechanicalLayerActive) {
   f.view.show();
   f.look(at(20, 10), 20);
   auto pixel = [&] {
-    f.view.update();
+    f.view.refresh();
     QTest::qWait(10);
     return f.view.grab().toImage().pixelColor(f.at(at(20, 10)));
   };
@@ -2915,4 +2916,44 @@ TEST(Gui, MechanicalLayerActive) {
   QTest::mouseClick(&f.view, Qt::LeftButton, {}, f.at(at(10, 10)));
   ASSERT_TRUE(f.view.isRouting());
   EXPECT_EQ(f.doc.activeLayer(), top);
+}
+
+// The board's picture is kept between frames: panned, it is moved and the strips uncovered drawn; what comes out is
+// the picture drawn anew (to a level of a pixel's colour, the antialiasing of a shape cut at a strip's edge).
+TEST(Gui, PannedPictureAsDrawnAnew) {
+  Fixture f("topor/Example_04/Arcs_master.pcb");
+  f.view.show();
+  f.view.fitBoard();
+  f.view.zoomBy(3);
+  auto grab = [&] {
+    QTest::qWait(5);
+    return f.view.grab().toImage().convertToFormat(QImage::Format_RGB32);
+  };
+  const QImage before = grab();
+  const QPoint mid(400, 300);
+  QTest::mousePress(&f.view, Qt::MiddleButton, {}, mid);
+  QPoint at = mid;
+  for (QPoint step : {QPoint(37, 0), QPoint(0, -23), QPoint(-11, 19), QPoint(5, 5)}) {
+    at += step;
+    moveTo(f.view, at, Qt::MiddleButton);
+    grab();
+  }
+  QTest::mouseRelease(&f.view, Qt::MiddleButton, {}, at);
+  const QImage moved = grab();
+  EXPECT_NE(moved, before) << "panned";
+  f.view.refresh();
+  const QImage fresh = grab();
+  ASSERT_EQ(moved.size(), fresh.size());
+  int off = 0;
+  for (int y = 0; y < fresh.height(); ++y)
+    for (int x = 0; x < fresh.width(); ++x) {
+      const QRgb u = moved.pixel(x, y), v = fresh.pixel(x, y);
+      if (std::abs(qRed(u) - qRed(v)) > 2 || std::abs(qGreen(u) - qGreen(v)) > 2 || std::abs(qBlue(u) - qBlue(v)) > 2)
+        ++off;
+    }
+  EXPECT_EQ(off, 0) << "pixels unlike the picture drawn anew";
+  if (const char* dir = std::getenv("XR_SHOT_DIR")) {
+    moved.save(QString(dir) + "/panned.png");
+    fresh.save(QString(dir) + "/fresh.png");
+  }
 }

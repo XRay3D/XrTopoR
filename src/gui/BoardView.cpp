@@ -13,6 +13,7 @@
 #include <QPainterPath>
 #include <QWheelEvent>
 #include <algorithm>
+#include <cstring>
 #include <bit>
 #include <cmath>
 #include <map>
@@ -44,16 +45,16 @@ BoardView::BoardView(Document* doc, QWidget* parent) : QWidget(parent), doc_(doc
     fitBoard();
     autoFit_ = true;
   });
-  connect(doc_, &Document::boardChanged, this, qOverload<>(&QWidget::update));
-  connect(doc_, &Document::selectionChanged, this, qOverload<>(&QWidget::update));
+  connect(doc_, &Document::boardChanged, this, &BoardView::refresh);
+  connect(doc_, &Document::selectionChanged, this, &BoardView::refresh);
   connect(doc_, &Document::layersChanged, this, [this] {
     // The 45° routing mode follows «Привязка к углу» of the display settings.
     if (doc_->hasBoard() && doc_->display().snapToAngle != (angle_ == RouteAngle::Deg45))
       setRouteAngle(doc_->display().snapToAngle ? RouteAngle::Deg45 : RouteAngle::Free);
     emit viewChanged();
-    update();
+    refresh();
   });
-  connect(doc_, &Document::drcChanged, this, qOverload<>(&QWidget::update));
+  connect(doc_, &Document::drcChanged, this, &BoardView::refresh);
 }
 
 // ---------------------------------------------------------------- view transform
@@ -67,14 +68,14 @@ Vec2 BoardView::toWorld(QPointF s) const {
 }
 
 void BoardView::fitBoard() {
-  if (!doc_->hasBoard()) { update(); return; }
+  if (!doc_->hasBoard()) { refresh(); return; }
   pushView();
   BBox bb = doc_->board()->bbox();
-  if (!bb.valid()) { center_ = {}; scale_ = 1e-5; update(); return; }
+  if (!bb.valid()) { center_ = {}; scale_ = 1e-5; refresh(); return; }
   bb = bb.inflated(2 * kNmPerMm);
   center_ = bb.center();
   scale_ = std::min(width() / bb.width(), height() / bb.height());
-  update();
+  refresh();
 }
 
 void BoardView::fitAll() {
@@ -92,7 +93,7 @@ void BoardView::fitAll() {
   bb = bb.inflated(2 * kNmPerMm);
   center_ = bb.center();
   scale_ = std::min(width() / bb.width(), height() / bb.height());
-  update();
+  refresh();
 }
 
 QString BoardView::benchmark(int frames) {
@@ -116,11 +117,11 @@ QString BoardView::benchmark(int frames) {
                .arg(ms.back(), 0, 'f', 2);
   };
   fitAll();
-  series("whole", [](int) {});
+  series("whole", [&](int) { dirty_ = true; });
   const Vec2 c0 = center_;
   scale_ *= 4;
-  series("zoom4", [](int) {});
-  series("pan", [&](int i) { center_ = c0 + Vec2{double(i % 25) * 20 / scale_, 0}; });
+  series("zoom4", [&](int) { dirty_ = true; });
+  series("pan", [&](int i) { center_ = c0 + Vec2{double(i % 25) * 20 / scale_, double(i % 25) * 7 / scale_}; });
   center_ = c0;
   setMode(Mode::Measure);
   const QPointF mid(width() / 2.0, height() / 2.0);
@@ -141,20 +142,20 @@ QString BoardView::benchmark(int frames) {
 void BoardView::centerAtCursor() {
   pushView();
   center_ = cursor_;
-  update();
+  refresh();
 }
 
 void BoardView::centerOn(Vec2 p, double widthMm) {
   pushView();
   center_ = p;
   if (widthMm > 0) scale_ = width() / (widthMm * kNmPerMm);
-  update();
+  refresh();
 }
 
 void BoardView::zoomBy(double factor) {
   pushView();
   scale_ = std::clamp(scale_ * factor, 1e-7, 1e-2);
-  update();
+  refresh();
 }
 
 void BoardView::resizeEvent(QResizeEvent*) {
@@ -166,7 +167,7 @@ void BoardView::resizeEvent(QResizeEvent*) {
       scale_ = std::min(width() / bb.width(), height() / bb.height());
     }
   }
-  update();
+  refresh();
 }
 
 // ---------------------------------------------------------------- layers / picking
@@ -337,6 +338,99 @@ static QColor brighter(QColor c, int rate) {
   return QColor(up(c.red()), up(c.green()), up(c.blue()), c.alpha());
 }
 
+// Boxes that surely hold what is drawn of an item (for skipping what lies outside the part drawn).
+static BBox around(Vec2 c, double h) { return {c.x - h, c.y - h, c.x + h, c.y + h}; }
+static BBox trackBox(const Track& t) {
+  const double h = double(t.width) / 2;
+  if (t.mid)
+    if (ArcGeom g = ArcGeom::fromThreePoints(t.a.v(), t.mid->v(), t.b.v()); g.valid) return around(g.center, g.radius + h);
+  BBox bb = around(t.a.v(), h);
+  bb.add(around(t.b.v(), h));
+  return bb;
+}
+static BBox padBox(const Pad& p) {
+  double h = std::max<double>(std::max(p.shape.w, p.shape.h), p.drill);
+  for (Vec2 q : p.shape.poly) h = std::max(h, 2 * std::max(std::abs(q.x), std::abs(q.y)));
+  return around(p.pos.v(), h);  // (twice the half size: a pad's shape on another layer may be larger)
+}
+static BBox textBounds(const Board& b, const Text& t) {
+  BBox bb;
+  for (Vec2 v : b.textBox(t)) bb.add(v);
+  return bb;
+}
+static BBox graphicBox(const Graphic& g) { return g.bbox().inflated(double(g.width) / 2); }
+
+void BoardView::refresh() {
+  dirty_ = true;
+  update();
+}
+
+// Moves the picture by (dx, dy) pixels in place; what is uncovered keeps its old pixels.
+static void scrollImage(QImage& img, int dx, int dy) {
+  const int w = img.width(), h = img.height(), bpl = int(img.bytesPerLine());
+  const int n = w - std::abs(dx);
+  uchar* bits = img.bits();
+  auto row = [&](int y) {
+    uchar* to = bits + qsizetype(y) * bpl;
+    const uchar* from = bits + qsizetype(y - dy) * bpl;
+    std::memmove(to + std::max(dx, 0) * 4, from + std::max(-dx, 0) * 4, size_t(n) * 4);
+  };
+  if (dy > 0)
+    for (int y = h - 1; y >= dy; --y) row(y);
+  else
+    for (int y = 0; y < h + dy; ++y) row(y);
+}
+
+void BoardView::paintCache(const QRect& area) {
+  QPainter p(&cache_);
+  p.setClipRect(area);
+  // Whatever may reach into the area: the drawing's pens, the labels and markers drawn in pixels.
+  const double margin = 64 / scale_;
+  Vec2 a = toWorld(area.topLeft()), b = toWorld(area.bottomRight() + QPoint(1, 1));
+  cull_ = BBox{std::min(a.x, b.x), std::min(a.y, b.y), std::max(a.x, b.x), std::max(a.y, b.y)}.inflated(margin);
+  p.fillRect(area, doc_->color("background", 0x030b10));
+  {
+    ProfScope ps("paint.grid");
+    drawGrid(p);
+  }
+  p.setRenderHint(QPainter::Antialiasing, true);
+  drawBoard(p);
+  cull_ = BBox{-1e300, -1e300, 1e300, 1e300};
+}
+
+void BoardView::updateCache() {
+  const qreal dpr = devicePixelRatioF();
+  const QSize dev = size() * dpr;
+  bool full = dirty_ || cache_.size() != dev || cache_.devicePixelRatio() != dpr || cacheScale_ != scale_;
+  if (!full && center_ == cacheCenter_) return;
+  ProfScope ps("paint.board");
+  if (!full) {
+    // Panned: by whole device pixels the picture moves and the strips uncovered are drawn.
+    const Vec2 d = (cacheCenter_ - center_) * (scale_ * dpr);
+    const double rx = std::round(d.x), ry = std::round(d.y);
+    if (std::abs(d.x - rx) > 1e-3 || std::abs(d.y - ry) > 1e-3 || std::abs(rx) >= dev.width() / 2 ||
+        std::abs(ry) >= dev.height() / 2) {
+      full = true;
+    } else {
+      const int dx = int(rx), dy = int(ry);
+      center_ = cacheCenter_ - Vec2{rx, ry} * (1 / (scale_ * dpr));  // exactly the pixels moved
+      scrollImage(cache_, dx, dy);
+      cacheCenter_ = center_;
+      // The strips in the widget's pixels (the device's divided by dpr, rounded outwards).
+      const int sx = int(std::ceil(std::abs(dx) / dpr)) + 1, sy = int(std::ceil(std::abs(dy) / dpr)) + 1;
+      if (dx) paintCache(dx > 0 ? QRect(0, 0, sx, height()) : QRect(width() - sx, 0, sx, height()));
+      if (dy) paintCache(dy > 0 ? QRect(0, 0, width(), sy) : QRect(0, height() - sy, width(), sy));
+      return;
+    }
+  }
+  if (cache_.size() != dev) cache_ = QImage(dev, QImage::Format_ARGB32_Premultiplied);
+  cache_.setDevicePixelRatio(dpr);
+  paintCache(rect());
+  cacheCenter_ = center_;
+  cacheScale_ = scale_;
+  dirty_ = false;
+}
+
 void BoardView::paintEvent(QPaintEvent*) {
   QPainter p(this);
   if (!doc_->hasBoard()) {
@@ -344,13 +438,9 @@ void BoardView::paintEvent(QPaintEvent*) {
     return;
   }
   ProfScope frame("paint");
-  p.fillRect(rect(), doc_->color("background", 0x030b10));
-  {
-    ProfScope ps("paint.grid");
-    drawGrid(p);
-  }
+  updateCache();
+  p.drawImage(QPointF(0, 0), cache_);
   p.setRenderHint(QPainter::Antialiasing, true);
-  drawBoard(p);
   ProfScope ps("paint.tools");
   drawOverlay(p);
   drawTools(p);
@@ -589,7 +679,8 @@ void BoardView::drawLayer(QPainter& p, LayerId l) {
     if (d.flag("showWires") && showDetails) {
       ProfScope ps("layer.tracks");
       for (auto& t : b.tracks)
-        if (t.layer == l) drawTrack(p, t, netColor(t.net, d.colorizeWire).value_or(t.locked ? fixColor : details));
+        if (t.layer == l && seen(trackBox(t)))
+          drawTrack(p, t, netColor(t.net, d.colorizeWire).value_or(t.locked ? fixColor : details));
       // The clasps («замки») of the zipped sections: a bar across the pair at each end of its axis.
       p.setPen(QPen(details.lighter(170), 2));
       for (const ZippedWire& z : b.zips) {
@@ -623,7 +714,7 @@ void BoardView::drawLayer(QPainter& p, LayerId l) {
       bool special = d.flag("throughPad", false);
       QColor through = doc_->color("clrThroughPads", 0xc0c0c0);
       for (auto& pad : b.pads) {
-        if (!pad.onLayer(l)) continue;
+        if (!pad.onLayer(l) || !seen(padBox(pad))) continue;
         if (pad.component >= 0 && !componentVisible(pad.component)) continue;
         QColor c = special && pad.drill > 0 ? through : padColor;
         drawPad(p, pad, l, netColor(pad.net, d.colorizePad).value_or(c));
@@ -632,7 +723,7 @@ void BoardView::drawLayer(QPainter& p, LayerId l) {
     if (d.flag("showTexts") && showDetails) {
       ProfScope ps("layer.texts");
       for (auto& t : b.texts)
-        if (t.layer == l) drawText(p, t, details);
+        if (t.layer == l && seen(textBounds(b, t))) drawText(p, t, details);
     }
     return;
   }
@@ -644,13 +735,14 @@ void BoardView::drawLayer(QPainter& p, LayerId l) {
   if ((L.kind == LayerKind::Mask || L.kind == LayerKind::Paste) && showPads && groupPads)
   {
     for (auto& pad : b.pads)
-      if (pad.padstack >= 0 && (pad.component < 0 || componentVisible(pad.component))) drawPad(p, pad, l, padColor);
+      if (pad.padstack >= 0 && seen(padBox(pad)) && (pad.component < 0 || componentVisible(pad.component)))
+        drawPad(p, pad, l, padColor);
     // The vias' openings, as their type gives them.
     if (d.flag("showVias") && b.rules) {
       p.setPen(Qt::NoPen);
       p.setBrush(padColor);
       for (auto& v : b.vias)
-        if (Coord dia = viaDiameterOn(b, v, l); dia > 0) {
+        if (Coord dia = viaDiameterOn(b, v, l); dia > 0 && seen(around(v.pos.v(), double(dia)))) {
           double r = px(dia / 2.0);
           p.drawEllipse(toScreen(v.pos.v()), r, r);
         }
@@ -658,7 +750,9 @@ void BoardView::drawLayer(QPainter& p, LayerId l) {
   }
   if (!showDetails || (group == 0 && !d.flag("showTopMechDetails")) || (group == 2 && !d.flag("showBotMechDetails")))
     return;
-  auto draw = [&](const Graphic& g) { drawGraphic(p, g, details); };  // board contours are never filled
+  auto draw = [&](const Graphic& g) {  // board contours are never filled
+    if (seen(graphicBox(g))) drawGraphic(p, g, details);
+  };
   for (int ci = 0; ci < int(b.components.size()); ++ci)
     if (componentVisible(ci))
       for (auto& g : b.components[ci].graphics)
@@ -667,7 +761,7 @@ void BoardView::drawLayer(QPainter& p, LayerId l) {
     if (g.layer == l) draw(g);
   if (d.flag("showTexts"))
     for (auto& t : b.texts)
-      if (t.layer == l) drawText(p, t, details);
+      if (t.layer == l && seen(textBounds(b, t))) drawText(p, t, details);
 }
 
 void BoardView::drawText(QPainter& p, const Text& t, const QColor& c) {
@@ -753,7 +847,7 @@ void BoardView::drawVias(QPainter& p) {
   QColor through = doc_->color("clrThroughVias", 0x949494), fixed = doc_->color("clrFixedVias", 0x7070b8);
   bool showFixed = d.flag("fixedVia");
   for (auto& v : b.vias)
-    if (v.layers & vis) drawVia(p, v, netColor(v.net, d.colorizeVia).value_or(v.locked && showFixed ? fixed : through));
+    if (v.layers & vis && seen(around(v.pos.v(), double(v.diameter)))) drawVia(p, v, netColor(v.net, d.colorizeVia).value_or(v.locked && showFixed ? fixed : through));
 }
 
 void BoardView::drawLabels(QPainter& p) {
@@ -767,7 +861,7 @@ void BoardView::drawLabels(QPainter& p) {
     p.setPen(doc_->color("compsName", 0xffffff));
     if (px(0.6 * kNmPerMm) >= 3)
       for (int ci = 0; ci < int(b.components.size()); ++ci)
-        if (componentVisible(ci)) {
+        if (componentVisible(ci) && seen(around(b.components[ci].pos.v(), 0))) {
           QRectF r(toScreen(b.components[ci].pos.v()) - QPointF(60, 10), QSizeF(120, 20));
           p.drawText(r, Qt::AlignCenter, QString::fromStdString(b.components[ci].ref));
         }
@@ -777,7 +871,7 @@ void BoardView::drawLabels(QPainter& p) {
   if (!names && !nets) return;
   for (auto& pad : b.pads) {
     if (pad.component >= 0 && !componentVisible(pad.component)) continue;
-    if (!(pad.copper & visibleCopper())) continue;
+    if (!(pad.copper & visibleCopper()) || !seen(padBox(pad))) continue;
     double size = px(double(std::min(pad.shape.w, pad.shape.h)));
     if (size < 14) continue;
     f.setPixelSize(std::clamp(int(size / 3), 6, 14));
@@ -818,7 +912,7 @@ void BoardView::drawBoard(QPainter& p) {
   p.setBrush(doc_->color("background", 0x030b10));
   LayerMask vis = visibleCopper();
   for (auto& pad : b.pads)
-    if (pad.drill > 0 && (pad.copper & vis || !pad.copper)) {
+    if (pad.drill > 0 && (pad.copper & vis || !pad.copper) && seen(padBox(pad))) {
       double r = px(pad.drill / 2.0);
       if (pad.drillH > 0 && pad.drillH != pad.drill) {
         Shape s = Shape::rect(pad.pos.v(), double(pad.drill), double(pad.drillH), -degToRad(pad.angle),
@@ -830,7 +924,7 @@ void BoardView::drawBoard(QPainter& p) {
     }
   if (d.flag("showVias"))
     for (auto& v : b.vias)
-      if (v.layers & vis) {
+      if (v.layers & vis && seen(around(v.pos.v(), double(v.drill)))) {
         double r = px(v.drill / 2.0);
         if (r >= 0.5) p.drawEllipse(toScreen(v.pos.v()), r, r);
       }
@@ -869,6 +963,9 @@ void BoardView::drawBoard(QPainter& p) {
         bool listed = r::contains(d.netlineNets, b.nets[r.net].name);
         if (listed == d.hideFilteredNetlines) continue;
       }
+      BBox rb = around(r.a, 0);
+      rb.add(r.b);
+      if (!seen(rb)) continue;
       p.setPen(QPen(netColor(r.net, d.colorizeNetline).value_or(nl), 1));
       p.drawLine(toScreen(r.a), toScreen(r.b));
     }
@@ -897,7 +994,7 @@ void BoardView::drawBoard(QPainter& p) {
     QColor viaLit = brighter(doc_->color("clrThroughVias", 0x949494), rate);
     if (hn != kNoNet) {
       for (auto& t : b.tracks)
-        if (t.net == hn && layerVisible(t.layer)) drawTrack(p, t, lit(t.layer));
+        if (t.net == hn && layerVisible(t.layer) && seen(trackBox(t))) drawTrack(p, t, lit(t.layer));
       for (auto& v : b.vias)
         if (v.net == hn) drawVia(p, v, viaLit);
       for (auto& pad : b.pads)
@@ -953,6 +1050,7 @@ void BoardView::drawBoard(QPainter& p) {
     p.setPen(QPen(doc_->color("drcViolation", 0xffffff), 2));
     p.setBrush(Qt::NoBrush);
     for (auto& v : doc_->drc()) {
+      if (!seen(around(v.pos, 0))) continue;
       QPointF c = toScreen(v.pos);
       p.drawEllipse(c, 7, 7);
       p.drawLine(c + QPointF(-4, -4), c + QPointF(4, 4));
@@ -1193,7 +1291,7 @@ void BoardView::mousePressEvent(QMouseEvent* e) {
       break;
     }
   }
-  update();
+  refresh();
 }
 
 void BoardView::clickSelect(const Pick& pk, Qt::KeyboardModifiers mods) {
@@ -1474,7 +1572,7 @@ void BoardView::prevView() {
   scale_ = views_[size_t(viewPos_)].scale;
   --viewPos_;
   viewTimer_.invalidate();
-  update();
+  refresh();
 }
 
 void BoardView::nextView() {
@@ -1483,7 +1581,7 @@ void BoardView::nextView() {
   center_ = views_[size_t(viewPos_ + 1)].center;
   scale_ = views_[size_t(viewPos_ + 1)].scale;
   viewTimer_.invalidate();
-  update();
+  refresh();
 }
 
 void BoardView::mouseMoveEvent(QMouseEvent* e) {
@@ -1498,12 +1596,12 @@ void BoardView::mouseMoveEvent(QMouseEvent* e) {
     QPointF d = pos - lastMouse_;
     center_ -= Vec2{d.x() / scale_, d.y() / scale_};
     lastMouse_ = pos;
-    update();
+    update();  // (the board's picture is moved, not drawn anew)
     return;
   }
   if (frameStart_) {
     frameEnd_ = pos;
-    update();
+    update();  // (the frame is drawn over the board's picture)
     return;
   }
   if (drag_ != Drag::None && doc_->hasBoard()) {
@@ -1545,7 +1643,7 @@ void BoardView::mouseMoveEvent(QMouseEvent* e) {
   if (mode_ == Mode::Select && !panning_ && !frameStart_)
     setCursor(markerAt(pos) ? Qt::SizeAllCursor : Qt::ArrowCursor);
   if (routing_ || mode_ == Mode::Measure || (mode_ == Mode::Draw && !drawPts_.empty()) || (mode_ == Mode::Via && viaStart_))
-    update();
+    update();  // (the tools are drawn over the board's picture)
   lastMouse_ = pos;
 }
 
@@ -1581,7 +1679,7 @@ void BoardView::mouseReleaseEvent(QMouseEvent* e) {
     if (r.width() > 3 || r.height() > 3)
       selectInFrame(r, crossing, e->modifiers() & (Qt::ShiftModifier | Qt::ControlModifier));
     frameStart_.reset();
-    update();
+    refresh();
     return;
   }
   if (drag_ != Drag::None && e->button() == Qt::LeftButton) finishDrag();
@@ -1599,7 +1697,7 @@ void BoardView::wheelEvent(QWheelEvent* e) {
   scale_ = std::clamp(scale_ * f, 1e-7, 1e-2);
   Vec2 after = toWorld(e->position());
   center_ += before - after;
-  update();
+  refresh();
 }
 
 void BoardView::keyPressEvent(QKeyEvent* e) {
@@ -1660,7 +1758,7 @@ void BoardView::setMode(Mode m) {
     }
     case Mode::Text: emit status(tr("Создание надписи: щёлкните место надписи")); break;
   }
-  update();
+  refresh();
 }
 
 void BoardView::setRouteAngle(RouteAngle a) {
@@ -1672,7 +1770,7 @@ void BoardView::setRouteAngle(RouteAngle a) {
     doc_->displayChanged();
   }
   emit routeAngleChanged(a);
-  update();
+  refresh();
 }
 
 void BoardView::setRatsnestVisible(bool on) {
@@ -2071,7 +2169,7 @@ void BoardView::applyDrag() {
       break;
   }
   doc_->invalidate();
-  update();
+  refresh();
 }
 
 // ---------------------------------------------------------------- creation tools
@@ -2145,7 +2243,7 @@ void BoardView::drawClick(Vec2 w) {
     case DrawShape::Line: break;
   }
   if (need && drawPts_.size() >= need) finishShape();
-  update();
+  refresh();
 }
 
 namespace {
@@ -2237,12 +2335,12 @@ void BoardView::finishShape() {
   auto fig = figureOf(drawShape_, drawPts_);
   drawPts_.clear();
   if (fig.empty()) {
-    update();
+    refresh();
     return;
   }
   createShape(std::move(fig));
   if (!drawSticky_) setMode(Mode::Select);
-  update();
+  refresh();
 }
 
 void BoardView::createShape(std::vector<Graphic> fig) {
@@ -2377,7 +2475,7 @@ void BoardView::freestyleBy(Vec2 shift, double rotate) {
   fsLast_ += r.moved;
   if (r.blocked) emit status(tr("Перемещение ограничено зазорами: объекты, которые нельзя подтолкнуть"));
   doc_->invalidate();
-  update();
+  refresh();
 }
 
 void BoardView::finishDrag() {
@@ -2391,7 +2489,7 @@ void BoardView::finishDrag() {
     pasteBefore_.reset();
     dragBefore_.reset();
     emit status(tr("Вставлено"));
-    update();
+    refresh();
     return;
   }
   if (!dragMoved_) {
@@ -2428,7 +2526,7 @@ void BoardView::finishDrag() {
   fsByModel_ = fsByTracks_ = fsApart_ = false;
   dragBefore_.reset();
   doc_->setSelection(std::move(items), doc_->selectedComponents());
-  update();
+  refresh();
 }
 
 void BoardView::cancelDrag() {
@@ -2442,7 +2540,7 @@ void BoardView::cancelDrag() {
     doc_->invalidate();
     doc_->clearSelection();
     emit status(tr("Вставка отменена"));
-    update();
+    refresh();
     return;
   }
   if (dragMoved_ && dragBefore_) {
@@ -2455,7 +2553,7 @@ void BoardView::cancelDrag() {
   dragMoved_ = false;
   dragBefore_.reset();
   pendingClick_.reset();
-  update();
+  refresh();
 }
 
 void BoardView::changeTrackWidth() {
@@ -2481,7 +2579,7 @@ void BoardView::changeTrackWidth() {
   if (!w) return;
   if (routing_) {
     routeWidth_ = *w;
-    update();
+    refresh();
     return;
   }
   auto before = doc_->beginEdit();
@@ -2655,17 +2753,17 @@ void BoardView::cancelTool() {
     routeVias_.clear();
     pr_ = {};
     emit status(tr("Прокладка отменена"));
-    update();
+    refresh();
     return;
   }
   if (mode_ == Mode::Draw && !drawPts_.empty()) {
     drawPts_.clear();
-    update();
+    refresh();
     return;
   }
   if (mode_ == Mode::Via && viaStart_) {
     viaStart_.reset();
-    update();
+    refresh();
     return;
   }
   if (mode_ == Mode::Measure) setMode(measureReturn_);
@@ -2780,7 +2878,7 @@ void BoardView::routeAddPoint(Vec2 at, const Pick& pk) {
   // Clicking an item of the same net ends the route on it.
   if (pk.item && routeNet_ != kNoNet && itemNet(*doc_->board(), *pk.item) == routeNet_ && pk.item->type != ItemType::Track)
     finishRoute();
-  update();
+  refresh();
 }
 
 void BoardView::routeAddVia() {
@@ -2807,7 +2905,7 @@ void BoardView::routeAddVia() {
   routeWidth_ = b.trackWidth(routeNet_, routeLayer_);
   doc_->setActiveLayer(routeLayer_);
   updateRouteHint();
-  update();
+  refresh();
 }
 
 void BoardView::toggleLayer() {
@@ -2849,7 +2947,7 @@ void BoardView::changeLayer() {
   }
   doc_->commitEdit(before, tr("Изменить слой"));
   if (vias) emit status(tr("Добавлено переходов: %1").arg(vias));
-  update();
+  refresh();
 }
 
 void BoardView::straighten() {
@@ -2973,7 +3071,7 @@ void BoardView::paste() {
   dragBefore_ = doc_->beginEdit();
   placing_ = true;
   emit status(tr("Вставка: щёлкните, где разместить; Space — повернуть, Esc — отмена"));
-  update();
+  refresh();
 }
 
 void BoardView::invertSelection() {
@@ -3010,7 +3108,7 @@ void BoardView::viaKey() {
 void BoardView::routeUndoLast() {
   if (mode_ == Mode::Draw && !drawPts_.empty()) {
     drawPts_.pop_back();
-    update();
+    refresh();
     return;
   }
   if (routing_ && routePair_) {
@@ -3032,7 +3130,7 @@ void BoardView::routeUndoLast() {
     routeDir_ = (pr.b.v() - pr.a.v()).normalized();
   }
   updateRouteHint();
-  update();
+  refresh();
 }
 
 void BoardView::updateRouteHint() {
@@ -3073,7 +3171,7 @@ void BoardView::nextTarget() {
   if (!routing_) return;
   ++targetIndex_;
   updateRouteHint();
-  update();
+  refresh();
 }
 
 void BoardView::routeToTarget() {
@@ -3132,7 +3230,7 @@ void BoardView::toggleFlexFix() {
   }
   doc_->commitEdit(before, all ? tr("Снять гибкую фиксацию") : tr("Гибкая фиксация"), false);
   emit status((all ? tr("Гибкая фиксация снята, цепей: %1") : tr("Гибкая фиксация включена, цепей: %1")).arg(nets.size()));
-  update();
+  refresh();
 }
 
 void BoardView::toggleFix() {
@@ -3193,7 +3291,7 @@ void BoardView::finishRoute() {
   routeTracks_.clear();
   routeVias_.clear();
   emit status(tr("Проводник проложен"));
-  update();
+  refresh();
 }
 
 // ---------------------------------------------------------------- the differential pair laid by hand
@@ -3311,7 +3409,7 @@ void BoardView::pairStart(const Pick& pk) {
   routeHint_.clear();
   routeTarget_.reset();
   emit status(tr("Прокладка дифф. пары %1: щёлкните, где поставить замок").arg(QString::fromStdString(ds.name)));
-  update();
+  refresh();
 }
 
 void BoardView::pairAddPoint(Vec2 at, const Pick& pk) {
@@ -3321,7 +3419,7 @@ void BoardView::pairAddPoint(Vec2 at, const Pick& pk) {
     routeLast_ = at;
     routeDir_.reset();
     emit status(tr("Ведите пару; щелчок по контакту цепи пары — завершить, V — смена слоя, Enter — закончить"));
-    update();
+    refresh();
     return;
   }
   // A pad or via of the pair's nets: the clasp at the end of the last segment, the conductors to it and its partner.
@@ -3350,7 +3448,7 @@ void BoardView::pairAddPoint(Vec2 at, const Pick& pk) {
   }
   routeDir_ = dir;
   routeLast_ = at;
-  update();
+  refresh();
 }
 
 void BoardView::pairAddVia() {
@@ -3387,7 +3485,7 @@ void BoardView::pairAddVia() {
   routeTracks_.clear();
   pr_.fromP = viaP;
   pr_.fromN = viaN;
-  update();
+  refresh();
 }
 
 void BoardView::pairUndoLast() {
@@ -3413,7 +3511,7 @@ void BoardView::pairUndoLast() {
     routeLast_ = (pr_.fromP + pr_.fromN) * 0.5;
     routeDir_.reset();
   }
-  update();
+  refresh();
 }
 
 void BoardView::pairFinish(std::optional<std::pair<Vec2, Vec2>> endPads) {
@@ -3433,7 +3531,7 @@ void BoardView::pairFinish(std::optional<std::pair<Vec2, Vec2>> endPads) {
     pr_ = {};
     routeTracks_.clear();
     emit status(tr("Прокладка дифф. пары отменена"));
-    update();
+    refresh();
     return;
   }
   auto before = doc_->beginEdit();
@@ -3470,7 +3568,7 @@ void BoardView::pairFinish(std::optional<std::pair<Vec2, Vec2>> endPads) {
   pr_ = {};
   routeTracks_.clear();
   emit status(tr("Дифференциальная пара проложена"));
-  update();
+  refresh();
 }
 
 }  // namespace xr::gui
