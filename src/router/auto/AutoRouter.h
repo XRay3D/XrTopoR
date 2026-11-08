@@ -22,7 +22,10 @@ struct Options {
   double crossing = 3.0;          // what crossing a wire of another net costs on the plane, mm (it may cost a via)
   int passes = 3;                 // re-laying passes on the plane (every wire taken out and laid again)
   int layeredPasses = 4;          // re-laying passes with the layers known (crossings on other layers only, vias at a price)
-  double via = 3.0;               // the price of a via in those passes, mm
+  double via = 3.0;               // the price of a via in those passes, mm (one variant: these two prices)
+  int relayerings = 4;            // rounds of re-layering the whole board and laying again, while the vias fall
+  int variants = 1;               // > 1: as many variants over a grid of prices (crossing 1/3/8/20, via 3/8/20/50 mm) and seeds, in parallel
+  double viaWeight = 10.0;        // a via against length when the best variant is chosen, mm (TopoR's rule of thumb: 25)
   bool metric = true;             // F5, F6 and F7 on the model after the tracks are laid
   std::function<void(int done, int total, const std::string& stage)> progress;
   const std::atomic<bool>* cancel = nullptr;
@@ -36,6 +39,14 @@ struct Options {
   std::function<void(const Sketch&)> sketch;
 };
 
+struct VariantInfo {
+  double crossing = 0, via = 0;  // the prices, mm
+  unsigned seed = 0;
+  double length = 0;             // taut, on the plane, nm
+  int vias = 0, over = 0, failed = 0;
+  bool pareto = false;           // on the front of (failures, overflow, length, vias)
+};
+
 struct Result {
   int connections = 0, routed = 0, failed = 0;
   int crossings = 0;        // of wires of different nets on the plane
@@ -45,6 +56,8 @@ struct Result {
   double length = 0;        // of the tracks at the end, nm
   double seconds = 0;
   bool cancelled = false;
+  std::vector<VariantInfo> variants;
+  int chosen = -1;
   std::vector<std::string> log;
 };
 

@@ -138,7 +138,8 @@ Layering solveLayers(const LayerProblem& p, int restarts, unsigned seed) {
   best.conflicts = 1 << 30;
   for (int k = 0; k < std::max(1, restarts); ++k) {
     std::vector<int> x(static_cast<size_t>(p.vars));
-    for (int v = 0; v < p.vars; ++v) {
+    if (k == 0 && int(p.start.size()) == p.vars) x = p.start;
+    else for (int v = 0; v < p.vars; ++v) {
       std::vector<int> ok;
       for (int l = 0; l < p.layers; ++l)
         if ((s.allowed[size_t(v)] >> l) & 1) ok.push_back(l);

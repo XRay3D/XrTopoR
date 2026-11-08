@@ -23,6 +23,7 @@ struct LayeredPath {
 
 struct LayeredCosts {
   int layers = 2;
+  std::vector<LayerId> layerIds;  // the board layer of each layer index (the room of an edge is that layer's)
   double via = 3e6;  // a change of layer, nm of length
   double viaDiameter = 0;  // the via's copper: a change of layer at an edge needs that much room there on both layers
   std::function<double(int net)> viaOf;  // another net's via diameter (vias already on an edge); empty: viaDiameter

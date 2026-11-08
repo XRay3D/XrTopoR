@@ -41,6 +41,7 @@ struct RelayPath {
 struct RelayMode {
   double crossing = -1;  // < 0: another net's chord is never crossed (a layer's mesh); else what crossing one costs, nm
   int layers = 1;        // the rows an edge holds: its free length times this is its room
+  LayerMask routing = 0;  // the plane's layers: the room is that of each layer summed (a pad of one side no bar on the other)
 };
 std::optional<RelayPath> findRelay(const Topology& t, int wire, const std::vector<char>* avoid = nullptr, const std::vector<int>* absent = nullptr,
                                    bool squeeze = false, const RelayMode& mode = {});

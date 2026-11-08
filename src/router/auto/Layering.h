@@ -25,6 +25,7 @@ struct LayerProblem {
     uint32_t layers;  // the pad's layers: a via when the point is on none of them
   };
   std::vector<End> ends;
+  std::vector<int> start;  // a layering to start from (the first of the restarts); empty: random starts only
 };
 
 struct Layering {

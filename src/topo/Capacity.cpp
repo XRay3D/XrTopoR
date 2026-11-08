@@ -52,7 +52,7 @@ bool chooseNarrowing(const std::vector<double>& width, const std::vector<double>
   return true;
 }
 
-EdgeCapacity capacityOf(const Topology& t, const LayerMesh& m, int va, int vb, const std::vector<int>& ws, int along) {
+EdgeCapacity capacityOf(const Topology& t, const LayerMesh& m, int va, int vb, const std::vector<int>& ws, int along, LayerMask on) {
   EdgeCapacity c;
   const Vertex& U = m.verts[va];
   const Vertex& V = m.verts[vb];
@@ -65,7 +65,10 @@ EdgeCapacity capacityOf(const Topology& t, const LayerMesh& m, int va, int vb, c
   // A zone's ring vertex is a bare point (its polygon's rayExit from a point of its boundary is anything).
   if (ou.kind == Owner::Kind::Zone) c.reachU = 0;
   if (ov.kind == Owner::Kind::Zone) c.reachV = 0;
-  if (U.owner == V.owner) c.reachU = c.reachV = c.L / 2;  // inside one owner: no room for anybody else
+  const bool bareU = on && !(ou.layers & on), bareV = on && !(ov.layers & on);
+  if (bareU) c.reachU = 0;
+  if (bareV) c.reachV = 0;
+  if (U.owner == V.owner && !bareU) c.reachU = c.reachV = c.L / 2;  // inside one owner: no room for anybody else
   if (along >= 0 && !ws.empty() && t.wires[ws[0]].net != t.wires[along].net)
     c.reachU = c.reachV = c.L / 2;  // a wire runs along it: no room for another net across
   c.freeLen = c.L - c.reachU - c.reachV;
@@ -91,7 +94,7 @@ EdgeCapacity capacityOf(const Topology& t, const LayerMesh& m, int va, int vb, c
     // The crossing wire keeps off the owner's copper unless it is its own (its net's, or its pair's at a
     // clasp): own copper is transparent, the centre line may pass through the point itself.
     auto need = [&](int v, double reach, const Wire& w, double width) {
-      if (t.own(m, v, w)) return 0.0;
+      if (t.own(m, v, w) || (v == va ? bareU : bareV)) return 0.0;
       return reach + vertexClearance(t, m, v, w) + margin + width / 2.0;
     };
     for (int k = 0; k < n; ++k) {

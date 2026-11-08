@@ -121,18 +121,13 @@ std::optional<LayeredPath> findLayeredPath(const Topology& t, int wi, const std:
     }
     ws.insert(ws.begin() + before, wi);
     const int along = E.along >= 0 && layerOf(E.along, 0) == l ? E.along : -1;
-    const EdgeCapacity cap = capacityOf(t, m, E.v[0], E.v[1], ws, along);
+    const LayerMask on = l < int(c.layerIds.size()) ? LayerMask(1) << c.layerIds[size_t(l)] : 0;
+    const EdgeCapacity cap = capacityOf(t, m, E.v[0], E.v[1], ws, along, on);
     // The vias already on the edge (a wire changing layer at its crossing) take their width beyond the wire's.
     const double vias = viaExtra(e);
     it->second = cap.cls < 3 && cap.deficit <= 0 && cap.slack >= vias;
     slackOf[{e, gap, l}] = cap.slack - vias;
     return it->second;
-  };
-  // A via at the gap: the wire's room on both layers and the via's width beyond the wire's.
-  auto viaRoom = [&](int e, int gap, int l0, int l1) {
-    if (!room(e, gap, l0) || !room(e, gap, l1)) return false;
-    const double extra = c.viaDiameter - double(w.width);
-    return slackOf[{e, gap, l0}] >= extra && slackOf[{e, gap, l1}] >= extra;
   };
   std::unordered_map<int, EdgeCapacity> capCache;
   auto pointAt = [&](int e, int gap) {
@@ -144,6 +139,40 @@ std::optional<LayeredPath> findLayeredPath(const Topology& t, int wi, const std:
     const int n = int(E.cross.size());
     const double f = cap.L > 0 && cap.freeLen > 0 ? (cap.reachU + cap.freeLen * (gap + 1.0) / (n + 2)) / cap.L : (gap + 1.0) / (n + 2);
     return U + (V - U) * f;
+  };
+  // The vias of the other wires (where their chords change layer), at their crossings' points.
+  struct OtherVia {
+    Vec2 p;
+    double r;
+  };
+  std::vector<OtherVia> otherVias;
+  for (int x = 0; x < int(t.wires.size()); ++x) {
+    if (x == wi) continue;
+    const Wire& X = t.wires[size_t(x)];
+    for (int i = 0; i < int(X.cross.size()); ++i) {
+      if (layerOf(x, i) == layerOf(x, i + 1)) continue;
+      const Crossing& xc = t.crossings[size_t(X.cross[size_t(i)])];
+      const Edge& E = m.edges[size_t(xc.edge)];
+      auto [it, fresh] = capCache.try_emplace(xc.edge);
+      if (fresh) it->second = edgeCapacity(t, m, xc.edge);
+      const EdgeCapacity& cap = it->second;
+      const int n = int(E.cross.size());
+      const int k = int(r::find(E.cross, X.cross[size_t(i)]) - E.cross.begin());
+      const Vec2 U = m.verts[size_t(E.v[0])].p, V = m.verts[size_t(E.v[1])].p;
+      const double f = cap.L > 0 && cap.freeLen > 0 ? (cap.reachU + cap.freeLen * (k + 1.0) / (n + 1)) / cap.L : (k + 1.0) / (n + 1);
+      otherVias.push_back({U + (V - U) * f, (c.viaOf ? c.viaOf(X.net) : c.viaDiameter) / 2});
+    }
+  }
+  // A via at the gap: the wire's room on both layers and the via's width beyond the wire's; and no other wire's via
+  // nearer than the two radii and the clearance (a via is a disc, not a place on one edge).
+  auto viaRoom = [&](int e, int gap, int l0, int l1) {
+    if (!room(e, gap, l0) || !room(e, gap, l1)) return false;
+    const double extra = c.viaDiameter - double(w.width);
+    if (slackOf[{e, gap, l0}] < extra || slackOf[{e, gap, l1}] < extra) return false;
+    const Vec2 p = pointAt(e, gap);
+    for (const OtherVia& ov : otherVias)
+      if ((ov.p - p).len() < ov.r + c.viaDiameter / 2 + double(w.clr)) return false;
+    return true;
   };
   auto usable = [&](int tri) {
     if (tri < 0) return false;

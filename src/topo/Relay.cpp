@@ -292,7 +292,18 @@ std::optional<RelayPath> findRelay(const Topology& t, int wi, const std::vector<
     });
     it->second.ok = c.cls < 3 && (squeeze ? (!atWall || c.deficit <= 0) : (c.deficit <= 0 && !c.narrowed));
     // The combined plane: the wires across the edge go to `layers` rows; it is open while they would fit.
-    if (mode.layers > 1) it->second.ok = c.freeLen > 0 && c.need <= mode.layers * c.freeLen;
+    if (mode.layers > 1) {
+      if (mode.routing) {
+        // The room of each layer (its own copper only), summed, against what the wires take beside the ends' copper.
+        const double wiresNeed = c.need - c.reachU - c.reachV;
+        double room = 0;
+        for (LayerId l = 0; l < 64; ++l)
+          if ((mode.routing >> l) & 1) room += std::max(0.0, capacityOf(t, m, E.v[0], E.v[1], ws, isAbsent(E.along) ? -1 : E.along, LayerMask(1) << l).freeLen);
+        it->second.ok = room > 0 && wiresNeed <= room;
+      } else {
+        it->second.ok = c.freeLen > 0 && c.need <= mode.layers * c.freeLen;
+      }
+    }
     if (!it->second.ok) { if (c.cls >= 3) ++dbg[2]; else if (c.deficit > 0) ++dbg[3]; else if (c.narrowed) ++dbg[4]; if (atWall) ++dbg[5]; }
     if (squeeze) it->second.penalty = kSqueeze * std::max(0.0, c.deficit) + (c.narrowed ? kSqueeze * 10000 : 0);
     it->second.p = pointOn(m, E, slotOf(c, gap).mid(), c.L);

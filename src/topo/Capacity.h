@@ -35,7 +35,9 @@ double vertexClearance(const Topology& t, const LayerMesh& m, int v, const Wire&
 EdgeCapacity edgeCapacity(const Topology& t, const LayerMesh& m, int e);
 // The capacity an edge from vertex va to vb would have with these wires across it, in this order, and
 // `along` (a wire or -1) running along it.
-EdgeCapacity capacityOf(const Topology& t, const LayerMesh& m, int va, int vb, const std::vector<int>& wires, int along);
+// `on` (the autorouter's combined plane): the copper of the layers in the mask only — an end owner with none there
+// is a bare point (no reach, no clearance; a pad of the other side is no bar to a wire on this one).
+EdgeCapacity capacityOf(const Topology& t, const LayerMesh& m, int va, int vb, const std::vector<int>& wires, int along, LayerMask on = 0);
 // Writes it into the edge (freeLen, need, cls) and the crossings (width).
 void refreshEdge(Topology& t, LayerMesh& m, int e);
 // The slot of crossing k on edge e: [lo, hi] along u -> v, and its midpoint (the sketch point).
