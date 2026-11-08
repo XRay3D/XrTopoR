@@ -35,7 +35,7 @@ void usage() {
       "  info       <board>                        summary of a board\n"
       "  convert    <board> <out.kicad_pcb|.dsn|.ses>\n"
       "  drc        <board> [--max N]               design rule check\n"
-      "  route      <board> [-o out] [--passes N] [--via-cost MM] [--no-vias] [--layers 0,1] [--nets a,b] [--keep] [--soft] [--no-optimize] [--no-refine] [--no-fill] [--svg out.svg]\n"
+      "  route      <board> [-o out] [--passes N] [--via-cost MM] [--no-vias] [--layers 0,1] [--nets a,b] [--keep] [--soft] [--buses] [--no-optimize] [--no-refine] [--no-fill] [--svg out.svg]\n"
       "  import-ses <board> <routes.ses> -o <out>\n"
       "  gerber     <board> <outdir>\n"
       "  svg        <board> <out.svg>\n"
@@ -122,6 +122,7 @@ int cmdRoute(Board& b, const Args& a) {
     for (auto part : v::split(p, ',')) ro.copperIndices.push_back(std::stoi(std::string(part.begin(), part.end())));
   ro.ripupExisting = !a.flag("--keep");
   ro.softPlanarity = a.flag("--soft");
+  ro.buses = a.flag("--buses");
   if (a.flag("--no-optimize")) ro.optimizeIterations = 0;
   ro.refine = !a.flag("--no-refine");
   ro.fillZones = !a.flag("--no-fill");

@@ -28,6 +28,7 @@
 #include "core/Connectivity.h"
 #include "core/ZoneFill.h"
 #include "drc/Drc.h"
+#include "router/topo/Buses.h"
 #include "router/topo/Optimizer.h"
 #include "router/topo/Realizer.h"
 #include "router/topo/Refine.h"
@@ -50,6 +51,7 @@ static const bool kSites = std::getenv("XR_SITES") != nullptr;    // pre-seeded 
 // not converge while the mesh changes under it and the via count explodes (260 vs 214). Opt-in.
 static const bool kEdgeVia = std::getenv("XR_EDGEVIA") != nullptr;
 constexpr double kOffLayer = 10 * kUnit;      // each edge crossed on a layer the net is not assigned to
+constexpr double kOffBus = 2 * kUnit;         // each edge crossed by a bus's net off the bus's layer
 constexpr double kNarrowCost = 0.5 * kUnit;  // a crossing at the minimum width («подрезка»)
 
 // rows x cols table indexed as grid[r, c]; the columns grow with the mesh (vias split triangles).
@@ -252,6 +254,8 @@ class Router {
   double width_ = 0, clr_ = 0, viaR_ = 0, viaClr_ = 0;
   std::vector<double> widthL_, widthMinL_, clrL_;  // the net's width (nominal, minimum) and clearance per layer
   LayerMask assigned_ = 0;             // «Назначение цепей на слои» of the net (0: any layer)
+  LayerId busLayer_ = -1;              // the layer of the net's bus (-1: in no bus)
+  std::vector<LayerId> busLayerOf_;    // per net
   Coord viaDia_ = 0, viaDrill_ = 0;
   std::vector<int> treeStamp_;
   int stamp_ = 0;
@@ -465,6 +469,12 @@ class Router {
   int countOverflow() const;
   // Realises the topology into tracks/vias appended to the board; returns wire index per new track.
   std::vector<int> realizeAll();
+  // The places a wire's sketch passes: its ends and its crossings.
+  std::vector<Vec2> sketchPoints(const Wire& w) const;
+  // Hands the progress to RouterOptions::sketch: the topology laid (`realised` false: no sooner than the interval
+  // after the last), or the board's tracks as they are.
+  void showSketch(const std::string& stage, bool realised);
+  std::chrono::steady_clock::time_point lastSketch_{};
   // Geometric check of the realised tracks; returns the wires involved and the spots.
   struct Conflict {
     Vec2 pos;
@@ -586,6 +596,24 @@ void Router::setup() {
     jobs_.push_back(std::move(j));
   }
   r::sort(jobs_, {}, &NetJob::estLen);
+  // The buses first, each on its layer (see Buses.h); the rest after them, the shorter first. Measured
+  // 2026-11-08 (via cost 2.8-3.3 mm, six runs each, medians): a bus between connectors crossed by 32 nets 157 -> 67
+  // vias, 3852 -> 3601 mm, 15 -> 8 s; but on the dense boards the bus laid first walls the others off (Arcs_master:
+  // nine buses, 29 -> 100 places of violations, 136 -> 185 vias; through-hole buses alone, or of 8 nets and more,
+  // 73-123; the order alone 79, the layer alone 178; MinVia_master one bus, about even). So a choice: the
+  // «Автотрассировка» window searches variants with the buses and without.
+  busLayerOf_.assign(b_.nets.size(), -1);
+  if (o_.buses && NL_ > 1) {
+    std::vector<int> nets;
+    for (auto& j : jobs_) nets.push_back(j.net);
+    for (const Bus& bus : findBuses(b_, {layers_.begin(), layers_.end()}, nets)) {
+      for (int n : bus.nets) busLayerOf_[size_t(n)] = bus.layer;
+      res_.log.push_back(std::format("bus of {} nets ({}...) on {}, crossed by {} nets, {}", bus.nets.size(), b_.nets[size_t(bus.nets.front())].name,
+                                     bus.layer >= 0 ? b_.layers[bus.layer].name : std::string("no one layer"), bus.crossedBy,
+                                     bus.through ? "through-hole" : "planar pads"));
+    }
+    r::stable_partition(jobs_, [&](const NetJob& j) { return busLayerOf_[size_t(j.net)] >= 0; });
+  }
   s_.failed.assign(jobs_.size(), {});
   padCluster_ = Connectivity::compute(b_).padCluster;
   copperIdx_.build(b_);
@@ -608,6 +636,7 @@ void Router::setNet(int net) {
     clrL_[li] = double(b_.clearanceUpper(net, layers_[li]));
   }
   assigned_ = b_.assignedLayers(net);
+  busLayer_ = busLayerOf_[size_t(net)];
   viaDia_ = nc.viaDiameter;
   viaDrill_ = nc.viaDrill;
   viaR_ = nc.viaDiameter / 2.0;
@@ -716,6 +745,7 @@ double Router::crossCost(int e, int li, bool& blocked, bool* narrow, double widt
   double over = need - free;
   // Other layers than the assigned ones only for short stretches (an SMD pad to its via).
   if (assigned_ && !((assigned_ >> layers_[li]) & 1)) cost += kOffLayer;
+  if (busLayer_ >= 0 && layers_[li] != busLayer_) cost += kOffBus;
   if (over > 1 && !relaxed_) {
     if (hardCap_) {
       blocked = true;
@@ -2201,6 +2231,51 @@ std::vector<int> Router::blockersOf(int ji) const {
   return v | v::keys | r::to<std::vector>();
 }
 
+std::vector<Vec2> Router::sketchPoints(const Wire& w) const {
+  std::vector<Vec2> pts{w.v0 >= 0 ? P(w.v0) : crossingPoint(w.li, s_.crossings[w.c0].edge, w.c0)};
+  for (int cid : w.cids) pts.push_back(crossingPoint(w.li, s_.crossings[cid].edge, cid));
+  pts.push_back(w.v1 >= 0 ? P(w.v1) : crossingPoint(w.li, s_.crossings[w.c1].edge, w.c1));
+  return pts;
+}
+
+void Router::showSketch(const std::string& stage, bool realised) {
+  if (!o_.sketch) return;
+  auto now = std::chrono::steady_clock::now();
+  if (!realised && now - lastSketch_ < std::chrono::duration<double>(o_.sketchInterval)) return;
+  lastSketch_ = now;
+  auto sk = std::make_shared<RouteSketch>();
+  sk->stage = stage;
+  sk->tracks = b_.tracks;
+  sk->vias = b_.vias;
+  sk->zones = b_.zones;
+  if (!realised) {
+    for (const Wire& w : s_.wires) {
+      if (!w.alive || !w.complete()) continue;
+      std::vector<Vec2> pts = sketchPoints(w);
+      for (auto [a, c] : pts | v::adjacent<2>) {
+        Track t;
+        t.a = Point(a);
+        t.b = Point(c);
+        t.width = w.width;
+        t.layer = layers_[w.li];
+        t.net = w.net;
+        sk->tracks.push_back(t);
+      }
+      if (w.c1 >= 0) {
+        const NetClass& nc = b_.classOf(w.net);
+        sk->vias.push_back(Via{Point(crossingPoint(w.li, s_.crossings[w.c1].edge, w.c1)), nc.viaDiameter, nc.viaDrill,
+                               b_.allCopperMask(), w.net, false});
+      }
+    }
+    for (auto [vtx, net] : v::enumerate(s_.viaNet)) {
+      if (net < 0) continue;
+      const NetClass& nc = b_.classOf(net);
+      sk->vias.push_back(Via{Point(P(int(vtx))), nc.viaDiameter, nc.viaDrill, b_.allCopperMask(), net, false});
+    }
+  }
+  o_.sketch(std::move(sk));
+}
+
 std::vector<int> Router::realizeAll() {
   std::vector<RealWire> wires;
   realizedWires_.clear();
@@ -2237,9 +2312,7 @@ std::vector<int> Router::realizeAll() {
       const MTri& T = m_.tris[t];
       return (P(T.v[0]) + P(T.v[1]) + P(T.v[2])) / 3.0;
     };
-    std::vector<Vec2> pts{w.v0 >= 0 ? P(w.v0) : crossingPoint(w.li, s_.crossings[w.c0].edge, w.c0)};
-    for (int cid : w.cids) pts.push_back(crossingPoint(w.li, s_.crossings[cid].edge, cid));
-    pts.push_back(w.v1 >= 0 ? P(w.v1) : crossingPoint(w.li, s_.crossings[w.c1].edge, w.c1));
+    std::vector<Vec2> pts = sketchPoints(w);
     // A waypoint per chord keeps the sketch inside its triangle: the chord's middle, nudged towards the
     // centroid (through the centroid itself the chords of one big triangle would all meet).
     for (size_t i = 0; i + 1 < pts.size(); ++i) {
@@ -2438,6 +2511,7 @@ RouterResult Router::run() {
       if (kRipOne) ripup(j);
       routeJob(j);
       if (o_.progress) o_.progress(++done, int(queue.size()), std::format("pass {}", pass + 1));
+      showSketch(std::format("pass {}", pass + 1), false);
     }
     int fails = 0;
     for (auto& f : s_.failed) fails += int(f.size());
@@ -2515,6 +2589,7 @@ RouterResult Router::run() {
     auto conflicts = checkRealized(tracks0, trackWire);
     size_t score = conflicts.size() + 10 * failedNow();
     res_.log.push_back(std::format("geometry round {}: {} conflict(s), {} failed", round, conflicts.size(), failedNow()));
+    showSketch(std::format("geometry round {}", round), true);
     if (!bestGeom || score < bestGeom->conflicts)
       bestGeom = Snapshot{snapshot(), {b_.tracks.begin() + tracks0, b_.tracks.end()},
                           {b_.vias.begin() + vias0, b_.vias.end()}, score};
@@ -2543,6 +2618,7 @@ RouterResult Router::run() {
     b_.tracks.insert(b_.tracks.end(), bestGeom->tracks.begin(), bestGeom->tracks.end());
     b_.vias.insert(b_.vias.end(), bestGeom->vias.begin(), bestGeom->vias.end());
     res_.vias = int(bestGeom->vias.size());
+    showSketch("realised", true);
   }
   if (o_.optimizeIterations > 0 && !cancelled() && !std::getenv("XR_SKETCH")) {
     OptimizeOptions oo;
@@ -2557,6 +2633,7 @@ RouterResult Router::run() {
     res_.log.push_back(std::format("optimised: {} via move(s), conflicts {} -> {}, length {:.1f} -> {:.1f} mm",
                                    r.viaMoves, r.conflictsBefore, r.conflictsAfter, r.lengthBefore / 1e6,
                                    r.lengthAfter / 1e6));
+    showSketch("vias optimised", true);
   }
   auto drcCount = [&] {
     DrcOptions d;
@@ -2578,10 +2655,12 @@ RouterResult Router::run() {
     res_.length = r.lengthAfter;
     res_.log.push_back(std::format("refined: {} wire(s) re-laid, {} repaired, {} moved to another layer, {} via(s) removed; DRC {} violation(s)",
                                    r.improved, r.repaired, r.layerChanges, r.viasRemoved, drcCount()));
+    showSketch("refined", true);
   }
   if (o_.fillZones && !b_.zones.empty() && !std::getenv("XR_SKETCH")) {
     auto zs = xr::fillZones(b_);
     res_.log.push_back(std::format("poured {} zone(s): {} polygon(s)", zs.zones, zs.polygons));
+    showSketch("poured", true);
   }
   int fails = 0;
   for (auto [j, f] : v::enumerate(s_.failed)) {

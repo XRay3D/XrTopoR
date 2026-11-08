@@ -21,10 +21,12 @@
 #include <QTreeWidget>
 #include <QVBoxLayout>
 #include <QtConcurrent/QtConcurrent>
+#include <mutex>
 
 #include "drc/Drc.h"
 #include "io/BoardIO.h"
 #include "gui/SpinBox.h"
+#include "router/topo/Buses.h"
 
 namespace xr::gui {
 
@@ -78,9 +80,8 @@ AutorouteWindow::AutorouteWindow(Document* doc, QWidget* parent) : QDialog(paren
   table_->setEditTriggers(QAbstractItemView::NoEditTriggers);
   table_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
   pv->addWidget(table_, 1);
-  auto* show = new QCheckBox(tr("Показывать процесс трассировки (может замедлить работу)"));
-  show->setEnabled(false);
-  pv->addWidget(show);
+  showProcess_ = new QCheckBox(tr("Показывать процесс трассировки (может замедлить работу)"));
+  pv->addWidget(showProcess_);
   addOpened_ = new QCheckBox(tr("Добавлять в проект вариант, открытый в редакторе"));
   pv->addWidget(addOpened_);
   auto* cost = new QHBoxLayout;
@@ -204,6 +205,9 @@ AutorouteWindow::AutorouteWindow(Document* doc, QWidget* parent) : QDialog(paren
   connect(close, &QPushButton::clicked, this, &QDialog::hide);
   connect(defaults, &QPushButton::clicked, this, &AutorouteWindow::setDefaults);
   connect(viaWeight_, &QDoubleSpinBox::valueChanged, this, &AutorouteWindow::refreshTable);
+  connect(showProcess_, &QCheckBox::toggled, this, [this](bool on) {
+    if (!on) emit sketchChanged(nullptr);
+  });
   connect(addAll, &QLabel::linkActivated, this, [this] {
     if (!addToProject_) {
       QMessageBox::information(this, windowTitle(), tr("Дизайн открыт без проекта."));
@@ -282,6 +286,8 @@ topo::RouterOptions AutorouteWindow::options(int strategy) const {
   o.optimizeIterations = optimize_->value();
   o.fillZones = pour_->isChecked();
   o.ripupExisting = !keepRouting_->isChecked();
+  // With the buses and without, in turn (after the strategies' round the other way than in the first).
+  o.buses = hasBuses_ && (strategy + strategy / int(std::size(kStrategies))) % 2 == 1;
   if (singleLayer_->isChecked()) {
     int n = doc_->board()->copperCount();
     o.copperIndices = {singleTop_->isChecked() ? 0 : n - 1};
@@ -319,6 +325,10 @@ void AutorouteWindow::start() {
     return;
   }
   auto base = std::make_shared<const Board>(*doc_->board());
+  if (variants_.empty()) {
+    auto layers = base->copperLayers();
+    hasBuses_ = !singleLayer_->isChecked() && !topo::findBuses(*base, {layers.begin(), layers.end()}).empty();
+  }
   std::vector<topo::RouterOptions> plans;
   for (int s = int(variants_.size()); s < kMaxVariants; ++s) plans.push_back(options(s));
   cancel_ = std::make_shared<std::atomic<bool>>(false);
@@ -328,6 +338,14 @@ void AutorouteWindow::start() {
   int first = int(variants_.size());
   QPointer<AutorouteWindow> self(this);
   auto cancel = cancel_;
+  // The progress shown: the router leaves its latest sketch here and posts one call to draw it while none is waiting
+  // (the router does not wait; a sketch not drawn yet is replaced by a newer one).
+  struct Latest {
+    std::mutex m;
+    std::shared_ptr<const topo::RouteSketch> sketch;
+    bool posted = false;
+  };
+  auto pending = std::make_shared<Latest>();
   watcher_ = new QFutureWatcher<void>(this);
   connect(watcher_, &QFutureWatcher<void>::finished, this, [this] {
     watcher_->deleteLater();
@@ -335,10 +353,11 @@ void AutorouteWindow::start() {
     operation_->setText(tr("Текущая операция:"));
     progress_->setValue(0);
     setRunning(false);
+    emit sketchChanged(nullptr);
     if (int(variants_.size()) >= kMaxVariants) hint_->setText(tr("Поиск вариантов целесообразно остановить"));
     emit finished();
   });
-  watcher_->setFuture(QtConcurrent::run([base, plans, cancel, self, first] {
+  watcher_->setFuture(QtConcurrent::run([base, plans, cancel, self, first, pending] {
     for (size_t i = 0; i < plans.size() && !cancel->load(); ++i) {
       Board work = *base;
       topo::RouterOptions o = plans[i];
@@ -352,11 +371,28 @@ void AutorouteWindow::start() {
           self->progress_->setValue(total ? done * 100 / total : 0);
         }, Qt::QueuedConnection);
       };
+      o.sketch = [self, pending](std::shared_ptr<const topo::RouteSketch> sk) {
+        {
+          std::lock_guard lock(pending->m);
+          pending->sketch = std::move(sk);
+          if (std::exchange(pending->posted, true)) return;
+        }
+        QMetaObject::invokeMethod(qApp, [self, pending] {
+          std::shared_ptr<const topo::RouteSketch> latest;
+          {
+            std::lock_guard lock(pending->m);
+            latest = std::move(pending->sketch);
+            pending->posted = false;
+          }
+          if (self && self->showProcess_->isChecked() && self->running_) emit self->sketchChanged(latest);
+        }, Qt::QueuedConnection);
+      };
       topo::RouterResult res = topo::routeBoard(work, o);
       if (res.cancelled) break;
       RoutingVariant v;
       v.name = QObject::tr("Вариант %1").arg(first + int(i) + 1);
       v.level = first + int(i) + 1;
+      v.buses = o.buses;
       v.length = res.length;
       v.viaCount = res.vias;
       v.seconds = res.seconds;
@@ -412,6 +448,7 @@ void AutorouteWindow::refreshTable() {
         f.setBold(true);
         it->setFont(f);
       }
+      if (c == 0 && v.buses) it->setToolTip(tr("Шины проложены первыми, каждая на одном слое"));
       if (c == 3)
         it->setToolTip(tr("Нарушений DRC: %1, неразведённых связей: %2").arg(v.violations).arg(v.unrouted));
       table_->setItem(i, c, it);
@@ -436,6 +473,7 @@ QString AutorouteWindow::saveVariant(const RoutingVariant& v) {
 
 void AutorouteWindow::openInEditor(int i) {
   if (i < 0 || i >= int(variants_.size()) || !doc_->hasBoard()) return;
+  emit sketchChanged(nullptr);
   const RoutingVariant& v = variants_[size_t(i)];
   auto before = doc_->beginEdit();
   Board& b = *doc_->board();

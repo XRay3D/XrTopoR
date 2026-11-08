@@ -30,6 +30,7 @@ struct RoutingVariant {
   std::vector<Zone> zones;
   double length = 0;  // nm
   int viaCount = 0, violations = 0, unrouted = 0, level = 0;
+  bool buses = false;  // the buses laid first, each on one layer
   double seconds = 0;
 };
 
@@ -52,6 +53,8 @@ class AutorouteWindow : public QDialog {
  signals:
   void variantFound(int index);
   void finished();
+  // What the router has laid so far, while «Показывать процесс трассировки» is on; null when it stops.
+  void sketchChanged(std::shared_ptr<const xr::topo::RouteSketch> sketch);
 
  private:
   void resetVariants();  // the design changed: earlier variants no longer apply
@@ -68,11 +71,13 @@ class AutorouteWindow : public QDialog {
   std::function<void(const QString&)> addToProject_;
   std::vector<RoutingVariant> variants_;
   bool running_ = false;
+  bool hasBuses_ = false;  // the board has buses: the variants are searched with them and without, in turn
   std::shared_ptr<std::atomic<bool>> cancel_;
   QFutureWatcher<void>* watcher_ = nullptr;
 
   // «Варианты»
   QLabel* hint_;
+  QCheckBox* showProcess_;
   QTableWidget* table_;
   QCheckBox* addOpened_;
   QDoubleSpinBox* viaWeight_;

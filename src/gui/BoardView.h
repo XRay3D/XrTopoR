@@ -12,6 +12,7 @@
 #include "core/Edit.h"
 #include "gui/Document.h"
 #include "router/topo/Freestyle.h"
+#include "router/topo/TopoRouter.h"
 
 namespace xr::gui {
 
@@ -40,6 +41,9 @@ class BoardView : public QWidget {
   // The board's picture is drawn anew (an edit, the selection, the display settings); update() alone repaints only
   // what is drawn over it (the tools, the handles, the route being laid) and pans it.
   void refresh();
+  // The autorouter's progress shown in place of the board's tracks and vias (null: the board's again).
+  void setRouteSketch(std::shared_ptr<const topo::RouteSketch> sketch);
+  bool showsRouteSketch() const { return sketch_ != nullptr; }
 
  public slots:
   void setMode(Mode m);
@@ -279,6 +283,9 @@ class BoardView : public QWidget {
   std::optional<EditSnapshot> pasteBefore_;
   // routing
   bool routing_ = false;
+  std::shared_ptr<const topo::RouteSketch> sketch_;
+  const std::vector<Track>& shownTracks() const { return sketch_ ? sketch_->tracks : doc_->board()->tracks; }
+  const std::vector<Via>& shownVias() const { return sketch_ ? sketch_->vias : doc_->board()->vias; }
   int routeNet_ = kNoNet;
   LayerId routeLayer_ = 0;
   Coord routeWidth_ = 0;

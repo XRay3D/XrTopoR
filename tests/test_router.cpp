@@ -6,6 +6,7 @@
 #include "core/Connectivity.h"
 #include "drc/Drc.h"
 #include "io/BoardIO.h"
+#include "router/topo/Buses.h"
 #include "router/topo/Optimizer.h"
 #include "router/topo/TopoMesh.h"
 #include "router/topo/TopoRouter.h"
@@ -58,6 +59,38 @@ TEST(Router, SelectedNetsOnly) {
   auto r = topo::routeBoard(**b, o);
   EXPECT_GT(r.routed, 0);
   for (auto& t : (*b)->tracks) EXPECT_EQ((*b)->nets[t.net].name, "GND");
+}
+
+// Buses (Buses.h): a bus between two connectors and 32 nets across it are laid the bus first on one layer, so that
+// the nets across take the other (RouterOptions::buses); laid in order of length the bus dove under them (157 vias,
+// now 67). Two buses
+// across each other go on different layers; a bus twisted end to end is no bus.
+TEST(Router, BusOnOneLayer) {
+  auto b = io::loadBoard(data("buses/bus_mixed.fst"));
+  ASSERT_TRUE(b);
+  auto layers = (*b)->copperLayers();
+  auto buses = topo::findBuses(**b, {layers.begin(), layers.end()});
+  ASSERT_EQ(buses.size(), 1u);
+  EXPECT_EQ(buses[0].nets.size(), 16u);
+  ASSERT_GE(buses[0].layer, 0);
+  topo::RouterOptions o;
+  o.buses = true;
+  auto r = topo::routeBoard(**b, o);
+  EXPECT_EQ(r.routed, r.connections);
+  EXPECT_EQ(clearanceViolations(**b), 0);
+  EXPECT_LT(r.vias, 100);
+  for (auto& t : (*b)->tracks)
+    if (r::contains(buses[0].nets, t.net)) EXPECT_EQ(t.layer, buses[0].layer) << (*b)->nets[t.net].name;
+
+  auto cross = io::loadBoard(data("buses/bus_cross.fst"));
+  ASSERT_TRUE(cross);
+  auto two = topo::findBuses(**cross, {layers.begin(), layers.end()});
+  ASSERT_EQ(two.size(), 2u);
+  EXPECT_NE(two[0].layer, two[1].layer);
+
+  auto twisted = io::loadBoard(data("buses/bus_twisted.fst"));
+  ASSERT_TRUE(twisted);
+  EXPECT_TRUE(topo::findBuses(**twisted, {layers.begin(), layers.end()}).empty());
 }
 
 TEST(Optimizer, MovesViasWithoutBreakingAnything) {

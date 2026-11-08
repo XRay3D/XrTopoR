@@ -692,7 +692,7 @@ void BoardView::drawLayer(QPainter& p, LayerId l) {
   if (L.kind == LayerKind::Copper) {
     if (d.flag("showCoppers")) {
       ProfScope ps("layer.zones");
-      for (auto& z : b.zones)
+      for (auto& z : sketch_ ? sketch_->zones : b.zones)
         if (z.layer == l) {
           QColor c = netColor(z.net, d.colorizeCopper).value_or(details);
           p.setPen(Qt::NoPen);
@@ -710,7 +710,7 @@ void BoardView::drawLayer(QPainter& p, LayerId l) {
     }
     if (d.flag("showWires") && showDetails) {
       ProfScope ps("layer.tracks");
-      for (auto& t : b.tracks)
+      for (auto& t : shownTracks())
         if (t.layer == l && seen(trackBox(t)))
           drawTrack(p, t, netColor(t.net, d.colorizeWire).value_or(t.locked ? fixColor : details));
       // The clasps («замки») of the zipped sections: a bar across the pair at each end of its axis.
@@ -876,13 +876,12 @@ void BoardView::drawKeepouts(QPainter& p) {
 }
 
 void BoardView::drawVias(QPainter& p) {
-  const Board& b = *doc_->board();
   const DisplayControl& d = doc_->display();
   if (!d.flag("showVias")) return;
   LayerMask vis = visibleCopper();
   QColor through = doc_->color("clrThroughVias", 0x949494), fixed = doc_->color("clrFixedVias", 0x7070b8);
   bool showFixed = d.flag("fixedVia");
-  for (auto& v : b.vias)
+  for (auto& v : shownVias())
     if (v.layers & vis && seen(around(v.pos.v(), double(v.diameter)))) drawVia(p, v, netColor(v.net, d.colorizeVia).value_or(v.locked && showFixed ? fixed : through));
 }
 
@@ -915,7 +914,7 @@ void BoardView::drawHoles(QPainter& p) {
     }
   }
   if (doc_->display().flag("showVias"))
-    for (auto& v : b.vias)
+    for (auto& v : shownVias())
       if (double r = px(v.drill / 2.0); r >= 0.5 && seen(around(v.pos.v(), double(v.drill))))
         hole(v.pos.v(), [&](QPointF c) { p.drawEllipse(c, r, r); });
   p.setBrushOrigin(0, 0);
@@ -1007,8 +1006,8 @@ void BoardView::drawBoard(QPainter& p) {
   drawHoles(p);
   drawLabels(p);
 
-  // Ratsnest, with the «Показывать связи» filter.
-  if (d.flag("showNetLines")) {
+  // Ratsnest, with the «Показывать связи» filter; not over the autorouter's progress (the board's own connections).
+  if (d.flag("showNetLines") && !sketch_) {
     QColor nl = doc_->color("netLines", 0xaf7d3a);
     for (auto& r : doc_->connectivity().ratsnest) {
       if (d.filterNetlines && !d.netlineNets.empty()) {
@@ -1109,6 +1108,12 @@ void BoardView::drawBoard(QPainter& p) {
       p.drawLine(c + QPointF(-4, 4), c + QPointF(4, -4));
     }
   }
+}
+
+void BoardView::setRouteSketch(std::shared_ptr<const topo::RouteSketch> sketch) {
+  if (!sketch && !sketch_) return;
+  sketch_ = std::move(sketch);
+  refresh();
 }
 
 void BoardView::drawOverlay(QPainter& p) {

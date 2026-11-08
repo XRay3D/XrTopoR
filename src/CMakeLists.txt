@@ -63,6 +63,7 @@ target_link_libraries(xrtopo PUBLIC xrcore CGAL::CGAL Boost::json)
 add_library(xrrouter STATIC
   router/topo/TopoMesh.cpp
   router/topo/TopoRouter.cpp
+  router/topo/Buses.cpp
   router/topo/Realizer.cpp
   router/topo/Wires.cpp
   router/topo/ModelTools.cpp

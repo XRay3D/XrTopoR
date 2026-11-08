@@ -1,4 +1,5 @@
 // GUI smoke test: drives the board view with synthetic mouse/key events on the offscreen platform.
+#include <QCheckBox>
 #include <QApplication>
 #include <format>
 #include <print>
@@ -1180,6 +1181,52 @@ TEST(Gui, AutorouteVariants) {
   EXPECT_TRUE(f.doc.connectivity().ratsnest.empty());
   f.doc.undoStack()->undo();
   EXPECT_FALSE(f.doc.connectivity().ratsnest.empty());
+}
+
+// «Показывать процесс трассировки»: what the router has laid is shown in place of the board's routing while it
+// runs (the sketches of the paths, then the tracks realised), and the board's own again when it stops.
+TEST(Gui, AutorouteShowsProcess) {
+  Fixture f("tt.kicad_pcb");
+  auto before = f.doc.beginEdit();
+  f.doc.board()->clearRouting(false);
+  f.doc.commitEdit(before, "clear");
+  BoardView view(&f.doc);
+  view.resize(800, 600);
+  view.show();
+  view.fitBoard();
+  AutorouteWindow w(&f.doc);
+  QObject::connect(&w, &AutorouteWindow::sketchChanged, &view, &BoardView::setRouteSketch);
+  QCheckBox* show = nullptr;
+  for (auto* c : w.findChildren<QCheckBox*>())
+    if (c->text().startsWith("Показывать процесс")) show = c;
+  ASSERT_TRUE(show);
+  EXPECT_TRUE(show->isEnabled());
+  show->setChecked(true);
+  bool sketchTracks = false, realised = false, shown = false;
+  const char* dir = std::getenv("XR_SHOT_DIR");
+  QObject::connect(&w, &AutorouteWindow::sketchChanged, &view, [&](std::shared_ptr<const topo::RouteSketch> sk) {
+    if (!sk) return;
+    shown |= view.showsRouteSketch();
+    if (sk->stage.starts_with("pass") && !sk->tracks.empty()) {
+      if (dir && !sketchTracks) view.grab().save(QString(dir) + "/autoroute_sketch.png");
+      sketchTracks = true;
+    }
+    if (sk->stage.starts_with("geometry") || sk->stage == "realised") {
+      if (dir && !realised) view.grab().save(QString(dir) + "/autoroute_realised.png");
+      realised |= !sk->tracks.empty();
+    }
+  });
+  QSignalSpy found(&w, &AutorouteWindow::variantFound);
+  QSignalSpy done(&w, &AutorouteWindow::finished);
+  w.start();
+  ASSERT_TRUE(found.wait(60000));
+  w.stop();
+  if (done.isEmpty()) ASSERT_TRUE(done.wait(60000));
+  EXPECT_TRUE(realised);
+  EXPECT_TRUE(shown);
+  (void)sketchTracks;  // the passes may be quicker than the interval
+  EXPECT_FALSE(view.showsRouteSketch());
+  EXPECT_TRUE(f.b().tracks.empty());  // the board is not touched
 }
 
 // DRC with the dialog's settings: wire widths against the rules' minimum, checks switched off, report.

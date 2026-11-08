@@ -1195,6 +1195,7 @@ void MainWindow::describeSelection() {
 AutorouteWindow* MainWindow::autorouteWindow() {
   if (!autoroute_) {
     autoroute_ = new AutorouteWindow(doc_, this);
+    connect(autoroute_, &AutorouteWindow::sketchChanged, view_, &BoardView::setRouteSketch);
     // Variants go next to the project (or the design) and into «Варианты автотрассировки».
     autoroute_->setProjectHooks(
         [this] { return project_ ? project_->dir() : QFileInfo(doc_->path()).absolutePath(); },
