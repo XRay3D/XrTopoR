@@ -726,15 +726,17 @@ void BoardView::drawLabels(QPainter& p) {
 void BoardView::drawBoard(QPainter& p) {
   const Board& b = *doc_->board();
   const DisplayControl& d = doc_->display();
-  // Bottom side first, active copper last among copper, top side over it, documenting layers on top.
+  // Bottom side first, active copper last among copper, top side over it, documenting layers on top; an active
+  // mechanical or documenting layer over them all.
   auto groupOf = [&](LayerId l) { return layerGroup(b, l); };
-  for (LayerId l = 0; l < LayerId(b.layers.size()); ++l)
-    if (groupOf(l) == 2 && layerVisible(l)) drawLayer(p, l);
-  auto cu = b.copperLayers();
   LayerId active = doc_->activeLayer();
+  bool activeCopper = b.layers[active].kind == LayerKind::Copper;
+  for (LayerId l = 0; l < LayerId(b.layers.size()); ++l)
+    if (groupOf(l) == 2 && l != active && layerVisible(l)) drawLayer(p, l);
+  auto cu = b.copperLayers();
   for (LayerId l : cu | v::reverse)
     if (l != active && layerVisible(l)) drawLayer(p, l);
-  if (layerVisible(active)) drawLayer(p, active);
+  if (activeCopper && layerVisible(active)) drawLayer(p, active);
   drawVias(p);
   // Drill holes in the background colour.
   p.setPen(Qt::NoPen);
@@ -758,7 +760,8 @@ void BoardView::drawBoard(QPainter& p) {
         if (r >= 0.5) p.drawEllipse(toScreen(v.pos.v()), r, r);
       }
   for (LayerId l = 0; l < LayerId(b.layers.size()); ++l)
-    if ((groupOf(l) == 0 || groupOf(l) == 3) && layerVisible(l)) drawLayer(p, l);
+    if ((groupOf(l) == 0 || groupOf(l) == 3) && l != active && layerVisible(l)) drawLayer(p, l);
+  if (!activeCopper && layerVisible(active)) drawLayer(p, active);
   // Board outline.
   if (d.flag("showBoardOutline")) {
     p.setPen(QPen(doc_->color("board", 0xd4d4d4), 1));
@@ -2171,7 +2174,8 @@ void BoardView::createShape(std::vector<Graphic> fig) {
   Board& b = *doc_->board();
   auto before = doc_->beginEdit();
   LayerId active = doc_->activeLayer();
-  LayerId copper = active >= 0 && b.layers[active].kind == LayerKind::Copper && !b.layers[active].plane ? active : b.topCopper();
+  LayerId copper = doc_->activeCopper();
+  if (b.layers[copper].plane) copper = b.topCopper();
   ItemRef made;
   QString title;
   switch (drawTarget_) {
@@ -2384,7 +2388,7 @@ void BoardView::changeTrackWidth() {
   Board& b = *doc_->board();
   Coord cur = routing_ ? routeWidth_ : 0;
   std::vector<int> nets;
-  LayerId layer = routing_ ? routeLayer_ : doc_->activeLayer();
+  LayerId layer = routing_ ? routeLayer_ : doc_->activeCopper();
   if (routing_) nets.push_back(routeNet_);
   for (ItemRef r : doc_->selectedItems())
     if (r.type == ItemType::Track) {
@@ -2602,13 +2606,14 @@ void BoardView::routeStart(const Pick& pk, Vec2 at) {
   routeFrom_ = pk.item;
   targetIndex_ = 0;
   routeNet_ = pk.item ? itemNet(b, *pk.item) : kNoNet;
-  routeLayer_ = doc_->activeLayer();
+  routeLayer_ = doc_->activeCopper();
   if (pk.item) {
     LayerMask lm = itemLayers(b, *pk.item);
     if (!((lm >> routeLayer_) & 1))
       for (LayerId l : b.copperLayers())
-        if ((lm >> l) & 1) { routeLayer_ = l; doc_->setActiveLayer(l); break; }
+        if ((lm >> l) & 1) { routeLayer_ = l; break; }
   }
+  doc_->setActiveLayer(routeLayer_);
   routeWidth_ = b.trackWidth(routeNet_, routeLayer_);
   routeTracks_.clear();
   routeVias_.clear();
@@ -3198,7 +3203,7 @@ void BoardView::pairStart(const Pick& pk) {
     emit status(tr("Прокладка дифф. пары: у контакта нет парного контакта другой цепи"));
     return;
   }
-  LayerId layer = doc_->activeLayer();
+  LayerId layer = doc_->activeCopper();
   const LayerMask lm = itemLayers(b, *pk.item);
   if (!((lm >> layer) & 1))
     for (LayerId l : b.copperLayers())

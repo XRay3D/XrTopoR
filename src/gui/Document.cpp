@@ -67,9 +67,11 @@ void Document::setBoard(std::unique_ptr<Board> b, const QString& path) {
     DisplayControl& d = *board_->display;
     completeDisplay(d, *board_, colorSchemeByName(colors, saved ? d.colorScheme : defaultColorScheme()),
                     viewSchemeByName(views, saved ? d.displayScheme : defaultViewScheme()));
-    activeLayer_ = board_->topCopper();
-    if (LayerId l = board_->findLayer(d.activeLayer); l >= 0 && board_->layers[l].kind == LayerKind::Copper)
+    activeLayer_ = activeCopper_ = board_->topCopper();
+    if (LayerId l = board_->findLayer(d.activeLayer); l >= 0 && layerGroup(*board_, l) >= 0) {
       activeLayer_ = l;
+      if (board_->layers[l].kind == LayerKind::Copper) activeCopper_ = l;
+    }
     d.activeLayer = board_->layers[activeLayer_].name;
     if (saved) {
       const std::string& u = d.units;
@@ -88,8 +90,9 @@ void Document::setBoard(std::unique_ptr<Board> b, const QString& path) {
 }
 
 void Document::setActiveLayer(LayerId l) {
-  if (l < 0 || !board_ || l >= LayerId(board_->layers.size()) || l == activeLayer_) return;
+  if (l < 0 || !board_ || l >= LayerId(board_->layers.size()) || l == activeLayer_ || layerGroup(*board_, l) < 0) return;
   activeLayer_ = l;
+  if (board_->layers[l].kind == LayerKind::Copper) activeCopper_ = l;
   display().activeLayer = board_->layers[l].name;
   emit layersChanged();
 }
@@ -243,10 +246,10 @@ bool Document::layerVisible(LayerId l) const {
   const DisplayControl& d = display();
   const LayerDisplay* ld = d.layer(board_->layers[l].name);
   if (ld && !ld->visible) return false;
-  switch (layerGroup(*board_, l)) {
-    case 1:
-      if (d.flag("showActiveLayerOnly", false)) return l == activeLayer_;
-      return d.flag("showSignalLayers");
+  int group = layerGroup(*board_, l);
+  if (group >= 0 && d.flag("showActiveLayerOnly", false)) return l == activeLayer_;
+  switch (group) {
+    case 1: return d.flag("showSignalLayers");
     case 0: return d.flag("showTopMechLayers");
     case 2: return d.flag("showBotMechLayers");
     case 3: return d.flag("showDocLayers", false);

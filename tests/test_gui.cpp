@@ -2846,3 +2846,73 @@ TEST(Gui, ArcCentreHandle) {
     }
   }
 }
+
+// A mechanical layer made active is drawn over everything (its drawing over a metal layer's wire), «Только активный
+// слой» shows it alone (the metal and the other mechanical layers hidden), and routing keeps to the last active metal
+// layer.
+TEST(Gui, MechanicalLayerActive) {
+  Fixture f("tt.kicad_pcb");
+  auto board = std::make_unique<Board>();
+  Board& b = *board;
+  const LayerId top = b.addLayer("Top", LayerKind::Copper, Side::Top);
+  b.layers[top].copperIndex = 0;
+  const LayerId bot = b.addLayer("Bottom", LayerKind::Copper, Side::Bottom);
+  b.layers[bot].copperIndex = 1;
+  const LayerId mech = b.addLayer("Mech", LayerKind::Other, Side::Bottom);
+  const LayerId silk = b.addLayer("Silk", LayerKind::Silk, Side::Top);
+  auto at = [](double x, double y) { return Vec2{x * kNmPerMm, y * kNmPerMm}; };
+  b.outline.push_back({at(0, 0), at(40, 0), at(40, 20), at(0, 20)});
+  Track t;
+  t.a = Point(at(10, 10));
+  t.b = Point(at(30, 10));
+  t.width = mmToNm(2);
+  t.layer = top;
+  t.net = b.addNet("N");
+  b.tracks.push_back(t);
+  Graphic g;
+  g.kind = GraphicKind::Line;
+  g.a = at(20, 5);
+  g.b = at(20, 15);
+  g.width = mmToNm(1);
+  g.layer = mech;
+  b.graphics.push_back(g);
+  f.doc.setBoard(std::move(board), "mech");
+  f.doc.setActiveLayer(bot);
+  f.doc.display().layer("Mech")->details = 0x00ff00;
+  f.doc.display().layer("Mech")->visible = true;
+  f.doc.display().layer("Silk")->visible = true;
+  f.doc.display().layer("Top")->details = 0xff0000;
+  f.doc.display().show["showBotMechLayers"] = true;
+  f.doc.display().show["showBotMechDetails"] = true;
+  f.view.show();
+  f.look(at(20, 10), 20);
+  auto pixel = [&] {
+    f.view.update();
+    QTest::qWait(10);
+    return f.view.grab().toImage().pixelColor(f.at(at(20, 10)));
+  };
+  const QColor mechColor = QColor::fromRgb(0x00ff00);
+  EXPECT_NE(pixel(), mechColor) << "the bottom mechanical layer under the metal";
+  f.doc.setActiveLayer(mech);
+  EXPECT_EQ(f.doc.activeLayer(), mech);
+  EXPECT_EQ(f.doc.activeCopper(), bot);
+  EXPECT_EQ(pixel(), mechColor) << "the active mechanical layer over the metal";
+  // Only the active layer.
+  f.view.setOnlyActiveLayer(true);
+  EXPECT_TRUE(f.doc.layerVisible(mech));
+  EXPECT_FALSE(f.doc.layerVisible(top));
+  EXPECT_FALSE(f.doc.layerVisible(bot));
+  EXPECT_FALSE(f.doc.layerVisible(silk));
+  f.doc.setActiveLayer(top);
+  EXPECT_TRUE(f.doc.layerVisible(top));
+  EXPECT_FALSE(f.doc.layerVisible(mech)) << "a metal layer active hides the mechanical ones too";
+  EXPECT_FALSE(f.doc.layerVisible(silk));
+  f.view.setOnlyActiveLayer(false);
+  // Routing from a mechanical layer active goes on the last active metal one.
+  f.doc.setActiveLayer(mech);
+  EXPECT_EQ(f.doc.activeCopper(), top);
+  f.view.setMode(Mode::Route);
+  QTest::mouseClick(&f.view, Qt::LeftButton, {}, f.at(at(10, 10)));
+  ASSERT_TRUE(f.view.isRouting());
+  EXPECT_EQ(f.doc.activeLayer(), top);
+}

@@ -438,8 +438,8 @@ QWidget* DisplayPanel::layersTab() {
       h->addWidget(boolRow({}, [ld] { return ld() && ld()->showDetails; }, [ld](bool on) {
         if (auto* x = ld()) x->showDetails = on;
       }));
-      if (b.layers[l].kind == LayerKind::Copper) {
-        // A click on a metal layer makes it active; the active one is highlighted.
+      {
+        // A click on a layer makes it active, a metal or a mechanical one; the active one is highlighted.
         label->setCursor(Qt::PointingHandCursor);
         label->installEventFilter(this);
         label->setProperty("layer", int(l));

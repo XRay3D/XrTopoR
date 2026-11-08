@@ -102,8 +102,12 @@ class Document : public QObject {
   uint32_t selectionFilter() const { return selFilter_; }
   void setSelectionFilter(uint32_t f);
 
+  // The active layer: any of the «Слои» tab, a metal one or a mechanical or documenting one. It is drawn over
+  // the others of its kind (a non-metal one over everything), and «Только активный слой» shows it alone.
   LayerId activeLayer() const { return activeLayer_; }
   void setActiveLayer(LayerId l);
+  // The metal layer routing goes on: the active layer when it is a metal one, else the last metal one active.
+  LayerId activeCopper() const { return activeCopper_; }
 
   // Derived data, rebuilt lazily after edits.
   const SpatialIndex& index();
@@ -167,6 +171,7 @@ class Document : public QObject {
   QUndoStack undo_;
   uint32_t selFilter_ = SelAll;
   LayerId activeLayer_ = 0;
+  LayerId activeCopper_ = 0;
   Unit unit_ = Unit::Mm;
   std::optional<SpatialIndex> index_;
   std::optional<Connectivity> conn_;
