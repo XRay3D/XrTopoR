@@ -7,6 +7,7 @@
 #include <string_view>
 #include <vector>
 
+#include "core/BoardGen.h"
 #include "core/Connectivity.h"
 #include "core/ZoneFill.h"
 #include "drc/Drc.h"
@@ -24,6 +25,7 @@
 #include "router/topo/Refine.h"
 #include "router/topo/Wires.h"
 #include "router/topo/TopoRouter.h"
+#include "router/auto/AutoRouter.h"
 
 using namespace xr;
 
@@ -49,6 +51,7 @@ void usage() {
       "  report     <board> [--bom out.csv]          routing statistics per layer and net, BOM\n"
       "  padstats   <board>                         how the wires meet the pads: widths, exits, runs inside copper, joints\n"
       "  flexfix    <board> -o <out> --nets a,b [--off]  set (or take off) the flexible fixation of nets\n"
+      "  gen        <kind> <out> [--n N]              a synthetic board with buses (bus_straight, bus_twisted, bus_offset, bus_cross, bus_mixed, smd_bus)\n"
       "boards: .kicad_pcb, .dsn, P-CAD ASCII .pcb");
 }
 
@@ -114,6 +117,22 @@ int cmdDrc(const Board& b, size_t maxShow) {
 }
 
 int cmdRoute(Board& b, const Args& a) {
+  if (a.flag("--new")) {  // the new autorouter (router/auto): the combined plane, layering, the metric stage on the model
+    autoroute::Options ao;
+    if (auto p = a.opt("--crossing"); !p.empty()) ao.crossing = std::stod(std::string(p));
+    ao.metric = !a.flag("--no-metric");
+    if (auto p = a.opt("--nets"); !p.empty()) ao.nets = p | v::split(',') | r::to<std::vector<std::string>>();
+    auto res = autoroute::route(b, ao);
+    for (auto& l : res.log) std::println("{}", l);
+    std::println("routed {}/{} connections on the plane ({} crossings, {} unlayered), {} vias, length {:.1f} mm, {:.2f} s", res.routed, res.connections,
+                 res.crossings, res.conflicts, res.vias, res.length / 1e6, res.seconds);
+    xr::Prof::get().report("route --new");
+    if (auto out = a.opt("-o"); !out.empty()) {
+      if (auto r = io::saveBoard(b, std::string(out)); !r) return fail(r.error());
+      std::println("written {}", out);
+    }
+    return res.failed == 0 ? 0 : 3;
+  }
   topo::RouterOptions ro;
   if (auto p = a.opt("--passes"); !p.empty()) ro.maxPasses = std::stoi(std::string(p));
   if (auto p = a.opt("--via-cost"); !p.empty()) ro.viaCost = std::stod(std::string(p));
@@ -178,6 +197,15 @@ int main(int argc, char** argv) {
   }
   std::string_view cmd = argv[1];
   Args a{std::vector<std::string_view>(argv + 2, argv + argc)};
+  if (cmd == "gen") {  // gen <kind> <out> [--n N]: a synthetic board (core/BoardGen.h)
+    if (a.v.size() < 2) return fail(std::format("gen <kind> <out> [--n N]; kinds: {}", busBoardKinds() | v::join_with(' ') | r::to<std::string>()));
+    int n = a.opt("--n").empty() ? 16 : std::stoi(std::string(a.opt("--n")));
+    auto b = makeBusBoard(a.v[0], n);
+    if (!b) return fail(std::format("unknown kind {}", a.v[0]));
+    if (auto r = io::saveBoard(*b, std::string(a.v[1])); !r) return fail(r.error());
+    std::println("written {}: {} components, {} nets", a.v[1], b->components.size(), b->nets.size());
+    return 0;
+  }
   auto loaded = io::loadBoard(std::string(a.v[0]));
   if (!loaded) return fail(loaded.error());
   Board& b = **loaded;

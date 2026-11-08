@@ -11,6 +11,7 @@ add_executable(xrtests
   test_refine.cpp
   test_router.cpp
   test_topo.cpp
+  test_autoroute.cpp
 )
 target_link_libraries(xrtests PRIVATE xrio xrdrc xrrouter GTest::gtest_main)
 target_compile_definitions(xrtests PRIVATE XR_TEST_DATA="${CMAKE_CURRENT_SOURCE_DIR}/data")

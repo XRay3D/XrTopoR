@@ -36,8 +36,14 @@ struct RelayPath {
 // (takeOut) before the path is applied.
 // `squeeze`: a gap short of room is taken too, at the price of its deficit many times over (a wire pushed
 // out of a keepout had better squeeze in beside the others than stay where it is); else only gaps with room.
+// On the autorouter's combined plane (Topology::buildPlane) the wires of different nets may cross, at a price, and an
+// edge holds as many rows of wires as there are layers.
+struct RelayMode {
+  double crossing = -1;  // < 0: another net's chord is never crossed (a layer's mesh); else what crossing one costs, nm
+  int layers = 1;        // the rows an edge holds: its free length times this is its room
+};
 std::optional<RelayPath> findRelay(const Topology& t, int wire, const std::vector<char>* avoid = nullptr, const std::vector<int>* absent = nullptr,
-                                   bool squeeze = false);
+                                   bool squeeze = false, const RelayMode& mode = {});
 // Takes the wire's old crossings out and puts the path's in; the edges' capacities are refreshed.
 void applyRelay(Topology& t, int wire, const RelayPath& path);
 // Takes the wire's crossings out (all but those of its own pads' sides) and puts none in: the wire is to be

@@ -167,7 +167,8 @@ double tautLength(const Topology& t, int wi) {
   return len;
 }
 
-std::optional<RelayPath> findRelay(const Topology& t, int wi, const std::vector<char>* avoid, const std::vector<int>* absent, bool squeeze) {
+std::optional<RelayPath> findRelay(const Topology& t, int wi, const std::vector<char>* avoid, const std::vector<int>* absent, bool squeeze,
+                                   const RelayMode& mode) {
   const Wire& w = t.wires[wi];
   const LayerMesh& m = *t.mesh(w.layer);
   RelayPath out;
@@ -239,11 +240,18 @@ std::optional<RelayPath> findRelay(const Topology& t, int wi, const std::vector<
     const double lo = gap > 0 ? rank(cids[size_t(gap - 1)]) : 0.0, hi = gap < int(cids.size()) ? rank(cids[size_t(gap)]) : 1.0;
     return perimeter(m, tri, le, (lo + hi) / 2);
   };
-  auto planar = [&](int tri, double p, double q) {
+  // The chords of other nets the chord p - q of the triangle crosses: on a layer's mesh none may be (-1: refused),
+  // on the combined plane each costs mode.crossing.
+  auto crossCost = [&](int tri, double p, double q) {
+    int n = 0;
     for (const Chord& c : chords(tri))
-      if (c.net != w.net && chordsCross(p, q, c.a, c.b)) return false;
-    return true;
+      if (c.net != w.net && chordsCross(p, q, c.a, c.b)) {
+        if (mode.crossing < 0) return -1.0;
+        ++n;
+      }
+    return n * std::max(0.0, mode.crossing);
   };
+  auto planar = [&](int tri, double p, double q) { return crossCost(tri, p, q) >= 0; };
   // Crossing edge e at the gap: does it still fit, and where does the wire cross?
   struct Fit {
     bool ok = false;
@@ -283,6 +291,8 @@ std::optional<RelayPath> findRelay(const Topology& t, int wi, const std::vector<
       return k == Owner::Kind::Outline || k == Owner::Kind::Keepout;
     });
     it->second.ok = c.cls < 3 && (squeeze ? (!atWall || c.deficit <= 0) : (c.deficit <= 0 && !c.narrowed));
+    // The combined plane: the wires across the edge go to `layers` rows; it is open while they would fit.
+    if (mode.layers > 1) it->second.ok = c.freeLen > 0 && c.need <= mode.layers * c.freeLen;
     if (!it->second.ok) { if (c.cls >= 3) ++dbg[2]; else if (c.deficit > 0) ++dbg[3]; else if (c.narrowed) ++dbg[4]; if (atWall) ++dbg[5]; }
     if (squeeze) it->second.penalty = kSqueeze * std::max(0.0, c.deficit) + (c.narrowed ? kSqueeze * 10000 : 0);
     it->second.p = pointOn(m, E, slotOf(c, gap).mid(), c.L);
@@ -342,7 +352,7 @@ std::optional<RelayPath> findRelay(const Topology& t, int wi, const std::vector<
     if (G.vertex >= 0) {
       if (nd.le >= 0 && T.v[nd.le] == G.vertex && planar(nd.tri, nd.place, double(nd.le))) {
         goal = ni;
-        goalCost = nd.g + (G.p - nd.p).len();
+        goalCost = nd.g + (G.p - nd.p).len() + crossCost(nd.tri, nd.place, double(nd.le));
         break;
       }
       if (nd.le < 0) {
@@ -363,7 +373,7 @@ std::optional<RelayPath> findRelay(const Topology& t, int wi, const std::vector<
       const int j = m.localEdge(nd.tri, G.edge);
       if (j >= 0 && j != nd.le && planar(nd.tri, nd.place, perimeter(m, nd.tri, j, G.f))) {
         goal = ni;
-        goalCost = nd.g + (G.p - nd.p).len();
+        goalCost = nd.g + (G.p - nd.p).len() + crossCost(nd.tri, nd.place, perimeter(m, nd.tri, j, G.f));
         break;
       }
     }
@@ -380,11 +390,12 @@ std::optional<RelayPath> findRelay(const Topology& t, int wi, const std::vector<
       if (G.vertex >= 0 && (E.v[0] == G.vertex || E.v[1] == G.vertex)) continue;
       const std::vector<int> cids = present(E);
       for (int gap = 0; gap <= int(cids.size()); ++gap) {
-        if (!planar(nd.tri, nd.place, gapPlace(nd.tri, j, E, cids, gap))) continue;
+        const double cross = crossCost(nd.tri, nd.place, gapPlace(nd.tri, j, E, cids, gap));
+        if (cross < 0) continue;
         const Fit& ft = fit(e, cids, gap);
         if (!ft.ok) continue;
         const int le = m.localEdge(next, e);
-        push({nd.g + (ft.p - nd.p).len() + ft.penalty, ni, next, le, -1, e, gap, gapPlace(next, le, E, cids, gap), ft.p});
+        push({nd.g + (ft.p - nd.p).len() + ft.penalty + cross, ni, next, le, -1, e, gap, gapPlace(next, le, E, cids, gap), ft.p});
       }
     }
   }

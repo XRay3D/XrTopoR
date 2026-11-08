@@ -191,6 +191,11 @@ struct Topology {
   void build(const Board& b);
   // Gives every track and via without an id one.
   static void assignIds(Board& b);
+  // The autorouter's combined plane (TopoR's «совмещённая топология», Polubasov 2010): the owners of the board
+  // and ONE mesh of all of them on the layers `on`, answering to layer id `layer`; no wires (the router lays them;
+  // on this mesh wires of different nets may cross, their layers are given later). The tracks and vias on the
+  // board are ignored but for their owners: the router clears what it reroutes first.
+  void buildPlane(const Board& b, LayerId layer, LayerMask on);
 
   const LayerMesh* mesh(LayerId layer) const;
   LayerMesh* mesh(LayerId layer);
@@ -220,6 +225,7 @@ struct Topology {
  private:
   void buildOwners(const Board& b, BuildScratch& s);
   void buildMeshes(const Board& b, BuildScratch& s);
+  LayerMesh buildMesh(const Board& b, BuildScratch& s, LayerId layer, LayerMask on);
   void convertWires(const Board& b, BuildScratch& s);
   void relayDisplaced(const Board& b, BuildScratch& s);
 };

@@ -144,6 +144,21 @@ void Topology::build(const Board& b) {
   boardHash = boardHashOf(b);
 }
 
+void Topology::buildPlane(const Board& b, LayerId layer, LayerMask on) {
+  owners.clear();
+  junctions.clear();
+  layers.clear();
+  wires.clear();
+  crossings.clear();
+  violations.clear();
+  BuildScratch scratch;
+  buildOwners(b, scratch);
+  takeViaBars(b);
+  takeRules(b);
+  layers.push_back(buildMesh(b, scratch, layer, on));
+  boardHash = boardHashOf(b);
+}
+
 void Topology::takeViaBars(const Board& b) {
   viaBars.clear();
   const LayerMask cuMask = b.allCopperMask();
@@ -326,6 +341,14 @@ void Topology::buildOwners(const Board& b, BuildScratch& scratch) {
 }
 
 void Topology::buildMeshes(const Board& b, BuildScratch& scratch) {
+  layers.clear();
+  // One mesh per copper layer, of the owners on it.
+  for (LayerId layer : b.copperLayers()) layers.push_back(buildMesh(b, scratch, layer, LayerMask(1) << layer));
+}
+
+// The mesh of the owners on any of the layers `on` (one layer: that layer's mesh; several: the combined plane of the
+// autorouter, where the walls and pours are those of all of them). `layer` is the id the mesh answers to.
+LayerMesh Topology::buildMesh(const Board& b, BuildScratch& scratch, LayerId layer, LayerMask on) {
   const std::vector<std::vector<Vec2>>& corners = scratch.corners;
   const std::vector<WallLoop>& walls = scratch.walls;
   auto add = [&](Owner o) {
@@ -333,9 +356,8 @@ void Topology::buildMeshes(const Board& b, BuildScratch& scratch) {
     scratch.corners.emplace_back();
     return int(owners.size() - 1);
   };
-  layers.clear();
-  // One mesh per copper layer, of the owners on it.
-  for (LayerId layer : b.copperLayers()) {
+  auto onAll = [&](LayerMask lm) { return (lm & on) == on; };
+  {
     LayerMesh m;
     m.layer = layer;
     m.ownerVerts.assign(owners.size(), {});
@@ -354,7 +376,7 @@ void Topology::buildMeshes(const Board& b, BuildScratch& scratch) {
     };
     for (int oi = 0; oi < int(owners.size()); ++oi) {
       const Owner& o = owners[oi];
-      if (!((o.layers >> layer) & 1)) continue;
+      if (!(o.layers & on)) continue;
       const bool hasCorners = oi < int(corners.size()) && !corners[oi].empty();
       // An oval has its two ends (the realiser's points; from a centre, an edge leaving at a slant would
       // put the slot nearer the side than the rule), a polygon its centre and its corners, the rest their
@@ -385,7 +407,7 @@ void Topology::buildMeshes(const Board& b, BuildScratch& scratch) {
     }
     auto only = [&](int owner) { return m.ownerVerts[owner].front(); };
     for (const WallLoop& wl : walls) {
-      if (!((wl.layers >> layer) & 1)) continue;
+      if (!onAll(wl.layers)) continue;
       for (size_t i = 0; i + 1 < wl.owners.size(); ++i) {
         in.constraints.push_back({only(wl.owners[i]), only(wl.owners[i + 1])});
         in.border.push_back(wl.border ? 1 : 0);
@@ -400,7 +422,7 @@ void Topology::buildMeshes(const Board& b, BuildScratch& scratch) {
     // on no wall (a pad's corner ring across the pour's boundary), else an outline owner of this layer.
     auto onWall = [&](Vec2 p) {
       for (const WallLoop& wl : walls) {
-        if (!((wl.layers >> layer) & 1)) continue;
+        if (!onAll(wl.layers)) continue;
         for (size_t i = 0; i < wl.owners.size(); ++i) {
           if (i + 1 == wl.owners.size() && !wl.area) break;
           if (distPointSegment(p, owners[wl.owners[i]].c, owners[wl.owners[(i + 1) % wl.owners.size()]].c) < 10) return true;
@@ -411,7 +433,7 @@ void Topology::buildMeshes(const Board& b, BuildScratch& scratch) {
     auto zoneRingAt = [&](Vec2 p) {
       for (int oi = 0; oi < int(owners.size()); ++oi) {
         const Owner& o = owners[oi];
-        if (o.kind != Owner::Kind::Zone || !((o.layers >> layer) & 1) || oi >= int(corners.size())) continue;
+        if (o.kind != Owner::Kind::Zone || !onAll(o.layers) || oi >= int(corners.size())) continue;
         const std::vector<Vec2>& ring = corners[oi];
         for (size_t i = 0; i < ring.size(); ++i)
           if (distPointSegment(p, o.c + ring[i], o.c + ring[(i + 1) % ring.size()]) < 10) return oi;
@@ -428,7 +450,7 @@ void Topology::buildMeshes(const Board& b, BuildScratch& scratch) {
       o.net = kBoardEdge;
       o.c = p;
       o.shape = Shape::circle(p, 0);
-      o.layers = LayerMask(1) << layer;
+      o.layers = on;
       int id = add(std::move(o));
       m.ownerVerts.emplace_back();
       vertex(id, 0, {});
@@ -480,7 +502,7 @@ void Topology::buildMeshes(const Board& b, BuildScratch& scratch) {
         if (t.nb[i] >= 0 && (!m.tris[t.nb[i]].inside || m.edges[t.e[i]].constrained)) t.nb[i] = -1;
     for (Edge& e : m.edges) e.rigid |= m.verts[e.v[0]].owner == m.verts[e.v[1]].owner;
     for (const WallLoop& wl : walls) {
-      if (wl.border || !wl.area || !((wl.layers >> layer) & 1)) continue;  // a keepout area: its triangles are blocked (a cutout's are outside)
+      if (wl.border || !wl.area || !onAll(wl.layers)) continue;  // a keepout area: its triangles are blocked (a cutout's are outside)
       Polyline poly;
       for (int o : wl.owners) poly.push_back(owners[o].c);
       for (Tri& t : m.tris)
@@ -489,7 +511,7 @@ void Topology::buildMeshes(const Board& b, BuildScratch& scratch) {
     // The triangles of a pour, by their centroids in its ring (the first zone wins where two overlap).
     for (int oi = 0; oi < int(owners.size()); ++oi) {
       const Owner& o = owners[oi];
-      if (o.kind != Owner::Kind::Zone || !((o.layers >> layer) & 1)) continue;
+      if (o.kind != Owner::Kind::Zone || !onAll(o.layers)) continue;
       Polyline poly;
       for (Vec2 c : corners[oi]) poly.push_back(o.c + c);
       for (Tri& t : m.tris)
@@ -501,12 +523,15 @@ void Topology::buildMeshes(const Board& b, BuildScratch& scratch) {
     m.ownerClr.resize(owners.size());
     for (int oi = 0; oi < int(owners.size()); ++oi) {
       const Owner& o = owners[oi];
+      double clr = 0;  // the net's clearance, the largest over the layers
+      for (LayerId l : b.copperLayers())
+        if ((on >> l) & 1) clr = std::max(clr, double(b.clearance(o.net, l)));
       m.ownerClr[oi] = o.kind == Owner::Kind::Outline ? double(b.edgeClearance)
                        : o.kind == Owner::Kind::Keepout ? 0.0
-                       : o.kind == Owner::Kind::Zone ? std::max(double(b.zones[o.zone].clearance), double(b.clearance(o.net, layer)))
-                                                     : double(b.clearance(o.net, layer));
+                       : o.kind == Owner::Kind::Zone ? std::max(double(b.zones[o.zone].clearance), clr)
+                                                     : clr;
     }
-    layers.push_back(std::move(m));
+    return m;
   }
 }
 

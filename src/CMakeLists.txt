@@ -12,6 +12,7 @@ add_library(xrcore STATIC
   core/HiSpeed.cpp
   core/Padstack.cpp
   core/Rules.cpp
+  core/BoardGen.cpp
   core/Runs.cpp
   core/SpatialIndex.cpp
   core/ZoneFill.cpp
@@ -73,6 +74,8 @@ add_library(xrrouter STATIC
   router/topo/Optimizer.cpp
   router/topo/Freestyle.cpp
   router/topo/Refine.cpp
+  router/auto/AutoRouter.cpp
+  router/auto/Layering.cpp
 )
 target_link_libraries(xrrouter PUBLIC xrcore xrdrc xrtopo CGAL::CGAL)
 

@@ -18,7 +18,12 @@ export WINUI_CACHE=$OUT/winui-cache PROJECT_DIR=$(dirname "$(realpath "$PROJ")")
 log() { echo "[$(date +%T)] $*"; }
 wait_for() {  # wait_for PATTERN TIMEOUT: a window line matching PATTERN
   local t=0
-  until winui windows 2>/dev/null | grep -q "$1"; do sleep 2; t=$((t + 2)); [ $t -ge "$2" ] && return 1; done
+  until winui windows 2>/dev/null | grep -q "$1"; do
+    sleep 2
+    t=$((t + 2))
+    if [ $t -ge "$2" ]; then return 1; fi
+  done
+  return 0  # (an until's status is its body's last command's)
 }
 mkdir -p "$OUT"
 [ -d "$WINEPREFIX/drive_c/Program Files/TopoR Lite" ] || { echo "no capture prefix $WINEPREFIX (see the header)"; exit 2; }
@@ -31,25 +36,32 @@ find "$PROJECT_DIR" -maxdepth 1 -name '.lock*' -delete
 sed -i "s|<File path=\".\\\\$DOC.fsx\" isopened=\"0\"|<File path=\".\\\\$DOC.fsx\" isopened=\"1\"|" "$PROJ"
 WP=$(echo "Z:$(realpath "$PROJ")" | tr / '\\')
 (cd "$WINEPREFIX/drive_c/Program Files/TopoR Lite/BIN" && nohup wine TopoR.exe "$WP" > "$OUT/topor.log" 2>&1 &)
-wait_for FS_MainFrame 120 || { log "TopoR did not start"; exit 1; }
+wait_for FS_MainFrame 300 || { log "TopoR did not start"; exit 1; }
 sleep 6
 winui place -w class:FS_MainFrame > /dev/null
 ITEM=$(winui --timeout 60 find -w class:FS_MainFrame --name "$DOC" --all 2>/dev/null | awk -v d="'$DOC'" '$2 == "text" && $3 == d {print $1; exit}')
 [ -n "$ITEM" ] || { log "no project item $DOC"; exit 1; }
 winui --timeout 60 click -w "${ITEM%%/*}" --path "$ITEM" --double --method mouse > /dev/null
+# Only a .fst in the project: the import wizard («Импорт», then «Готово» adding the design to this project).
+if [ ! -e "$PROJECT_DIR/$DOC.fsx" ]; then
+  wait_for "Мастер импорта" 60 || { log "no import wizard"; winui windows; exit 1; }
+  winui --timeout 150 click -w "Мастер импорта" --id finish_btn > /dev/null
+  sleep 8
+  winui --timeout 150 click -w "Мастер импорта" --id finish_btn > /dev/null
+fi
 wait_for "Редактор ПП - $DOC" 120 || { log "the document did not open"; winui windows; exit 1; }
 sleep 4
 if winui windows | grep -q "#32770"; then log "a dialog is open:"; winui windows; exit 1; fi
 log "opened $DOC"
 winui cmd -w class:FS_MainFrame 70d3 > /dev/null
 wait_for "Автоматическая трассировка" 60 || { log "no autorouting dialog"; exit 1; }
-# The walk of the dialog (UIA) takes ~25 s; then the click is by the cached path.
+# The walk of the dialog (UIA) takes ~25 s on an idle machine; then the click is by the cached path, and the frames
+# start right after it (the first seconds of the routing are lost to the click's return, a second or two).
 winui --timeout 280 find -w "Автоматическая трассировка" --id btn_start > /dev/null
-"$HERE/frames.sh" "$OUT" "$SECS" 1 &
-FR=$!
+log "start button found"
 winui --timeout 280 click -w "Автоматическая трассировка" --id btn_start --method mouse --no-verify > /dev/null
 log "started"
-wait $FR
+"$HERE/frames.sh" "$OUT" "$SECS" 1
 log "stopping"
 wineserver -k
 log "done: $(ls "$OUT/frames" | wc -l) frames, $(ls "$OUT/fsb" | wc -l) variants"
