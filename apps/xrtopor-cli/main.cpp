@@ -120,6 +120,7 @@ int cmdRoute(Board& b, const Args& a) {
   if (a.flag("--new")) {  // the new autorouter (router/auto): the combined plane, layering, the metric stage on the model
     autoroute::Options ao;
     if (auto p = a.opt("--crossing"); !p.empty()) ao.crossing = std::stod(std::string(p));
+    if (auto p = a.opt("--via"); !p.empty()) ao.via = std::stod(std::string(p));
     ao.metric = !a.flag("--no-metric");
     if (auto p = a.opt("--nets"); !p.empty()) ao.nets = p | v::split(',') | r::to<std::vector<std::string>>();
     auto res = autoroute::route(b, ao);

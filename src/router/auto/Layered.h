@@ -5,6 +5,7 @@
 // layer, may change layer at an edge it crosses (a via there, at a price), and an edge holds on each layer what that
 // layer's wires across it leave room for.
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <vector>
 
@@ -24,6 +25,7 @@ struct LayeredCosts {
   int layers = 2;
   double via = 3e6;  // a change of layer, nm of length
   double viaDiameter = 0;  // the via's copper: a change of layer at an edge needs that much room there on both layers
+  std::function<double(int net)> viaOf;  // another net's via diameter (vias already on an edge); empty: viaDiameter
 };
 
 // chordLayer: per wire of t, the layer of each of its chords (the wire laid again: ignored). startLayers, endLayers:

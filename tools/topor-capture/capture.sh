@@ -32,6 +32,11 @@ CFG=$WINEPREFIX/drive_c/users/x-ray/AppData/Roaming/Eremex/TopoR/TopoR_7.0.cfg
 sed -i '/<recentfile /d' "$CFG"
 find "$WINEPREFIX/drive_c/users/x-ray/AppData/Roaming/Eremex/TopoR/Autosave" -mindepth 1 -delete 2>/dev/null
 find "$PROJECT_DIR" -maxdepth 1 -name '.lock*' -delete
+# Documents the project lists but the disk no longer has (TopoR adds the .fsx of an imported .fst, and crashes on
+# one that is gone): out of the project.
+grep -o 'File path="[^"]*"' "$PROJ" | sed 's/File path=".\\\(.*\)"/\1/' | while read -r f; do
+  [ -e "$PROJECT_DIR/$f" ] || sed -i "/File path=\".\\\\$f\"/d" "$PROJ"
+done
 # The document opens with the project when marked opened.
 sed -i "s|<File path=\".\\\\$DOC.fsx\" isopened=\"0\"|<File path=\".\\\\$DOC.fsx\" isopened=\"1\"|" "$PROJ"
 WP=$(echo "Z:$(realpath "$PROJ")" | tr / '\\')
@@ -53,6 +58,28 @@ wait_for "Редактор ПП - $DOC" 120 || { log "the document did not open"
 sleep 4
 if winui windows | grep -q "#32770"; then log "a dialog is open:"; winui windows; exit 1; fi
 log "opened $DOC"
+PID=$(pgrep -f "TopoR.exe.*$(basename "$PROJ")" | head -1)
+ticks() { awk '{print $14 + $15}' "/proc/$PID/stat" 2>/dev/null || echo 0; }
+# MODE=f5 (or f6, f7): TopoR's own procedure on the design as it is (our routing realised by TopoR), then the main
+# window and its status line («... мм, переходов: V, нарушений: N») once TopoR has been idle for 5 s.
+if [ "${MODE:-route}" != route ]; then
+  winui shot -w class:FS_MainFrame -o "$OUT/before.png" > /dev/null
+  for step in ${MODE//,/ }; do  # f5,f7: one after another, each to the end (TopoR idle for 5 s)
+    case $step in f5) CMD=7044 ;; f6) CMD=7043 ;; f7) CMD=8002 ;; *) log "unknown step $step"; exit 1 ;; esac
+    winui cmd -w class:FS_MainFrame "$CMD" > /dev/null
+    idle=0
+    for _ in $(seq 3600); do
+      a=$(ticks); sleep 1; b=$(ticks)
+      if [ $((b - a)) -lt 5 ]; then idle=$((idle + 1)); else idle=0; fi
+      [ $idle -ge 5 ] && break
+    done
+    winui shot -w class:FS_MainFrame -o "$OUT/after_$step.png" > /dev/null
+    echo "$step: $(winui --timeout 60 find -w class:FS_MainFrame --name "нарушений" --regex --all 2>/dev/null | grep -o "'[^']*нарушений[^']*'" | head -1)" | tee -a "$OUT/status.txt"
+  done
+  log "$MODE done"
+  wineserver -k
+  exit 0
+fi
 winui cmd -w class:FS_MainFrame 70d3 > /dev/null
 wait_for "Автоматическая трассировка" 60 || { log "no autorouting dialog"; exit 1; }
 # «Запустить» by its place, 186 x 34 px from the dialog's lower right corner: the walk of the dialog (UIA) to find
@@ -65,8 +92,6 @@ read -r X Y W H < <(winui windows | grep -m1 'Автоматическая тр�
 MAIN=$(winui windows | awk '/FS_MainFrame/{print $1; exit}')
 winui --timeout 30 click -w "$MAIN" --path "$MAIN" --at "$((X + W - 186)),$((Y + H - 34))" --method mouse --no-verify > /dev/null 2>&1 &
 started=0
-PID=$(pgrep -f "TopoR.exe.*$(basename "$PROJ")" | head -1)
-ticks() { awk '{print $14 + $15}' "/proc/$PID/stat" 2>/dev/null || echo 0; }
 for _ in $(seq 20); do
   a=$(ticks); sleep 1; b=$(ticks)
   # more than half a core in that second (100 ticks a second)

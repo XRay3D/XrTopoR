@@ -4,6 +4,7 @@
 #include <array>
 #include <bit>
 #include <chrono>
+#include <cstdlib>
 #include <format>
 #include <map>
 #include <numeric>
@@ -365,6 +366,7 @@ Result route(Board& b, const Options& o) {
     std::mt19937 rng(2);
     std::vector<int> order(NW);
     LayeredCosts lc{int(layers.size()), o.via * kNmPerMm};
+    lc.viaOf = [&](int net) { return double(b.classOf(net).viaDiameter); };
     for (int pass = 0; pass < o.layeredPasses && !cancelled(); ++pass) {
       std::iota(order.begin(), order.end(), 0);
       std::shuffle(order.begin(), order.end(), rng);
@@ -400,6 +402,25 @@ Result route(Board& b, const Options& o) {
       if (moved == 0) break;
     }
     for (int wi = 0; wi < nw; ++wi) sk[size_t(wi)] = sketchOf(plane, m, plane.wires[size_t(wi)]);
+    // How full the plane is, layer by layer: the edges whose wires on a layer do not fit (the vias counted as wires).
+    int over = 0;
+    double deficit = 0;
+    for (int e = 0; e < int(m.edges.size()); ++e) {
+      const topo::Edge& E = m.edges[size_t(e)];
+      if (E.cross.empty()) continue;
+      for (int l = 0; l < int(layers.size()); ++l) {
+        std::vector<int> ws;
+        for (int cid : E.cross) {
+          const topo::Crossing& x = plane.crossings[size_t(cid)];
+          const auto& cl = chordLayer[size_t(x.wire)];
+          if (cl[size_t(x.idx)] == l || cl[size_t(x.idx) + 1] == l) ws.push_back(x.wire);
+        }
+        if (ws.empty()) continue;
+        const topo::EdgeCapacity cap = topo::capacityOf(plane, m, E.v[0], E.v[1], ws, -1);
+        if (cap.deficit > 0 || cap.cls >= 3) ++over, deficit += cap.deficit;
+      }
+    }
+    log(std::format("plane by layers: {} edge-layer(s) over, {:.3f} mm short", over, deficit / 1e6));
   }
 
   // 4. The tracks along the sketches, a via where the layer changes.
@@ -410,6 +431,37 @@ Result route(Board& b, const Options& o) {
   constexpr Coord kViaPoint = 2000;  // 2 um
   const size_t vias0 = b.vias.size();
   std::vector<std::pair<Coord, Coord>> realVia;  // per new via: its diameter and drill
+  // Where a via at crossing cid (from layer l0 to l1) stands on its edge: the middle of the room the wires of both
+  // layers leave it there (the packing of each layer with the wire in its place), kept between its neighbours'
+  // sketch points on the edge so that every other wire passes it on its own side.
+  auto viaPlace = [&](int cid, int l0, int l1) {
+    const topo::Crossing& x = plane.crossings[size_t(cid)];
+    const topo::Edge& E = m.edges[size_t(x.edge)];
+    const Vec2 U = m.verts[size_t(E.v[0])].p, V = m.verts[size_t(E.v[1])].p;
+    const double L = (V - U).len();
+    const int k = int(r::find(E.cross, cid) - E.cross.begin());
+    double centre = 0;
+    for (int l : {l0, l1}) {
+      std::vector<int> ws;
+      int mine = 0;
+      for (int j = 0; j < int(E.cross.size()); ++j) {
+        const topo::Crossing& y = plane.crossings[size_t(E.cross[size_t(j)])];
+        const auto& yl = chordLayer[size_t(y.wire)];
+        if (j != k && yl[size_t(y.idx)] != l && yl[size_t(y.idx) + 1] != l) continue;
+        if (j == k) mine = int(ws.size());
+        ws.push_back(y.wire);
+      }
+      const topo::EdgeCapacity cap = topo::capacityOf(plane, m, E.v[0], E.v[1], ws, -1);
+      centre += topo::slotOf(cap, mine).mid() / 2;
+    }
+    const Vec2 here = crossingPoint(plane, m, cid);
+    double lo = 0, hi = L;
+    if (k > 0) lo = (crossingPoint(plane, m, E.cross[size_t(k - 1)]) - U).len();
+    if (k + 1 < int(E.cross.size())) hi = (crossingPoint(plane, m, E.cross[size_t(k + 1)]) - U).len();
+    const double gap = (hi - lo) * 0.05;
+    if (L <= 0 || hi - lo <= 2 * gap) return here;
+    return U + (V - U) * (std::clamp(centre, lo + gap, hi - gap) / L);
+  };
   for (int wi = 0; wi < nw; ++wi) {
     const topo::Wire& w = plane.wires[size_t(wi)];
     const auto& pts = sk[size_t(wi)];
@@ -417,7 +469,8 @@ Result route(Board& b, const Options& o) {
     const int last = int(pts.size()) - 2;
     struct Cut {
       Place at;
-      int layer;  // the layer after it
+      int layer;   // the layer after it
+      int cross = -1;  // the crossing it stands at (a change of layer at an edge), or -1 (on a chord)
     };
     std::vector<Cut> cuts;
     auto padLayer = [&](int end, int want) {
@@ -429,7 +482,7 @@ Result route(Board& b, const Options& o) {
     const int startLayer = padLayer(0, cl.front());
     if (startLayer != cl.front()) cuts.push_back({{0, 0.5}, cl.front()});
     for (size_t k = 1; k < cl.size(); ++k)
-      if (cl[k] != cl[k - 1]) cuts.push_back({{int(k) - 1, 1.0}, cl[k]});
+      if (cl[k] != cl[k - 1]) cuts.push_back({{int(k) - 1, 1.0}, cl[k], w.cross[k - 1]});
     if (int endLayer = padLayer(1, cl.back()); endLayer != cl.back()) cuts.push_back({{last, 0.5}, endLayer});
     r::stable_sort(cuts, {}, [](const Cut& c) { return c.at.s(); });
     // Walk the sketch, cutting it at the vias.
@@ -453,7 +506,7 @@ Result route(Board& b, const Options& o) {
     size_t ci = 0;
     for (int c = 0; c <= last; ++c) {
       while (ci < cuts.size() && cuts[ci].at.chord == c) {
-        const Vec2 p = at(pts, cuts[ci].at);
+        const Vec2 p = cuts[ci].cross >= 0 ? viaPlace(cuts[ci].cross, cl[size_t(cuts[ci].at.chord)], cuts[ci].layer) : at(pts, cuts[ci].at);
         run.push_back(p);
         flush(cur);
         Via v;
@@ -480,13 +533,19 @@ Result route(Board& b, const Options& o) {
   if (o.sketch) o.sketch({drawnLines, drawnLayers, viaPoints});
   log(std::format("tracks: {} along the sketches, {} vias", b.tracks.size(), res.vias));
 
+  // Without the metric stage the board keeps the sketches, with the vias their real size.
+  if (!o.metric || cancelled())
+    for (size_t k = 0; k < realVia.size(); ++k) {
+      b.vias[vias0 + k].diameter = realVia[k].first;
+      b.vias[vias0 + k].drill = realVia[k].second;
+    }
   // 5. The metric stage: the model from the tracks, F5, F6, F7.
   if (o.metric && !cancelled()) {
     Topology::assignIds(b);
     Topology t;
     t.build(b);
     // The vias their real size: on the board and in the model, the edges' capacities with them.
-    for (size_t k = 0; k < realVia.size(); ++k) {
+    for (size_t k = 0; k < realVia.size() && !std::getenv("XR_AUTO_POINTVIAS"); ++k) {
       Via& v = b.vias[vias0 + k];
       v.diameter = realVia[k].first;
       v.drill = realVia[k].second;
@@ -530,6 +589,21 @@ Result route(Board& b, const Options& o) {
       if (!order.empty()) log(std::format("model: {} wire(s) laid again on their layer, {} found no way", relaid, stuck));
     }
     if (t.untangled) log(std::format("model: {} double crossing(s) taken apart", t.untangled));
+    {
+      int over = 0, atVia = 0, atTwo = 0;
+      double deficit = 0;
+      for (const topo::LayerMesh& lm : t.layers)
+        for (const topo::Edge& E : lm.edges)
+          if (E.cls >= 2 && !E.cross.empty()) {
+            ++over;
+            deficit += std::max(0.0, E.need - E.freeLen);
+            const int vias = (t.owners[size_t(lm.verts[size_t(E.v[0])].owner)].kind == topo::Owner::Kind::Via) +
+                             (t.owners[size_t(lm.verts[size_t(E.v[1])].owner)].kind == topo::Owner::Kind::Via);
+            atVia += vias > 0;
+            atTwo += vias > 1;
+          }
+      log(std::format("model before F5: {} edge(s) over ({} at a via, {} between two), {:.3f} mm short", over, atVia, atTwo, deficit / 1e6));
+    }
     if (o.progress) o.progress(0, 3, "F5");
     auto f5 = topo::runF5Model(b, t, {});
     log(std::format("F5: {}", f5.drawn ? "drawn" : "stopped by the model's violations"));

@@ -91,6 +91,18 @@ std::optional<LayeredPath> findLayeredPath(const Topology& t, int wi, const std:
   // Room on layer l at the gap of edge e: the wires crossing it on l (a via there takes both its layers), and this one.
   std::map<std::tuple<int, int, int>, bool> roomCache;
   std::map<std::tuple<int, int, int>, double> slackOf;
+  std::unordered_map<int, double> viaExtraCache;
+  auto viaExtra = [&](int e) {
+    auto [it, fresh] = viaExtraCache.try_emplace(e, 0.0);
+    if (!fresh) return it->second;
+    for (int cid : m.edges[size_t(e)].cross) {
+      const Crossing& x = t.crossings[size_t(cid)];
+      if (x.wire < 0 || x.wire == wi || layerOf(x.wire, x.idx) == layerOf(x.wire, x.idx + 1)) continue;
+      const Wire& X = t.wires[size_t(x.wire)];
+      it->second += std::max(0.0, (c.viaOf ? c.viaOf(X.net) : c.viaDiameter) - double(X.width));
+    }
+    return it->second;
+  };
   auto room = [&](int e, int gap, int l) {
     auto [it, fresh] = roomCache.try_emplace({e, gap, l}, false);
     if (!fresh) return it->second;
@@ -110,8 +122,10 @@ std::optional<LayeredPath> findLayeredPath(const Topology& t, int wi, const std:
     ws.insert(ws.begin() + before, wi);
     const int along = E.along >= 0 && layerOf(E.along, 0) == l ? E.along : -1;
     const EdgeCapacity cap = capacityOf(t, m, E.v[0], E.v[1], ws, along);
-    it->second = cap.cls < 3 && cap.deficit <= 0;
-    slackOf[{e, gap, l}] = cap.slack;
+    // The vias already on the edge (a wire changing layer at its crossing) take their width beyond the wire's.
+    const double vias = viaExtra(e);
+    it->second = cap.cls < 3 && cap.deficit <= 0 && cap.slack >= vias;
+    slackOf[{e, gap, l}] = cap.slack - vias;
     return it->second;
   };
   // A via at the gap: the wire's room on both layers and the via's width beyond the wire's.
