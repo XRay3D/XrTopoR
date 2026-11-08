@@ -270,6 +270,7 @@ std::optional<LayeredPath> findLayeredPath(const Topology& t, int wi, const std:
         const Vec2 p = pointAt(e, gap);
         const double step = (p - nd.p).len();
         for (int l = 0; l < NL; ++l) {
+          if (l != nd.layer && c.via >= 1e17) continue;  // no change of layer at all (a piece between two vias)
           if (l != nd.layer && (!viaRoom(e, gap, nd.layer, l) || (alongOther && layerOf(E.along, 0) == l))) continue;
           // Its own vias apart too: the wires crossing between two of them need the room.
           if (l != nd.layer && nd.hasVia && (nd.lastVia - p).len() < c.viaDiameter + double(w.clr)) continue;

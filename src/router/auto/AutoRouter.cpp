@@ -445,14 +445,87 @@ Variant makeVariant(const Context& cx, double crossing, double via, unsigned see
     if (moved == 0) break;
   }
 
+  // Same-layer crossings of wires of different nets on the plane (a check: none should be).
+  auto sameLayerCrossings = [&] {
+    int n = 0;
+    auto perim = [&](int tri, int le, double f) {
+      const topo::Tri& T = m.tris[size_t(tri)];
+      const topo::Edge& E = m.edges[size_t(T.e[le])];
+      return (le + 1) % 3 + (E.v[0] == T.v[(le + 1) % 3] ? f : 1 - f);
+    };
+    for (int tri = 0; tri < int(m.tris.size()); ++tri) {
+      if (!m.tris[size_t(tri)].inside) continue;
+      struct Ch { double a, b; int net, layer; };
+      std::vector<Ch> chs;
+      const topo::Tri& T = m.tris[size_t(tri)];
+      for (int i = 0; i < 3; ++i) {
+        const topo::Edge& E = m.edges[size_t(T.e[i])];
+        const int ncr = int(E.cross.size());
+        for (int k = 0; k < ncr; ++k) {
+          const topo::Crossing& x = plane.crossings[size_t(E.cross[size_t(k)])];
+          const topo::Wire& X = plane.wires[size_t(x.wire)];
+          const double here = perim(tri, i, double(k + 1) / (ncr + 1));
+          const int nx = int(X.cross.size());
+          const auto& cl = V.chordLayer[size_t(x.wire)];
+          if (x.idx == 0 && T.v[i] == X.endVertex[0]) chs.push_back({here, double(i), X.net, cl[0]});
+          if (x.idx == nx - 1 && T.v[i] == X.endVertex[1]) chs.push_back({here, double(i), X.net, cl[size_t(nx)]});
+          if (x.idx + 1 < nx) {
+            const topo::Crossing& d = plane.crossings[size_t(X.cross[size_t(x.idx) + 1])];
+            const int j = m.localEdge(tri, d.edge);
+            if (j >= 0 && j != i) {
+              const topo::Edge& F = m.edges[size_t(d.edge)];
+              const int kf = int(r::find(F.cross, X.cross[size_t(x.idx) + 1]) - F.cross.begin());
+              chs.push_back({here, perim(tri, j, double(kf + 1) / (F.cross.size() + 1)), X.net, cl[size_t(x.idx) + 1]});
+            }
+          }
+        }
+      }
+      for (size_t a = 0; a < chs.size(); ++a)
+        for (size_t c = a + 1; c < chs.size(); ++c) {
+          if (chs[a].net == chs[c].net || chs[a].layer != chs[c].layer) continue;
+          double p = chs[a].a, q = chs[a].b;
+          if (p > q) std::swap(p, q);
+          auto in = [&](double z) { return z > p + 1e-9 && z < q - 1e-9; };
+          auto on = [&](double z) { return std::abs(z - p) <= 1e-9 || std::abs(z - q) <= 1e-9; };
+          if (!on(chs[c].a) && !on(chs[c].b) && in(chs[c].a) != in(chs[c].b)) ++n;
+        }
+    }
+    return n;
+  };
   // 4. The vias made vertices of the plane (TopoR's model: a via is an owner the wires end at): each change of layer
   // puts a via owner, at its size, into the triangle beyond the crossing where the layer changes, on the wire's chord
   // before its first crossing with another wire; the wire is cut there into pieces of one layer each. The room
   // round a via is then the plane's own (the capacity of the edges at its vertex), not an estimate.
+  if (std::getenv("XR_AUTO_DEBUG")) log(std::format("same-layer crossings before the vias were made vertices: {}", sameLayerCrossings()));
   if (o.viaVertices) {
     int made = 0, kept = 0;
     const int n0 = int(plane.wires.size());
+    // The layers by crossing, not by chord: an insertion or a flip gives a wire new crossings (on the new spokes)
+    // and shifts its chords; a new crossing takes the layer of the chord it falls on.
+    std::vector<int> startL(plane.wires.size()), after(plane.crossings.size(), -1);
+    for (int wi = 0; wi < n0; ++wi) {
+      const auto& cl = V.chordLayer[size_t(wi)];
+      startL[size_t(wi)] = cl.front();
+      const auto& cr = plane.wires[size_t(wi)].cross;
+      for (size_t i = 0; i < cr.size(); ++i) after[size_t(cr[i])] = cl[i + 1];
+    }
+    auto relayer = [&](int wi) {
+      auto& cl = V.chordLayer[size_t(wi)];
+      const auto& cr = plane.wires[size_t(wi)].cross;
+      cl.assign(cr.size() + 1, startL[size_t(wi)]);
+      if (after.size() < plane.crossings.size()) after.resize(plane.crossings.size(), -1);
+      for (size_t i = 0; i < cr.size(); ++i) {
+        int& a = after[size_t(cr[i])];
+        if (a < 0) a = cl[i];
+        cl[i + 1] = a;
+      }
+    };
+    auto relayerAll = [&] {
+      startL.resize(plane.wires.size(), 0);
+      for (int wi = 0; wi < int(plane.wires.size()); ++wi) relayer(wi);
+    };
     for (int wi = 0; wi < n0 && !cx.cancelled(); ++wi) {
+      relayer(wi);
       const std::vector<int> cl = V.chordLayer[size_t(wi)];
       std::vector<int> splits;  // crossing i: the layer changes between chord i and chord i + 1
       for (size_t k = 1; k < cl.size(); ++k)
@@ -524,6 +597,9 @@ Variant makeVariant(const Context& cx, double crossing, double via, unsigned see
       if (!ok) {  // the wire as it was, its changes of layer left at the crossings
         for (int ow : owners) topo::removeOwner(plane, ow, false);
         topo::applyRelay(plane, wi, was);
+        if (after.size() < plane.crossings.size()) after.resize(plane.crossings.size(), -1);
+        const auto& cr = plane.wires[size_t(wi)].cross;
+        for (size_t i = 0; i < cr.size() && i + 1 < cl.size(); ++i) after[size_t(cr[i])] = cl[i + 1];
         ++kept;
         continue;
       }
@@ -561,13 +637,19 @@ Variant makeVariant(const Context& cx, double crossing, double via, unsigned see
           }
         }
         topo::applyRelay(plane, pw, path);
-        V.chordLayer[size_t(pw)].assign(path.steps.size() + 1, cl[size_t(k < splits.size() ? splits[k] : int(cl.size()) - 1)]);
-        if (k > 0) V.chordLayer[size_t(pw)].assign(path.steps.size() + 1, cl[size_t(splits[k - 1]) + 1]);
+        const int pieceLayer = k == 0 ? cl.front() : cl[size_t(splits[k - 1]) + 1];
+        if (int(startL.size()) <= pw) startL.resize(size_t(pw) + 1, 0);
+        startL[size_t(pw)] = pieceLayer;
+        if (after.size() < plane.crossings.size()) after.resize(plane.crossings.size(), -1);
+        for (int cid : plane.wires[size_t(pw)].cross) after[size_t(cid)] = pieceLayer;
+        V.chordLayer[size_t(pw)].assign(path.steps.size() + 1, pieceLayer);
         from = to;
       }
       for (int ow : owners) V.viaOwners.push_back(ow);
       made += int(owners.size());
     }
+    relayerAll();
+    if (std::getenv("XR_AUTO_DEBUG")) log(std::format("same-layer crossings after the vias were made vertices: {}", sameLayerCrossings()));
     // The vias pushed off what is too near (a small F7 on the plane): along each spoke of a via, what the wires across
     // it on each layer lack, or with none across it the clearance the copper at its two ends lacks, pushes the via away
     // from the far vertex; the mesh follows with flips (moveOwner), the crossings with it.
@@ -607,6 +689,8 @@ Variant makeVariant(const Context& cx, double crossing, double via, unsigned see
       }
       if (moved < 1000) break;
     }
+    relayerAll();
+    if (std::getenv("XR_AUTO_DEBUG")) log(std::format("same-layer crossings after the pushes: {}", sameLayerCrossings()));
     // The pieces through edges whose wires on their layer do not fit, laid again on their layer (the vias stand).
     LayeredCosts single{int(cx.layers.size()), cx.layers, 1e18};
     single.viaOf = lc.viaOf;
@@ -645,6 +729,7 @@ Variant makeVariant(const Context& cx, double crossing, double via, unsigned see
       relaid += moved;
       if (moved == 0) break;
     }
+    if (std::getenv("XR_AUTO_DEBUG")) log(std::format("same-layer crossings after the repair: {}", sameLayerCrossings()));
     log(std::format("vias as vertices: {} made, {} wire(s) left with their changes at the crossings; {} push(es); {} piece(s) laid again round them", made, kept, pushes, relaid));
   }
 
