@@ -23,6 +23,9 @@ struct Options {
   int passes = 3;                 // re-laying passes on the plane (every wire taken out and laid again)
   int layeredPasses = 4;          // re-laying passes with the layers known (crossings on other layers only, vias at a price)
   double via = 3.0;               // the price of a via in those passes, mm (one variant: these two prices)
+  // The vias made vertices of the plane before the variant is measured and drawn (an experiment, off: MinVia 743 places
+  // against 23 with the vias as discs round the crossings; the conversion finds same-layer crossings after the pushes).
+  bool viaVertices = false;
   int relayerings = 4;            // rounds of re-layering the whole board and laying again, while the vias fall
   int variants = 1;               // > 1: as many variants over a grid of prices (crossing 1/3/8/20, via 3/8/20/50 mm) and seeds, in parallel
   double viaWeight = 10.0;        // a via against length when the best variant is chosen, mm (TopoR's rule of thumb: 25)

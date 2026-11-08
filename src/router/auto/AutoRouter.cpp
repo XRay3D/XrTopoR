@@ -21,6 +21,7 @@
 #include "router/topo/ModelRelax.h"
 #include "router/topo/ModelTools.h"
 #include "topo/Capacity.h"
+#include "topo/Move.h"
 #include "topo/Relay.h"
 
 namespace xr::autoroute {
@@ -128,6 +129,7 @@ struct Variant {
   int over = 0;           // edge-layers whose wires do not fit
   double deficit = 0;     // ... by how much, nm
   double length = 0;      // the wires' taut length on the plane, nm
+  std::vector<int> viaOwners;  // the vias made vertices of the plane (owners), the wires split at them
   std::vector<std::string> log;
 };
 
@@ -443,6 +445,209 @@ Variant makeVariant(const Context& cx, double crossing, double via, unsigned see
     if (moved == 0) break;
   }
 
+  // 4. The vias made vertices of the plane (TopoR's model: a via is an owner the wires end at): each change of layer
+  // puts a via owner, at its size, into the triangle beyond the crossing where the layer changes, on the wire's chord
+  // before its first crossing with another wire; the wire is cut there into pieces of one layer each. The room
+  // round a via is then the plane's own (the capacity of the edges at its vertex), not an estimate.
+  if (o.viaVertices) {
+    int made = 0, kept = 0;
+    const int n0 = int(plane.wires.size());
+    for (int wi = 0; wi < n0 && !cx.cancelled(); ++wi) {
+      const std::vector<int> cl = V.chordLayer[size_t(wi)];
+      std::vector<int> splits;  // crossing i: the layer changes between chord i and chord i + 1
+      for (size_t k = 1; k < cl.size(); ++k)
+        if (cl[k] != cl[k - 1]) splits.push_back(int(k) - 1);
+      if (splits.empty()) continue;
+      const topo::Wire w0 = plane.wires[size_t(wi)];
+      const topo::RelayPath was = stepsOf(plane, wi);
+      if (was.along) continue;
+      takeAllOut(plane, wi);
+      // Where a gap of an edge stands (rankPos's spacing: the crossings evenly over the whole edge).
+      auto gapPoint = [&](int e, int gap) {
+        const topo::Edge& E = m.edges[size_t(e)];
+        const Vec2 U = m.verts[size_t(E.v[0])].p, W = m.verts[size_t(E.v[1])].p;
+        return U + (W - U) * ((gap + 0.5) / (double(E.cross.size()) + 1));
+      };
+      auto rank = [&](const topo::Edge& E, int cid) {
+        const Vec2 U = m.verts[size_t(E.v[0])].p, W = m.verts[size_t(E.v[1])].p;
+        const int k = int(r::find(E.cross, cid) - E.cross.begin());
+        return U + (W - U) * ((k + 1.0) / (double(E.cross.size()) + 1));
+      };
+      std::vector<int> owners;
+      bool ok = true;
+      for (int i : splits) {
+        const auto& st = was.steps[size_t(i)];
+        const Vec2 A = gapPoint(st.edge, st.gap);
+        const bool toEnd = i + 1 >= int(was.steps.size());
+        const Vec2 B = toEnd ? m.verts[size_t(w0.endVertex[1])].p : gapPoint(was.steps[size_t(i) + 1].edge, was.steps[size_t(i) + 1].gap);
+        // The triangle beyond edge i: shared with the next edge, or holding the end vertex.
+        int tri = -1;
+        for (int tt : m.edges[size_t(st.edge)].t) {
+          if (tt < 0) continue;
+          if (toEnd ? m.localVertex(tt, w0.endVertex[1]) >= 0 : m.localEdge(tt, was.steps[size_t(i) + 1].edge) >= 0) tri = tt;
+        }
+        if (tri < 0) { ok = false; break; }
+        // The first crossing of A-B with the other wires' chords in the triangle: the via before it.
+        double first = 1;
+        const topo::Tri& T = m.tris[size_t(tri)];
+        for (int j = 0; j < 3; ++j) {
+          const topo::Edge& E = m.edges[size_t(T.e[j])];
+          for (int cid : E.cross) {
+            const topo::Crossing& c = plane.crossings[size_t(cid)];
+            const topo::Wire& X = plane.wires[size_t(c.wire)];
+            const Vec2 here = rank(E, cid);
+            std::vector<Vec2> others;
+            if (c.idx + 1 < int(X.cross.size())) {
+              const int nc = X.cross[size_t(c.idx) + 1];
+              const int ne = plane.crossings[size_t(nc)].edge;
+              if (ne != T.e[j] && m.localEdge(tri, ne) >= 0) others.push_back(rank(m.edges[size_t(ne)], nc));
+            } else if (m.localVertex(tri, X.endVertex[1]) >= 0) {
+              others.push_back(m.verts[size_t(X.endVertex[1])].p);
+            }
+            if (c.idx == 0 && m.localVertex(tri, X.endVertex[0]) >= 0) others.push_back(m.verts[size_t(X.endVertex[0])].p);
+            for (Vec2 q : others)
+              if (auto x = segCross(A, B, here, q)) first = std::min(first, x->first);
+          }
+        }
+        const double sAt = std::clamp(first * 0.5, 0.02, 0.5);
+        topo::Owner o;
+        o.kind = topo::Owner::Kind::Via;
+        o.net = w0.net;
+        o.c = A + (B - A) * sAt;
+        o.halfWidth = b.classOf(w0.net).viaDiameter / 2.0;
+        o.shape = Shape::circle(o.c, o.halfWidth);
+        o.layers = cx.routing;
+        const int ow = topo::insertOwner(plane, o, false);
+        if (ow < 0) { ok = false; break; }
+        owners.push_back(ow);
+      }
+      if (!ok) {  // the wire as it was, its changes of layer left at the crossings
+        for (int ow : owners) topo::removeOwner(plane, ow, false);
+        topo::applyRelay(plane, wi, was);
+        ++kept;
+        continue;
+      }
+      // The pieces: [start .. split 0], [split 0 + 1 .. split 1], ..., each from its owner and vertex to the next.
+      int from = 0;
+      for (size_t k = 0; k <= splits.size(); ++k) {
+        const int to = k < splits.size() ? splits[k] + 1 : int(was.steps.size());  // steps [from, to)
+        topo::Wire piece = w0;
+        piece.cross.clear();
+        piece.hasExit[0] = piece.hasExit[1] = false;
+        if (k > 0) {
+          piece.end[0] = owners[k - 1];
+          piece.endVertex[0] = m.ownerVerts[size_t(owners[k - 1])].front();
+        }
+        if (k < splits.size()) {
+          piece.end[1] = owners[k];
+          piece.endVertex[1] = m.ownerVerts[size_t(owners[k])].front();
+        }
+        int pw = wi;
+        if (k == 0) plane.wires[size_t(wi)] = piece;
+        else {
+          plane.wires.push_back(piece);
+          pw = int(plane.wires.size()) - 1;
+          V.chordLayer.push_back({});
+        }
+        topo::RelayPath path;
+        for (int i = from; i < to; ++i) path.steps.push_back(was.steps[size_t(i)]);
+        if (path.steps.empty()) {  // between two neighbouring vertices: along their edge
+          for (int e : m.verts[size_t(piece.endVertex[0])].tris.empty() ? std::vector<int>{} : topo::starEdges(m, piece.endVertex[0])) {
+            const topo::Edge& E = m.edges[size_t(e)];
+            if ((E.v[0] == piece.endVertex[0] && E.v[1] == piece.endVertex[1]) || (E.v[1] == piece.endVertex[0] && E.v[0] == piece.endVertex[1])) {
+              path.along = true;
+              path.alongEdge = e;
+            }
+          }
+        }
+        topo::applyRelay(plane, pw, path);
+        V.chordLayer[size_t(pw)].assign(path.steps.size() + 1, cl[size_t(k < splits.size() ? splits[k] : int(cl.size()) - 1)]);
+        if (k > 0) V.chordLayer[size_t(pw)].assign(path.steps.size() + 1, cl[size_t(splits[k - 1]) + 1]);
+        from = to;
+      }
+      for (int ow : owners) V.viaOwners.push_back(ow);
+      made += int(owners.size());
+    }
+    // The vias pushed off what is too near (a small F7 on the plane): along each spoke of a via, what the wires across
+    // it on each layer lack, or with none across it the clearance the copper at its two ends lacks, pushes the via away
+    // from the far vertex; the mesh follows with flips (moveOwner), the crossings with it.
+    int pushes = 0;
+    for (int it = 0; it < 24 && !cx.cancelled(); ++it) {
+      double moved = 0;
+      for (int ow : V.viaOwners) {
+        if (m.ownerVerts[size_t(ow)].empty()) continue;
+        const int vx = m.ownerVerts[size_t(ow)].front();
+        const Vec2 P = m.verts[size_t(vx)].p;
+        Vec2 force;
+        for (int e : topo::starEdges(m, vx)) {
+          const topo::Edge& E = m.edges[size_t(e)];
+          if (E.v[0] != vx && E.v[1] != vx) continue;
+          const int other = E.v[0] == vx ? E.v[1] : E.v[0];
+          const topo::Owner& ox = plane.owners[size_t(m.verts[size_t(other)].owner)];
+          if (ox.net == plane.owners[size_t(ow)].net && ox.net >= 0) continue;
+          double lack = 0;
+          for (int l = 0; l < int(cx.layers.size()); ++l) {
+            std::vector<int> ws;
+            for (int cid : E.cross) {
+              const topo::Crossing& x = plane.crossings[size_t(cid)];
+              if (V.chordLayer[size_t(x.wire)][size_t(x.idx)] == l) ws.push_back(x.wire);
+            }
+            const topo::EdgeCapacity cap = topo::capacityOf(plane, m, E.v[0], E.v[1], ws, -1, LayerMask(1) << cx.layers[size_t(l)]);
+            if (!ws.empty()) lack = std::max(lack, cap.deficit);
+            else if ((ox.layers >> cx.layers[size_t(l)]) & 1)
+              lack = std::max(lack, double(b.classOf(plane.owners[size_t(ow)].net).clearance) - cap.freeLen);
+          }
+          if (lack > 0) force = force + (P - m.verts[size_t(other)].p).normalized() * lack;
+        }
+        const double len = force.len();
+        if (len < 1000) continue;  // 1 um
+        const Vec2 step = force * (std::min(len, 0.25 * kNmPerMm) / len);
+        moved = std::max(moved, topo::moveOwner(plane, ow, step) * step.len());
+        ++pushes;
+      }
+      if (moved < 1000) break;
+    }
+    // The pieces through edges whose wires on their layer do not fit, laid again on their layer (the vias stand).
+    LayeredCosts single{int(cx.layers.size()), cx.layers, 1e18};
+    single.viaOf = lc.viaOf;
+    int relaid = 0;
+    for (int round = 0; round < 3 && !cx.cancelled(); ++round) {
+      std::set<int> redo;
+      for (int e = 0; e < int(m.edges.size()); ++e) {
+        const topo::Edge& E = m.edges[size_t(e)];
+        if (E.cross.empty() || m.verts[size_t(E.v[0])].owner == m.verts[size_t(E.v[1])].owner) continue;
+        for (int l = 0; l < int(cx.layers.size()); ++l) {
+          std::vector<int> ws;
+          for (int cid : E.cross) {
+            const topo::Crossing& x = plane.crossings[size_t(cid)];
+            if (V.chordLayer[size_t(x.wire)][size_t(x.idx)] == l) ws.push_back(x.wire);
+          }
+          if (ws.empty()) continue;
+          const topo::EdgeCapacity cap = topo::capacityOf(plane, m, E.v[0], E.v[1], ws, -1, LayerMask(1) << cx.layers[size_t(l)]);
+          if (cap.deficit > 0 || cap.cls >= 3) redo.insert(ws.begin(), ws.end());
+        }
+      }
+      if (redo.empty()) break;
+      int moved = 0;
+      for (int wi : redo) {
+        const topo::RelayPath was = stepsOf(plane, wi);
+        const int layer = V.chordLayer[size_t(wi)].front();
+        takeAllOut(plane, wi);
+        single.viaDiameter = double(b.classOf(plane.wires[size_t(wi)].net).viaDiameter);
+        if (auto p = findLayeredPath(plane, wi, V.chordLayer, single, 1u << layer, 1u << layer)) {
+          topo::applyRelay(plane, wi, p->path);
+          V.chordLayer[size_t(wi)].assign(p->path.steps.size() + 1, layer);
+          ++moved;
+        } else {
+          topo::applyRelay(plane, wi, was);
+        }
+      }
+      relaid += moved;
+      if (moved == 0) break;
+    }
+    log(std::format("vias as vertices: {} made, {} wire(s) left with their changes at the crossings; {} push(es); {} piece(s) laid again round them", made, kept, pushes, relaid));
+  }
+
   // The measures of the variant: the taut length, the vias, the edge-layers over.
   for (int wi = 0; wi < nw; ++wi) {
     V.length += topo::tautLength(plane, wi);
@@ -453,6 +658,7 @@ Variant makeVariant(const Context& cx, double crossing, double via, unsigned see
       V.vias += pl && !((pl >> (end == 0 ? cl.front() : cl.back())) & 1);
     }
   }
+  V.vias += int(V.viaOwners.size());
   for (int e = 0; e < int(m.edges.size()); ++e) {
     const topo::Edge& E = m.edges[size_t(e)];
     // (A side of a pad, crossed by its own wires on their way out: no room by rule, no overflow.)
@@ -554,6 +760,20 @@ void realize(const Context& cx, const Variant& V, Result& res) {
       run.push_back(pts[size_t(c) + 1]);
     }
     flush(cur);
+  }
+  // The vias that are vertices of the plane: where their owners stand.
+  for (int ow : V.viaOwners) {
+    const topo::Owner& O = plane.owners[size_t(ow)];
+    Via v;
+    v.pos = Point(O.c);
+    const NetClass& nc = b.classOf(O.net);
+    v.diameter = kViaPoint;
+    v.drill = kViaPoint / 2;
+    realVia.push_back({nc.viaDiameter, nc.viaDrill});
+    v.layers = b.allCopperMask();
+    v.net = O.net;
+    b.vias.push_back(v);
+    viaPoints.push_back(O.c);
   }
   if (o.sketch) o.sketch({drawnLines, drawnLayers, viaPoints});
   log(std::format("tracks: {} along the sketches, {} vias", b.tracks.size(), viaPoints.size()));
