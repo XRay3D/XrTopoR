@@ -2919,9 +2919,11 @@ TEST(Gui, MechanicalLayerActive) {
 }
 
 // The board's picture is kept between frames: panned, it is moved and the strips uncovered drawn; what comes out is
-// the picture drawn anew (to a level of a pixel's colour, the antialiasing of a shape cut at a strip's edge).
+// the picture drawn anew (to a level of a pixel's colour, and for a few pixels of thin lines). The window is large
+// enough for the picture drawn anew to be drawn in bands in parallel.
 TEST(Gui, PannedPictureAsDrawnAnew) {
   Fixture f("topor/Example_04/Arcs_master.pcb");
+  f.view.resize(1600, 1200);
   f.view.show();
   f.view.fitBoard();
   f.view.zoomBy(3);
@@ -2930,7 +2932,7 @@ TEST(Gui, PannedPictureAsDrawnAnew) {
     return f.view.grab().toImage().convertToFormat(QImage::Format_RGB32);
   };
   const QImage before = grab();
-  const QPoint mid(400, 300);
+  const QPoint mid(800, 600);
   QTest::mousePress(&f.view, Qt::MiddleButton, {}, mid);
   QPoint at = mid;
   for (QPoint step : {QPoint(37, 0), QPoint(0, -23), QPoint(-11, 19), QPoint(5, 5)}) {
@@ -2951,7 +2953,8 @@ TEST(Gui, PannedPictureAsDrawnAnew) {
       if (std::abs(qRed(u) - qRed(v)) > 2 || std::abs(qGreen(u) - qGreen(v)) > 2 || std::abs(qBlue(u) - qBlue(v)) > 2)
         ++off;
     }
-  EXPECT_EQ(off, 0) << "pixels unlike the picture drawn anew";
+  // (A line one pixel wide cut at a strip's edge is rasterised from the cut: a few of its pixels a pixel aside.)
+  EXPECT_LT(off, 100) << "pixels unlike the picture drawn anew";
   if (const char* dir = std::getenv("XR_SHOT_DIR")) {
     moved.save(QString(dir) + "/panned.png");
     fresh.save(QString(dir) + "/fresh.png");

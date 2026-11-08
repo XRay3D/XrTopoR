@@ -165,8 +165,10 @@ class BoardView : public QWidget {
   // The board's picture (background, grid, drawBoard), kept between frames: drawn anew when dirty or zoomed, moved
   // when panned by whole pixels (the strips uncovered drawn), else used as it is.
   void updateCache();
-  void paintCache(const QRect& area);  // the part `area` (in the widget's pixels) of the picture
-  bool seen(const BBox& bb) const { return bb.intersects(cull_); }  // within the part being drawn
+  // The part `area` (in the widget's pixels) of the picture, in bands drawn in parallel.
+  void paintCache(const QRect& area);
+  void paintBand(QPainter& p, const QRectF& area);
+  bool seen(const BBox& bb) const;  // within the part being drawn (on this thread)
   void drawLayer(QPainter& p, LayerId l);
   void drawGrid(QPainter& p);
   void drawVias(QPainter& p);
@@ -214,7 +216,6 @@ class BoardView : public QWidget {
   bool dirty_ = true;          // drawn anew at the next frame
   Vec2 cacheCenter_;           // the view it was drawn for
   double cacheScale_ = 0;
-  BBox cull_{-1e300, -1e300, 1e300, 1e300};  // the world's part being drawn, with a margin: what is outside is skipped
   QPointF lastMouse_;
   Vec2 cursor_;
   bool panning_ = false;

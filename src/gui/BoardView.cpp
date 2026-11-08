@@ -17,9 +17,11 @@
 #include <bit>
 #include <cmath>
 #include <map>
+#include <mutex>
 #include <numeric>
 #include <ranges>
 
+#include "core/Parallel.h"
 #include "core/Prof.h"
 #include "gui/Schemes.h"
 #include "gui/SmallDialogs.h"
@@ -381,13 +383,21 @@ static void scrollImage(QImage& img, int dx, int dy) {
     for (int y = 0; y < h + dy; ++y) row(y);
 }
 
-void BoardView::paintCache(const QRect& area) {
-  QPainter p(&cache_);
+// The world's part being drawn by this thread, with a margin: what is outside is skipped.
+static thread_local BBox tlCull{-1e300, -1e300, 1e300, 1e300};
+bool BoardView::seen(const BBox& bb) const { return bb.intersects(tlCull); }
+// A point with what is drawn round it in pixels (a label, a marker), up to `px` pixels off it.
+static bool seenPx(Vec2 at, double px, double scale) {
+  return BBox{at.x, at.y, at.x, at.y}.inflated(px / scale).intersects(tlCull);
+}
+
+void BoardView::paintBand(QPainter& p, const QRectF& area) {
   p.setClipRect(area);
-  // Whatever may reach into the area: the drawing's pens, the labels and markers drawn in pixels.
-  const double margin = 64 / scale_;
-  Vec2 a = toWorld(area.topLeft()), b = toWorld(area.bottomRight() + QPoint(1, 1));
-  cull_ = BBox{std::min(a.x, b.x), std::min(a.y, b.y), std::max(a.x, b.x), std::max(a.y, b.y)}.inflated(margin);
+  // The items' boxes hold their pens; two pixels for the antialiasing (what is drawn in pixels, the labels and DRC
+  // markers, is looked for further: seenPx).
+  const double margin = 2 / scale_;
+  const Vec2 a = toWorld(area.topLeft()), b = toWorld(area.bottomRight());
+  tlCull = BBox{std::min(a.x, b.x), std::min(a.y, b.y), std::max(a.x, b.x), std::max(a.y, b.y)}.inflated(margin);
   p.fillRect(area, doc_->color("background", 0x030b10));
   {
     ProfScope ps("paint.grid");
@@ -395,7 +405,29 @@ void BoardView::paintCache(const QRect& area) {
   }
   p.setRenderHint(QPainter::Antialiasing, true);
   drawBoard(p);
-  cull_ = BBox{-1e300, -1e300, 1e300, 1e300};
+  tlCull = BBox{-1e300, -1e300, 1e300, 1e300};
+}
+
+void BoardView::paintCache(const QRect& area) {
+  // Bands of rows of the picture, each drawn by its own painter on its rows; what the drawing computes lazily is
+  // computed first (Qt 6 draws text from any thread; drawText builds the glyphs' outlines one at a time).
+  const qreal dpr = cache_.devicePixelRatio();
+  const int top = int(std::floor(area.top() * dpr)), bottom = std::min(cache_.height(), int(std::ceil((area.bottom() + 1) * dpr)));
+  const int rows = bottom - top;
+  // A band to 400 thousand pixels, up to eight: further the painters' threads hinder each other (AMK310 maximised,
+  // the whole board: 70 ms in one band, 40 in four, 30 in eight, slower in sixteen and more).
+  const qsizetype pixels = qsizetype(rows) * qsizetype(std::ceil(area.width() * dpr));
+  const int bands = int(std::clamp<qsizetype>(pixels / 400'000, 1, std::min(8, parallelThreads())));
+  if (bands > 1 && doc_->display().flag("showNetLines")) doc_->connectivity();
+  parallelFor(size_t(bands), [&](size_t i) {
+    const int y0 = top + rows * int(i) / bands, y1 = top + rows * int(i + 1) / bands;
+    QImage band(cache_.bits() + qsizetype(y0) * cache_.bytesPerLine(), cache_.width(), y1 - y0, cache_.bytesPerLine(),
+                cache_.format());
+    band.setDevicePixelRatio(dpr);
+    QPainter p(&band);
+    p.translate(0, -y0 / dpr);
+    paintBand(p, QRectF(area).intersected(QRectF(0, y0 / dpr, width(), (y1 - y0) / dpr)));
+  });
 }
 
 void BoardView::updateCache() {
@@ -780,15 +812,19 @@ void BoardView::drawText(QPainter& p, const Text& t, const QColor& c) {
   // The lines as the board lays them out (Board::textLayout), each in the style's font with its cell (ascent and
   // descent) one character height; a line's top is the top of its capitals, as TopoR has it (a centred «2» in a
   // circle: the top of the digit half the height above the point, its baseline under it by the rest).
-  TextLayout l = doc_->board()->textLayout(t);
-  QFont f = textFont(st);
-  QFontMetricsF fm(f);
-  double k = l.lineHeight / (fm.ascent() + fm.descent());  // nm per font pixel
   QPainterPath path;
-  for (auto [i, line] : v::enumerate(l.lines)) {
-    QPainterPath one;
-    one.addText(0, fm.capHeight(), f, QString::fromUtf8(line.data(), qsizetype(line.size())));
-    path.addPath(QTransform().translate(l.left, l.top + double(i) * l.lineHeight).scale(k, k).map(one));
+  {
+    static std::mutex glyphs;  // (the bands of the picture are drawn in parallel; the outlines are built one at a time)
+    std::lock_guard lock(glyphs);
+    TextLayout l = doc_->board()->textLayout(t);
+    QFont f = textFont(st);
+    QFontMetricsF fm(f);
+    double k = l.lineHeight / (fm.ascent() + fm.descent());  // nm per font pixel
+    for (auto [i, line] : v::enumerate(l.lines)) {
+      QPainterPath one;
+      one.addText(0, fm.capHeight(), f, QString::fromUtf8(line.data(), qsizetype(line.size())));
+      path.addPath(QTransform().translate(l.left, l.top + double(i) * l.lineHeight).scale(k, k).map(one));
+    }
   }
   QTransform tr;
   QPointF at = toScreen(t.pos);
@@ -861,7 +897,7 @@ void BoardView::drawLabels(QPainter& p) {
     p.setPen(doc_->color("compsName", 0xffffff));
     if (px(0.6 * kNmPerMm) >= 3)
       for (int ci = 0; ci < int(b.components.size()); ++ci)
-        if (componentVisible(ci) && seen(around(b.components[ci].pos.v(), 0))) {
+        if (componentVisible(ci) && seenPx(b.components[ci].pos.v(), 64, scale_)) {
           QRectF r(toScreen(b.components[ci].pos.v()) - QPointF(60, 10), QSizeF(120, 20));
           p.drawText(r, Qt::AlignCenter, QString::fromStdString(b.components[ci].ref));
         }
@@ -871,7 +907,7 @@ void BoardView::drawLabels(QPainter& p) {
   if (!names && !nets) return;
   for (auto& pad : b.pads) {
     if (pad.component >= 0 && !componentVisible(pad.component)) continue;
-    if (!(pad.copper & visibleCopper()) || !seen(padBox(pad))) continue;
+    if (!(pad.copper & visibleCopper()) || !seen(padBox(pad).inflated(32 / scale_))) continue;
     double size = px(double(std::min(pad.shape.w, pad.shape.h)));
     if (size < 14) continue;
     f.setPixelSize(std::clamp(int(size / 3), 6, 14));
@@ -1050,7 +1086,7 @@ void BoardView::drawBoard(QPainter& p) {
     p.setPen(QPen(doc_->color("drcViolation", 0xffffff), 2));
     p.setBrush(Qt::NoBrush);
     for (auto& v : doc_->drc()) {
-      if (!seen(around(v.pos, 0))) continue;
+      if (!seenPx(v.pos, 10, scale_)) continue;
       QPointF c = toScreen(v.pos);
       p.drawEllipse(c, 7, 7);
       p.drawLine(c + QPointF(-4, -4), c + QPointF(4, 4));
