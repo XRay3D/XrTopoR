@@ -55,11 +55,24 @@ if winui windows | grep -q "#32770"; then log "a dialog is open:"; winui windows
 log "opened $DOC"
 winui cmd -w class:FS_MainFrame 70d3 > /dev/null
 wait_for "Автоматическая трассировка" 60 || { log "no autorouting dialog"; exit 1; }
-# The walk of the dialog (UIA) takes ~25 s on an idle machine; then the click is by the cached path, and the frames
-# start right after it (the first seconds of the routing are lost to the click's return, a second or two).
-winui --timeout 280 find -w "Автоматическая трассировка" --id btn_start > /dev/null
-log "start button found"
-winui --timeout 280 click -w "Автоматическая трассировка" --id btn_start --method mouse --no-verify > /dev/null
+# «Запустить» by its place, 186 x 34 px from the dialog's lower right corner: the walk of the dialog (UIA) to find
+# it by id takes 25 s with few nets and minutes with a hundred (the net table). The click's own check of the result
+# times out once TopoR is busy routing — that is the sign it started: TopoR's CPU load.
+sleep 3
+# The dialog answers no accessibility query once its net table is long (it hung TopoR's window thread): the real
+# mouse goes to the screen point, with the main window as the helper's target.
+read -r X Y W H < <(winui windows | grep -m1 'Автоматическая трассировка' | sed -E 's/.* (-?[0-9]+),(-?[0-9]+) ([0-9]+)x([0-9]+) .*/\1 \2 \3 \4/')
+MAIN=$(winui windows | awk '/FS_MainFrame/{print $1; exit}')
+winui --timeout 30 click -w "$MAIN" --path "$MAIN" --at "$((X + W - 186)),$((Y + H - 34))" --method mouse --no-verify > /dev/null 2>&1 &
+started=0
+PID=$(pgrep -f "TopoR.exe.*$(basename "$PROJ")" | head -1)
+ticks() { awk '{print $14 + $15}' "/proc/$PID/stat" 2>/dev/null || echo 0; }
+for _ in $(seq 20); do
+  a=$(ticks); sleep 1; b=$(ticks)
+  # more than half a core in that second (100 ticks a second)
+  if [ $((b - a)) -gt 50 ]; then started=1; break; fi
+done
+[ $started = 1 ] || { log "the routing did not start"; exit 1; }
 log "started"
 "$HERE/frames.sh" "$OUT" "$SECS" 1
 log "stopping"

@@ -21,6 +21,8 @@ struct Options {
   std::vector<std::string> nets;  // empty: every net to be routed («Трассировать» on, not flexibly fixed)
   double crossing = 3.0;          // what crossing a wire of another net costs on the plane, mm (it may cost a via)
   int passes = 3;                 // re-laying passes on the plane (every wire taken out and laid again)
+  int layeredPasses = 4;          // re-laying passes with the layers known (crossings on other layers only, vias at a price)
+  double via = 3.0;               // the price of a via in those passes, mm
   bool metric = true;             // F5, F6 and F7 on the model after the tracks are laid
   std::function<void(int done, int total, const std::string& stage)> progress;
   const std::atomic<bool>* cancel = nullptr;

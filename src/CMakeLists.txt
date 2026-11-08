@@ -76,6 +76,7 @@ add_library(xrrouter STATIC
   router/topo/Refine.cpp
   router/auto/AutoRouter.cpp
   router/auto/Layering.cpp
+  router/auto/Layered.cpp
 )
 target_link_libraries(xrrouter PUBLIC xrcore xrdrc xrtopo CGAL::CGAL)
 

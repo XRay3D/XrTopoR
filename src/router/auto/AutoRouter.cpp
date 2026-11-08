@@ -12,6 +12,7 @@
 
 #include "core/Prof.h"
 #include "geom/Geometry.h"
+#include "router/auto/Layered.h"
 #include "router/auto/Layering.h"
 #include "router/topo/ModelRefine.h"
 #include "router/topo/ModelRelax.h"
@@ -339,6 +340,68 @@ Result route(Board& b, const Options& o) {
   res.conflicts = lay.conflicts;
   log(std::format("layering: {} points, {} crossings, {} vias, {} conflicts", lp.vars, lp.differ.size(), lay.vias, lay.conflicts));
 
+  // The layer of every chord of every wire (chord k: from crossing k-1 to crossing k): a chord with events takes
+  // its first event's layer, one without the next event's (the last's after the last event); a wire changes layer
+  // at the crossing between two chords of different layers (a via on that edge).
+  std::vector<std::vector<int>> chordLayer(NW);
+  for (int wi = 0; wi < nw; ++wi) {
+    const int chordsN = int(plane.wires[size_t(wi)].cross.size()) + 1;
+    const auto& ev = events[size_t(wi)];
+    auto& cl = chordLayer[size_t(wi)];
+    cl.assign(size_t(chordsN), lay.layer[size_t(vars[size_t(wi)].front())]);
+    size_t k = 0;
+    for (int c = 0; c < chordsN; ++c) {
+      while (k < ev.size() && ev[k].at.chord < c) ++k;
+      cl[size_t(c)] = lay.layer[size_t(vars[size_t(wi)][std::min(k, vars[size_t(wi)].size() - 1)])];
+    }
+  }
+  auto padLayers = [&](const topo::Wire& w, int end) {
+    const int pad = plane.owners[size_t(w.end[end])].pad;
+    return pad >= 0 ? layerIndex(b.pads[size_t(pad)].copper) : 0u;
+  };
+  // 3a. Re-laying with the layers: each wire laid again where it crosses others only on another layer, changes layer
+  // at an edge at the price of a via, and finds room on its layer of every edge.
+  {
+    std::mt19937 rng(2);
+    std::vector<int> order(NW);
+    LayeredCosts lc{int(layers.size()), o.via * kNmPerMm};
+    for (int pass = 0; pass < o.layeredPasses && !cancelled(); ++pass) {
+      std::iota(order.begin(), order.end(), 0);
+      std::shuffle(order.begin(), order.end(), rng);
+      int moved = 0, none = 0;
+      for (int wi : order) {
+        topo::Wire& w = plane.wires[size_t(wi)];
+        const Topology keep = plane;
+        const std::vector<int> keepLayers = chordLayer[size_t(wi)];
+        topo::RelayPath all;  // every crossing out, its own pad's sides too: the search starts at the vertices
+        all.first = 0;
+        all.last = int(w.cross.size());
+        std::vector<int> wasEdges;
+        for (int cid : w.cross) wasEdges.push_back(plane.crossings[size_t(cid)].edge);
+        topo::applyRelay(plane, wi, all);
+        lc.viaDiameter = double(b.classOf(plane.wires[size_t(wi)].net).viaDiameter);
+        auto p = findLayeredPath(plane, wi, chordLayer, lc, padLayers(plane.wires[size_t(wi)], 0), padLayers(plane.wires[size_t(wi)], 1));
+        if (!p) {
+          plane = keep;
+          chordLayer[size_t(wi)] = keepLayers;
+          ++none;
+          continue;
+        }
+        topo::applyRelay(plane, wi, p->path);
+        chordLayer[size_t(wi)] = p->chordLayer;
+        std::vector<int> nowEdges;
+        for (int cid : plane.wires[size_t(wi)].cross) nowEdges.push_back(plane.crossings[size_t(cid)].edge);
+        moved += nowEdges != wasEdges || p->chordLayer != keepLayers;
+      }
+      int vias = 0;
+      for (const auto& cl : chordLayer)
+        for (size_t k = 1; k < cl.size(); ++k) vias += cl[k] != cl[k - 1];
+      log(std::format("layered pass {}: {} wire(s) changed, {} found no legal way, {} vias", pass + 1, moved, none, vias));
+      if (moved == 0) break;
+    }
+    for (int wi = 0; wi < nw; ++wi) sk[size_t(wi)] = sketchOf(plane, m, plane.wires[size_t(wi)]);
+  }
+
   // 4. The tracks along the sketches, a via where the layer changes.
   NetClass dflt = b.netClasses[0];
   std::vector<std::vector<Vec2>> drawnLines;
@@ -350,31 +413,25 @@ Result route(Board& b, const Options& o) {
   for (int wi = 0; wi < nw; ++wi) {
     const topo::Wire& w = plane.wires[size_t(wi)];
     const auto& pts = sk[size_t(wi)];
-    const auto& ev = events[size_t(wi)];
+    const auto& cl = chordLayer[size_t(wi)];
     const int last = int(pts.size()) - 2;
-    // The layers along the wire and the places where they change.
-    std::vector<int> lay1;
-    for (int v : vars[size_t(wi)]) lay1.push_back(lay.layer[size_t(v)]);
-    std::vector<Place> marks;  // the event places (or the middle of the wire, for one without events)
-    if (ev.empty()) marks.push_back(midway(pts, {0, 0}, {last, 1}));
-    else
-      for (const Event& e : ev) marks.push_back(e.at);
     struct Cut {
       Place at;
       int layer;  // the layer after it
     };
     std::vector<Cut> cuts;
     auto padLayer = [&](int end, int want) {
-      const int pad = plane.owners[size_t(w.end[end])].pad;
-      const uint32_t pl = pad >= 0 ? layerIndex(b.pads[size_t(pad)].copper) : 0u;
+      const uint32_t pl = padLayers(w, end);
       if (!pl || ((pl >> want) & 1)) return want;
       return std::countr_zero(pl);
     };
-    int startLayer = padLayer(0, lay1.front());
-    if (startLayer != lay1.front()) cuts.push_back({midway(pts, {0, 0}, marks.front()), lay1.front()});
-    for (size_t k = 1; k < lay1.size(); ++k)
-      if (lay1[k] != lay1[k - 1]) cuts.push_back({midway(pts, marks[k - 1], marks[k]), lay1[k]});
-    if (int endLayer = padLayer(1, lay1.back()); endLayer != lay1.back()) cuts.push_back({midway(pts, marks.back(), {last, 1}), endLayer});
+    // A chord's layer not on its end pad (left so by the layering): a via halfway along the end chord.
+    const int startLayer = padLayer(0, cl.front());
+    if (startLayer != cl.front()) cuts.push_back({{0, 0.5}, cl.front()});
+    for (size_t k = 1; k < cl.size(); ++k)
+      if (cl[k] != cl[k - 1]) cuts.push_back({{int(k) - 1, 1.0}, cl[k]});
+    if (int endLayer = padLayer(1, cl.back()); endLayer != cl.back()) cuts.push_back({{last, 0.5}, endLayer});
+    r::stable_sort(cuts, {}, [](const Cut& c) { return c.at.s(); });
     // Walk the sketch, cutting it at the vias.
     int cur = startLayer;
     std::vector<Vec2> run{pts.front()};
