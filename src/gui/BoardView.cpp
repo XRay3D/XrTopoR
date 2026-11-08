@@ -886,6 +886,42 @@ void BoardView::drawVias(QPainter& p) {
     if (v.layers & vis && seen(around(v.pos.v(), double(v.diameter)))) drawVia(p, v, netColor(v.net, d.colorizeVia).value_or(v.locked && showFixed ? fixed : through));
 }
 
+// Drill holes over everything, whatever layers are shown: the background dotted, a thin contour in the board
+// outline's colour. The dots are laid from each hole's centre, so a picture panned shows them where a picture drawn
+// anew does.
+void BoardView::drawHoles(QPainter& p) {
+  const Board& b = *doc_->board();
+  QColor edge = doc_->color("board", 0xd4d4d4);
+  constexpr int kStep = 7;
+  QImage tile(kStep, kStep, QImage::Format_ARGB32_Premultiplied);
+  tile.fill(doc_->color("background", 0x030b10));
+  tile.setPixelColor(kStep / 2, kStep / 2, edge);
+  QBrush dots(tile);
+  p.setPen(QPen(edge, 1));
+  auto hole = [&](Vec2 at, auto&& draw) {
+    QPointF c = toScreen(at);
+    p.setBrushOrigin(std::round(c.x()) - kStep / 2, std::round(c.y()) - kStep / 2);
+    p.setBrush(dots);
+    draw(c);
+  };
+  for (auto& pad : b.pads) {
+    if (pad.drill <= 0 || !seen(padBox(pad))) continue;
+    if (pad.drillH > 0 && pad.drillH != pad.drill) {
+      Shape s = Shape::rect(pad.pos.v(), double(pad.drill), double(pad.drillH), -degToRad(pad.angle),
+                            std::min(pad.drill, pad.drillH) / 2.0);
+      hole(pad.pos.v(), [&](QPointF) { p.drawPolygon(toPoly(s.outline(2000), [&](Vec2 v) { return toScreen(v); })); });
+    } else if (double r = px(pad.drill / 2.0); r >= 0.5) {
+      hole(pad.pos.v(), [&](QPointF c) { p.drawEllipse(c, r, r); });
+    }
+  }
+  if (doc_->display().flag("showVias"))
+    for (auto& v : b.vias)
+      if (double r = px(v.drill / 2.0); r >= 0.5 && seen(around(v.pos.v(), double(v.drill))))
+        hole(v.pos.v(), [&](QPointF c) { p.drawEllipse(c, r, r); });
+  p.setBrushOrigin(0, 0);
+  p.setBrush(Qt::NoBrush);
+}
+
 void BoardView::drawLabels(QPainter& p) {
   const Board& b = *doc_->board();
   const DisplayControl& d = doc_->display();
@@ -943,27 +979,6 @@ void BoardView::drawBoard(QPainter& p) {
     drawVias(p);
   }
   ProfScope psHoles("board.rest");
-  // Drill holes in the background colour.
-  p.setPen(Qt::NoPen);
-  p.setBrush(doc_->color("background", 0x030b10));
-  LayerMask vis = visibleCopper();
-  for (auto& pad : b.pads)
-    if (pad.drill > 0 && (pad.copper & vis || !pad.copper) && seen(padBox(pad))) {
-      double r = px(pad.drill / 2.0);
-      if (pad.drillH > 0 && pad.drillH != pad.drill) {
-        Shape s = Shape::rect(pad.pos.v(), double(pad.drill), double(pad.drillH), -degToRad(pad.angle),
-                              std::min(pad.drill, pad.drillH) / 2.0);
-        p.drawPolygon(toPoly(s.outline(2000), [&](Vec2 v) { return toScreen(v); }));
-      } else if (r >= 0.5) {
-        p.drawEllipse(toScreen(pad.pos.v()), r, r);
-      }
-    }
-  if (d.flag("showVias"))
-    for (auto& v : b.vias)
-      if (v.layers & vis && seen(around(v.pos.v(), double(v.drill)))) {
-        double r = px(v.drill / 2.0);
-        if (r >= 0.5) p.drawEllipse(toScreen(v.pos.v()), r, r);
-      }
   for (LayerId l = 0; l < LayerId(b.layers.size()); ++l)
     if ((groupOf(l) == 0 || groupOf(l) == 3) && l != active && layerVisible(l)) drawLayer(p, l);
   if (!activeCopper && layerVisible(active)) drawLayer(p, active);
@@ -989,6 +1004,7 @@ void BoardView::drawBoard(QPainter& p) {
                                 toScreen(c.toBoard({bb.maxX, bb.maxY})), toScreen(c.toBoard({bb.minX, bb.maxY}))});
     }
   }
+  drawHoles(p);
   drawLabels(p);
 
   // Ratsnest, with the «Показывать связи» filter.

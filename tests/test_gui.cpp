@@ -2918,6 +2918,68 @@ TEST(Gui, MechanicalLayerActive) {
   EXPECT_EQ(f.doc.activeLayer(), top);
 }
 
+// A drill hole is drawn over everything, whatever layers are shown: a thin contour in the board outline's colour round
+// the background dotted.
+TEST(Gui, HolesOverEverything) {
+  Fixture f("tt.kicad_pcb");
+  auto board = std::make_unique<Board>();
+  Board& b = *board;
+  const LayerId top = b.addLayer("Top", LayerKind::Copper, Side::Top);
+  b.layers[top].copperIndex = 0;
+  const LayerId silk = b.addLayer("Silk", LayerKind::Silk, Side::Top);
+  auto at = [](double x, double y) { return Vec2{x * kNmPerMm, y * kNmPerMm}; };
+  b.outline.push_back({at(0, 0), at(40, 0), at(40, 20), at(0, 20)});
+  Pad pad;
+  pad.pos = Point(at(20, 10));
+  pad.shape.kind = PadShapeKind::Circle;
+  pad.shape.w = pad.shape.h = mmToNm(4);
+  pad.drill = mmToNm(2);
+  pad.copper = LayerMask(1) << top;
+  b.pads.push_back(pad);
+  Graphic g;  // a silkscreen bar across the hole
+  g.kind = GraphicKind::Line;
+  g.a = at(15, 10);
+  g.b = at(25, 10);
+  g.width = mmToNm(3);
+  g.layer = silk;
+  b.graphics.push_back(g);
+  f.doc.setBoard(std::move(board), "holes");
+  f.doc.display().layer("Silk")->visible = true;
+  f.doc.display().layer("Silk")->details = 0x00ff00;
+  f.view.show();
+  f.look(at(20, 10), 20);
+  const int r = int(std::lround(f.scale * mmToNm(1)));  // the hole's radius in pixels
+  ASSERT_GE(r, 15);
+  auto shot = [&] {
+    f.view.refresh();
+    QTest::qWait(10);
+    return f.view.grab().toImage();
+  };
+  const QColor edge = f.doc.color("board", 0xd4d4d4), back = f.doc.color("background", 0x030b10);
+  auto check = [&](const char* what) {
+    QImage img = shot();
+    QPoint c = f.at(at(20, 10));
+    // On the contour: a line of a pixel in the board outline's colour, antialiased over two pixels of the row at most.
+    int light = 0;
+    for (int x = c.x() + r - 2; x <= c.x() + r + 2; ++x)
+      light += img.pixelColor(x, c.y() + 1).lightness() - back.lightness();
+    EXPECT_GT(light, (edge.lightness() - back.lightness()) * 3 / 4) << what;
+    // Inside: the background and the dots only.
+    int dots = 0, h = r / 2;
+    for (int y = c.y() - h; y <= c.y() + h; ++y)
+      for (int x = c.x() - h; x <= c.x() + h; ++x) {
+        QColor px = img.pixelColor(x, y);
+        if (px == edge) ++dots;
+        else EXPECT_EQ(px, back) << what << " at " << x - c.x() << "," << y - c.y();
+      }
+    EXPECT_GE(dots, 4) << what;
+  };
+  check("over the silkscreen");
+  f.doc.display().layer("Top")->visible = false;
+  f.doc.display().layer("Silk")->visible = false;
+  check("the layers hidden");
+}
+
 // The board's picture is kept between frames: panned, it is moved and the strips uncovered drawn; what comes out is
 // the picture drawn anew (to a level of a pixel's colour, and for a few pixels of thin lines). The window is large
 // enough for the picture drawn anew to be drawn in bands in parallel.

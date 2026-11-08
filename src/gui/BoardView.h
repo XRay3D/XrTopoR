@@ -172,6 +172,7 @@ class BoardView : public QWidget {
   void drawLayer(QPainter& p, LayerId l);
   void drawGrid(QPainter& p);
   void drawVias(QPainter& p);
+  void drawHoles(QPainter& p);
   void drawLabels(QPainter& p);
   std::optional<QColor> netColor(int net, bool enabledForKind) const;
   bool componentVisible(int ci) const;
