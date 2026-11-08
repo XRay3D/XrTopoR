@@ -1082,7 +1082,8 @@ struct Writer {
     }
     x.close();
     x.open("RulesClearancesCompToComp");
-    x.open("ClearanceCompToComp", {{"enabled", "on"}, {"clrn", mm(b.netClasses[0].clearance)}});
+    x.open("ClearanceCompToComp", {{"enabled", onOff(rules_.compClearanceEnabled)},
+                                   {"clrn", mm(rules_.compClearance > 0 ? rules_.compClearance : b.netClasses[0].clearance)}});
     x.open("ObjectsAffected");
     x.empty("AllComps");
     x.empty("AllComps");
@@ -1099,8 +1100,8 @@ struct Writer {
       ruleObject(v.nets);
       x.close();
       x.open("Viastacks");
-      if (v.viaType.empty()) x.empty("AllViastacks");
-      else x.empty("ViastackRef", {{"name", viaTypeName(v.viaType)}});
+      if (v.viaTypes.empty()) x.empty("AllViastacks");
+      for (const std::string& t : v.viaTypes) x.empty("ViastackRef", {{"name", viaTypeName(t)}});
       x.close();
       x.close();
     }
@@ -1141,6 +1142,7 @@ struct Writer {
       }
       x.close();
     }
+    x.empty("PadConnectSettings", {{"mode", rules_.padConnectAll ? "AllPads" : "AutoConnect"}});
     x.close();
   }
 
@@ -1348,7 +1350,27 @@ struct Writer {
     writeConnectivity();
     x.blank();
     x.open("Settings", {{"version", "1.3"}});
-    x.empty("Autoroute", {{"autoEqu", "None"}});
+    {
+      using S = AutorouteSettings;
+      const S& s = b.autoroute;
+      std::vector<std::pair<std::string, std::string>> a;
+      if (s.mode != S::Mode::Multilayer) a.push_back({"mode", s.mode == S::Mode::SingleLayerTop ? "SingleLayerTop" : "SingleLayerBottom"});
+      a.push_back({"autoEqu", s.equivalence == S::Equivalence::Pins ? "Pins" : "None"});
+      if (s.wireShape != S::WireShape::Polyline) a.push_back({"wireShape", s.wireShape == S::WireShape::Arcs ? "Arcs" : "Line45"});
+      auto flag = [&](const char* name, bool on) {
+        if (on) a.push_back({name, "on"});
+      };
+      flag("teardrops", s.teardrops);
+      flag("weakCheck", s.weakCheck);
+      flag("takeCurLayout", s.takeCurrentLayout);
+      flag("directConnectSMD", s.directConnectSmd);
+      flag("dontStretchWireToPolypin", s.dontStretchToPolypin);
+      x.emptyList("Autoroute", a);
+      std::vector<std::pair<std::string, std::string>> p;
+      if (s.refine != S::Refine::ChangeLayer) p.push_back({"refine", "NoChangeLayer"});
+      if (s.automove != S::Automove::MoveVias) p.push_back({"automove", "MoveViasWithRefine"});
+      x.emptyList("Autoproc", p);
+    }
     x.empty("Labels", {{"rotateWithComp", "on"}});
     x.close();
     if (b.display) {

@@ -42,6 +42,7 @@ class DesignParamsDialog : public QDialog {
   QWidget* widthsPage();
   QWidget* clearancesPage();
   QWidget* edgePage();
+  QWidget* compClearancePage();
   QWidget* impedancesPage();
   QWidget* diffSignalsPage();
   QWidget* viaRulesPage();
@@ -62,6 +63,8 @@ class DesignParamsDialog : public QDialog {
   std::pair<QDoubleSpinBox*, QDoubleSpinBox*> orderedSpins(Coord low, Coord high, std::function<void(Coord low, Coord high)> set);
   QWidget* netsCell(const RuleNets& value, std::function<void(RuleNets)> set);
   QWidget* layerCell(const std::vector<std::string>& value, std::function<void(std::vector<std::string>)> set);
+  // A cell choosing several of `options` (a menu of check boxes); `none` is shown when nothing is chosen.
+  QWidget* multiCell(const QStringList& options, const QStringList& value, const QString& none, std::function<void(QStringList)> set);
   QWidget* checkCell(bool value, std::function<void(bool)> set);
 
   // Pad stacks: the editor, «Создать детали на слоях», the stacks of the selected rows.

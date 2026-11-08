@@ -51,7 +51,7 @@ struct ViaType {
 struct ViaRule {
   bool enabled = true;
   RuleNets nets;
-  std::string viaType;  // empty: all types
+  std::vector<std::string> viaTypes;  // the types the nets may use (TopoR: a through and a blind one, say); empty: all
 };
 
 struct PlaneRule {
@@ -81,6 +81,12 @@ struct DesignRules {
   std::vector<PlaneRule> planes;
   std::vector<LayerNetsRule> layerNets;
   Coord edgeWires = 0, edgeComps = 0;  // «Зазор до края платы»
+  // «Зазор между компонентами» (TopoR's file has one rule, all components against all): for placement.
+  bool compClearanceEnabled = true;
+  Coord compClearance = 0;
+  // PadConnectSettings: AutoConnect (TopoR's default: a wire to a pad's anchor, its corners only when rounded
+  // enough) or AllPads.
+  bool padConnectAll = false;
 };
 
 // The diameter of a via type's pad on a layer of a class (`layerClass`) and name (`layer`): the layer's own

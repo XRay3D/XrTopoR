@@ -770,6 +770,50 @@ TEST(FstIO, KeepoutsToKicad) {
 
 // The nets' properties of TopoR's file: the flexible fixation and «Трассировать» are read, written for every
 // net and read back.
+// The autorouting settings, the component clearance, PadConnectSettings and a via rule with several types are read
+// and written back as they were (they were dropped or made up before).
+TEST(FstIO, AutorouteSettingsAndViaListRoundTrip) {
+  auto r = io::loadBoard(data("topor/Example_01/SingleLayer.fst"));
+  ASSERT_TRUE(r) << r.error();
+  Board& a = **r;
+  using S = AutorouteSettings;
+  EXPECT_EQ(a.autoroute.mode, S::Mode::SingleLayerTop);  // <Autoroute mode="SingleLayerTop" wireShape="Arcs" directConnectSMD="on"/>
+  EXPECT_EQ(a.autoroute.wireShape, S::WireShape::Arcs);
+  EXPECT_TRUE(a.autoroute.directConnectSmd);
+  EXPECT_FALSE(a.autoroute.weakCheck);
+  ASSERT_TRUE(a.rules);
+  EXPECT_EQ(a.rules->compClearance, mmToNm(0.25));
+  EXPECT_FALSE(a.rules->padConnectAll);
+  ASSERT_FALSE(a.rules->vias.empty());
+  EXPECT_TRUE(a.rules->vias[0].viaTypes.empty());  // AllViastacks
+  a.autoroute.weakCheck = true;
+  a.autoroute.equivalence = S::Equivalence::Pins;
+  a.autoroute.automove = S::Automove::MoveViasWithRefine;
+  a.autoroute.refine = S::Refine::NoChangeLayer;
+  a.rules->compClearance = mmToNm(0.4);
+  a.rules->padConnectAll = true;
+  ASSERT_FALSE(a.rules->viaTypes.empty());
+  a.rules->viaTypes.push_back(a.rules->viaTypes[0]);
+  a.rules->viaTypes.back().name = "second";
+  a.rules->viaTypes.back().diameter += mmToNm(0.2);
+  a.rules->vias[0].viaTypes = {a.rules->viaTypes[0].name, "second"};
+  compileRules(a);
+  ASSERT_FALSE(a.netViaTypes.empty());
+  EXPECT_EQ(a.netViaTypes[0], (std::vector<int>{0, int(a.rules->viaTypes.size()) - 1}));
+  std::string text = io::writeFst(a);
+  auto again = io::readFst(text, "settings.fst");
+  ASSERT_TRUE(again) << again.error();
+  const Board& c = **again;
+  EXPECT_EQ(c.autoroute, a.autoroute);
+  ASSERT_TRUE(c.rules);
+  EXPECT_EQ(c.rules->compClearance, mmToNm(0.4));
+  EXPECT_TRUE(c.rules->padConnectAll);
+  ASSERT_FALSE(c.rules->vias.empty());
+  EXPECT_EQ(c.rules->vias[0].viaTypes.size(), 2u);
+  ASSERT_FALSE(c.netViaTypes.empty());
+  EXPECT_EQ(c.netViaTypes[0].size(), 2u);
+}
+
 TEST(FstIO, NetPropertiesRoundTrip) {
   auto r = io::loadBoard(data("topor/Example_04/Arcs_standard_routing.fst"));
   ASSERT_TRUE(r) << r.error();

@@ -1099,11 +1099,18 @@ struct Reader {
     if (auto* rv = rules.find("RulesViastacksOfNets"))
       for (auto* v : rv->findAll("ViastacksOfNets")) {
         auto obj = objects(*v);
-        auto* vs = v->find("Viastacks");
-        auto* ref = vs ? vs->find("ViastackRef") : nullptr;
         if (obj.empty()) continue;
-        r.vias.push_back({v->flag("enabled", true), ruleNets(*obj[0]), ref ? std::string(ref->attr("name")) : std::string()});
+        ViaRule rule{v->flag("enabled", true), ruleNets(*obj[0]), {}};
+        if (auto* vs = v->find("Viastacks"))
+          for (auto* ref : vs->findAll("ViastackRef")) rule.viaTypes.emplace_back(ref->attr("name"));  // none: AllViastacks
+        r.vias.push_back(std::move(rule));
       }
+    if (auto* cc = rules.find("RulesClearancesCompToComp"))
+      if (auto* c = cc->find("ClearanceCompToComp")) {
+        r.compClearanceEnabled = c->flag("enabled", true);
+        r.compClearance = len(c->num("clrn"));
+      }
+    if (auto* pc = rules.find("PadConnectSettings")) r.padConnectAll = pc->attr("mode") == "AllPads";
     // The nets' properties: the flexible fixation and «Трассировать».
     if (auto* np = rules.find("NetProperties"))
       for (auto* p : np->findAll("NetProperty")) {
@@ -1123,6 +1130,36 @@ struct Reader {
       }
     b.rules = std::move(r);
     compileRules(b);
+  }
+
+  // Settings/Autoroute and Settings/Autoproc (TopoR writes «SingleLayerTop», its schema «SinglelayerTop»).
+  void readSettings(const Element& st) {
+    AutorouteSettings& s = b.autoroute;
+    auto is = [](std::string_view v, std::string_view w) {
+      return v.size() == w.size() && r::equal(v, w, {}, [](char c) { return std::tolower(static_cast<unsigned char>(c)); },
+                                               [](char c) { return std::tolower(static_cast<unsigned char>(c)); });
+    };
+    if (auto* a = st.find("Autoroute")) {
+      std::string_view m = a->attr("mode");
+      s.mode = is(m, "SingleLayerTop") ? AutorouteSettings::Mode::SingleLayerTop
+             : is(m, "SingleLayerBottom") ? AutorouteSettings::Mode::SingleLayerBottom
+                                          : AutorouteSettings::Mode::Multilayer;
+      std::string_view w = a->attr("wireShape");
+      s.wireShape = is(w, "Arcs") ? AutorouteSettings::WireShape::Arcs
+                  : is(w, "Line45") || is(w, "45") ? AutorouteSettings::WireShape::Line45
+                                                    : AutorouteSettings::WireShape::Polyline;
+      s.equivalence = is(a->attr("autoEqu"), "Pins") ? AutorouteSettings::Equivalence::Pins : AutorouteSettings::Equivalence::None;
+      s.teardrops = a->flag("teardrops", false);
+      s.weakCheck = a->flag("weakCheck", false);
+      s.takeCurrentLayout = a->flag("takeCurLayout", false);
+      s.directConnectSmd = a->flag("directConnectSMD", false);
+      s.dontStretchToPolypin = a->flag("dontStretchWireToPolypin", false);
+    }
+    if (auto* p = st.find("Autoproc")) {
+      s.refine = is(p->attr("refine"), "NoChangeLayer") ? AutorouteSettings::Refine::NoChangeLayer : AutorouteSettings::Refine::ChangeLayer;
+      s.automove = is(p->attr("automove"), "MoveViasWithRefine") ? AutorouteSettings::Automove::MoveViasWithRefine
+                                                                 : AutorouteSettings::Automove::MoveVias;
+    }
   }
 
   void applyVia(NetClass& nc, const std::string& name) {
@@ -1488,6 +1525,7 @@ Result<BoardPtr> readFst(const std::string& text, const std::string& path) {
   if (auto* rules = root.find("Rules")) r.readRules(*rules);
   else r.applyVia(b->netClasses[0], r.firstViastack);
   if (auto* cn = root.find("Connectivity")) r.readConnectivity(*cn);
+  if (auto* st = root.find("Settings")) r.readSettings(*st);
   if (auto* dc = root.find("DisplayControl")) r.readDisplay(*dc);
   // The inner loops of the Contour: cutouts where no pad and no track lies in them.
   for (auto& loop : r.contourHoles) {

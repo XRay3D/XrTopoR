@@ -133,7 +133,8 @@ DesignParamsDialog::DesignParamsDialog(Document* doc, QWidget* parent) : QDialog
   page(rules, tr("Зазор между проводниками"), [this] { return clearancesPage(); },
        tr("Зазоры между объектами цепей. Номинальный зазор выдерживается, где есть место, минимальный — в "
           "узких местах. Последующие правила имеют приоритет над предыдущими."));
-  page(rules, tr("Зазор между компонентами"), [this] { return notSupported(tr("Зазор между компонентами")); }, {});
+  page(rules, tr("Зазор между компонентами"), [this] { return compClearancePage(); },
+       tr("Зазор между корпусами компонентов (для размещения): одно правило «все компоненты — все компоненты»."));
   page(rules, tr("Зазор до края платы"), [this] { return edgePage(); }, tr("Зазоры от проводников и компонентов до контура платы."));
   page(rules, tr("Назначение типов ПО"), [this] { return viaRulesPage(); },
        tr("Типы переходных отверстий, которые используются для цепей."));
@@ -350,6 +351,35 @@ QWidget* DesignParamsDialog::layerCell(const std::vector<std::string>& value, st
     changed();
   });
   return c;
+}
+
+QWidget* DesignParamsDialog::multiCell(const QStringList& options, const QStringList& value, const QString& none,
+                                       std::function<void(QStringList)> set) {
+  auto* button = new QToolButton;
+  button->setAutoRaise(true);
+  button->setPopupMode(QToolButton::InstantPopup);
+  button->setToolButtonStyle(Qt::ToolButtonTextOnly);
+  button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+  auto* menu = new QMenu(button);
+  for (const QString& o : options) {
+    QAction* a = menu->addAction(o);
+    a->setCheckable(true);
+    a->setChecked(value.contains(o));
+  }
+  auto show = [button, menu, none] {
+    QStringList chosen;
+    for (QAction* a : menu->actions())
+      if (a->isChecked()) chosen << a->text();
+    button->setText(chosen.isEmpty() ? none : chosen.join(", "));
+    return chosen;
+  };
+  show();
+  connect(menu, &QMenu::triggered, this, [this, show, set] {
+    set(show());
+    changed();
+  });
+  button->setMenu(menu);
+  return button;
 }
 
 QWidget* DesignParamsDialog::ruleTable(const QStringList& headers, std::function<int()> count,
@@ -785,7 +815,8 @@ QWidget* DesignParamsDialog::viaTypesPage() {
           std::string old = rules_.viaTypes[size_t(r)].name, now = name->text().toStdString();
           if (old == now || now.empty()) return;
           for (auto& v : rules_.vias)
-            if (v.viaType == old) v.viaType = now;
+            for (auto& n : v.viaTypes)
+              if (n == old) n = now;
           rules_.viaTypes[size_t(r)].name = now;
           changed();
           refresh();
@@ -1123,6 +1154,15 @@ QWidget* DesignParamsDialog::diffSignalsPage() {
   return t;
 }
 
+QWidget* DesignParamsDialog::compClearancePage() {
+  auto* w = new QWidget;
+  auto* f = new QFormLayout(w);
+  if (rules_.compClearance <= 0) rules_.compClearance = doc_->board()->netClasses[0].clearance;
+  f->addRow(tr("Правило включено:"), checkCell(rules_.compClearanceEnabled, [this](bool on) { rules_.compClearanceEnabled = on; }));
+  f->addRow(tr("Зазор между компонентами:"), lengthCell(rules_.compClearance, [this](Coord v) { rules_.compClearance = v; }));
+  return w;
+}
+
 QWidget* DesignParamsDialog::edgePage() {
   auto* w = new QWidget;
   auto* f = new QFormLayout(w);
@@ -1141,18 +1181,20 @@ QWidget* DesignParamsDialog::viaRulesPage() {
         auto& v = rules_.vias[size_t(r)];
         t->setCellWidget(r, 1, checkCell(v.enabled, [this, r](bool on) { rules_.vias[size_t(r)].enabled = on; }));
         t->setCellWidget(r, 2, netsCell(v.nets, [this, r](RuleNets n) { rules_.vias[size_t(r)].nets = n; }));
-        auto* c = new QComboBox;
-        c->setFrame(false);
-        c->addItem(tr("Все типы"));
-        for (auto& vt : rules_.viaTypes) c->addItem(QString::fromStdString(vt.name));
-        c->setCurrentText(v.viaType.empty() ? tr("Все типы") : QString::fromStdString(v.viaType));
-        connect(c, &QComboBox::activated, this, [this, r, c](int i) {
-          rules_.vias[size_t(r)].viaType = i == 0 ? std::string() : c->itemText(i).toStdString();
-          changed();
-        });
-        t->setCellWidget(r, 3, c);
+        // Several types a rule may allow (a through and a blind one, say); none checked: all types.
+        QStringList types, chosen;
+        for (auto& vt : rules_.viaTypes) types << QString::fromStdString(vt.name);
+        for (auto& n : v.viaTypes) chosen << QString::fromStdString(n);
+        t->setCellWidget(r, 3, multiCell(types, chosen, tr("Все типы"), [this, r](QStringList now) {
+          auto& list = rules_.vias[size_t(r)].viaTypes;
+          list.clear();
+          for (auto& s : now) list.push_back(s.toStdString());
+        }));
       },
-      [this] { rules_.vias.push_back({true, {}, rules_.viaTypes.empty() ? std::string() : rules_.viaTypes.front().name}); },
+      [this] {
+        rules_.vias.push_back({true, {}, {}});
+        if (!rules_.viaTypes.empty()) rules_.vias.back().viaTypes.push_back(rules_.viaTypes.front().name);
+      },
       [this](int r) { rules_.vias.erase(rules_.vias.begin() + r); },
       [this](int a, int b) { std::swap(rules_.vias[size_t(a)], rules_.vias[size_t(b)]); });
 }
@@ -1196,18 +1238,47 @@ QWidget* DesignParamsDialog::planesPage() {
 }
 
 QWidget* DesignParamsDialog::layerNetsPage() {
+  const Board& b = *doc_->board();
   return ruleTable(
       {"#", "", tr("Слой"), tr("Цепи")},
       [this] { return int(rules_.layerNets.size()); },
-      [this](QTableWidget* t, int r) {
+      [this, &b](QTableWidget* t, int r) {
         auto& rule = rules_.layerNets[size_t(r)];
         t->setCellWidget(r, 1, checkCell(rule.enabled, [this, r](bool on) { rules_.layerNets[size_t(r)].enabled = on; }));
-        t->setItem(r, 2, new QTableWidgetItem(QString::fromStdString(rule.layer)));
-        QStringList nets;
-        for (auto& n : rule.nets) nets << netsText(n);
-        t->setItem(r, 3, new QTableWidgetItem(nets.join(", ")));
+        // The layer: a signal layer (plane layers carry their net as a pour).
+        auto* layer = new QComboBox;
+        layer->setFrame(false);
+        for (LayerId l : b.copperLayers())
+          if (!b.layers[l].plane) layer->addItem(QString::fromStdString(b.layers[l].name));
+        layer->setCurrentText(QString::fromStdString(rule.layer));
+        connect(layer, &QComboBox::activated, this, [this, r, layer](int i) {
+          rules_.layerNets[size_t(r)].layer = layer->itemText(i).toStdString();
+          changed();
+        });
+        t->setCellWidget(r, 2, layer);
+        // The nets and groups meant for the layer.
+        std::vector<RuleNets> options;
+        for (auto& g : rules_.netGroups) options.push_back({RuleNets::Kind::Group, g.name});
+        for (auto& n : b.nets) options.push_back({RuleNets::Kind::Net, n.name});
+        for (auto& n : rule.nets)
+          if (r::find(options, n) == options.end()) options.push_back(n);
+        QStringList names, chosen;
+        for (auto& o : options) names << netsText(o);
+        for (auto& n : rule.nets) chosen << netsText(n);
+        t->setCellWidget(r, 3, multiCell(names, chosen, tr("(нет цепей)"), [this, r, options, names](QStringList now) {
+          auto& nets = rules_.layerNets[size_t(r)].nets;
+          nets.clear();
+          for (auto& s : now)
+            if (qsizetype i = names.indexOf(s); i >= 0) nets.push_back(options[size_t(i)]);
+        }));
       },
-      [] {}, [this](int r) { rules_.layerNets.erase(rules_.layerNets.begin() + r); },
+      [this, &b] {
+        std::string layer;
+        for (LayerId l : b.copperLayers())
+          if (!b.layers[l].plane && layer.empty()) layer = b.layers[l].name;
+        rules_.layerNets.push_back({true, layer, {}});
+      },
+      [this](int r) { rules_.layerNets.erase(rules_.layerNets.begin() + r); },
       [this](int a, int b) { std::swap(rules_.layerNets[size_t(a)], rules_.layerNets[size_t(b)]); });
 }
 

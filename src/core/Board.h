@@ -337,6 +337,27 @@ void setTextMeasure(TextMeasure m);
 
 struct SourceDoc;
 
+// TopoR's autorouting settings (the .fst's Settings/Autoroute and Settings/Autoproc; the «Настройки» of the
+// autorouting panel and the modes of F6/F7). What the file leaves out is TopoR's default.
+struct AutorouteSettings {
+  enum class Mode { Multilayer, SingleLayerTop, SingleLayerBottom };
+  enum class WireShape { Polyline, Arcs, Line45 };  // «Произвольная», «Дуги», «45°»
+  enum class Equivalence { None, Pins };             // swap functionally equivalent pins
+  enum class Refine { ChangeLayer, NoChangeLayer };   // F6 may move wires to another layer
+  enum class Automove { MoveVias, MoveViasWithRefine };  // F7 re-lays wires as the vias move
+  Mode mode = Mode::Multilayer;
+  WireShape wireShape = WireShape::Polyline;
+  Equivalence equivalence = Equivalence::None;
+  bool teardrops = false;
+  bool weakCheck = false;          // «Ослабленный контроль зазоров»
+  bool takeCurrentLayout = false;  // «Использовать имеющуюся разводку как начальный вариант»
+  bool directConnectSmd = false;   // «Прямое подключение SMD-выводов»
+  bool dontStretchToPolypin = false;  // «Не дотягивать проводник до точки привязки полигональных контактов»
+  Refine refine = Refine::ChangeLayer;
+  Automove automove = Automove::MoveVias;
+  bool operator==(const AutorouteSettings&) const = default;
+};
+
 struct Board {
   std::string name;
   std::vector<Layer> layers;
@@ -387,6 +408,10 @@ struct Board {
   std::shared_ptr<SourceDoc> source;       // original file tree for lossless round-trip
   std::optional<DisplayControl> display;   // display settings saved with the design (TopoR .fst)
   std::optional<DesignRules> rules;        // TopoR-style rules the classes are compiled from, if any
+  // Per net: the via types it may use (indices into rules->viaTypes; empty: any), set by compileRules from
+  // «Назначение типов ПО». The net class keeps the first of them as its via.
+  std::vector<std::vector<int>> netViaTypes;
+  AutorouteSettings autoroute;
 
   // Layers
   double tracksLength() const;     // of all tracks, nm

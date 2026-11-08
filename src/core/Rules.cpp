@@ -171,11 +171,25 @@ void compileRules(Board& b) {
     }
     apply(nets, [&] { d.clearance = clr; }, [&](PerNet& p, bool reset) { p.clearance = reset ? 0 : clr; });
   }
+  // Via types: the class keeps the first a rule names as its via; every net gets the list it may use.
   std::string defaultVia;
+  b.netViaTypes.assign(b.nets.size(), {});
+  auto typeIndices = [&](const ViaRule& v) {
+    std::vector<int> out;
+    for (const std::string& name : v.viaTypes)
+      for (auto [i, t] : v::enumerate(r.viaTypes))
+        if (t.name == name && !r::contains(out, int(i))) out.push_back(int(i));
+    return out;
+  };
   for (auto& v : r.vias) {
-    if (!v.enabled || v.viaType.empty()) continue;
-    apply(netsOf(b, r, v.nets), [&] { defaultVia = v.viaType; },
-          [&](PerNet& p, bool reset) { p.via = reset ? std::string() : v.viaType; });
+    if (!v.enabled) continue;
+    const std::vector<int> types = typeIndices(v);  // empty: all types
+    const std::string first = v.viaTypes.empty() ? std::string() : v.viaTypes.front();
+    auto nets = netsOf(b, r, v.nets);
+    for (size_t n = 0; n < b.nets.size(); ++n)
+      if (!nets || r::contains(*nets, int(n))) b.netViaTypes[n] = types;
+    if (first.empty()) continue;  // all types: the class keeps the via it has
+    apply(nets, [&] { defaultVia = first; }, [&](PerNet& p, bool reset) { p.via = reset ? std::string() : first; });
   }
   if (!defaultVia.empty()) via(d, defaultVia);
 
@@ -294,7 +308,7 @@ DesignRules rulesFromBoard(const Board& b) {
   const NetClass& d = b.netClasses[0];
   r.widths.push_back({true, {}, {}, d.trackWidth, d.trackWidth});
   r.clearances.push_back({true, {}, {}, {}, d.clearance, d.clearance});
-  r.vias.push_back({true, {}, viaType(d.viaDiameter, d.viaDrill)});
+  r.vias.push_back({true, {}, {viaType(d.viaDiameter, d.viaDrill)}});
   auto groupOf = [&](const std::string& name, std::vector<std::string> nets) {
     if (nets.size() == 1) return RuleNets{RuleNets::Kind::Net, nets[0]};
     std::string g = name;
@@ -312,7 +326,7 @@ DesignRules rulesFromBoard(const Board& b) {
     if (nc.trackWidth != d.trackWidth) r.widths.push_back({true, {}, obj, nc.trackWidth, nc.trackWidth});
     if (nc.clearance != d.clearance) r.clearances.push_back({true, {}, obj, {}, nc.clearance, nc.clearance});
     if (nc.viaDiameter != d.viaDiameter || nc.viaDrill != d.viaDrill)
-      r.vias.push_back({true, obj, viaType(nc.viaDiameter, nc.viaDrill)});
+      r.vias.push_back({true, obj, {viaType(nc.viaDiameter, nc.viaDrill)}});
   }
   for (size_t i = 0; i < b.layerRules.size(); ++i) {
     const LayerRule& lr = b.layerRules[i];
