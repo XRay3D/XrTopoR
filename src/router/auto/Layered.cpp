@@ -117,6 +117,7 @@ std::optional<LayeredPath> findLayeredPath(const Topology& t, int wi, const std:
   // Room on layer l at the gap of edge e: the wires crossing it on l (a via there takes both its layers), and this one.
   std::map<std::tuple<int, int, int>, bool> roomCache;
   std::map<std::tuple<int, int, int>, double> slackOf;
+  std::map<std::tuple<int, int, int>, bool> closedOf;
   std::unordered_map<int, double> viaExtraCache;
   auto viaExtra = [&](int e) {
     auto [it, fresh] = viaExtraCache.try_emplace(e, 0.0);
@@ -160,8 +161,17 @@ std::optional<LayeredPath> findLayeredPath(const Topology& t, int wi, const std:
       if (d < reach) vias += 2 * std::sqrt(reach * reach - d * d);
     }
     it->second = cap.cls < 3 && cap.deficit <= 0 && cap.slack >= vias;
-    slackOf[{e, gap, l}] = cap.slack - vias;
+    slackOf[{e, gap, l}] = cap.deficit > 0 ? -cap.deficit - vias : cap.slack - vias;
+    closedOf[{e, gap, l}] = cap.cls >= 3;
     return it->second;
+  };
+  // In the negotiation: what passing the gap on layer l costs beyond its length (-1: closed).
+  auto roomCost = [&](int e, int gap, int l) {
+    const bool ok = room(e, gap, l);
+    double h = c.history ? (*c.history)[size_t(e) * size_t(NL) + size_t(l)] : 0.0;
+    if (ok) return h;
+    if (closedOf[{e, gap, l}]) return -1.0;
+    return h + c.present * std::max(0.0, -slackOf[{e, gap, l}]);
   };
   auto pointAt = [&](int e, int gap) {
     auto [it, fresh] = capCache.try_emplace(e);
@@ -175,6 +185,12 @@ std::optional<LayeredPath> findLayeredPath(const Topology& t, int wi, const std:
   };
   // A via at the gap: the wire's room on both layers and the via's width beyond the wire's; and no other wire's via
   // nearer than the two radii and the clearance (a via is a disc, not a place on one edge).
+  auto viaApart = [&](int e, int gap) {
+    const Vec2 p = pointAt(e, gap);
+    for (const OtherVia& ov : otherVias)
+      if ((ov.p - p).len() < ov.r + c.viaDiameter / 2 + double(w.clr)) return false;
+    return true;
+  };
   auto viaRoom = [&](int e, int gap, int l0, int l1) {
     if (!room(e, gap, l0) || !room(e, gap, l1)) return false;
     const double extra = c.viaDiameter - double(w.width);
@@ -266,15 +282,29 @@ std::optional<LayeredPath> findLayeredPath(const Topology& t, int wi, const std:
       for (int gap = 0; gap <= n; ++gap) {
         if (!legal(nd.tri, nd.place, gapPlace(nd.tri, j, n, gap), nd.layer)) continue;
         if (alongOther && layerOf(E.along, 0) == nd.layer) continue;
-        if (!room(e, gap, nd.layer)) continue;
+        double here = 0;
+        if (c.present < 0) {
+          if (!room(e, gap, nd.layer)) continue;
+        } else if ((here = roomCost(e, gap, nd.layer)) < 0) {
+          continue;
+        }
         const Vec2 p = pointAt(e, gap);
-        const double step = (p - nd.p).len();
+        const double step = (p - nd.p).len() + here;
         for (int l = 0; l < NL; ++l) {
           if (l != nd.layer && c.via >= 1e17) continue;  // no change of layer at all (a piece between two vias)
-          if (l != nd.layer && (!viaRoom(e, gap, nd.layer, l) || (alongOther && layerOf(E.along, 0) == l))) continue;
+          double viaCost = 0;
+          if (l != nd.layer && c.present >= 0) {  // negotiating: what the via lacks on both layers costs, its distance to the others holds
+            if (alongOther && layerOf(E.along, 0) == l) continue;
+            const double other = roomCost(e, gap, l);
+            if (other < 0 || !viaApart(e, gap)) continue;
+            const double extra = c.viaDiameter - double(w.width);
+            viaCost = other + c.present * (std::max(0.0, extra - slackOf[{e, gap, nd.layer}]) + std::max(0.0, extra - slackOf[{e, gap, l}]));
+          } else if (l != nd.layer && (!viaRoom(e, gap, nd.layer, l) || (alongOther && layerOf(E.along, 0) == l))) {
+            continue;
+          }
           // Its own vias apart too: the wires crossing between two of them need the room.
           if (l != nd.layer && nd.hasVia && (nd.lastVia - p).len() < c.viaDiameter + double(w.clr)) continue;
-          Node next1{nd.g + step + (l != nd.layer ? c.via : 0), ni, next, le, -1, e, gap, l, gapPlace(next, le, n, gap), p, nd.hasVia, nd.lastVia};
+          Node next1{nd.g + step + (l != nd.layer ? c.via + viaCost : 0), ni, next, le, -1, e, gap, l, gapPlace(next, le, n, gap), p, nd.hasVia, nd.lastVia};
           if (l != nd.layer) next1.hasVia = true, next1.lastVia = p;
           push(next1);
         }

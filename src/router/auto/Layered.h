@@ -27,6 +27,10 @@ struct LayeredCosts {
   double via = 3e6;  // a change of layer, nm of length
   double viaDiameter = 0;  // the via's copper: a change of layer at an edge needs that much room there on both layers
   std::function<double(int net)> viaOf;  // another net's via diameter (vias already on an edge); empty: viaDiameter
+  // Negotiation (PathFinder): < 0, an edge must have room on the layer; else what it lacks costs `present` times
+  // over, plus the edge-layer's history (nm, indexed edge * layers + layer). An edge with no room at all stays closed.
+  double present = -1;
+  const std::vector<double>* history = nullptr;
 };
 
 // chordLayer: per wire of t, the layer of each of its chords (the wire laid again: ignored). startLayers, endLayers:

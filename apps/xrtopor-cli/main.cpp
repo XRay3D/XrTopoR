@@ -123,6 +123,8 @@ int cmdRoute(Board& b, const Args& a) {
     if (auto p = a.opt("--via"); !p.empty()) ao.via = std::stod(std::string(p));
     if (auto p = a.opt("--variants"); !p.empty()) ao.variants = std::stoi(std::string(p));
     if (a.flag("--via-discs")) ao.viaVertices = false;
+    if (auto p = a.opt("--layered-passes"); !p.empty()) ao.layeredPasses = std::stoi(std::string(p));
+    if (a.flag("--no-negotiate")) ao.negotiate = false;
     if (auto p = a.opt("--via-weight"); !p.empty()) ao.viaWeight = std::stod(std::string(p));
     ao.metric = !a.flag("--no-metric");
     if (auto p = a.opt("--nets"); !p.empty()) ao.nets = p | v::split(',') | r::to<std::vector<std::string>>();

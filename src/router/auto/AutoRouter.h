@@ -21,13 +21,15 @@ struct Options {
   std::vector<std::string> nets;  // empty: every net to be routed («Трассировать» on, not flexibly fixed)
   double crossing = 3.0;          // what crossing a wire of another net costs on the plane, mm (it may cost a via)
   int passes = 3;                 // re-laying passes on the plane (every wire taken out and laid again)
-  int layeredPasses = 4;          // re-laying passes with the layers known (crossings on other layers only, vias at a price)
+  int layeredPasses = 12;         // re-laying passes with the layers known (crossings on other layers only, vias at a price)
+  bool negotiate = true;          // ... negotiating the room (PathFinder): a lack costs, more every pass, plus history
   double via = 3.0;               // the price of a via in those passes, mm (one variant: these two prices)
   // The vias made vertices of the plane before the variant is measured and drawn (the room round them the plane's own;
   // single variant, places of violations: MinVia 18 against 23 with the vias as discs, Arcs 958 against 1458).
   bool viaVertices = true;
   int relayerings = 4;            // rounds of re-layering the whole board and laying again, while the vias fall
-  int variants = 1;               // > 1: as many variants over a grid of prices (crossing 1/3/8/20, via 3/8/20/50 mm) and seeds, in parallel
+  int drawn = 2;                  // the best variants by the plane's measures that are drawn and judged by their DRC
+  int variants = 2;               // 1: the given prices; 2: with the room a must and negotiated; > 2: as many variants over a grid of prices (crossing 1/3/8/20, via 3/8/20/50 mm) and seeds, in parallel
   double viaWeight = 10.0;        // a via against length when the best variant is chosen, mm (TopoR's rule of thumb: 25)
   bool metric = true;             // F5, F6 and F7 on the model after the tracks are laid
   std::function<void(int done, int total, const std::string& stage)> progress;

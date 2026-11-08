@@ -5,6 +5,7 @@
 #include <atomic>
 #include <bit>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <format>
 #include <map>
@@ -13,6 +14,7 @@
 #include <set>
 
 #include "core/Parallel.h"
+#include "drc/Drc.h"
 #include "core/Prof.h"
 #include "geom/Geometry.h"
 #include "router/auto/Layered.h"
@@ -130,6 +132,7 @@ struct Variant {
   double deficit = 0;     // ... by how much, nm
   double length = 0;      // the wires' taut length on the plane, nm
   std::vector<int> viaOwners;  // the vias made vertices of the plane (owners), the wires split at them
+  bool negotiate = false;      // laid with the room negotiated (else the room a must)
   std::vector<std::string> log;
 };
 
@@ -157,13 +160,14 @@ void takeAllOut(Topology& t, int wi) {
   topo::applyRelay(t, wi, all);
 }
 
-Variant makeVariant(const Context& cx, double crossing, double via, unsigned seed) {
+Variant makeVariant(const Context& cx, double crossing, double via, unsigned seed, bool negotiate) {
   const Board& b = cx.b;
   const Options& o = cx.o;
   Variant V;
   V.crossing = crossing;
   V.via = via;
   V.seed = seed;
+  V.negotiate = negotiate;
   V.plane = cx.base;
   Topology& plane = V.plane;
   topo::LayerMesh& m = plane.layers.front();
@@ -347,34 +351,67 @@ Variant makeVariant(const Context& cx, double crossing, double via, unsigned see
   // via fits, at its price; room on each layer.
   LayeredCosts lc{int(cx.layers.size()), cx.layers, via};
   lc.viaOf = [&](int net) { return double(b.classOf(net).viaDiameter); };
-  auto layeredPasses = [&] {
-  for (int pass = 0; pass < o.layeredPasses && !cx.cancelled(); ++pass) {
-    std::iota(order.begin(), order.end(), 0);
-    std::shuffle(order.begin(), order.end(), rng);
-    int moved = 0, none = 0;
-    for (int wi : order) {
-      const std::vector<int> keepLayers = V.chordLayer[size_t(wi)];
-      const topo::RelayPath was = stepsOf(plane, wi);
-      takeAllOut(plane, wi);
-      lc.viaDiameter = double(b.classOf(plane.wires[size_t(wi)].net).viaDiameter);
-      const topo::Wire& w = plane.wires[size_t(wi)];
-      auto p = findLayeredPath(plane, wi, V.chordLayer, lc, cx.padLayers(plane, w, 0), cx.padLayers(plane, w, 1));
-      if (!p) {
-        topo::applyRelay(plane, wi, was);
-        ++none;
-        continue;
+  // The edge-layers whose wires do not fit (a side of a pad crossed by its own wires is none): (edge, layer, deficit).
+  const size_t NLs = cx.layers.size();
+  auto overflow = [&] {
+    std::vector<std::tuple<int, int, double>> out;
+    for (int e = 0; e < int(m.edges.size()); ++e) {
+      const topo::Edge& E = m.edges[size_t(e)];
+      if (E.cross.empty() || m.verts[size_t(E.v[0])].owner == m.verts[size_t(E.v[1])].owner) continue;
+      for (int l = 0; l < int(NLs); ++l) {
+        std::vector<int> ws;
+        for (int cid : E.cross) {
+          const topo::Crossing& x = plane.crossings[size_t(cid)];
+          const auto& cl = V.chordLayer[size_t(x.wire)];
+          if (cl[size_t(x.idx)] == l || cl[size_t(x.idx) + 1] == l) ws.push_back(x.wire);
+        }
+        if (ws.empty()) continue;
+        const topo::EdgeCapacity cap = topo::capacityOf(plane, m, E.v[0], E.v[1], ws, -1, LayerMask(1) << cx.layers[size_t(l)]);
+        if (cap.deficit > 0 || cap.cls >= 3) out.push_back({e, l, std::max(cap.deficit, 1000.0)});
       }
-      topo::applyRelay(plane, wi, p->path);
-      V.chordLayer[size_t(wi)] = p->chordLayer;
-      std::vector<int> a, c;
-      for (auto& st : was.steps) a.push_back(st.edge);
-      for (auto& st : p->path.steps) c.push_back(st.edge);
-      moved += a != c || p->chordLayer != keepLayers;
     }
-    if (moved == 0) break;
-  }
+    return out;
   };
-  layeredPasses();
+  // Negotiation (PathFinder, McMurchie & Ebeling): what an edge-layer lacks costs `present` times over, doubled every
+  // pass, plus its history, which grows on the edge-layers that stay over; every wire is laid again each pass.
+  std::vector<double> history;
+  auto layeredPasses = [&](int passes) {
+    history.assign(m.edges.size() * NLs, 0.0);
+    lc.history = negotiate ? &history : nullptr;
+    for (int pass = 0; pass < passes && !cx.cancelled(); ++pass) {
+      lc.present = negotiate ? std::min(8.0, std::ldexp(0.5, pass)) : -1;
+      std::iota(order.begin(), order.end(), 0);
+      std::shuffle(order.begin(), order.end(), rng);
+      int moved = 0, none = 0;
+      for (int wi : order) {
+        const std::vector<int> keepLayers = V.chordLayer[size_t(wi)];
+        const topo::RelayPath was = stepsOf(plane, wi);
+        takeAllOut(plane, wi);
+        lc.viaDiameter = double(b.classOf(plane.wires[size_t(wi)].net).viaDiameter);
+        const topo::Wire& w = plane.wires[size_t(wi)];
+        auto p = findLayeredPath(plane, wi, V.chordLayer, lc, cx.padLayers(plane, w, 0), cx.padLayers(plane, w, 1));
+        if (!p) {
+          topo::applyRelay(plane, wi, was);
+          ++none;
+          continue;
+        }
+        topo::applyRelay(plane, wi, p->path);
+        V.chordLayer[size_t(wi)] = p->chordLayer;
+        std::vector<int> a, c;
+        for (auto& st : was.steps) a.push_back(st.edge);
+        for (auto& st : p->path.steps) c.push_back(st.edge);
+        moved += a != c || p->chordLayer != keepLayers;
+      }
+      const auto over = overflow();
+      if (negotiate)
+        for (auto& [e, l, d] : over) history[size_t(e) * NLs + size_t(l)] += 0.2 * kNmPerMm + 0.5 * d;
+      if (negotiate && std::getenv("XR_AUTO_DEBUG")) log(std::format("  negotiation pass {}: {} moved, {} with no way, {} edge-layers over", pass + 1, moved, none, over.size()));
+      if (moved == 0 || (negotiate && over.empty() && pass >= 1)) break;
+    }
+    lc.present = -1;
+    lc.history = nullptr;
+  };
+  layeredPasses(o.layeredPasses);
   // The vias of the chords' layers (changes along the wires, ends off their pads' layers).
   auto viasOf = [&](const std::vector<std::vector<int>>& layers) {
     int n = 0;
@@ -390,20 +427,21 @@ Variant makeVariant(const Context& cx, double crossing, double via, unsigned see
   };
   // Re-layering the whole board from the layers as they are, then laying again with them: kept while the vias fall.
   for (int round = 0; round < o.relayerings && !cx.cancelled(); ++round) {
-    const int before = viasOf(V.chordLayer);
+    // Better is fewer edge-layers over, then fewer vias.
+    const auto before = std::pair{int(overflow().size()), viasOf(V.chordLayer)};
     const Topology keepPlane = plane;
     const auto keepLayers = V.chordLayer;
     std::vector<std::vector<int>> fresh;
     layerAll(true, fresh);
     V.chordLayer = std::move(fresh);
-    layeredPasses();
-    const int after = viasOf(V.chordLayer);
+    layeredPasses(o.layeredPasses);
+    const auto after = std::pair{int(overflow().size()), viasOf(V.chordLayer)};
     if (after >= before) {
       plane = keepPlane;
       V.chordLayer = keepLayers;
       break;
     }
-    log(std::format("re-layering {}: vias {} -> {}", round + 1, before, after));
+    log(std::format("re-layering {}: over {} -> {}, vias {} -> {}", round + 1, before.first, after.first, before.second, after.second));
   }
 
   // Vias kept apart: the pairs of vias (at their crossings' points) nearer than their radii and the clearance; the
@@ -766,8 +804,7 @@ Variant makeVariant(const Context& cx, double crossing, double via, unsigned see
 }
 
 // The variant as tracks along its sketches with a via where the layer changes, then the metric stage.
-void realize(const Context& cx, const Variant& V, Result& res) {
-  Board& b = cx.b;
+void realize(const Context& cx, Board& b, const Variant& V, Result& res) {
   const Options& o = cx.o;
   const Topology& plane = V.plane;
   const topo::LayerMesh& m = plane.layers.front();
@@ -1027,22 +1064,28 @@ Result route(Board& b, const Options& o) {
   struct Plan {
     double crossing, via;
     unsigned seed;
+    bool negotiate;
   };
   std::vector<Plan> plans;
-  if (o.variants <= 1) {
-    plans.push_back({o.crossing * kNmPerMm, o.via * kNmPerMm, 0});
+  if (o.variants <= 2) {
+    // The given prices, with the room a must and with it negotiated (each better on some boards: tt, MinVia the
+    // first; Arcs, bus_mixed the second).
+    plans.push_back({o.crossing * kNmPerMm, o.via * kNmPerMm, 0, false});
+    if (o.variants == 2) plans.push_back({o.crossing * kNmPerMm, o.via * kNmPerMm, 0, true});
+    if (o.variants == 1) plans.back().negotiate = o.negotiate;
   } else {
     const double crossings[] = {1, 3, 8, 20};
     const double vias[] = {3, 8, 20, 50};
     for (unsigned seed = 0; int(plans.size()) < o.variants; ++seed)
       for (double cr : crossings)
         for (double vi : vias)
-          if (int(plans.size()) < o.variants) plans.push_back({cr * kNmPerMm, vi * kNmPerMm, seed});
+          for (bool ng : {false, true})
+            if (int(plans.size()) < o.variants) plans.push_back({cr * kNmPerMm, vi * kNmPerMm, seed, ng});
   }
   std::vector<Variant> vs(plans.size());
   std::atomic<int> done{0};
   parallelFor(plans.size(), [&](size_t i) {
-    vs[i] = makeVariant(cx, plans[i].crossing, plans[i].via, plans[i].seed);
+    vs[i] = makeVariant(cx, plans[i].crossing, plans[i].via, plans[i].seed, plans[i].negotiate);
     if (o.progress) o.progress(++done, int(plans.size()), "variants");
   });
   if (cx.cancelled()) {
@@ -1068,6 +1111,32 @@ Result route(Board& b, const Options& o) {
                   (vs[k].length < vs[i].length || vs[k].vias < vs[i].vias || vs[k].over < vs[i].over);
     res.variants[i].pareto = !dominated;
   }
+  // The best few by the plane's measures drawn, each on a copy of the board, and judged by the drawing: the DRC
+  // (the plane does not foresee every violation), then the length with the vias at their weight.
+  std::vector<size_t> order(vs.size());
+  std::iota(order.begin(), order.end(), size_t(0));
+  r::stable_sort(order, {}, [&](size_t i) { return key(vs[i]); });
+  const size_t draw = std::min<size_t>(order.size(), size_t(std::max(1, o.drawn)));
+  if (draw > 1) {
+    std::vector<Board> boards(draw, b);
+    std::vector<Result> rs(draw);
+    std::vector<std::pair<size_t, double>> score(draw);
+    parallelFor(draw, [&](size_t k) {
+      realize(cx, boards[k], vs[order[k]], rs[k]);
+      DrcOptions d;
+      d.unconnected = false;
+      score[k] = {runDrc(boards[k], d).size(), boards[k].tracksLength() + o.viaWeight * kNmPerMm * double(boards[k].vias.size())};
+    });
+    size_t best = 0;
+    for (size_t k = 0; k < draw; ++k) {
+      log(std::format("drawn variant {} ({}): {} violation(s), {:.1f} mm, {} vias", order[k], vs[order[k]].negotiate ? "negotiated" : "room a must",
+                      score[k].first, boards[k].tracksLength() / 1e6, boards[k].vias.size()));
+      if (score[k] < score[best]) best = k;
+    }
+    bi = order[best];
+    b = std::move(boards[best]);
+    for (auto& l : rs[best].log) log(l);
+  }
   const Variant& V = vs[bi];
   res.chosen = int(bi);
   res.routed = V.routed;
@@ -1077,7 +1146,7 @@ Result route(Board& b, const Options& o) {
   res.planeLength = V.length;
   log(std::format("chosen: variant {} (cross {:.1f}, via {:.1f}, seed {}): {:.1f} mm, {} vias, {} edge-layers over", bi, V.crossing / 1e6, V.via / 1e6,
                   V.seed, V.length / 1e6, V.vias, V.over));
-  realize(cx, V, res);
+  if (draw <= 1) realize(cx, b, V, res);
   res.vias = int(b.vias.size());
   res.length = b.tracksLength();
   res.cancelled = cx.cancelled();
