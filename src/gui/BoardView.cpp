@@ -19,6 +19,7 @@
 #include <numeric>
 #include <ranges>
 
+#include "core/Prof.h"
 #include "gui/Schemes.h"
 #include "gui/SmallDialogs.h"
 #include "gui/TextFont.h"
@@ -92,6 +93,49 @@ void BoardView::fitAll() {
   center_ = bb.center();
   scale_ = std::min(width() / bb.width(), height() / bb.height());
   update();
+}
+
+QString BoardView::benchmark(int frames) {
+  QString out;
+  auto series = [&](const char* name, const std::function<void(int)>& step) {
+    std::vector<double> ms;
+    for (int i = 0; i < frames; ++i) {
+      step(i);
+      QElapsedTimer t;
+      t.start();
+      repaint();
+      ms.push_back(double(t.nsecsElapsed()) / 1e6);
+    }
+    r::sort(ms);
+    double sum = 0;
+    for (double m : ms) sum += m;
+    out += QString("%1: mean %2 ms, median %3, max %4\n")
+               .arg(name, -8)
+               .arg(sum / double(ms.size()), 0, 'f', 2)
+               .arg(ms[ms.size() / 2], 0, 'f', 2)
+               .arg(ms.back(), 0, 'f', 2);
+  };
+  fitAll();
+  series("whole", [](int) {});
+  const Vec2 c0 = center_;
+  scale_ *= 4;
+  series("zoom4", [](int) {});
+  series("pan", [&](int i) { center_ = c0 + Vec2{double(i % 25) * 20 / scale_, 0}; });
+  center_ = c0;
+  setMode(Mode::Measure);
+  const QPointF mid(width() / 2.0, height() / 2.0);
+  QMouseEvent press(QEvent::MouseButtonPress, mid, mapToGlobal(mid), Qt::LeftButton, Qt::LeftButton, {});
+  QMouseEvent release(QEvent::MouseButtonRelease, mid, mapToGlobal(mid), Qt::LeftButton, {}, {});
+  QCoreApplication::sendEvent(this, &press);
+  QCoreApplication::sendEvent(this, &release);
+  series("cursor", [&](int i) {
+    const QPointF at = mid + QPointF(double(i % 25) * 7, double(i % 7) * 5);
+    QMouseEvent move(QEvent::MouseMove, at, mapToGlobal(at), Qt::NoButton, {}, {});
+    QCoreApplication::sendEvent(this, &move);
+  });
+  setMode(Mode::Select);
+  Prof::get().report("render");
+  return out;
 }
 
 void BoardView::centerAtCursor() {
@@ -299,10 +343,15 @@ void BoardView::paintEvent(QPaintEvent*) {
     p.fillRect(rect(), QColor(0x03, 0x0b, 0x10));
     return;
   }
+  ProfScope frame("paint");
   p.fillRect(rect(), doc_->color("background", 0x030b10));
-  drawGrid(p);
+  {
+    ProfScope ps("paint.grid");
+    drawGrid(p);
+  }
   p.setRenderHint(QPainter::Antialiasing, true);
   drawBoard(p);
+  ProfScope ps("paint.tools");
   drawOverlay(p);
   drawTools(p);
 }
@@ -377,19 +426,35 @@ void BoardView::drawGrid(QPainter& p) {
   c.setAlpha(d.gridDots ? 160 : 60);
   p.setPen(QPen(c, d.gridDots ? 1.5 : 1));
   if (d.gridDots) {
-    QVector<QPointF> pts;
-    for (double x = std::floor(a.x / sx) * sx; x <= b.x; x += sx)
-      for (double y = std::floor(a.y / sy) * sy; y <= b.y; y += sy) pts << toScreen({x, y});
-    p.drawPoints(pts.data(), int(pts.size()));
+    // One row of dots drawn once and copied to every row: tens of thousands of wide points cost a third of a frame.
+    const qreal dpr = p.device()->devicePixelRatioF();
+    QImage row(QSize(width(), 4) * dpr, QImage::Format_ARGB32_Premultiplied);
+    row.setDevicePixelRatio(dpr);
+    row.fill(Qt::transparent);
+    {
+      QPainter rp(&row);
+      rp.setPen(p.pen());
+      QVector<QPointF> pts;
+      for (double x = std::floor(a.x / sx) * sx; x <= b.x; x += sx) pts << QPointF(toScreen({x, 0}).x(), 2);
+      rp.drawPoints(pts.data(), int(pts.size()));
+    }
+    for (double y = std::floor(a.y / sy) * sy; y <= b.y; y += sy)
+      p.drawImage(QPointF(0, std::round((toScreen({0, y}).y() - 2) * dpr) / dpr), row);
   } else {
-    for (double x = std::floor(a.x / sx) * sx; x <= b.x; x += sx) {
-      double sxp = toScreen({x, 0}).x();
-      p.drawLine(QPointF(sxp, 0), QPointF(sxp, height()));
-    }
-    for (double y = std::floor(a.y / sy) * sy; y <= b.y; y += sy) {
-      double syp = toScreen({0, y}).y();
-      p.drawLine(QPointF(0, syp), QPointF(width(), syp));
-    }
+    // A stroked grid cost a third of a frame: each vertical line is a span per row. The vertical lines are one
+    // row of pixels repeated down the view by a texture brush (a span per row for all of them), the horizontal
+    // ones rectangles.
+    const qreal dpr = p.device()->devicePixelRatioF();
+    QImage comb(int(std::ceil(width() * dpr)), 1, QImage::Format_ARGB32_Premultiplied);
+    comb.fill(Qt::transparent);
+    const QRgb px1 = qPremultiply(c.rgba());
+    auto* line = reinterpret_cast<QRgb*>(comb.scanLine(0));
+    for (double x = std::floor(a.x / sx) * sx; x <= b.x; x += sx)
+      if (int i = int(std::floor(toScreen({x, 0}).x() * dpr)); i >= 0 && i < comb.width()) line[i] = px1;
+    comb.setDevicePixelRatio(dpr);
+    p.fillRect(rect(), QBrush(comb));
+    for (double y = std::floor(a.y / sy) * sy; y <= b.y; y += sy)
+      p.fillRect(QRectF(0, std::floor(toScreen({0, y}).y() * dpr) / dpr, width(), 1 / dpr), c);
   }
 }
 
@@ -504,6 +569,7 @@ void BoardView::drawLayer(QPainter& p, LayerId l) {
   const Layer& L = b.layers[l];
   if (L.kind == LayerKind::Copper) {
     if (d.flag("showCoppers")) {
+      ProfScope ps("layer.zones");
       for (auto& z : b.zones)
         if (z.layer == l) {
           QColor c = netColor(z.net, d.colorizeCopper).value_or(details);
@@ -521,6 +587,7 @@ void BoardView::drawLayer(QPainter& p, LayerId l) {
         }
     }
     if (d.flag("showWires") && showDetails) {
+      ProfScope ps("layer.tracks");
       for (auto& t : b.tracks)
         if (t.layer == l) drawTrack(p, t, netColor(t.net, d.colorizeWire).value_or(t.locked ? fixColor : details));
       // The clasps («замки») of the zipped sections: a bar across the pair at each end of its axis.
@@ -552,6 +619,7 @@ void BoardView::drawLayer(QPainter& p, LayerId l) {
       }
     }
     if (d.flag("showMetalPads") && showPads) {
+      ProfScope ps("layer.pads");
       bool special = d.flag("throughPad", false);
       QColor through = doc_->color("clrThroughPads", 0xc0c0c0);
       for (auto& pad : b.pads) {
@@ -561,13 +629,16 @@ void BoardView::drawLayer(QPainter& p, LayerId l) {
         drawPad(p, pad, l, netColor(pad.net, d.colorizePad).value_or(c));
       }
     }
-    if (d.flag("showTexts") && showDetails)
+    if (d.flag("showTexts") && showDetails) {
+      ProfScope ps("layer.texts");
       for (auto& t : b.texts)
         if (t.layer == l) drawText(p, t, details);
+    }
     return;
   }
   // Technical layers: the pads' details on the mask and paste layers, drawings of the board and of visible
   // components.
+  ProfScope ps("layer.mech");
   int group = layerGroup(b, l);
   bool groupPads = group == 0 ? d.flag("showTopMechPads") : group == 2 ? d.flag("showBotMechPads") : true;
   if ((L.kind == LayerKind::Mask || L.kind == LayerKind::Paste) && showPads && groupPads)
@@ -737,7 +808,11 @@ void BoardView::drawBoard(QPainter& p) {
   for (LayerId l : cu | v::reverse)
     if (l != active && layerVisible(l)) drawLayer(p, l);
   if (activeCopper && layerVisible(active)) drawLayer(p, active);
-  drawVias(p);
+  {
+    ProfScope ps("board.vias");
+    drawVias(p);
+  }
+  ProfScope psHoles("board.rest");
   // Drill holes in the background colour.
   p.setPen(Qt::NoPen);
   p.setBrush(doc_->color("background", 0x030b10));

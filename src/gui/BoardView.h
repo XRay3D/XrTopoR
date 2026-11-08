@@ -33,6 +33,9 @@ class BoardView : public QWidget {
   bool onlyActiveLayer() const;
   bool isRouting() const { return routing_; }
   topo::Push freestylePush() const { return push_; }
+  // Frame times of the rendering (xrtopor --render-bench): the whole board, zoomed in, panned, the cursor moved
+  // with the ruler (a frame of the tools only); `frames` of each, painted at once. A line per series.
+  QString benchmark(int frames);
 
  public slots:
   void setMode(Mode m);
