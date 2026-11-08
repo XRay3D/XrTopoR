@@ -6,6 +6,7 @@
 #include <set>
 #include <unordered_map>
 
+#include "geom/Geometry.h"
 #include "topo/Capacity.h"
 
 namespace xr::autoroute {
@@ -88,6 +89,31 @@ std::optional<LayeredPath> findLayeredPath(const Topology& t, int wi, const std:
     return true;
   };
   auto gapPlace = [&](int tri, int le, int n, int gap) { return perimeter(m, tri, le, (gap + 0.5) / (n + 1)); };
+  std::unordered_map<int, EdgeCapacity> capCache;
+  // The vias of the other wires (where their chords change layer), at their crossings' points.
+  struct OtherVia {
+    Vec2 p;
+    double r;
+    int edge;  // the edge it stands on
+  };
+  std::vector<OtherVia> otherVias;
+  for (int x = 0; x < int(t.wires.size()); ++x) {
+    if (x == wi) continue;
+    const Wire& X = t.wires[size_t(x)];
+    for (int i = 0; i < int(X.cross.size()); ++i) {
+      if (layerOf(x, i) == layerOf(x, i + 1)) continue;
+      const Crossing& xc = t.crossings[size_t(X.cross[size_t(i)])];
+      const Edge& E = m.edges[size_t(xc.edge)];
+      auto [it, fresh] = capCache.try_emplace(xc.edge);
+      if (fresh) it->second = edgeCapacity(t, m, xc.edge);
+      const EdgeCapacity& cap = it->second;
+      const int n = int(E.cross.size());
+      const int k = int(r::find(E.cross, X.cross[size_t(i)]) - E.cross.begin());
+      const Vec2 U = m.verts[size_t(E.v[0])].p, V = m.verts[size_t(E.v[1])].p;
+      const double f = cap.L > 0 && cap.freeLen > 0 ? (cap.reachU + cap.freeLen * (k + 1.0) / (n + 1)) / cap.L : (k + 1.0) / (n + 1);
+      otherVias.push_back({U + (V - U) * f, (c.viaOf ? c.viaOf(X.net) : c.viaDiameter) / 2, xc.edge});
+    }
+  }
   // Room on layer l at the gap of edge e: the wires crossing it on l (a via there takes both its layers), and this one.
   std::map<std::tuple<int, int, int>, bool> roomCache;
   std::map<std::tuple<int, int, int>, double> slackOf;
@@ -124,12 +150,19 @@ std::optional<LayeredPath> findLayeredPath(const Topology& t, int wi, const std:
     const LayerMask on = l < int(c.layerIds.size()) ? LayerMask(1) << c.layerIds[size_t(l)] : 0;
     const EdgeCapacity cap = capacityOf(t, m, E.v[0], E.v[1], ws, along, on);
     // The vias already on the edge (a wire changing layer at its crossing) take their width beyond the wire's.
-    const double vias = viaExtra(e);
+    // ... and the other wires' vias near the edge take the piece of it their disc (with the clearance) covers.
+    double vias = viaExtra(e);
+    const Vec2 A = m.verts[size_t(E.v[0])].p, B = m.verts[size_t(E.v[1])].p;
+    for (const OtherVia& ov : otherVias) {
+      if (ov.edge == e) continue;
+      const double reach = ov.r + double(w.clr);
+      const double d = distPointSegment(ov.p, A, B);
+      if (d < reach) vias += 2 * std::sqrt(reach * reach - d * d);
+    }
     it->second = cap.cls < 3 && cap.deficit <= 0 && cap.slack >= vias;
     slackOf[{e, gap, l}] = cap.slack - vias;
     return it->second;
   };
-  std::unordered_map<int, EdgeCapacity> capCache;
   auto pointAt = [&](int e, int gap) {
     auto [it, fresh] = capCache.try_emplace(e);
     if (fresh) it->second = edgeCapacity(t, m, e);
@@ -140,29 +173,6 @@ std::optional<LayeredPath> findLayeredPath(const Topology& t, int wi, const std:
     const double f = cap.L > 0 && cap.freeLen > 0 ? (cap.reachU + cap.freeLen * (gap + 1.0) / (n + 2)) / cap.L : (gap + 1.0) / (n + 2);
     return U + (V - U) * f;
   };
-  // The vias of the other wires (where their chords change layer), at their crossings' points.
-  struct OtherVia {
-    Vec2 p;
-    double r;
-  };
-  std::vector<OtherVia> otherVias;
-  for (int x = 0; x < int(t.wires.size()); ++x) {
-    if (x == wi) continue;
-    const Wire& X = t.wires[size_t(x)];
-    for (int i = 0; i < int(X.cross.size()); ++i) {
-      if (layerOf(x, i) == layerOf(x, i + 1)) continue;
-      const Crossing& xc = t.crossings[size_t(X.cross[size_t(i)])];
-      const Edge& E = m.edges[size_t(xc.edge)];
-      auto [it, fresh] = capCache.try_emplace(xc.edge);
-      if (fresh) it->second = edgeCapacity(t, m, xc.edge);
-      const EdgeCapacity& cap = it->second;
-      const int n = int(E.cross.size());
-      const int k = int(r::find(E.cross, X.cross[size_t(i)]) - E.cross.begin());
-      const Vec2 U = m.verts[size_t(E.v[0])].p, V = m.verts[size_t(E.v[1])].p;
-      const double f = cap.L > 0 && cap.freeLen > 0 ? (cap.reachU + cap.freeLen * (k + 1.0) / (n + 1)) / cap.L : (k + 1.0) / (n + 1);
-      otherVias.push_back({U + (V - U) * f, (c.viaOf ? c.viaOf(X.net) : c.viaDiameter) / 2});
-    }
-  }
   // A via at the gap: the wire's room on both layers and the via's width beyond the wire's; and no other wire's via
   // nearer than the two radii and the clearance (a via is a disc, not a place on one edge).
   auto viaRoom = [&](int e, int gap, int l0, int l1) {
@@ -188,6 +198,8 @@ std::optional<LayeredPath> findLayeredPath(const Topology& t, int wi, const std:
     int layer = 0;
     double place = 0;
     Vec2 p;
+    bool hasVia = false;  // its own last change of layer on the way here, and where
+    Vec2 lastVia;
   };
   std::vector<Node> nodes;
   using Item = std::pair<double, int>;
@@ -209,7 +221,7 @@ std::optional<LayeredPath> findLayeredPath(const Topology& t, int wi, const std:
       for (int l = 0; l < NL; ++l)
         if ((startLayers >> l) & 1) {
           const int corner = m.localVertex(tri, S);
-          push({0, -1, tri, -1, corner, -1, -1, l, double(corner), startP});
+          push({0, -1, tri, -1, corner, -1, -1, l, double(corner), startP, false, {}});
         }
   int goal = -1;
   double goalCost = 0;
@@ -259,7 +271,11 @@ std::optional<LayeredPath> findLayeredPath(const Topology& t, int wi, const std:
         const double step = (p - nd.p).len();
         for (int l = 0; l < NL; ++l) {
           if (l != nd.layer && (!viaRoom(e, gap, nd.layer, l) || (alongOther && layerOf(E.along, 0) == l))) continue;
-          push({nd.g + step + (l != nd.layer ? c.via : 0), ni, next, le, -1, e, gap, l, gapPlace(next, le, n, gap), p});
+          // Its own vias apart too: the wires crossing between two of them need the room.
+          if (l != nd.layer && nd.hasVia && (nd.lastVia - p).len() < c.viaDiameter + double(w.clr)) continue;
+          Node next1{nd.g + step + (l != nd.layer ? c.via : 0), ni, next, le, -1, e, gap, l, gapPlace(next, le, n, gap), p, nd.hasVia, nd.lastVia};
+          if (l != nd.layer) next1.hasVia = true, next1.lastVia = p;
+          push(next1);
         }
       }
     }

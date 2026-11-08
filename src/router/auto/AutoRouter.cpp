@@ -404,6 +404,45 @@ Variant makeVariant(const Context& cx, double crossing, double via, unsigned see
     log(std::format("re-layering {}: vias {} -> {}", round + 1, before, after));
   }
 
+  // Vias kept apart: the pairs of vias (at their crossings' points) nearer than their radii and the clearance; the
+  // wires of one of each pair laid again by the layered search, which keeps a new via off the others. A few rounds.
+  for (int round = 0; round < 4 && !cx.cancelled(); ++round) {
+    struct At {
+      Vec2 p;
+      double r;
+      int wire;
+    };
+    std::vector<At> vias;
+    for (int wi = 0; wi < nw; ++wi) {
+      const topo::Wire& w = plane.wires[size_t(wi)];
+      const auto& cl = V.chordLayer[size_t(wi)];
+      for (size_t k = 1; k < cl.size(); ++k)
+        if (cl[k] != cl[k - 1]) vias.push_back({crossingPoint(plane, m, w.cross[k - 1]), b.classOf(w.net).viaDiameter / 2.0, wi});
+    }
+    std::set<int> redo;
+    for (size_t i = 0; i < vias.size(); ++i)
+      for (size_t k = i + 1; k < vias.size(); ++k)
+        if ((vias[i].p - vias[k].p).len() < vias[i].r + vias[k].r + double(plane.wires[size_t(vias[i].wire)].clr))
+          redo.insert(std::max(vias[i].wire, vias[k].wire));
+    if (redo.empty()) break;
+    int moved = 0;
+    for (int wi : redo) {
+      const topo::RelayPath was = stepsOf(plane, wi);
+      takeAllOut(plane, wi);
+      lc.viaDiameter = double(b.classOf(plane.wires[size_t(wi)].net).viaDiameter);
+      const topo::Wire& w = plane.wires[size_t(wi)];
+      if (auto p = findLayeredPath(plane, wi, V.chordLayer, lc, cx.padLayers(plane, w, 0), cx.padLayers(plane, w, 1))) {
+        topo::applyRelay(plane, wi, p->path);
+        V.chordLayer[size_t(wi)] = p->chordLayer;
+        ++moved;
+      } else {
+        topo::applyRelay(plane, wi, was);
+      }
+    }
+    log(std::format("vias apart {}: {} wire(s) with a via too near another, {} laid again", round + 1, redo.size(), moved));
+    if (moved == 0) break;
+  }
+
   // The measures of the variant: the taut length, the vias, the edge-layers over.
   for (int wi = 0; wi < nw; ++wi) {
     V.length += topo::tautLength(plane, wi);
