@@ -56,6 +56,27 @@ int resolveCrossings(const Board& b, Topology& t);
 void drawModel(Board& b, Topology& t, bool direct, RealizeStats& stats, int& nWires, bool editedOnly = false,
                const std::vector<int>* only = nullptr);
 
+// A connection for manual routing, on the model: a copy of it with the new wire laid over the triangles from `from` to
+// `to` on the layer (findRelay, as F6 re-lays a wire: among the wires as they run, each edge with room for it; squeezed
+// in when there is no way with room, or only a very long one). An end on a pad, a via or a branch point of the net is that owner, one anywhere
+// else a new free end of the wire. Nothing when there is no way on the layer.
+struct ModelConnection {
+  Topology model;
+  int wire = -1;
+  double length = 0;      // over the triangles, nm
+  bool squeezed = false;  // no way with room
+  Vec2 from, to;
+  bool freeFrom = false, freeTo = false;  // the end stands off the point meant (a free end is put beside it: see the .cpp)
+};
+std::optional<ModelConnection> connectionOnModel(const Topology& live, Vec2 from, Vec2 to, LayerId layer, int net, Coord width, Coord widthMin, Coord clearance);
+// The wire drawn as F5 draws it: with the wires of other nets sharing an edge with it, packed there, the rest as they
+// lie (a way over the triangles may need them moved over); the wires of its own net stay.
+struct DrawnConnection {
+  std::vector<Track> tracks;  // the wire, from `from` to `to`
+  std::vector<Track> board;   // the board's tracks with those wires redrawn, the wire not among them
+};
+DrawnConnection drawConnection(const Board& b, ModelConnection c);
+
 // The model's violations as DRC violations (Type::Topology) for the message list and the selection: `a`
 // and `b` are tracks of the wires concerned (or the pad a wire runs through).
 std::vector<DrcViolation> topologyViolations(const Board& b, const Topology& t, const std::vector<Violation>& vs);

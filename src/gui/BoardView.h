@@ -294,13 +294,26 @@ class BoardView : public QWidget {
   std::vector<Via> routeVias_;
   Vec2 routeLast_;
   std::optional<Vec2> routeDir_;  // direction of the last segment (for tangent arcs)
-  // TopoR's target and suggested path: the nearest unconnected object of the net on the routing
-  // layer and the way to it without violations (dash-dotted); none found: a dashed pointer.
+  // TopoR's target and suggested path: the nearest point of what the net has not joined yet on the routing layer
+  // (a pad, a via, a place on a wire), nearest by the way to it over the model's triangles, and that way
+  // (dashed, as it will be laid); none found: a pointer. Q takes the next of the groups not joined.
   std::optional<ItemRef> routeFrom_;
   int targetIndex_ = 0;
-  std::optional<Vec2> routeTarget_;
+  // Where a route ends on what is not joined yet: the wire `track` (-1: a pad, a via) is split there.
+  struct RouteLanding {
+    Vec2 at;
+    int track = -1;
+  };
+  std::optional<RouteLanding> routeTarget_, routeLanding_;
+  std::vector<Track> routeMoved_;  // what finishRoute puts on the board for the tracks, when the wire goes the model's way
   std::vector<Track> routeHint_;
+  std::vector<Track> routeHintBoard_;  // the board's tracks with the wires that make room for it moved over («;» lays them)
   void updateRouteHint();
+  int routeFromCluster() const;
+  // The connection under the world point `w`, within a few pixels: a pad's or a via's centre, a wire's end or the
+  // nearest point of its line or arc, of the routing layer and not joined to where the route began.
+  std::optional<RouteLanding> routeMagnet(Vec2 w) const;
+  void routeLand(const RouteLanding& at);  // the last segment to `at`, and the route is finished
   // A differential pair laid by hand (TopoR's «Ручная прокладка дифф. пары»): from a pad of a pair's net and its
   // partner, the conductors converge to the clasp the second click places; the pair is laid as one wire (its
   // axis in routeTracks_, as wide as the pair) up to a pad of the pair, where a clasp ends it and the conductors

@@ -1142,11 +1142,11 @@ void BoardView::drawOverlay(QPainter& p) {
   }
   for (auto& t : routeTracks_) drawTrack(p, t, doc_->layerColor(t.layer));
   for (auto& v : routeVias_) drawVia(p, v, doc_->color("clrThroughVias", 0x949494));
-  // The suggested path to the target (dash-dotted), or a pointer to it when there is none.
+  // Where and how the wire is led to its target (dashed), or a pointer to it when there is no way.
   if (!routeHint_.empty()) {
     QColor hc = brighter(c, 50);
     for (auto& t : routeHint_) {
-      QPen pen(hc, 1.5, Qt::DashDotLine);
+      QPen pen(hc, 1.5, Qt::DashLine);
       p.setPen(pen);
       p.setBrush(Qt::NoBrush);
       auto pts = t.path(std::max(500.0, 0.3 / scale_));
@@ -1154,13 +1154,19 @@ void BoardView::drawOverlay(QPainter& p) {
     }
   } else if (routeTarget_) {
     p.setPen(QPen(brighter(c, 50), 1, Qt::DashLine));
-    p.drawLine(toScreen(routeLast_), toScreen(*routeTarget_));
+    p.drawLine(toScreen(routeLast_), toScreen(routeTarget_->at));
   }
-  if (auto seg = makeSegment(routeLast_, constrained(routeLast_, snapped(cursor_)))) {
+  auto magnet = routeMagnet(cursor_);
+  if (auto seg = makeSegment(routeLast_, magnet ? magnet->at : constrained(routeLast_, snapped(cursor_)))) {
     double m = rubberMargin(*seg);
     QColor rc = m < 0 ? QColor(0xff, 0x30, 0x30) : brighter(c, 30);
     rc.setAlpha(200);
     drawTrack(p, *seg, rc);
+  }
+  if (magnet) {  // the place a click ends the route on
+    p.setPen(QPen(Qt::white, 1.5));
+    p.setBrush(Qt::NoBrush);
+    p.drawEllipse(toScreen(magnet->at), 6.0, 6.0);
   }
 }
 
@@ -1285,6 +1291,7 @@ void BoardView::mousePressEvent(QMouseEvent* e) {
         break;
       }
       if (!routing_) routeStart(pk, pk.item ? pk.snap : w);
+      else if (auto m = routeMagnet(toWorld(e->position()))) routeLand(*m);
       else routeAddPoint(constrained(routeLast_, pk.item && itemNet(*doc_->board(), *pk.item) == routeNet_ ? pk.snap : w), pk);
       break;
     }
@@ -2850,8 +2857,8 @@ void BoardView::routeStart(const Pick& pk, Vec2 at) {
   routeLast_ = at;
   routeDir_.reset();
   updateRouteHint();
-  emit status(tr("Прокладка цепи %1 на слое %2: «;» — проложить до цели, Q — другая цель, V — переход, Backspace — отменить, "
-                 "Enter — завершить")
+  emit status(tr("Прокладка цепи %1 на слое %2: «;» — проложить до ближайшего соединения, Q — другая цель, V — переход, "
+                 "Backspace — отменить, Enter — завершить; щелчок у соединения завершает")
                   .arg(routeNet_ >= 0 ? QString::fromStdString(b.nets[routeNet_].name) : tr("(без цепи)"))
                   .arg(QString::fromStdString(b.layers[routeLayer_].name)));
 }
@@ -3202,38 +3209,138 @@ void BoardView::routeUndoLast() {
   refresh();
 }
 
+int BoardView::routeFromCluster() const {
+  if (!routeFrom_) return -1;
+  const Connectivity& conn = doc_->connectivity();
+  switch (routeFrom_->type) {
+    case ItemType::Pad: return conn.padCluster[size_t(routeFrom_->index)];
+    case ItemType::Track: return conn.trackCluster[size_t(routeFrom_->index)];
+    case ItemType::Via: return conn.viaCluster[size_t(routeFrom_->index)];
+    default: return -1;
+  }
+}
+
+namespace {
+
+bool joined(Vec2 a, Vec2 b) { return (a - b).len() <= edit::kJoinTol; }
+
+// The point of a wire's centre line nearest `w`.
+Vec2 nearestOnTrack(const Track& t, Vec2 w) {
+  Vec2 best = t.a.v();
+  double bd = std::numeric_limits<double>::max();
+  auto pts = t.path(500);
+  for (size_t i = 1; i < pts.size(); ++i) {
+    Vec2 q = closestPointOnSegment(w, pts[i - 1], pts[i]);
+    if (double d = (q - w).len2(); d < bd) bd = d, best = q;
+  }
+  return best;
+}
+
+}  // namespace
+
+std::optional<BoardView::RouteLanding> BoardView::routeMagnet(Vec2 w) const {
+  if (!routing_ || routePair_ || routeNet_ == kNoNet) return std::nullopt;
+  const Board& b = *doc_->board();
+  const Connectivity& conn = doc_->connectivity();
+  const int from = routeFromCluster();
+  const double reach = 8 / scale_;
+  BBox box;
+  box.add(w);
+  std::optional<RouteLanding> best;
+  auto better = std::tuple(3, 0.0);  // a centre, a wire's end, a place on a wire; the nearest of them
+  auto offer = [&](int rank, Vec2 at, int track) {
+    auto key = std::tuple(rank, (at - w).len());
+    if (key < better) better = key, best = RouteLanding{at, track};
+  };
+  doc_->index().query(box.inflated(reach), LayerMask(1) << routeLayer_, [&](ItemRef r) {
+    if (r.type == ItemType::Pad) {
+      const Pad& p = b.pads[size_t(r.index)];
+      if (p.net == routeNet_ && p.onLayer(routeLayer_) && conn.padCluster[size_t(r.index)] != from && p.shapeGeom().distance(w) <= reach)
+        offer(0, p.pos.v(), -1);
+    } else if (r.type == ItemType::Via) {
+      const Via& v = b.vias[size_t(r.index)];
+      if (v.net == routeNet_ && v.onLayer(routeLayer_) && conn.viaCluster[size_t(r.index)] != from &&
+          (v.pos.v() - w).len() <= v.diameter / 2.0 + reach)
+        offer(0, v.pos.v(), -1);
+    } else if (r.type == ItemType::Track) {
+      const Track& t = b.tracks[size_t(r.index)];
+      if (t.net != routeNet_ || t.layer != routeLayer_ || conn.trackCluster[size_t(r.index)] == from) return;
+      const double near = t.width / 2.0 + reach;
+      if ((t.a.v() - w).len() <= near) offer(1, t.a.v(), -1);
+      else if ((t.b.v() - w).len() <= near) offer(1, t.b.v(), -1);
+      else if (Vec2 q = nearestOnTrack(t, w); (q - w).len() <= near) offer(2, q, r.index);
+    }
+  });
+  return best;
+}
+
+void BoardView::routeLand(const RouteLanding& at) {
+  if (auto seg = makeSegment(routeLast_, at.at)) routeTracks_.push_back(*seg);
+  routeLast_ = at.at;
+  routeLanding_ = at;
+  finishRoute();
+}
+
 void BoardView::updateRouteHint() {
   routeHint_.clear();
+  routeHintBoard_.clear();
   routeTarget_.reset();
   if (!routing_ || routeNet_ == kNoNet) return;
   const Board& b = *doc_->board();
   const Connectivity& conn = doc_->connectivity();
-  auto clusterOf = [&](ItemRef r) {
-    switch (r.type) {
-      case ItemType::Pad: return conn.padCluster[r.index];
-      case ItemType::Track: return conn.trackCluster[r.index];
-      case ItemType::Via: return conn.viaCluster[r.index];
-      default: return -1;
-    }
+  const int from = routeFromCluster();
+  // The nearest point of every group of the net not joined to the start, on the routing layer.
+  struct Cand {
+    double d = std::numeric_limits<double>::max();
+    RouteLanding to;
+    std::optional<topo::ModelConnection> way;
   };
-  int from = routeFrom_ ? clusterOf(*routeFrom_) : -1;
-  // Unconnected pads and vias of the net on the routing layer, nearest first.
-  std::vector<std::pair<double, Vec2>> cands;
-  for (int i = 0; i < int(b.pads.size()); ++i) {
-    const Pad& p = b.pads[i];
-    if (p.net != routeNet_ || !p.onLayer(routeLayer_) || (from >= 0 && conn.padCluster[i] == from)) continue;
-    cands.push_back({(p.pos.v() - routeLast_).len(), p.pos.v()});
+  std::map<int, Cand> nearest;
+  auto offer = [&](int cluster, Vec2 p, int track) {
+    double d = (p - routeLast_).len();
+    if (cluster == from || cluster < 0 || d < 1) return;
+    Cand& c = nearest[cluster];
+    if (d < c.d) c = Cand{d, {p, track}, {}};
+  };
+  for (int i = 0; i < int(b.pads.size()); ++i)
+    if (b.pads[i].net == routeNet_ && b.pads[i].onLayer(routeLayer_)) offer(conn.padCluster[i], b.pads[i].pos.v(), -1);
+  for (int i = 0; i < int(b.vias.size()); ++i)
+    if (b.vias[i].net == routeNet_ && b.vias[i].onLayer(routeLayer_)) offer(conn.viaCluster[i], b.vias[i].pos.v(), -1);
+  for (int i = 0; i < int(b.tracks.size()); ++i) {
+    const Track& t = b.tracks[i];
+    if (t.net != routeNet_ || t.layer != routeLayer_) continue;
+    Vec2 q = nearestOnTrack(t, routeLast_);
+    offer(conn.trackCluster[i], q, joined(q, t.a.v()) || joined(q, t.b.v()) ? -1 : i);
   }
-  for (int i = 0; i < int(b.vias.size()); ++i) {
-    const Via& v = b.vias[i];
-    if (v.net != routeNet_ || !v.onLayer(routeLayer_) || (from >= 0 && conn.viaCluster[i] == from)) continue;
-    cands.push_back({(v.pos.v() - routeLast_).len(), v.pos.v()});
+  std::vector<Cand> cands;
+  for (auto& [cluster, c] : nearest) {
+    // A place on a wire inside a pad of its group: the pad's centre.
+    for (int i = 0; i < int(b.pads.size()) && c.to.track >= 0; ++i)
+      if (conn.padCluster[i] == cluster && b.pads[i].onLayer(routeLayer_) && b.pads[i].shapeGeom().contains(c.to.at)) c.to = {b.pads[i].pos.v(), -1};
+    cands.push_back(c);
   }
-  std::erase_if(cands, [&](auto& c) { return c.first < 1; });
   if (cands.empty()) return;
-  r::sort(cands, {}, &std::pair<double, Vec2>::first);
-  routeTarget_ = cands[size_t(targetIndex_) % cands.size()].second;
-  routeHint_ = topo::routeConnection(b, routeLast_, *routeTarget_, routeLayer_, routeNet_, routeWidth_);
+  // The nearest few by the line, then by the way over the model's triangles: what is near may be behind a wall of
+  // other nets' wires, and a way with room comes before one squeezed in.
+  constexpr size_t kTried = 5;
+  r::sort(cands, {}, &Cand::d);
+  if (cands.size() > kTried) cands.resize(kTried);
+  const topo::Topology& model = doc_->topology();
+  const Coord widthMin = std::min(routeWidth_, b.minTrackWidth(routeNet_, routeLayer_));
+  const Coord clearance = b.clearance(routeNet_, routeLayer_);
+  parallelFor(cands.size(), [&](size_t i) {
+    cands[i].way = topo::connectionOnModel(model, routeLast_, cands[i].to.at, routeLayer_, routeNet_, routeWidth_, widthMin, clearance);
+  });
+  r::stable_sort(cands, {}, [](const Cand& c) {
+    return c.way ? std::tuple(int(c.way->squeezed), c.way->length) : std::tuple(2, 0.0);
+  });
+  const Cand& c = cands[size_t(targetIndex_) % cands.size()];
+  routeTarget_ = c.to;
+  if (c.way) {
+    topo::DrawnConnection drawn = topo::drawConnection(b, *c.way);
+    routeHint_ = std::move(drawn.tracks);
+    routeHintBoard_ = std::move(drawn.board);
+  }
 }
 
 void BoardView::nextTarget() {
@@ -3251,6 +3358,8 @@ void BoardView::routeToTarget() {
   }
   for (auto& t : routeHint_) routeTracks_.push_back(t);
   routeHint_.clear();
+  routeLanding_ = routeTarget_;
+  routeMoved_ = std::move(routeHintBoard_);
   finishRoute();
 }
 
@@ -3353,12 +3462,29 @@ void BoardView::finishRoute() {
   routing_ = false;
   if (!routeTracks_.empty() || !routeVias_.empty()) {
     auto before = doc_->beginEdit();
+    int landed = routeLanding_ ? routeLanding_->track : -1;
+    if (!routeMoved_.empty()) {  // the wires that make room for it moved over; the wire landed on is not among them
+      const uint32_t id = landed >= 0 ? b.tracks[size_t(landed)].id : 0;
+      b.tracks = std::move(routeMoved_);
+      if (landed >= 0) landed = int(r::find(b.tracks, id, &Track::id) - b.tracks.begin());
+      routeMoved_.clear();
+    }
+    if (landed >= 0 && landed < int(b.tracks.size()) && b.tracks[size_t(landed)].zip < 0) {
+      // Ended on a wire between its ends: a vertex of the wire there (an arc's split that cannot land on it is undone).
+      const int ti = landed;
+      const Track was = b.tracks[size_t(ti)];
+      if (int second = edit::splitTrack(b, ti, routeLanding_->at); second >= 0 && !joined(b.tracks[size_t(second)].a.v(), routeLanding_->at)) {
+        b.tracks[size_t(ti)] = was;
+        b.tracks.pop_back();
+      }
+    }
     for (auto& t : routeTracks_) b.tracks.push_back(t);
     for (auto& v : routeVias_) b.vias.push_back(v);
     doc_->commitEdit(before, tr("Прокладка проводника"));
   }
   routeTracks_.clear();
   routeVias_.clear();
+  routeLanding_.reset();
   emit status(tr("Проводник проложен"));
   refresh();
 }

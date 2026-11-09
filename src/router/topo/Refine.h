@@ -42,9 +42,4 @@ RefineResult refine(Board& b, const RefineOptions& o = {});
 std::optional<Polyline> findPath(const Board& b, Vec2 from, Vec2 to, LayerId layer, int net, Coord width,
                                  const BBox& region, const std::vector<char>& ignore = {});
 
-// A wire for one connection on one layer (manual routing's «Проложить проводник автоматически»): the
-// shortest path around the copper of other nets, keepouts and the board edge, pulled taut with arcs.
-// Empty when there is none on that layer.
-std::vector<Track> routeConnection(const Board& b, Vec2 from, Vec2 to, LayerId layer, int net, Coord width);
-
 }  // namespace xr::topo

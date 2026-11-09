@@ -17,6 +17,7 @@
 #include "topo/Capacity.h"
 #include "topo/Flip.h"
 #include "topo/Move.h"
+#include "topo/Relay.h"
 #include "drc/Drc.h"
 #include "geom/Geometry.h"
 
@@ -182,9 +183,20 @@ RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int
     const LayerMesh& m = *t.mesh(layer);
     LayerObstacles& ob = in.obstacles[layer];
     std::map<int, int> centreOf;  // owner -> its centre point
+    // The realiser's points are the mesh's vertices by index: a removed vertex (a via or a branch point taken out of
+    // the live model) keeps its number as a bare point on a point of the wall that is there anyway.
+    Vec2 nowhere;
+    for (const Vertex& x : m.verts)
+      if (x.owner >= 0) {
+        nowhere = x.p;
+        if (t.owners[x.owner].kind == Owner::Kind::Outline) break;
+      }
     for (int v = 0; v < int(m.verts.size()); ++v) {
       const Vertex& x = m.verts[v];
-      if (x.owner < 0) continue;  // removed
+      if (x.owner < 0) {
+        ob.add(nowhere, 0, 0, kBoardEdge);
+        continue;
+      }
       const Owner& o = t.owners[x.owner];
       double clr = m.ownerClr[x.owner];
       int id;
@@ -228,6 +240,7 @@ RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int
     }
     // The sides: a pad's perimeter between its corners (or its two ends), the outline and keepout pieces.
     for (const Edge& E : m.edges) {
+      if (E.v[0] < 0) continue;  // the spokes of a removed vertex
       const Vertex& a = m.verts[E.v[0]];
       const Vertex& c = m.verts[E.v[1]];
       const Owner& oa = t.owners[a.owner];
@@ -690,6 +703,107 @@ void drawModel(Board& b, Topology& t, bool direct, RealizeStats& stats, int& nWi
   }
   ps.reset();
   nWires = int(chosen.size());
+}
+
+namespace {
+
+// What a free end's vertex stands off the point meant, towards the wire's other end: a point exactly on a wire of the
+// net lies on the edge it runs along, and an edge is no place for a vertex. The drawn end goes back to the point.
+constexpr double kFreeEndAside = 2000;
+
+// The owner of the net holding `p` on the layer; else a new free end beside it. -1: the mesh has no place for it.
+int connectionEnd(Topology& t, LayerMesh& m, Vec2 p, Vec2 other, int net, Coord width, bool& isFree) {
+  int best = -1;
+  double bd = std::numeric_limits<double>::max();
+  for (int oi = 0; oi < int(t.owners.size()); ++oi) {
+    const Owner& o = t.owners[size_t(oi)];
+    if (o.net != net || !((o.layers >> m.layer) & 1) || m.ownerVerts[size_t(oi)].empty()) continue;
+    if (o.kind != Owner::Kind::Pad && o.kind != Owner::Kind::Via && o.kind != Owner::Kind::Junction) continue;
+    if (double d = (o.c - p).len(); d < bd && o.shape.contains(p)) bd = d, best = oi;
+  }
+  isFree = best < 0;
+  if (best >= 0) return best;
+  Owner o;
+  o.kind = Owner::Kind::Junction;
+  o.c = p + (other - p).normalized() * kFreeEndAside;
+  o.halfWidth = width / 2.0;
+  o.shape = Shape::circle(o.c, o.halfWidth);
+  o.net = net;
+  o.layers = LayerMask(1) << m.layer;
+  o.junction = int(t.junctions.size());
+  const Vec2 c = o.c;
+  const int owner = insertOwner(t, std::move(o));
+  if (owner >= 0) t.junctions.push_back({c, net, m.layer, owner, 1});
+  return owner;
+}
+
+}  // namespace
+
+std::optional<ModelConnection> connectionOnModel(const Topology& live, Vec2 from, Vec2 to, LayerId layer, int net, Coord width, Coord widthMin, Coord clearance) {
+  std::optional<ModelConnection> out(std::in_place);
+  ModelConnection& c = *out;
+  c.model = live;
+  c.from = from;
+  c.to = to;
+  Topology& t = c.model;
+  LayerMesh* m = t.mesh(layer);
+  if (!m) return std::nullopt;
+  const int a = connectionEnd(t, *m, from, to, net, width, c.freeFrom);
+  const int z = a < 0 ? -1 : connectionEnd(t, *m, to, from, net, width, c.freeTo);
+  if (a < 0 || z < 0 || a == z) return std::nullopt;
+  auto vertexOf = [&](int owner, Vec2 towards) {  // a polygon pad's centre, or the vertex of the axis nearest the other end
+    if (t.owners[size_t(owner)].shape.kind == Shape::Kind::Polygon)
+      for (int v : m->ownerVerts[size_t(owner)])
+        if (m->verts[size_t(v)].t == 0 && m->verts[size_t(v)].off.len2() < 1) return v;
+    return t.nearestVertex(*m, owner, towards);
+  };
+  Wire w;
+  w.net = net;
+  w.layer = layer;
+  w.width = width;
+  w.widthMin = widthMin;
+  w.clr = clearance;
+  w.end[0] = a;
+  w.end[1] = z;
+  w.endVertex[0] = vertexOf(a, to);
+  w.endVertex[1] = vertexOf(z, from);
+  c.wire = int(t.wires.size());
+  t.wires.push_back(std::move(w));
+  std::optional<RelayPath> path = findRelay(t, c.wire);
+  // No way with room, or only one round half the board: squeezed in beside the others, if that is shorter.
+  if (const double line = (to - from).len(); !path || path->length > 3 * line + 5 * kNmPerMm)
+    if (std::optional<RelayPath> tight = findRelay(t, c.wire, nullptr, nullptr, true); tight && (!path || tight->length < path->length)) {
+      path = tight;
+      c.squeezed = true;
+    }
+  if (!path) return std::nullopt;
+  applyRelay(t, c.wire, *path);
+  c.length = path->length;
+  return out;
+}
+
+DrawnConnection drawConnection(const Board& b, ModelConnection c) {
+  Board trial = b;
+  Topology& t = c.model;
+  for (Wire& w : t.wires)
+    if (w.net == t.wires[size_t(c.wire)].net && &w != &t.wires[size_t(c.wire)]) w.locked = true;
+  RealizeStats stats;
+  int drawn = 0;
+  const std::vector<int> only{c.wire};
+  drawModel(trial, t, true, stats, drawn, false, &only);
+  const std::set<uint32_t> own(t.wires[size_t(c.wire)].tracks.begin(), t.wires[size_t(c.wire)].tracks.end());
+  DrawnConnection out;
+  for (Track& x : trial.tracks) (own.contains(x.id) ? out.tracks : out.board).push_back(x);
+  if (out.tracks.empty()) return out;
+  // From `from` to `to`, whichever way the realiser went.
+  if ((out.tracks.back().b.v() - c.from).len() < (out.tracks.front().a.v() - c.from).len()) {
+    r::reverse(out.tracks);
+    for (Track& x : out.tracks) std::swap(x.a, x.b);
+  }
+  if (c.freeFrom) out.tracks.front().a = Point(c.from);
+  if (c.freeTo) out.tracks.back().b = Point(c.to);
+  for (Track& x : out.tracks) x.id = 0;
+  return out;
 }
 
 F5ModelResult runF5Model(Board& b, Topology& t, const F5ModelOptions& o) {

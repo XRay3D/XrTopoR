@@ -1871,6 +1871,197 @@ TEST(Gui, RouteToTarget) {
   EXPECT_EQ(runDrc(b, o).size(), 0u);
 }
 
+namespace {
+
+// A route from via A of net N at (10, 10); what it may join is added by the tests. 50 x 30 mm, two layers.
+struct RouteBoard {
+  App& a = app();
+  Document doc;
+  BoardView view{&doc};
+  Board* b = nullptr;
+  LayerId top = -1;
+  int n = -1, other = -1;
+  Vec2 c{25 * double(kNmPerMm), 15 * double(kNmPerMm)};
+  double scale = 800.0 / (60 * double(kNmPerMm));
+  static Vec2 mm(double x, double y) { return {x * kNmPerMm, y * kNmPerMm}; }
+  RouteBoard() {
+    view.resize(800, 600);
+    auto own = std::make_unique<Board>();
+    b = own.get();
+    top = b->addLayer("Top", LayerKind::Copper, Side::Top);
+    LayerId bot = b->addLayer("Bottom", LayerKind::Copper, Side::Bottom);
+    b->layers[top].copperIndex = 0;
+    b->layers[bot].copperIndex = 1;
+    n = b->addNet("N");
+    other = b->addNet("O");
+    b->outline.push_back({mm(0, 0), mm(50, 0), mm(50, 30), mm(0, 30)});
+    via(10, 10);
+    doc.setBoard(std::move(own), "route");
+    view.centerOn(c, 60);
+  }
+  void via(double x, double y) {
+    Via v;
+    v.pos = Point(mm(x, y));
+    v.net = n;
+    v.diameter = mmToNm(1);
+    v.drill = mmToNm(0.5);
+    v.layers = b->allCopperMask();
+    b->vias.push_back(v);
+  }
+  Track& wire(Vec2 p, Vec2 q, int net = -2) {
+    Track t;
+    t.a = Point(p);
+    t.b = Point(q);
+    t.width = mmToNm(0.25);
+    t.layer = top;
+    t.net = net == -2 ? n : net;
+    b->tracks.push_back(t);
+    return b->tracks.back();
+  }
+  QPoint at(Vec2 w) { return screenOf(view, w, c, scale); }
+  void click(Vec2 w) { QTest::mouseClick(&view, Qt::LeftButton, {}, at(w)); }
+  void start() {
+    doc.invalidate();
+    view.setMode(Mode::Route);
+    click(mm(10, 10));
+    ASSERT_TRUE(view.isRouting());
+  }
+  size_t unrouted() { return Connectivity::compute(*b).ratsnest.size(); }
+  // A click lands on a whole pixel, a place on a wire within that of the point meant.
+  bool joins(Vec2 p) {
+    const double px = 1 / scale;
+    return r::any_of(b->tracks, [&](const Track& t) { return (t.a.v() - p).len() < px || (t.b.v() - p).len() < px; });
+  }
+};
+
+}  // namespace
+
+// «;» lays the wire to the nearest place of what the net has not joined, a wire's line among them: the wire gets a
+// vertex there. A via farther off stays for the next one.
+TEST(Gui, RouteToTheNearestPlaceOnAWire) {
+  RouteBoard f;
+  f.wire(RouteBoard::mm(20, 2), RouteBoard::mm(20, 28));
+  f.via(40, 10);
+  f.start();
+  size_t before = f.unrouted();
+  f.view.routeToTarget();
+  EXPECT_FALSE(f.view.isRouting());
+  EXPECT_EQ(f.unrouted(), before - 1);
+  EXPECT_EQ(f.b->tracks.size(), 3u) << "the wire in two, the new one";
+  EXPECT_TRUE(f.joins(RouteBoard::mm(20, 10)));
+  DrcOptions o;
+  o.unconnected = false;
+  EXPECT_EQ(runDrc(*f.b, o).size(), 0u);
+}
+
+// The nearest by the way there: a via 8 mm off behind a wall of another net (across the whole board) loses to one
+// 14 mm off in the open.
+TEST(Gui, RouteTargetIsNearestByTheWayThere) {
+  RouteBoard f;
+  f.via(18, 10);
+  f.via(10, 24);
+  f.wire(RouteBoard::mm(14, 0.5), RouteBoard::mm(14, 29.5), f.other);
+  f.start();
+  f.view.routeToTarget();
+  EXPECT_FALSE(f.view.isRouting());
+  EXPECT_TRUE(f.joins(RouteBoard::mm(10, 24)));
+  EXPECT_FALSE(f.joins(RouteBoard::mm(18, 10)));
+}
+
+// By hand the end sticks to a connection within a few pixels and a click there finishes the route: a via's centre,
+// a wire's end, a place on a line, on an arc. What the route began from does not attract it, nor another net.
+TEST(Gui, RouteEndSticksToConnections) {
+  const double px = 60.0 / 800;  // mm a pixel
+  {
+    RouteBoard f;
+    f.via(30, 10);
+    f.start();
+    f.click(RouteBoard::mm(30 + 4 * px, 10 + 8 * px));  // beside the via's rim is 0.5 mm: inside it
+    EXPECT_FALSE(f.view.isRouting());
+    EXPECT_TRUE(f.joins(RouteBoard::mm(30, 10))) << "the centre";
+    EXPECT_EQ(f.unrouted(), 0u);
+  }
+  {
+    RouteBoard f;
+    f.wire(RouteBoard::mm(30, 2), RouteBoard::mm(30, 28));
+    f.start();
+    f.click(RouteBoard::mm(30 + 3 * px, 14));
+    EXPECT_FALSE(f.view.isRouting());
+    EXPECT_EQ(f.b->tracks.size(), 3u);
+    EXPECT_TRUE(f.joins(RouteBoard::mm(30, 14)));
+    EXPECT_EQ(f.unrouted(), 0u);
+  }
+  {
+    RouteBoard f;
+    f.wire(RouteBoard::mm(30, 12), RouteBoard::mm(36, 12));
+    f.start();
+    f.click(RouteBoard::mm(30 - 2 * px, 12 + 2 * px));
+    EXPECT_FALSE(f.view.isRouting());
+    EXPECT_EQ(f.b->tracks.size(), 2u) << "at its end: not split";
+    EXPECT_TRUE(f.joins(RouteBoard::mm(30, 12)));
+  }
+  {
+    RouteBoard f;
+    Track& arc = f.wire(RouteBoard::mm(30, 5), RouteBoard::mm(30, 25));
+    arc.mid = Point(RouteBoard::mm(40, 15));
+    f.start();
+    f.click(RouteBoard::mm(40 + 3 * px, 15));
+    EXPECT_FALSE(f.view.isRouting());
+    EXPECT_EQ(f.b->tracks.size(), 3u);
+    EXPECT_TRUE(f.joins(RouteBoard::mm(40, 15)));
+    EXPECT_EQ(f.unrouted(), 0u);
+  }
+  {  // another net's wire is no connection; nor the wire the route began from
+    RouteBoard f;
+    f.wire(RouteBoard::mm(30, 2), RouteBoard::mm(30, 28), f.other);
+    f.wire(RouteBoard::mm(10, 10), RouteBoard::mm(10, 20));
+    f.start();
+    f.click(RouteBoard::mm(30 + 3 * px, 14));
+    EXPECT_TRUE(f.view.isRouting());
+    f.click(RouteBoard::mm(10 + 3 * px, 15));
+    EXPECT_TRUE(f.view.isRouting());
+  }
+}
+
+// «;» on a real board: the wire goes the model's way, the wires of other nets on its edges move over: the connection
+// is made and the new copper overlaps nothing. Undone in between: the live model then has vertices taken out of it.
+TEST(Gui, RouteOnTheModelOfARealBoard) {
+  Fixture f("topor/Example_03/arz_2L.fst");
+  Board& b = *f.doc.board();
+  for (size_t i = b.tracks.size(); i-- > 0;)
+    if (i % 7 == 0) b.tracks.erase(b.tracks.begin() + long(i));
+  f.doc.invalidate();
+  const auto rats = f.doc.connectivity().ratsnest;
+  ASSERT_GT(rats.size(), 100u);
+  int laid = 0;
+  for (size_t k = 0; k < rats.size(); k += rats.size() / 8) {
+    f.look(rats[k].a, 16);
+    f.view.setMode(Mode::Route);
+    QTest::mouseClick(&f.view, Qt::LeftButton, {}, f.at(rats[k].a));
+    if (!f.view.isRouting()) continue;
+    const size_t before = f.doc.connectivity().ratsnest.size();
+    const auto ids = b.tracks | v::transform(&Track::id) | r::to<std::set<uint32_t>>();
+    f.view.routeToTarget();
+    if (f.view.isRouting()) {
+      f.view.cancelTool();
+      continue;
+    }
+    ++laid;
+    EXPECT_EQ(f.doc.connectivity().ratsnest.size(), before - 1);
+    for (int i = 0; i < int(b.tracks.size()); ++i) {
+      const Track& t = b.tracks[size_t(i)];
+      if (ids.contains(t.id)) continue;
+      for (const Shape& s : itemShapes(b, {ItemType::Track, i}))
+        f.doc.index().query(s.bbox(), LayerMask(1) << t.layer, [&](ItemRef o) {
+          if (o.type == ItemType::Zone || itemNet(b, o) == t.net) return;
+          for (const Shape& x : itemShapes(b, o, 0, t.layer)) EXPECT_GE(s.distance(x), -1000.0) << "track " << i << " of " << b.nets[size_t(t.net)].name;
+        });
+    }
+    f.doc.undoStack()->undo();
+  }
+  EXPECT_GE(laid, 6);
+}
+
 // «Габариты»: the component's bounding rectangle in the compsBound colour, only when the flag is on.
 TEST(Gui, ComponentBounds) {
   app();
