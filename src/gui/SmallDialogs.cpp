@@ -16,6 +16,7 @@
 #include <QVBoxLayout>
 #include <algorithm>
 #include <cmath>
+#include <map>
 
 namespace xr::gui {
 
@@ -49,6 +50,16 @@ std::optional<Coord> askTrackWidth(QWidget* parent, Document* doc, const std::ve
   width->setValue(toUnit(double(current), u));
   f->addRow(QObject::tr("Ширина:"), width);
   v->addLayout(f);
+  // «Активные ширины»: the minimum and the nominal of the rule that holds for each of these nets (filled below).
+  v->addWidget(new QLabel(QObject::tr("Активные ширины")));
+  auto* active = new QListWidget;
+  active->setObjectName("widths");
+  v->addWidget(active);
+  // A width clicked is the answer.
+  auto pick = [&](Coord w) {
+    width->setValue(toUnit(double(w), u));
+    dlg.accept();
+  };
   // «Действующие правила»: the width rules that apply to these wires, later ones winning.
   v->addWidget(new QLabel(QObject::tr("Действующие правила")));
   auto* t = new QTableWidget(0, 5);
@@ -63,17 +74,34 @@ std::optional<Coord> askTrackWidth(QWidget* parent, Document* doc, const std::ve
       if (grp.name == g && r::contains(grp.nets, net)) return true;
     return false;
   };
+  auto holdsFor = [&](const WidthRule& w, int n) {
+    if (w.nets.kind == RuleNets::Kind::All) return true;
+    if (n < 0) return false;
+    const std::string& name = b.nets[size_t(n)].name;
+    return (w.nets.kind == RuleNets::Kind::Net && w.nets.name == name) || (w.nets.kind == RuleNets::Kind::Group && groupHas(w.nets.name, name));
+  };
+  auto onLayer = [&](const WidthRule& w) { return w.enabled && (w.layers.empty() || (layer >= 0 && r::contains(w.layers, b.layers[layer].name))); };
+  // The rule in force for a net is the last that holds for it; wires of no net: those for all nets.
+  std::map<Coord, QStringList> widths;
+  for (int n : nets.empty() ? std::vector<int>{-1} : nets) {
+    auto held = rules.widths | v::filter([&](const WidthRule& w) { return onLayer(w) && holdsFor(w, n); });
+    auto last = r::find_last_if(held, [](const WidthRule&) { return true; }).begin();
+    if (last == held.end()) continue;
+    widths[(*last).min] << QObject::tr("мин.");
+    widths[(*last).nom] << QObject::tr("ном.");
+  }
+  for (auto& [w, what] : widths) {
+    what.removeDuplicates();
+    auto* item = new QListWidgetItem(QString("%1 %2  (%3)").arg(formatLength(double(w), u, 4), unitName(u), what.join(", ")));
+    item->setData(Qt::UserRole, qlonglong(w));
+    active->addItem(item);
+    if (w == current) active->setCurrentItem(item);
+  }
+  active->setFixedHeight(active->sizeHintForRow(0) * std::max(active->count(), 1) + 2 * active->frameWidth() + 2);
+  QObject::connect(active, &QListWidget::itemClicked, &dlg, [&](QListWidgetItem* item) { pick(Coord(item->data(Qt::UserRole).toLongLong())); });
   for (int i = 0; i < int(rules.widths.size()); ++i) {
     const WidthRule& w = rules.widths[size_t(i)];
-    if (!w.enabled) continue;
-    bool layerOk = w.layers.empty() || (layer >= 0 && r::contains(w.layers, b.layers[layer].name));
-    bool netOk = w.nets.kind == RuleNets::Kind::All;
-    for (int n : nets) {
-      const std::string& name = b.nets[n].name;
-      netOk = netOk || (w.nets.kind == RuleNets::Kind::Net && w.nets.name == name) ||
-              (w.nets.kind == RuleNets::Kind::Group && groupHas(w.nets.name, name));
-    }
-    if (!layerOk || !netOk) continue;
+    if (!onLayer(w) || !(nets.empty() ? holdsFor(w, -1) : r::any_of(nets, [&](int n) { return holdsFor(w, n); }))) continue;
     int r = t->rowCount();
     t->insertRow(r);
     QStringList layers;
@@ -81,7 +109,12 @@ std::optional<Coord> askTrackWidth(QWidget* parent, Document* doc, const std::ve
     QStringList cells{QString::number(i), layers.isEmpty() ? QObject::tr("Все") : layers.join(", "), netsText(w.nets),
                       formatLength(w.min, u, 4), formatLength(w.nom, u, 4)};
     for (int c = 0; c < cells.size(); ++c) t->setItem(r, c, new QTableWidgetItem(cells[c]));
+    t->item(r, 3)->setData(Qt::UserRole, qlonglong(w.min));
+    t->item(r, 4)->setData(Qt::UserRole, qlonglong(w.nom));
   }
+  QObject::connect(t, &QTableWidget::itemClicked, &dlg, [&](QTableWidgetItem* item) {
+    if (item->column() >= 3) pick(Coord(item->data(Qt::UserRole).toLongLong()));
+  });
   t->resizeColumnsToContents();
   v->addWidget(t, 1);
   auto* box = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);

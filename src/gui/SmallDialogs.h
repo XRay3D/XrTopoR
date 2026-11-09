@@ -8,7 +8,8 @@
 
 namespace xr::gui {
 
-// New width for wires of `nets` on `layer` (shown with the width rules that apply to them).
+// New width for wires of `nets` on `layer`, shown with the width rules that apply to them and the widths in force for
+// these nets; a click on a width picks it and closes the dialog.
 std::optional<Coord> askTrackWidth(QWidget* parent, Document* doc, const std::vector<int>& nets, LayerId layer, Coord current);
 std::optional<double> askRotationAngle(QWidget* parent);
 // «Надпись»: text, layer, style, angle and mirroring of a new or existing text; false if cancelled.

@@ -8,6 +8,8 @@
 #include <QPushButton>
 #include <QTableWidget>
 #include <QFile>
+#include <QTimer>
+#include <QListWidget>
 #include <QDoubleSpinBox>
 #include <QPlainTextEdit>
 #include <QRadioButton>
@@ -48,6 +50,7 @@
 #include "gui/PropertiesPanel.h"
 #include "gui/TextStylesDialog.h"
 #include "gui/SearchPanel.h"
+#include "gui/SmallDialogs.h"
 #include "gui/Schemes.h"
 #include "gui/ToporConfig.h"
 #include "io/BoardIO.h"
@@ -2060,6 +2063,59 @@ TEST(Gui, RouteOnTheModelOfARealBoard) {
     f.doc.undoStack()->undo();
   }
   EXPECT_GE(laid, 6);
+}
+
+// «Ширина проводника»: the widths in force for the net, of the last rule that holds for it (an earlier one is listed
+// among the rules, its widths are not active); a click on one is the answer and closes the dialog, as on a rule's cell.
+TEST(Gui, TrackWidthDialogOffersTheActiveWidths) {
+  RouteBoard f;
+  DesignRules rules;
+  rules.netGroups.push_back({"POWER", {"N"}});
+  rules.widths.push_back({.nets = {}, .min = mmToNm(0.25), .nom = mmToNm(0.25)});
+  rules.widths.push_back({.nets = {RuleNets::Kind::Group, "POWER"}, .min = mmToNm(0.3), .nom = mmToNm(0.8)});
+  f.b->rules = rules;
+  struct Seen {
+    QStringList rows;
+    int rules = 0;
+  } seen;
+  auto ask = [&](int net, auto&& act) {
+    seen = {};
+    QTimer::singleShot(0, [&] {
+      auto* dlg = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+      ASSERT_TRUE(dlg);
+      auto* list = dlg->findChild<QListWidget*>("widths");
+      ASSERT_TRUE(list);
+      for (int i = 0; i < list->count(); ++i) seen.rows << list->item(i)->text();
+      auto* table = dlg->findChild<QTableWidget*>();
+      seen.rules = table->rowCount();
+      act(dlg, list, table);
+    });
+    return askTrackWidth(nullptr, &f.doc, {net}, f.top, mmToNm(0.5));
+  };
+  auto clickRow = [](QAbstractItemView* view, QModelIndex at) {
+    view->scrollTo(at);
+    QTest::mouseClick(view->viewport(), Qt::LeftButton, {}, view->visualRect(at).center());
+  };
+  auto w = ask(f.n, [&](QDialog*, QListWidget* list, QTableWidget*) { clickRow(list, list->model()->index(1, 0)); });
+  EXPECT_EQ(seen.rows, (QStringList{"0.3 мм  (мин.)", "0.8 мм  (ном.)"}));
+  EXPECT_EQ(seen.rules, 2);
+  ASSERT_TRUE(w);
+  EXPECT_EQ(*w, mmToNm(0.8));
+
+  w = ask(f.other, [&](QDialog*, QListWidget* list, QTableWidget*) { clickRow(list, list->model()->index(0, 0)); });
+  EXPECT_EQ(seen.rows, (QStringList{"0.25 мм  (мин., ном.)"}));
+  EXPECT_EQ(seen.rules, 1);
+  ASSERT_TRUE(w);
+  EXPECT_EQ(*w, mmToNm(0.25));
+
+  // A rule's cell: its minimum; another column picks nothing.
+  w = ask(f.n, [&](QDialog* dlg, QListWidget*, QTableWidget* table) {
+    clickRow(table, table->model()->index(0, 1));
+    EXPECT_TRUE(dlg->isVisible());
+    clickRow(table, table->model()->index(1, 3));
+  });
+  ASSERT_TRUE(w);
+  EXPECT_EQ(*w, mmToNm(0.3));
 }
 
 // «Габариты»: the component's bounding rectangle in the compsBound colour, only when the flag is on.
