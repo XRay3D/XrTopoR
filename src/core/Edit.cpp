@@ -654,7 +654,7 @@ int straighten(Board& b, const std::vector<int>& tracks) {
   return int(made.size());
 }
 
-int changeLayer(Board& b, const std::vector<int>& tracks, LayerId layer) {
+LayerChange changeLayer(Board& b, const std::vector<int>& tracks, LayerId layer) {
   std::vector<char> moved(b.tracks.size(), 0);
   struct End {
     Vec2 p;
@@ -696,7 +696,7 @@ int changeLayer(Board& b, const std::vector<int>& tracks, LayerId layer) {
     rebuildZip(b, z, was);
   }
   std::vector<Vec2> placed;
-  int added = 0;
+  LayerChange res;
   for (auto [p, from, net] : ends) {
     // Already joined to the new layer by a via or a through pad?
     if (r::any_of(b.vias, [&](const Via& v) { return onVia(v, p, layer, net); })) continue;
@@ -721,9 +721,25 @@ int changeLayer(Board& b, const std::vector<int>& tracks, LayerId layer) {
     v.layers = b.allCopperMask();
     b.vias.push_back(v);
     placed.push_back(p);
-    ++added;
+    ++res.added;
   }
-  return added;
+  // The vias the moved tracks end on, left with one layer to join. A wire of another layer going over one, with
+  // no end there, is joined by it too.
+  for (int vi = int(b.vias.size()) - 1; vi >= 0; --vi) {
+    const Via& v = b.vias[size_t(vi)];
+    if (v.locked || b.flexFixed(v.net) || r::none_of(ends, [&](const End& e) { return onVia(v, e.p, layer, e.net); })) continue;
+    LayerMask used = viaTrackLayers(b, v) | viaHeldBy(b, v);
+    const Shape hole = Shape::circle(v.pos.v(), v.diameter / 2.0);
+    for (int ti = 0; ti < int(b.tracks.size()) && std::popcount(used) < 2; ++ti) {
+      const Track& t = b.tracks[size_t(ti)];
+      if (t.net == v.net && v.onLayer(t.layer) && r::any_of(itemShapes(b, {ItemType::Track, ti}), [&](const Shape& sh) { return sh.distance(hole) <= 0; }))
+        used |= LayerMask(1) << t.layer;
+    }
+    if (std::popcount(used) > 1) continue;
+    b.vias.erase(b.vias.begin() + vi);
+    ++res.removed;
+  }
+  return res;
 }
 
 int unlink(Board& b, const Fragment& f) {

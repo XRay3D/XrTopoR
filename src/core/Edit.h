@@ -105,9 +105,12 @@ void editFigure(Board& b, ItemRef r, int part, const std::function<void(std::vec
 // becomes one straight segment between its ends. Returns the number of segments made.
 int straighten(Board& b, const std::vector<int>& tracks);
 // «Изменить слой» (L): the tracks go to `layer`; where the wire goes on on other copper (tracks of
-// another layer, an SMD pad of another layer) a through via of the net's type is added. Returns the
-// number of vias added.
-int changeLayer(Board& b, const std::vector<int>& tracks, LayerId layer);
+// another layer, an SMD pad of another layer) a through via of the net's type is added. A via one of these
+// tracks ends on goes when all it joins is left on one layer (not a locked one, nor one of a flexibly fixed net).
+struct LayerChange {
+  int added = 0, removed = 0;  // vias
+};
+LayerChange changeLayer(Board& b, const std::vector<int>& tracks, LayerId layer);
 // «Отсоединить» (U): the unlocked tracks attached to the fragment's pads and vias from outside it are
 // removed, so the connections show as net lines and later moves do not drag wires. Returns the count.
 int unlink(Board& b, const Fragment& f);

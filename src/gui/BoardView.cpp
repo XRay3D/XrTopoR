@@ -2996,14 +2996,16 @@ void BoardView::changeLayer() {
   if (r::any_of(tracks, &Track::locked, of(b.tracks)))
     emit status(tr("Зафиксированные участки проводников остались на своём слое"));
   auto before = doc_->beginEdit();
-  int vias = edit::changeLayer(b, tracks, layer);
-  {  // a section moved has its conductors made again: the selection by what is there
+  edit::LayerChange vias = edit::changeLayer(b, tracks, layer);
+  {  // a section moved has its conductors made again, a via gone renumbers the rest: the selection by what is there
     auto items = doc_->selectedItems();
-    std::erase_if(items, [&](ItemRef r) { return r.type == ItemType::Track && r.index >= int(b.tracks.size()); });
+    std::erase_if(items, [&](ItemRef r) {
+      return (r.type == ItemType::Track && r.index >= int(b.tracks.size())) || (r.type == ItemType::Via && vias.removed);
+    });
     doc_->setSelection(std::move(items), doc_->selectedComponents());
   }
   doc_->commitEdit(before, tr("Изменить слой"));
-  if (vias) emit status(tr("Добавлено переходов: %1").arg(vias));
+  if (vias.added || vias.removed) emit status(tr("Переходов добавлено: %1, удалено: %2").arg(vias.added).arg(vias.removed));
   refresh();
 }
 

@@ -201,16 +201,45 @@ TEST(Edit, SplitStraightenChangeLayer) {
 
   // Net B's far segment goes to the bottom: a via at the bend joins it to the top segment.
   Fixture f2;
-  EXPECT_EQ(edit::changeLayer(f2.b, {2}, f2.bot), 1);
+  EXPECT_EQ(edit::changeLayer(f2.b, {2}, f2.bot).added, 1);
   ASSERT_EQ(f2.b.vias.size(), 1u);
   EXPECT_EQ(f2.b.vias[0].pos, mm(16, 14));
   EXPECT_EQ(f2.unrouted(), 0u);
-  // Both segments on the bottom: the via is excess, and the SMD pad end needs one instead.
-  EXPECT_EQ(edit::changeLayer(f2.b, {1}, f2.bot), 1);
-  EXPECT_EQ(edit::removeExcessVias(f2.b), 1);
+  // Both segments on the bottom: the via at the bend goes, and the SMD pad end needs one instead.
+  auto both = edit::changeLayer(f2.b, {1}, f2.bot);
+  EXPECT_EQ(both.added, 1);
+  EXPECT_EQ(both.removed, 1);
   ASSERT_EQ(f2.b.vias.size(), 1u);
   EXPECT_EQ(f2.b.vias[0].pos, mm(12, 10));
   EXPECT_EQ(f2.unrouted(), 0u);
+}
+
+// A via stays when it still joins two layers, however it does, and when it is fixed.
+TEST(Edit, ChangeLayerKeepsAViaThatIsNeeded) {
+  auto viaAtTheBend = [] {
+    auto f = std::make_unique<Fixture>();
+    edit::changeLayer(f->b, {2}, f->bot);
+    return f;
+  };
+  // The third wire ending on it stays on the top.
+  auto third = viaAtTheBend();
+  third->addTrack(mm(16, 14), mm(16, 20), third->top, third->netB);
+  EXPECT_EQ(edit::changeLayer(third->b, {1}, third->bot).removed, 0);
+  // A wire of the top going over it, with no end there.
+  auto over = viaAtTheBend();
+  over->addTrack(mm(14, 14), mm(18, 14), over->top, over->netB);
+  EXPECT_EQ(edit::changeLayer(over->b, {1}, over->bot).removed, 0);
+  // Locked.
+  auto locked = viaAtTheBend();
+  locked->b.vias[0].locked = true;
+  EXPECT_EQ(edit::changeLayer(locked->b, {1}, locked->bot).removed, 0);
+  // Of another wire: a via of the net no moved track ends on is not this tool's.
+  auto other = viaAtTheBend();
+  Via far = other->b.vias[0];
+  far.pos = mm(30, 30);
+  other->b.vias.push_back(far);
+  EXPECT_EQ(edit::changeLayer(other->b, {1}, other->bot).removed, 1);
+  EXPECT_EQ(other->b.vias[0].pos, mm(30, 30));
 }
 
 TEST(Edit, UnlinkAndDegenerate) {
