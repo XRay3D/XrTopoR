@@ -257,6 +257,13 @@ struct Via {
 
 enum class PadConnection { Thermal, Solid, None };
 
+// How a copper area joins the pads (or the vias) of its net.
+struct ZoneThermal {
+  PadConnection connection = PadConnection::Thermal;
+  Coord gap = 0, spoke = 0;  // the barrier and the spokes; 0: the fill's default
+  double angle = 0;          // of the spokes, degrees from the pad's axes (TopoR's 45)
+};
+
 struct Zone {
   int net = kNoNet;
   LayerId layer = 0;
@@ -268,12 +275,12 @@ struct Zone {
   void setShape(Graphic g);
   std::vector<std::vector<Vec2>> cutouts;  // «Вырезы в металлизации»: never poured
   std::vector<std::vector<Vec2>> filled;
-  Coord clearance = 0;
+  Coord clearance = 0;           // used only with useClearance
+  bool useClearance = false;     // the area's own clearance, to everything; else the rules' (Board::zoneClearance)
   int priority = 0;              // higher priority zones are cut out of lower ones
-  PadConnection padConnection = PadConnection::Thermal;
-  Coord thermalGap = 0;          // 0 = fill default
-  Coord spokeWidth = 0;          // 0 = fill default
-  double spokeAngle = 0;         // degrees relative to the pad (TopoR default 45)
+  ZoneThermal pads, vias{PadConnection::Solid};
+  bool removeIslands = true;     // pieces with no copper of the net go
+  double minIslandArea = 1e10;   // nm²: smaller pieces go (TopoR's 0.01 mm²)
   Coord minWidth = 0;            // 0 = fill default
 };
 
@@ -436,6 +443,9 @@ struct Board {
   const TextStyle& styleOf(const Text& t) const;
   // Approximate extent of a text: characters 0.7 of the height wide (TopoR's vector fonts), as the
   // corners of its box in board coordinates.
+  // The clearance of a copper area: its own, when it says so, else the rules' to that net (on the area's layer).
+  Coord zoneClearance(const Zone& z, int otherNet) const;
+  Coord zoneClearance(const Zone& z) const;
   TextLayout textLayout(const Text& t) const;
   std::array<Vec2, 4> textBox(const Text& t) const;  // round the laid-out lines, on the board
   void rebuildNetIndex();  // fixes cached lookup after edits

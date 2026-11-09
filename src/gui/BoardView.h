@@ -174,6 +174,7 @@ class BoardView : public QWidget {
   void paintBand(QPainter& p, const QRectF& area);
   bool seen(const BBox& bb) const;  // within the part being drawn (on this thread)
   void drawLayer(QPainter& p, LayerId l);
+  void drawFill(QPainter& p, const Zone& z) const;  // the polygons of its fill in view, with the painter's pen and brush
   void drawGrid(QPainter& p);
   void drawVias(QPainter& p);
   void drawHoles(QPainter& p);

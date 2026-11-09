@@ -14,8 +14,9 @@ std::optional<Coord> askTrackWidth(QWidget* parent, Document* doc, const std::ve
 std::optional<double> askRotationAngle(QWidget* parent);
 // «Надпись»: text, layer, style, angle and mirroring of a new or existing text; false if cancelled.
 bool askText(QWidget* parent, Document* doc, Text& t);
-// «Изменение цепи»: a net of the design (or «без цепи», kNoNet), searched by name.
-std::optional<int> askNet(QWidget* parent, Document* doc, int current);
+// «Изменение цепи»: a net of the design (or «без цепи», kNoNet), searched by name. `current`: the net the selected
+// objects share (none: they differ); `what`: what is selected, in words.
+std::optional<int> askNet(QWidget* parent, Document* doc, std::optional<int> current, const QString& what);
 void showCopperArea(QWidget* parent, Document* doc);
 
 }  // namespace xr::gui

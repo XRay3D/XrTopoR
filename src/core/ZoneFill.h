@@ -1,13 +1,12 @@
 #pragma once
 // Copper pour: zone outline (inside the board, away from its edge) minus the copper of other nets
-// grown by the clearance; thin necks are removed and islands not touching the zone's net dropped.
+// grown by the clearance; thin necks are removed; islands not touching the zone's net and small ones dropped as the zone says.
 #include "core/Board.h"
 
 namespace xr {
 
 struct ZoneFillOptions {
   Coord minWidth = mmToNm(0.2);        // narrower necks are removed (opening)
-  bool removeIslands = true;           // keep only pieces touching copper of the zone's net
   double arcTolerance = 5000;          // chord error for round shapes (nm)
   bool thermals = true;                // same-net pads connect through spokes, not solid
   Coord thermalGap = mmToNm(0.5);      // clearance ring around a pad

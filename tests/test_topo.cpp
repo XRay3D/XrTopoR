@@ -1363,12 +1363,14 @@ TEST(Topo, ToolsKeepThePairRule) {
   }
 }
 
-// The pour keeps the pair's rule from the copper of the other net, and its own clearance from the rest.
+// The pour keeps the rules, the pair's from the copper of the other net, unless it has a clearance of its own: that
+// one holds for everything.
 TEST(Topo, PourKeepsThePairRule) {
   auto lb = io::loadBoard(data("astable.kicad_pcb"));
   ASSERT_TRUE(lb.has_value());
   Board& b = **lb;
   ASSERT_FALSE(b.zones.empty());
+  b.zones.front().useClearance = false;
   const Zone& z = b.zones.front();
   int other = kNoNet;
   for (const Track& t : b.tracks)
@@ -1391,6 +1393,11 @@ TEST(Topo, PourKeepsThePairRule) {
   fillZones(b);
   EXPECT_GT(gapToOther(), before + 0.3 * kNmPerMm);
   EXPECT_GE(gapToOther(), double(rule) - 1000);
+  const double byTheRule = gapToOther();
+  b.zones.front().useClearance = true;
+  b.zones.front().clearance = mmToNm(0.2);
+  fillZones(b);
+  EXPECT_LT(gapToOther(), byTheRule - 0.3 * kNmPerMm) << "its own one, for everything";
 }
 
 // Which wires of an edge are narrowed: the fewest, by what is missing and no more; nothing when it cannot be had.
@@ -1713,11 +1720,12 @@ struct PinBoard {
     z.net = net(n);
     z.layer = top;
     z.clearance = mmToNm(clearance);
+    z.useClearance = clearance > 0;
+    z.removeIslands = false;
     for (const auto& q : poly) z.outline.push_back(at(q.first, q.second));
     b.zones.push_back(z);
     if (pour) {
       ZoneFillOptions o;
-      o.removeIslands = false;
       fillZones(b, o);
     }
     return int(b.zones.size() - 1);

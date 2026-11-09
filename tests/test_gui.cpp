@@ -35,6 +35,7 @@
 #include "core/Connectivity.h"
 #include "core/DiffPairs.h"
 #include "core/Edit.h"
+#include "core/ZoneFill.h"
 #include "gui/BoardView.h"
 #include "gui/Commands.h"
 #include "gui/Document.h"
@@ -2116,6 +2117,131 @@ TEST(Gui, TrackWidthDialogOffersTheActiveWidths) {
   });
   ASSERT_TRUE(w);
   EXPECT_EQ(*w, mmToNm(0.3));
+}
+
+// «Область металлизации» as in TopoR: thermals of pads and vias apart, the state a check box, several areas edited
+// together, the net from its dialog, the layer's list with an empty first line when the areas are on different layers.
+TEST(Gui, ZoneProperties) {
+  RouteBoard f;
+  Board& b = *f.b;
+  LayerId bottom = b.copperLayers()[1];
+  for (LayerId l : {f.top, bottom}) {
+    Zone z;
+    z.net = f.n;
+    z.layer = l;
+    z.outline = b.outline[0];
+    z.removeIslands = false;
+    b.zones.push_back(z);
+  }
+  fillZones(b);
+  f.doc.invalidate();
+  ASSERT_FALSE(b.zones[0].filled.empty());
+  PropertiesPanel props(&f.doc);
+  f.doc.setSelection({{ItemType::Zone, 0}, {ItemType::Zone, 1}}, {});
+  auto settled = [&] { QCoreApplication::processEvents(); };
+  auto* tabs = props.findChild<QTabWidget*>();
+  ASSERT_TRUE(tabs);
+  EXPECT_EQ(tabs->count(), 3) << "the shape: of one area only";
+  auto* layer = props.findChild<QComboBox*>("layer");
+  ASSERT_TRUE(layer);
+  EXPECT_TRUE(layer->itemText(0).isEmpty());
+  EXPECT_EQ(layer->currentIndex(), 0);
+  EXPECT_EQ(props.findChild<QCheckBox*>("poured")->checkState(), Qt::Checked);
+
+  // The priority of both; undone.
+  auto* prio = props.findChild<QSpinBox*>("priority");
+  ASSERT_TRUE(prio);
+  prio->setValue(7);
+  emit prio->editingFinished();
+  EXPECT_EQ(b.zones[0].priority, 7);
+  EXPECT_EQ(b.zones[1].priority, 7);
+  f.doc.undoStack()->undo();
+  EXPECT_EQ(b.zones[1].priority, 0);
+  settled();
+
+  // The vias' column: off by default, its fields with it; on for both.
+  auto* viaOn = props.findChild<QCheckBox*>("viaThermal");
+  ASSERT_TRUE(viaOn);
+  EXPECT_FALSE(viaOn->isChecked());
+  EXPECT_TRUE(props.findChild<QCheckBox*>("padThermal")->isChecked());
+  EXPECT_FALSE(props.findChild<QWidget*>("viaSpoke")->isEnabled());
+  EXPECT_TRUE(props.findChild<QWidget*>("padSpoke")->isEnabled());
+  viaOn->click();
+  settled();
+  EXPECT_EQ(b.zones[0].vias.connection, PadConnection::Thermal);
+  EXPECT_EQ(b.zones[1].vias.connection, PadConnection::Thermal);
+  EXPECT_TRUE(props.findChild<QWidget*>("viaSpoke")->isEnabled());
+
+  // Their own clearance: the field opens, starting from what the rules gave.
+  EXPECT_FALSE(props.findChild<QWidget*>("clearance")->isEnabled());
+  props.findChild<QCheckBox*>("useClearance")->click();
+  settled();
+  EXPECT_TRUE(b.zones[1].useClearance);
+  EXPECT_EQ(b.zones[1].clearance, b.clearance(f.n, bottom));
+  EXPECT_TRUE(props.findChild<QWidget*>("clearance")->isEnabled());
+
+  // Islands and their least area.
+  props.findChild<QCheckBox*>("removeIslands")->click();
+  settled();
+  EXPECT_TRUE(b.zones[0].removeIslands);
+  EXPECT_TRUE(b.zones[1].removeIslands);
+  auto* area = props.findChild<QDoubleSpinBox*>("minIslandArea");
+  area->setValue(0.5);
+  emit area->editingFinished();
+  EXPECT_NEAR(b.zones[1].minIslandArea, 0.5e12, 1e6);
+  settled();
+
+  // Re-pour: the fill as it should be again; the state: all off, then all on.
+  b.zones[0].filled = {b.zones[0].filled[0]};
+  b.zones[0].filled[0].resize(3);
+  props.findChild<QPushButton*>("repour")->click();
+  settled();
+  EXPECT_GT(b.zones[0].filled[0].size(), 3u);
+  props.findChild<QCheckBox*>("poured")->click();
+  settled();
+  EXPECT_TRUE(b.zones[0].filled.empty());
+  EXPECT_TRUE(b.zones[1].filled.empty());
+  EXPECT_FALSE(props.findChild<QPushButton*>("repour")->isEnabled());
+  props.findChild<QCheckBox*>("poured")->click();
+  settled();
+  EXPECT_FALSE(b.zones[1].filled.empty());
+
+  // The net from the dialog: «Назначить» waits for another net.
+  QTimer::singleShot(0, [&] {
+    auto* dlg = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+    ASSERT_TRUE(dlg);
+    auto* list = dlg->findChild<QListWidget*>("nets");
+    auto* assign = dlg->findChild<QPushButton*>("assign");
+    ASSERT_TRUE(list && assign);
+    EXPECT_FALSE(assign->isEnabled());
+    for (int i = 0; i < list->count(); ++i)
+      if (list->item(i)->text() == "O") list->setCurrentRow(i);
+    EXPECT_TRUE(assign->isEnabled());
+    assign->click();
+  });
+  props.findChild<QPushButton*>("net")->click();
+  settled();
+  EXPECT_EQ(b.zones[0].net, f.other);
+  EXPECT_EQ(b.zones[1].net, f.other);
+
+  // The empty line picks nothing, a layer moves both.
+  layer = props.findChild<QComboBox*>("layer");
+  emit layer->activated(0);
+  EXPECT_NE(b.zones[0].layer, b.zones[1].layer);
+  if (const char* dir = std::getenv("XR_SHOT_DIR")) {
+    props.resize(620, 300);
+    const char* names[] = {"zone-general.png", "zone-thermal.png", "zone-fill.png"};
+    auto* now = props.findChild<QTabWidget*>();
+    for (int i = 0; i < 3; ++i) {
+      now->setCurrentIndex(i);
+      props.grab().save(QString(dir) + "/" + names[i]);
+    }
+  }
+  emit layer->activated(layer->findData(int(bottom)));
+  EXPECT_EQ(b.zones[0].layer, bottom);
+  EXPECT_EQ(b.zones[1].layer, bottom);
+  settled();
+  EXPECT_FALSE(props.findChild<QComboBox*>("layer")->itemText(0).isEmpty()) << "one layer: no empty line";
 }
 
 // «Габариты»: the component's bounding rectangle in the compsBound colour, only when the flag is on.

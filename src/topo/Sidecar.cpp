@@ -231,7 +231,7 @@ uint64_t boardHashOf(const Board& b, bool places) {
     item([&](Fnv& f) {
       f.s(netName(b, z.net));
       f.i(z.layer);
-      f.i(q(double(z.clearance)));
+      f.i(z.useClearance ? q(double(z.clearance)) : -1);
       f.i(z.filled.empty() ? 0 : 1);
       for (Vec2 p : z.outline) f.v(p);
     });

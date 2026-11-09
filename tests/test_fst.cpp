@@ -272,6 +272,58 @@ TEST(FstIO, TextsOfSeveralLines) {
   EXPECT_EQ((*again)->texts[1].align, TextAlign::CM);
 }
 
+// A copper area's settings go through the file; what TopoR leaves out is at its default: a direct connection, the
+// rules' clearance, islands kept.
+TEST(FstIO, CopperSettings) {
+  auto file = io::readFile(data("topor/Example_06/Signals.fst"));
+  ASSERT_TRUE(file) << file.error();
+  auto r = io::readFst(*file, "s.fst");
+  ASSERT_TRUE(r) << r.error();
+  ASSERT_FALSE((*r)->zones.empty());
+  const Zone& read = (*r)->zones[0];
+  EXPECT_EQ(read.pads.connection, PadConnection::Thermal);
+  EXPECT_EQ(read.pads.spoke, mmToNm(0.381));
+  EXPECT_EQ(read.pads.gap, mmToNm(1));
+  EXPECT_EQ(read.pads.angle, 45);
+  EXPECT_EQ(read.vias.connection, PadConnection::Solid);
+  EXPECT_FALSE(read.useClearance);
+  EXPECT_EQ(read.clearance, mmToNm(1));
+  EXPECT_TRUE(read.removeIslands);
+  EXPECT_NEAR(read.minIslandArea, 0.01e12, 1);
+  EXPECT_EQ(read.priority, 50);
+
+  std::string text = *file;
+  for (const std::string_view gone : {" connectPad=\"Thermal\"", " deleteUnconnected=\"on\""})
+    for (size_t at = text.find(gone); at != std::string::npos; at = text.find(gone)) text.erase(at, gone.size());
+  auto bare = io::readFst(text, "s.fst");
+  ASSERT_TRUE(bare) << bare.error();
+  EXPECT_EQ((*bare)->zones[0].pads.connection, PadConnection::Solid);
+  EXPECT_FALSE((*bare)->zones[0].removeIslands);
+
+  Board& b = **r;
+  Zone& z = b.zones[0];
+  z.priority = 7;
+  z.useClearance = true;
+  z.clearance = mmToNm(0.3);
+  z.vias = {PadConnection::Thermal, mmToNm(0.4), mmToNm(0.6), 0};
+  z.pads.connection = PadConnection::Solid;
+  z.removeIslands = false;
+  z.minIslandArea = 0.5e12;
+  auto again = io::readFst(io::writeFst(b), "rt.fst");
+  ASSERT_TRUE(again) << again.error();
+  const Zone& c = (*again)->zones[0];
+  EXPECT_EQ(c.priority, 7);
+  EXPECT_TRUE(c.useClearance);
+  EXPECT_EQ(c.clearance, mmToNm(0.3));
+  EXPECT_EQ(c.vias.connection, PadConnection::Thermal);
+  EXPECT_EQ(c.vias.gap, mmToNm(0.4));
+  EXPECT_EQ(c.vias.spoke, mmToNm(0.6));
+  EXPECT_EQ(c.vias.angle, 0);
+  EXPECT_EQ(c.pads.connection, PadConnection::Solid);
+  EXPECT_FALSE(c.removeIslands);
+  EXPECT_NEAR(c.minIslandArea, 0.5e12, 1);
+}
+
 TEST(FstIO, RoundTrip) {
   auto r = io::loadBoard(data("topor/Example_03/arz_2L.fst"));
   ASSERT_TRUE(r) << r.error();

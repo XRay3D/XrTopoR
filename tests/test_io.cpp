@@ -114,7 +114,8 @@ TEST(PcadIO, PatternGraphicsThermalsAndTexts) {
   insertAt(text.find("(layerContents (layerNumRef 1)", design) + 30, R"(
     (text (pt 500.0 600.0) "NOTE" (textStyleRef "T60") (rotation 90.0) (justify Center))
     (text (pt 700.0 600.0) "BACK" (textStyleRef "S50") (rotation 20.0) (isFlipped True) (justify UpperRight))
-    (copperPour95 (pcbPoly (pt 0.0 0.0) (pt 100.0 0.0) (pt 100.0 100.0))
+    (copperPour95 (useDesignRules False) (pourBackoff 12.0) (thermalType Therm90) (thermalWidth 10.0) (viaThermalType Therm45) (viaThermalWidth 15.0)
+      (pcbPoly (pt 0.0 0.0) (pt 100.0 0.0) (pt 100.0 100.0))
       (island (islandOutline (pt 0.0 0.0) (pt 100.0 0.0) (pt 100.0 100.0))
         (thermal (pt 10.0 10.0) (pt 50.0 10.0) (thermalWidth 10.0))))
     )");
@@ -155,6 +156,14 @@ TEST(PcadIO, PatternGraphicsThermalsAndTexts) {
   EXPECT_NEAR(bridge.height(), mil(10), 1);
   EXPECT_NEAR(bridge.center().x, mil(30), 1);
   EXPECT_NEAR(bridge.center().y, -mil(10), 1);
+  // Its settings: its own clearance, the thermals of pads and vias apart.
+  EXPECT_TRUE(z->useClearance);
+  EXPECT_EQ(z->clearance, Coord(mil(12)));
+  EXPECT_EQ(z->pads.connection, PadConnection::Thermal);
+  EXPECT_EQ(z->pads.spoke, Coord(mil(10)));
+  EXPECT_EQ(z->vias.connection, PadConnection::Thermal);
+  EXPECT_EQ(z->vias.spoke, Coord(mil(15)));
+  EXPECT_EQ(z->vias.angle, 45);
 }
 
 TEST(PcadIO, WriterRoundTripAndRouting) {

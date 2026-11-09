@@ -6,6 +6,7 @@
 #include <boost/geometry/geometries/polygon.hpp>
 
 #include <algorithm>
+#include <map>
 #include <cstdio>
 #include <numeric>
 #include <cstdlib>
@@ -86,7 +87,6 @@ void addPlaneZones(Board& b) {
     z.net = L.planeNet;
     z.name = L.name;
     z.priority = -1000;  // anything else poured on the layer wins
-    z.padConnection = PadConnection::Thermal;
     if (!b.outline.empty()) {
       z.outline = b.outline.front();
     } else {
@@ -112,8 +112,13 @@ ZoneFillStats fillZones(Board& b, const ZoneFillOptions& opt) {
     if (i == 0) board = loop;
     else bg::difference(board, loop, tmp), board = std::move(tmp);
   }
-  // Keep the copper away from the board edge.
-  if (!board.empty() && b.edgeClearance > 0) board = grow(board, -double(b.edgeClearance) - opt.arcTolerance);
+  // Keep the copper away from the board edge: by the rule, or by the area's own clearance.
+  std::map<Coord, BMulti> inset;
+  auto boardInset = [&](Coord c) -> const BMulti& {
+    auto [it, fresh] = inset.try_emplace(c, board);
+    if (fresh && !board.empty() && c > 0) it->second = grow(board, -double(c) - opt.arcTolerance);
+    return it->second;
+  };
 
   // Higher priority first: its fill is an obstacle for lower-priority zones of other nets.
   std::vector<int> order(b.zones.size());
@@ -123,11 +128,11 @@ ZoneFillStats fillZones(Board& b, const ZoneFillOptions& opt) {
     Zone& z = b.zones[zi];
     if (z.outline.size() < 3 || !selected(zi)) continue;
     ++st.zones;
-    double zoneClr = double(std::max(z.clearance, b.clearance(z.net, z.layer)));
+    double zoneClr = double(b.zoneClearance(z));
     BMulti area = toMulti(z.outline);
-    if (!board.empty()) {
+    if (const BMulti& inside = boardInset(z.useClearance ? z.clearance : b.edgeClearance); !inside.empty()) {
       BMulti tmp;
-      bg::intersection(area, board, tmp);
+      bg::intersection(area, inside, tmp);
       area = std::move(tmp);
     }
     if (area.empty()) continue;
@@ -136,19 +141,30 @@ ZoneFillStats fillZones(Board& b, const ZoneFillOptions& opt) {
     double maxClr = std::max(zoneClr, double(b.maxClearance()));
 
     std::vector<BMulti> holes;
-    std::vector<std::pair<Vec2, const Pad*>> thermalPads;
+    struct Relief {
+      Vec2 c;
+      Shape copper;
+      double angle;  // of the spokes, degrees
+      const ZoneThermal* thermal;
+    };
+    std::vector<Relief> reliefs;
     idx.query(zb.inflated(maxClr), LayerMask(1) << z.layer, [&](ItemRef r) {
       if (r.type == ItemType::Zone) return;
       int net = itemNet(b, r);
       bool same = net == z.net && net != kNoNet;
       if (same) {
-        // Same-net pads get a thermal relief (or nothing: solid); same-net tracks and vias merge.
-        if (r.type == ItemType::Pad && opt.thermals && z.padConnection == PadConnection::Thermal)
-          thermalPads.push_back({b.pads[r.index].pos.v(), &b.pads[r.index]});
-        if (!(r.type == ItemType::Pad && z.padConnection == PadConnection::None)) return;
+        // Same-net pads and vias as the zone says: a thermal relief, solid, or kept apart; same-net tracks merge.
+        if (r.type != ItemType::Pad && r.type != ItemType::Via) return;
+        const bool pad = r.type == ItemType::Pad;
+        const ZoneThermal& th = pad ? z.pads : z.vias;
+        if (opt.thermals && th.connection == PadConnection::Thermal) {
+          if (pad) reliefs.push_back({b.pads[r.index].pos.v(), b.pads[r.index].shapeGeom(), b.pads[r.index].angle + th.angle, &th});
+          else reliefs.push_back({b.vias[r.index].pos.v(), Shape::circle(b.vias[r.index].pos.v(), b.vias[r.index].diameter / 2.0), th.angle, &th});
+        }
+        if (th.connection != PadConnection::None) return;
       }
       // Outlines are inscribed polygons: grow by the chord error so the true clearance holds.
-      double clr = std::max(double(z.clearance), double(b.clearance(z.net, net, z.layer))) + opt.arcTolerance;
+      double clr = double(b.zoneClearance(z, net)) + opt.arcTolerance;
       for (auto& s : itemShapes(b, r)) holes.push_back(toMulti(s.inflated(clr).outline(opt.arcTolerance)));
     });
     // Already poured zones (higher priority) of other nets on this layer.
@@ -156,7 +172,7 @@ ZoneFillStats fillZones(Board& b, const ZoneFillOptions& opt) {
       if (oz == zi) break;
       const Zone& o = b.zones[oz];
       if (o.layer != z.layer || o.net == z.net) continue;
-      double clr = std::max(double(z.clearance), double(b.clearance(z.net, o.net, z.layer))) + opt.arcTolerance;
+      double clr = double(b.zoneClearance(z, o.net)) + opt.arcTolerance;
       for (auto& f : o.filled) holes.push_back(toMulti(Shape::polygon(f, clr).outline(opt.arcTolerance)));
     }
     // Non-plated holes without copper are keep-outs on every layer.
@@ -174,18 +190,16 @@ ZoneFillStats fillZones(Board& b, const ZoneFillOptions& opt) {
         else holes.push_back(toMulti(s.inflated(s.kind == Shape::Kind::Segment ? zoneClr / 2 : 0).outline(opt.arcTolerance)));
       }
     }
-    // Thermal reliefs: a ring of `thermalGap` around the pad, crossed by four spokes.
-    double gap = double(z.thermalGap > 0 ? z.thermalGap : opt.thermalGap);
-    double spoke = double(z.spokeWidth > 0 ? z.spokeWidth : opt.spokeWidth);
-    for (auto& [c, pad] : thermalPads) {
-      Shape s = pad->shapeGeom();
+    // Thermal reliefs: a ring of the barrier's width around the copper, crossed by four spokes.
+    for (auto& [c, s, angle, th] : reliefs) {
+      const double gap = double(th->gap > 0 ? th->gap : opt.thermalGap), spoke = double(th->spoke > 0 ? th->spoke : opt.spokeWidth);
       BMulti ring = toMulti(s.inflated(gap).outline(opt.arcTolerance));
       BMulti core = toMulti(s.outline(opt.arcTolerance));
       BMulti annulus;
       bg::difference(ring, core, annulus);
       BBox pb = s.bbox().inflated(gap * 2);
       double hw = spoke / 2;
-      double ang = -degToRad(pad->angle + z.spokeAngle);
+      double ang = -degToRad(angle);
       Polyline sx = {c + Vec2(-pb.width(), -hw).rotated(ang), c + Vec2(pb.width(), -hw).rotated(ang),
                      c + Vec2(pb.width(), hw).rotated(ang), c + Vec2(-pb.width(), hw).rotated(ang)};
       Polyline sy = {c + Vec2(-hw, -pb.height()).rotated(ang), c + Vec2(hw, -pb.height()).rotated(ang),
@@ -216,7 +230,7 @@ ZoneFillStats fillZones(Board& b, const ZoneFillOptions& opt) {
     double minW = double(z.minWidth > 0 ? z.minWidth : opt.minWidth);
     if (std::getenv("XR_DEBUG_FILL"))
       std::fprintf(stderr, "zone %d: net %d layer %d clr %.3f minW %.3f gap %.3f spoke %.3f conn %d priority %d cutouts %zu; %zu polygons after difference, area %.1f mm2\n",
-                   zi, z.net, int(z.layer), zoneClr / 1e6, minW / 1e6, gap / 1e6, spoke / 1e6, int(z.padConnection), z.priority, z.cutouts.size(),
+                   zi, z.net, int(z.layer), zoneClr / 1e6, minW / 1e6, double(z.pads.gap) / 1e6, double(z.pads.spoke) / 1e6, int(z.pads.connection), z.priority, z.cutouts.size(),
                    fill.size(), bg::area(fill) / 1e12);
     // Polygon by polygon: the pieces are disjoint, so the opening of the whole is the union of the
     // openings, and boost's buffer of one big multipolygon with thousands of holes went wrong (a KiCad
@@ -252,7 +266,11 @@ ZoneFillStats fillZones(Board& b, const ZoneFillOptions& opt) {
         if (std::abs(want - got) > 0.01 * want + 1e9)
           std::fprintf(stderr, "  fracture area mismatch: polygon %.3f mm2 (%zu holes) -> %.3f mm2\n", want / 1e12, inner.size(), got / 1e12);
       }
-      if (opt.removeIslands && z.net != kNoNet) {
+      if (z.minIslandArea > 0 && std::abs(polygonArea(f)) < z.minIslandArea) {
+        ++st.islandsRemoved;
+        continue;
+      }
+      if (z.removeIslands && z.net != kNoNet) {
         // Keep the piece only if copper of the zone's net touches it.
         Shape piece = Shape::polygon(f);
         bool connected = false;

@@ -156,7 +156,7 @@ CopperPush copperPush(const Board& b, const Topology& t, const OwnerGrid& grid, 
     const auto k = keepingOff(ob, o, at);
     if (!k) return;
     double req = ob.halfWidth + requiredClearance(b, k->net, o.net, ob.layers & o.layers);
-    if (o.kind == Owner::Kind::Zone) req = std::max(req, ob.halfWidth + double(b.zones[o.zone].clearance));  // a pour keeps its own clearance
+    if (o.kind == Owner::Kind::Zone && b.zones[o.zone].useClearance) req = ob.halfWidth + double(b.zones[o.zone].clearance);  // a pour's own clearance
     double d = o.shape.distance(k->probe);
     if (d >= req - 1000) return;
     Vec2 n = awayFrom(o.shape, k->probe.kind == Shape::Kind::Point ? k->probe.a : at, o.c);  // (from the end that keeps off)
@@ -225,7 +225,7 @@ std::optional<Vec2> blockerAt(const Board& b, const Topology& t, const OwnerGrid
     if (req < 0) {
       if (!kThere) return;
       req = ob.halfWidth + requiredClearance(b, kThere->net, o.net, ob.layers & o.layers) + nominalExcess(b, kThere->net, o.net, ob.layers & o.layers);
-      if (o.kind == Owner::Kind::Zone) req = std::max(req, ob.halfWidth + double(b.zones[o.zone].clearance));
+      if (o.kind == Owner::Kind::Zone && b.zones[o.zone].useClearance) req = ob.halfWidth + double(b.zones[o.zone].clearance);
     }
     const double dThere = kThere ? o.shape.distance(kThere->probe) : o.shape.distance(p), dHere = kHere ? o.shape.distance(kHere->probe) : o.shape.distance(ob.c);
     double there = std::max(0.0, req - 1000 - dThere), here = std::max(0.0, req - 1000 - dHere);

@@ -2,6 +2,7 @@
 
 #include "core/Connectivity.h"
 #include "core/Edit.h"
+#include "core/ZoneFill.h"
 #include "io/BoardIO.h"
 
 using namespace xr;
@@ -390,4 +391,114 @@ TEST(Edit, RectanglesAndCirclesKeepTheirKind) {
   edit::bendFigure(list, 2, 1, mm(12, 25));  // a straight side: a vertex
   EXPECT_EQ(list[2].pts.size(), 4u);
   EXPECT_EQ(list[2].arcs.size(), 4u);
+}
+
+namespace {
+
+// A 20 x 20 mm board, the rules' clearance 1 mm from everything; a copper area of G over the whole of it.
+struct PourBoard {
+  Board b;
+  LayerId top;
+  int g, o;
+  static Vec2 at(double x, double y) { return {x * kNmPerMm, y * kNmPerMm}; }
+  PourBoard() {
+    top = b.addLayer("Top", LayerKind::Copper, Side::Top);
+    b.layers[top].copperIndex = 0;
+    g = b.addNet("G");
+    o = b.addNet("O");
+    b.netClasses[0].clearance = mmToNm(1);
+    b.edgeClearance = mmToNm(1);
+    b.outline.push_back({at(0, 0), at(20, 0), at(20, 20), at(0, 20)});
+    Zone z;
+    z.net = g;
+    z.layer = top;
+    z.outline = b.outline[0];
+    z.removeIslands = false;
+    z.minIslandArea = 0;
+    z.pads.gap = z.vias.gap = mmToNm(0.5);
+    z.pads.spoke = z.vias.spoke = mmToNm(0.5);
+    b.zones.push_back(z);
+  }
+  Zone& zone() { return b.zones[0]; }
+  void via(double x, double y, int net) {
+    Via v;
+    v.pos = Point(at(x, y));
+    v.net = net;
+    v.diameter = mmToNm(1);
+    v.drill = mmToNm(0.5);
+    v.layers = b.allCopperMask();
+    b.vias.push_back(v);
+  }
+  void pad(double x, double y, int net) {
+    Pad p;
+    p.pos = Point(at(x, y));
+    p.net = net;
+    p.shape.kind = PadShapeKind::Circle;
+    p.shape.w = p.shape.h = mmToNm(1);
+    p.copper = b.allCopperMask();
+    b.pads.push_back(p);
+  }
+  bool poured(double x, double y) {
+    return r::any_of(zone().filled, [&](const Polyline& f) { return pointInPolygon(at(x, y), f); });
+  }
+};
+
+}  // namespace
+
+// Pads and vias of the area's net are joined each as the area says: a barrier crossed by spokes, or solid.
+TEST(ZoneFill, PadsAndViasHaveTheirOwnConnection) {
+  PourBoard t;
+  t.via(5, 5, t.g);
+  t.pad(15, 5, t.g);
+  t.zone().vias.connection = PadConnection::Thermal;
+  t.zone().pads.connection = PadConnection::Solid;
+  fillZones(t.b);
+  EXPECT_FALSE(t.poured(5 + 0.53, 5 + 0.53)) << "the via's barrier, between the spokes";
+  EXPECT_TRUE(t.poured(5 + 0.75, 5)) << "its spoke";
+  EXPECT_TRUE(t.poured(15 + 0.53, 5 + 0.53)) << "the pad is joined solid";
+  t.zone().vias.connection = PadConnection::Solid;
+  t.zone().pads.connection = PadConnection::Thermal;
+  fillZones(t.b);
+  EXPECT_TRUE(t.poured(5 + 0.53, 5 + 0.53));
+  EXPECT_FALSE(t.poured(15 + 0.53, 5 + 0.53));
+}
+
+// The clearance is the rules' unless the area uses its own, and then that one holds for everything, the edge too.
+TEST(ZoneFill, OwnClearanceForEverything) {
+  PourBoard t;
+  t.via(10, 10, t.o);
+  fillZones(t.b);
+  EXPECT_FALSE(t.poured(10 + 0.5 + 0.5, 10)) << "the rule, 1 mm";
+  EXPECT_FALSE(t.poured(0.5, 10)) << "the edge's rule";
+  t.zone().clearance = mmToNm(5);
+  fillZones(t.b);
+  EXPECT_TRUE(t.poured(10 + 0.5 + 2, 10)) << "not used: only the rules";
+  t.zone().clearance = mmToNm(0.2);
+  t.zone().useClearance = true;
+  fillZones(t.b);
+  EXPECT_TRUE(t.poured(10 + 0.5 + 0.5, 10));
+  EXPECT_TRUE(t.poured(0.5, 10));
+  EXPECT_FALSE(t.poured(10 + 0.5 + 0.1, 10));
+  EXPECT_FALSE(t.poured(0.1, 10));
+}
+
+// A strip of the area cut off from the rest: it goes when the area removes what is not connected, and when it is
+// smaller than the area's minimum, connected or not.
+TEST(ZoneFill, IslandsByTheAreasSettings) {
+  PourBoard t;
+  t.b.netClasses[0].clearance = mmToNm(0.2);
+  t.b.edgeClearance = 0;
+  t.zone().cutouts.push_back({PourBoard::at(4, -1), PourBoard::at(5, -1), PourBoard::at(5, 21), PourBoard::at(4, 21)});
+  t.via(10, 10, t.g);
+  fillZones(t.b);
+  EXPECT_TRUE(t.poured(2, 10)) << "kept: the area does not remove them";
+  t.zone().removeIslands = true;
+  fillZones(t.b);
+  EXPECT_FALSE(t.poured(2, 10));
+  EXPECT_TRUE(t.poured(10 + 3, 10));
+  t.zone().removeIslands = false;
+  t.zone().minIslandArea = 100e12;  // 100 mm²: the strip has 80
+  fillZones(t.b);
+  EXPECT_FALSE(t.poured(2, 10));
+  EXPECT_TRUE(t.poured(10 + 3, 10));
 }

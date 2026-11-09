@@ -318,14 +318,14 @@ struct Reader {
     if (const Node* cp = n.find("connect_pads")) {
       if (const Node* c = cp->find("clearance")) z.clearance = mm(c->num(0));
       const std::string& mode = cp->arg(0);
-      if (mode == "yes") z.padConnection = PadConnection::Solid;
-      else if (mode == "no") z.padConnection = PadConnection::None;
+      if (mode == "yes") z.pads.connection = PadConnection::Solid;
+      else if (mode == "no") z.pads.connection = PadConnection::None;
     }
     if (const Node* pr = n.find("priority")) z.priority = int(pr->num(0));
     if (const Node* mt = n.find("min_thickness")) z.minWidth = mm(mt->num(0));
     if (const Node* fill = n.find("fill")) {
-      if (const Node* g = fill->find("thermal_gap")) z.thermalGap = mm(g->num(0));
-      if (const Node* w = fill->find("thermal_bridge_width")) z.spokeWidth = mm(w->num(0));
+      if (const Node* g = fill->find("thermal_gap")) z.pads.gap = mm(g->num(0));
+      if (const Node* w = fill->find("thermal_bridge_width")) z.pads.spoke = mm(w->num(0));
     }
     if (const Node* poly = n.find("polygon"))
       if (const Node* pts = poly->find("pts"))
@@ -475,6 +475,8 @@ Result<BoardPtr> readKicad(const std::string& text, const std::string& path) {
   src->tree = tree;
   b->source = src;
   b->rebuildNetIndex();
+  // A zone's clearance in KiCad is the larger of its own and its net class's.
+  for (Zone& z : b->zones) z.useClearance = z.clearance > b->clearance(z.net, z.layer);
   return b;
 }
 

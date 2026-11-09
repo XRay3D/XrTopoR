@@ -12,6 +12,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QPushButton>
 #include <QTableWidget>
 #include <QVBoxLayout>
 #include <algorithm>
@@ -195,36 +196,53 @@ bool askText(QWidget* parent, Document* doc, Text& t) {
   return true;
 }
 
-std::optional<int> askNet(QWidget* parent, Document* doc, int current) {
+std::optional<int> askNet(QWidget* parent, Document* doc, std::optional<int> current, const QString& what) {
   const Board& b = *doc->board();
   QDialog dlg(parent);
   dlg.setWindowTitle(QObject::tr("Изменение цепи"));
+  auto netName = [&](int n) { return n == kNoNet ? QObject::tr("(без цепи)") : QString::fromStdString(b.nets[size_t(n)].name); };
   auto* v = new QVBoxLayout(&dlg);
-  v->addWidget(new QLabel(QObject::tr("Новая цепь выделенных объектов:")));
+  auto* head = new QFormLayout;
+  head->addRow(QObject::tr("Выделено:"), new QLabel(what));
+  head->addRow(QObject::tr("Текущая цепь:"), new QLabel(current ? netName(*current) : QString()));
+  v->addLayout(head);
+  v->addWidget(new QLabel(QObject::tr("Список цепей")));
   auto* filter = new QLineEdit;
-  filter->setPlaceholderText(QObject::tr("Фильтр"));
+  filter->setPlaceholderText(QObject::tr("Поиск"));
   filter->setClearButtonEnabled(true);
   v->addWidget(filter);
   auto* list = new QListWidget;
-  auto* none = new QListWidgetItem(QObject::tr("(без цепи)"), list);
-  none->setData(Qt::UserRole, kNoNet);
-  std::vector<int> order(b.nets.size());
-  for (int i = 0; i < int(order.size()); ++i) order[size_t(i)] = i;
-  r::sort(order, {}, [&](int n) { return b.nets[size_t(n)].name; });
-  for (int n : order) {
-    auto* it = new QListWidgetItem(QString::fromStdString(b.nets[size_t(n)].name), list);
+  list->setObjectName("nets");
+  auto add = [&](int n) {
+    auto* it = new QListWidgetItem(netName(n), list);
     it->setData(Qt::UserRole, n);
-    if (n == current) list->setCurrentItem(it);
-  }
+    if (current && n == *current) list->setCurrentItem(it);
+  };
+  add(kNoNet);
+  std::vector<int> order(b.nets.size());
+  r::iota(order, 0);
+  r::sort(order, {}, [&](int n) { return b.nets[size_t(n)].name; });
+  for (int n : order) add(n);
   v->addWidget(list);
   QObject::connect(filter, &QLineEdit::textChanged, list, [list](const QString& t) {
     for (int i = 0; i < list->count(); ++i) list->item(i)->setHidden(!t.isEmpty() && !list->item(i)->text().contains(t, Qt::CaseInsensitive));
   });
-  auto* bb = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+  auto* bb = new QDialogButtonBox;
+  auto* assign = bb->addButton(QObject::tr("Назначить"), QDialogButtonBox::AcceptRole);
+  assign->setObjectName("assign");
+  bb->addButton(QObject::tr("Отмена"), QDialogButtonBox::RejectRole);
   v->addWidget(bb);
+  auto refresh = [&] {
+    QListWidgetItem* it = list->currentItem();
+    assign->setEnabled(it && (!current || it->data(Qt::UserRole).toInt() != *current));
+  };
+  refresh();
+  QObject::connect(list, &QListWidget::currentItemChanged, &dlg, refresh);
   QObject::connect(bb, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
   QObject::connect(bb, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
-  QObject::connect(list, &QListWidget::itemDoubleClicked, &dlg, &QDialog::accept);
+  QObject::connect(list, &QListWidget::itemDoubleClicked, &dlg, [&] {
+    if (assign->isEnabled()) dlg.accept();
+  });
   filter->setFocus();
   if (dlg.exec() != QDialog::Accepted || !list->currentItem()) return std::nullopt;
   return list->currentItem()->data(Qt::UserRole).toInt();

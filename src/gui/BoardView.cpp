@@ -680,6 +680,14 @@ std::optional<QColor> BoardView::netColor(int net, bool enabledForKind) const {
   return std::nullopt;
 }
 
+void BoardView::drawFill(QPainter& p, const Zone& z) const {
+  for (auto& f : z.filled) {
+    BBox box;
+    for (Vec2 v : f) box.add(v);
+    if (seen(box)) p.drawPolygon(toPoly(f, [&](Vec2 v) { return toScreen(v); }));
+  }
+}
+
 void BoardView::drawLayer(QPainter& p, LayerId l) {
   const Board& b = *doc_->board();
   const DisplayControl& d = doc_->display();
@@ -697,7 +705,7 @@ void BoardView::drawLayer(QPainter& p, LayerId l) {
           QColor c = netColor(z.net, d.colorizeCopper).value_or(details);
           p.setPen(Qt::NoPen);
           p.setBrush(c);
-          for (auto& f : z.filled) p.drawPolygon(toPoly(f, [&](Vec2 v) { return toScreen(v); }));
+          drawFill(p, z);
           // An unpoured area shows its outline; cutouts are dashed.
           p.setBrush(Qt::NoBrush);
           if (z.filled.empty()) {
@@ -1059,11 +1067,12 @@ void BoardView::drawBoard(QPainter& p) {
         case ItemType::Zone: {
           const Zone& z = b.zones[r.index];
           QColor c = lit(z.layer);
+          // The fill as the unselected one, no pen: an antialiased pen round thousands of points took more than the
+          // whole picture (and went along the seams of the fractured polygons).
+          p.setPen(Qt::NoPen);
+          p.setBrush(c);
+          drawFill(p, z);
           p.setPen(QPen(c, 2));
-          QColor fill = c;
-          fill.setAlpha(z.filled.empty() ? 40 : 255);
-          p.setBrush(fill);
-          for (auto& f : z.filled) p.drawPolygon(toPoly(f, [&](Vec2 v) { return toScreen(v); }));
           p.setBrush(Qt::NoBrush);
           p.drawPolygon(toPoly(z.outline, [&](Vec2 v) { return toScreen(v); }));
           break;
@@ -3070,7 +3079,12 @@ void BoardView::changeNet() {
     emit status(tr("Выделите проводники, переходы, контакты или области металлизации"));
     return;
   }
-  auto net = askNet(this, doc_, current);
+  QStringList what;
+  if (!f.tracks.empty()) what << tr("проводники");
+  if (!f.vias.empty()) what << tr("переходы");
+  if (!pads.empty()) what << tr("контакты");
+  if (!f.zones.empty()) what << tr("обл. металлизации");
+  auto net = askNet(this, doc_, current, what.join(", "));
   if (!net) return;
   auto before = doc_->beginEdit();
   edit::changeNet(b, f, pads, *net);

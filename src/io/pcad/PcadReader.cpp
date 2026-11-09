@@ -420,14 +420,21 @@ struct Reader {
     z.layer = l;
     z.net = b.findNet(str(k.find("netNameRef")));
     z.clearance = Coord(val1(k.find("pourBackoff")));
+    const Node* rules = k.find("useDesignRules");
+    z.useClearance = !rules || rules->arg(0) != "True";
     z.outline = polyOf(k.find("pcbPoly"));
-    if (const Node* tw = k.find("thermalWidth")) z.spokeWidth = Coord(val1(tw));
-    if (const Node* tt = k.find("thermalType")) {
-      const std::string& t = tt->arg(0);
-      if (t == "NoTherm" || t == "Direct") z.padConnection = PadConnection::Solid;
-      else if (t == "Therm45" || t.find("45") != std::string::npos) z.spokeAngle = 45;
-    }
-    z.thermalGap = z.clearance;
+    auto thermal = [&](ZoneThermal& t, const char* type, const char* width) {
+      if (const Node* tw = k.find(width)) t.spoke = Coord(val1(tw));
+      t.gap = z.clearance;
+      t.connection = PadConnection::Thermal;
+      if (const Node* tt = k.find(type)) {
+        const std::string& how = tt->arg(0);
+        if (how == "NoTherm" || how == "Direct") t.connection = PadConnection::Solid;
+        else if (how.find("45") != std::string::npos) t.angle = 45;
+      }
+    };
+    thermal(z.pads, "thermalType", "thermalWidth");
+    thermal(z.vias, "viaThermalType", "viaThermalWidth");
     if (const Node* pp = k.find("pourPriority")) z.priority = int(pp->num(0));
     for (auto* isl : k.findAll("island")) {
       Polyline outer = polyOf(isl->find("islandOutline"));

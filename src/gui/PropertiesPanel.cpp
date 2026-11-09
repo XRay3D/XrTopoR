@@ -26,6 +26,7 @@
 #include "core/Padstack.h"
 #include "core/ZoneFill.h"
 #include "gui/PadstackDialogs.h"
+#include "gui/SmallDialogs.h"
 #include "gui/SpinBox.h"
 #include "gui/TextStylesDialog.h"
 #include "io/BoardIO.h"
@@ -202,7 +203,7 @@ void PropertiesPanel::rebuild() {
       page = oneZip ? zipPage(z) : wirePage(tracks);
     }
     else if (!vias.empty()) page = viaPage(vias);
-    else if (!zones.empty()) page = zones.size() == 1 ? zonePage(zones[0]) : message(tr("Области металлизации (%1)").arg(zones.size()));
+    else if (!zones.empty()) page = zonePage(zones);
     else if (!keepouts.empty()) page = keepouts.size() == 1 ? keepoutPage(keepouts[0]) : message(tr("Запреты (%1)").arg(keepouts.size()));
     else if (!texts.empty()) page = textPage(texts);
     else if (!details.empty()) page = detailPage(details);
@@ -973,111 +974,195 @@ QWidget* PropertiesPanel::viaPage(const std::vector<int>& vias) {
   return w;
 }
 
-QWidget* PropertiesPanel::zonePage(int zi) {
+QWidget* PropertiesPanel::zonePage(const std::vector<int>& zones) {
   const Board& b = *doc_->board();
-  const Zone& z = b.zones[zi];
-  auto* tabs = new QTabWidget;
-  auto refill = [this, zi](Board& bd) {
-    if (bd.zones[zi].filled.empty()) return;
-    bd.zones[zi].filled.clear();
-    ZoneFillOptions o;
-    o.only = {zi};
-    fillZones(bd, o);
+  const Unit u = doc_->unit();
+  auto again = [this] { QMetaObject::invokeMethod(this, &PropertiesPanel::rebuild, Qt::QueuedConnection); };
+  // Every selected area, and those of them that are poured poured again.
+  auto editZones = [this, zones](const QString& name, const std::function<void(Zone&)>& fn) {
+    edit(name, [&](Board& bd) {
+      ZoneFillOptions o;
+      for (int zi : zones) {
+        fn(bd.zones[size_t(zi)]);
+        if (!bd.zones[size_t(zi)].filled.empty()) o.only.push_back(zi);
+      }
+      if (!o.only.empty()) fillZones(bd, o);
+    });
   };
+  auto showCheck = [](QCheckBox* c, std::optional<bool> on) {
+    c->setTristate(!on);
+    c->setCheckState(!on ? Qt::PartiallyChecked : *on ? Qt::Checked : Qt::Unchecked);
+  };
+  auto zoneOf = [&](int zi) -> const Zone& { return b.zones[size_t(zi)]; };
 
+  // «Общие».
+  auto* tabs = new QTabWidget;
   auto* general = new QWidget;
   auto* f = new QFormLayout(general);
-  f->addRow(title(tr("Область металлизации")));
-  auto* net = new QComboBox;
-  net->addItem(tr("(без цепи)"), kNoNet);
-  for (int n = 0; n < int(b.nets.size()); ++n) net->addItem(QString::fromStdString(b.nets[n].name), n);
-  net->setCurrentIndex(net->findData(z.net));
-  connect(net, &QComboBox::activated, this, [this, net, zi, refill](int i) {
-    edit(tr("Изменить цепь"), [&](Board& bd) {
-      bd.zones[zi].net = net->itemData(i).toInt();
-      refill(bd);
-    });
+  f->addRow(title(zones.size() == 1 ? tr("Область металлизации") : tr("Области металлизации (%1)").arg(zones.size())));
+  const auto netShared = common<int>(zones, [&](int zi) { return zoneOf(zi).net; });
+  auto* net = new QPushButton(!netShared ? QString() : *netShared == kNoNet ? tr("(без цепи)") : QString::fromStdString(b.nets[size_t(*netShared)].name));
+  net->setObjectName("net");
+  connect(net, &QPushButton::clicked, this, [this, netShared, editZones, again] {
+    const auto picked = askNet(this, doc_, netShared, tr("обл. металлизации"));
+    if (!picked) return;
+    editZones(tr("Изменить цепь"), [&](Zone& z) { z.net = *picked; });
+    again();
   });
   f->addRow(tr("Цепь:"), net);
   auto* layer = new QComboBox;
+  layer->setObjectName("layer");
+  const auto layerShared = common<LayerId>(zones, [&](int zi) { return zoneOf(zi).layer; });
+  if (!layerShared) layer->addItem(QString(), -1);
   for (LayerId l : b.copperLayers()) layer->addItem(QString::fromStdString(b.layers[l].name), int(l));
-  layer->setCurrentIndex(layer->findData(int(z.layer)));
-  connect(layer, &QComboBox::activated, this, [this, layer, zi, refill](int i) {
-    edit(tr("Изменить слой"), [&](Board& bd) {
-      bd.zones[zi].layer = LayerId(layer->itemData(i).toInt());
-      refill(bd);
-    });
+  layer->setCurrentIndex(layerShared ? layer->findData(int(*layerShared)) : 0);
+  connect(layer, &QComboBox::activated, this, [layer, editZones, again](int i) {
+    const int l = layer->itemData(i).toInt();
+    if (l < 0) return;
+    editZones(tr("Изменить слой"), [&](Zone& z) { z.layer = LayerId(l); });
+    again();
   });
   f->addRow(tr("Слой:"), layer);
-  auto* state = new QComboBox;
-  state->addItems({tr("Без заливки"), tr("Залита")});
-  state->setCurrentIndex(z.filled.empty() ? 0 : 1);
-  connect(state, &QComboBox::activated, this, [this, zi](int i) {
-    edit(i ? tr("Залить") : tr("Удалить заливку"), [&](Board& bd) {
-      bd.zones[zi].filled.clear();
-      if (i) {
+  auto* state = new QCheckBox(tr("Залита"));
+  state->setObjectName("poured");
+  showCheck(state, common<bool>(zones, [&](int zi) { return !zoneOf(zi).filled.empty(); }));
+  connect(state, &QCheckBox::clicked, this, [this, zones, again](bool on) {
+    edit(on ? tr("Залить") : tr("Удалить заливку"), [&](Board& bd) {
+      for (int zi : zones) bd.zones[size_t(zi)].filled.clear();
+      if (on) {
         ZoneFillOptions o;
-        o.only = {zi};
+        o.only = zones;
         fillZones(bd, o);
       }
     });
+    again();
   });
   f->addRow(tr("Состояние заливки:"), state);
-  auto* prio = new QSpinBox;
-  prio->setRange(0, 1000);
-  prio->setValue(z.priority);
-  prio->setKeyboardTracking(false);
-  connect(prio, &QSpinBox::editingFinished, this, [this, prio, zi, refill] {
-    if (prio->value() == doc_->board()->zones[zi].priority) return;
-    edit(tr("Приоритет"), [&](Board& bd) {
-      bd.zones[zi].priority = prio->value();
-      refill(bd);
-    });
-  });
-  f->addRow(tr("Приоритет:"), prio);
+  auto* repour = new QPushButton(tr("Перезалить"));
+  repour->setObjectName("repour");
+  repour->setEnabled(r::any_of(zones, [&](int zi) { return !zoneOf(zi).filled.empty(); }));
+  connect(repour, &QPushButton::clicked, this, [editZones] { editZones(tr("Перезалить"), [](Zone&) {}); });
+  f->addRow(repour);
   tabs->addTab(general, tr("Общие"));
 
+  // «Термобарьеры»: the pads' column and the vias'.
   auto* thermal = new QWidget;
-  auto* t = new QFormLayout(thermal);
-  auto* conn = new QComboBox;
-  conn->addItems({tr("Термобарьер"), tr("Сплошное"), tr("Нет")});
-  conn->setCurrentIndex(int(z.padConnection));
-  connect(conn, &QComboBox::activated, this, [this, zi, refill](int i) {
-    edit(tr("Подключение КП"), [&](Board& bd) {
-      bd.zones[zi].padConnection = PadConnection(i);
-      refill(bd);
+  auto* outer = new QVBoxLayout(thermal);
+  auto* t = new QGridLayout;
+  outer->addLayout(t);
+  outer->addStretch(1);
+  t->addWidget(new QLabel(tr("Ширина спиц/барьера:")), 1, 0);
+  t->addWidget(new QLabel(tr("Угол:")), 2, 0);
+  const ZoneFillOptions fillDefaults;
+  auto column = [&](ZoneThermal Zone::* m, int col, const QString& name, const QString& prefix) {
+    auto thermalOn = common<bool>(zones, [&](int zi) { return (zoneOf(zi).*m).connection == PadConnection::Thermal; });
+    auto* on = new QCheckBox(name);
+    on->setObjectName(prefix + "Thermal");
+    showCheck(on, thermalOn);
+    connect(on, &QCheckBox::clicked, this, [m, name, editZones, again](bool c) {
+      editZones(tr("Термобарьер %1").arg(name), [&](Zone& z) { (z.*m).connection = c ? PadConnection::Thermal : PadConnection::Solid; });
+      again();
     });
-  });
-  t->addRow(tr("Подключение КП/ПО:"), conn);
-  auto zoneLength = [&](Coord Zone::* m, const QString& name) {
-    double v = double(z.*m);
-    return length(v > 0 ? std::optional<double>(v) : std::nullopt, [this, zi, m, name, refill](double nm) {
-      edit(name, [&](Board& bd) {
-        bd.zones[zi].*m = Coord(std::llround(nm));
-        refill(bd);
+    t->addWidget(on, 0, col, 1, 3);
+    auto field = [&](Coord ZoneThermal::* v, Coord fallback, const QString& what, const QString& id) {
+      auto shared = common<double>(zones, [&](int zi) { const Coord x = (zoneOf(zi).*m).*v; return double(x > 0 ? x : fallback); });
+      QWidget* box = length(shared, [m, v, what, editZones](double nm) {
+        editZones(what, [&](Zone& z) { (z.*m).*v = Coord(std::llround(nm)); });
       });
+      box->setObjectName(prefix + id);
+      box->setMinimumWidth(90);  // (a spin box asks for room for its whole range: the four would not fit a narrow panel)
+      return box;
+    };
+    QWidget* spoke = field(&ZoneThermal::spoke, fillDefaults.spokeWidth, tr("Ширина спиц"), "Spoke");
+    QWidget* gap = field(&ZoneThermal::gap, fillDefaults.thermalGap, tr("Ширина барьера"), "Gap");
+    t->addWidget(spoke, 1, col);
+    t->addWidget(new QLabel("/"), 1, col + 1);
+    t->addWidget(gap, 1, col + 2);
+    auto* angle = new QComboBox;
+    angle->setObjectName(prefix + "Angle");
+    angle->addItem("45°", 45.0);
+    angle->addItem("90°", 0.0);
+    const auto shared = common<bool>(zones, [&](int zi) { return std::abs((zoneOf(zi).*m).angle - 45) < 1; });
+    angle->setCurrentIndex(!shared ? -1 : *shared ? 0 : 1);
+    connect(angle, &QComboBox::activated, this, [m, angle, editZones](int i) {
+      const double a = angle->itemData(i).toDouble();
+      editZones(tr("Угол спиц"), [&](Zone& z) { (z.*m).angle = a; });
     });
+    t->addWidget(angle, 2, col, 1, 3);
+    const bool enabled = thermalOn.value_or(true);
+    for (QWidget* w : std::initializer_list<QWidget*>{spoke, gap, angle}) w->setEnabled(enabled);
   };
-  t->addRow(tr("Зазор:"), zoneLength(&Zone::thermalGap, tr("Зазор термобарьера")));
-  t->addRow(tr("Ширина спиц:"), zoneLength(&Zone::spokeWidth, tr("Ширина спиц")));
-  auto* angle = new QComboBox;
-  angle->addItems({"90°", "45°"});
-  angle->setCurrentIndex(std::abs(z.spokeAngle - 45) < 1 ? 1 : 0);
-  connect(angle, &QComboBox::activated, this, [this, zi, refill](int i) {
-    edit(tr("Угол спиц"), [&](Board& bd) {
-      bd.zones[zi].spokeAngle = i ? 45 : 0;
-      refill(bd);
-    });
-  });
-  t->addRow(tr("Угол спиц:"), angle);
+  column(&Zone::pads, 1, tr("КП"), "pad");
+  column(&Zone::vias, 4, tr("ПО"), "via");
   tabs->addTab(thermal, tr("Термобарьеры"));
 
+  // «Заливка».
   auto* fill = new QWidget;
   auto* fl = new QFormLayout(fill);
-  fl->addRow(tr("Зазор:"), zoneLength(&Zone::clearance, tr("Зазор области")));
-  fl->addRow(tr("Мин. ширина:"), zoneLength(&Zone::minWidth, tr("Минимальная ширина")));
+  auto* prio = new QSpinBox;
+  prio->setObjectName("priority");
+  const auto prioShared = common<int>(zones, [&](int zi) { return zoneOf(zi).priority; });
+  prio->setRange(-1001, 1000);
+  prio->setSpecialValueText(" ");  // the bottom of the range: the areas differ
+  prio->setValue(prioShared.value_or(-1001));
+  prio->setKeyboardTracking(false);
+  const int prioShown = prio->value();
+  connect(prio, &QSpinBox::editingFinished, this, [prio, prioShown, editZones] {
+    if (prio->value() == prioShown || prio->value() < -1000) return;
+    const int v = prio->value();
+    editZones(tr("Приоритет"), [&](Zone& z) { z.priority = v; });
+  });
+  fl->addRow(tr("Приоритет:"), prio);
+  auto* own = new QCheckBox;
+  own->setObjectName("useClearance");
+  const auto ownShared = common<bool>(zones, [&](int zi) { return zoneOf(zi).useClearance; });
+  showCheck(own, ownShared);
+  connect(own, &QCheckBox::clicked, this, [this, editZones, again](bool on) {
+    editZones(tr("Зазор области"), [&](Zone& z) {
+      if (on && z.clearance <= 0) z.clearance = doc_->board()->zoneClearance(z);  // what it had by the rules
+      z.useClearance = on;
+    });
+    again();
+  });
+  // Shown what is in force, the rules' when the area has none of its own.
+  QWidget* clearance = length(common<double>(zones, [&](int zi) { return double(zoneOf(zi).useClearance || zoneOf(zi).clearance > 0 ? zoneOf(zi).clearance : b.zoneClearance(zoneOf(zi))); }),
+                              [editZones](double nm) { editZones(tr("Зазор области"), [&](Zone& z) { z.clearance = Coord(std::llround(nm)); }); });
+  clearance->setObjectName("clearance");
+  clearance->setEnabled(ownShared.value_or(false));
+  auto* clearanceRow = new QHBoxLayout;
+  clearanceRow->addWidget(own);
+  clearanceRow->addWidget(clearance, 1);
+  fl->addRow(tr("Зазор (использовать):"), clearanceRow);
+  auto* islands = new QCheckBox;
+  islands->setObjectName("removeIslands");
+  showCheck(islands, common<bool>(zones, [&](int zi) { return zoneOf(zi).removeIslands; }));
+  connect(islands, &QCheckBox::clicked, this, [editZones, again](bool on) {
+    editZones(tr("Удаление островков"), [&](Zone& z) { z.removeIslands = on; });
+    again();
+  });
+  fl->addRow(tr("Удалять неподключённые островки:"), islands);
+  const double unit2 = toUnit(1, u) * toUnit(1, u);  // an nm² in the unit²
+  auto* area = new DoubleSpinBox;
+  area->setObjectName("minIslandArea");
+  area->setDecimals(4);
+  area->setRange(-1, 1e9);
+  area->setSpecialValueText(" ");  // the bottom of the range: the areas differ
+  area->setSuffix(" " + unitName(u) + "²");
+  area->setKeyboardTracking(false);
+  const auto areaShared = common<double>(zones, [&](int zi) { return zoneOf(zi).minIslandArea; });
+  area->setValue(areaShared ? *areaShared * unit2 : -1);
+  const double areaShown = area->value();
+  connect(area, &QDoubleSpinBox::editingFinished, this, [area, areaShown, unit2, editZones] {
+    if (area->value() == areaShown || area->value() < 0) return;
+    const double v = area->value() / unit2;
+    editZones(tr("Мин. площадь островка"), [&](Zone& z) { z.minIslandArea = v; });
+  });
+  fl->addRow(tr("Мин. площадь островка:"), area);
+  fl->addRow(tr("Мин. ширина:"), length(common<double>(zones, [&](int zi) { return double(zoneOf(zi).minWidth > 0 ? zoneOf(zi).minWidth : fillDefaults.minWidth); }),
+                                        [editZones](double nm) { editZones(tr("Минимальная ширина"), [&](Zone& z) { z.minWidth = Coord(std::llround(nm)); }); }));
   tabs->addTab(fill, tr("Заливка"));
-  if (auto g = edit::figureOf(b, {ItemType::Zone, zi})) tabs->addTab(shapePage({ItemType::Zone, zi}, 0), shapeTitle(*g));
+  if (zones.size() == 1)
+    if (auto g = edit::figureOf(b, {ItemType::Zone, zones[0]})) tabs->addTab(shapePage({ItemType::Zone, zones[0]}, 0), shapeTitle(*g));
   return tabs;
 }
 

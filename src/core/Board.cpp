@@ -260,6 +260,9 @@ Coord Board::clearanceUpper(int net, LayerId layer) const {
   return c;
 }
 
+Coord Board::zoneClearance(const Zone& z, int otherNet) const { return z.useClearance ? z.clearance : clearance(z.net, otherNet, z.layer); }
+Coord Board::zoneClearance(const Zone& z) const { return z.useClearance ? z.clearance : clearance(z.net, z.layer); }
+
 Coord Board::maxClearance() const {
   Coord m = 0;
   for (auto& nc : netClasses) m = std::max(m, nc.clearance);

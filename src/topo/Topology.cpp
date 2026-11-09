@@ -503,7 +503,7 @@ void Topology::buildMeshes(const Board& b, BuildScratch& scratch) {
       const Owner& o = owners[oi];
       m.ownerClr[oi] = o.kind == Owner::Kind::Outline ? double(b.edgeClearance)
                        : o.kind == Owner::Kind::Keepout ? 0.0
-                       : o.kind == Owner::Kind::Zone ? std::max(double(b.zones[o.zone].clearance), double(b.clearance(o.net, layer)))
+                       : o.kind == Owner::Kind::Zone ? double(b.zoneClearance(b.zones[o.zone]))
                                                      : double(b.clearance(o.net, layer));
     }
     layers.push_back(std::move(m));

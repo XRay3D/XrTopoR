@@ -11,6 +11,7 @@
 
 #include "core/Padstack.h"
 #include "core/Runs.h"
+#include "core/ZoneFill.h"
 #include "io/topor/Fst.h"
 #include "io/xml/Xml.h"
 
@@ -1253,11 +1254,27 @@ struct Writer {
 
   void writeCopper(const Zone& z) {
     if (z.outline.size() < 3 || z.layer < 0 || z.layer >= int(b.layers.size()) || layerName[z.layer].empty()) return;
-    x.open("Copper", {{"priority", "50"}, {"backoff", mm(z.clearance > 0 ? z.clearance : b.netClasses[0].clearance)},
-                      {"connectPad", "Thermal"}, {"lineWidth", "0.1"}, {"deleteUnconnected", "on"},
+    auto how = [](const ZoneThermal& t) { return t.connection == PadConnection::Thermal ? "Thermal" : t.connection == PadConnection::None ? "None" : "Direct"; };
+    x.open("Copper", {{"priority", std::to_string(z.priority)}, {"useBackoff", onOff(z.useClearance)},
+                      {"backoff", mm(z.clearance > 0 ? z.clearance : b.netClasses[0].clearance)},
+                      {"connectPad", how(z.pads)}, {"connectVia", how(z.vias)}, {"lineWidth", "0.1"},
+                      {"minSquare", num(z.minIslandArea / 1e12, 6)}, {"deleteUnconnected", onOff(z.removeIslands)},
                       {"state", z.filled.empty() ? "Unpoured" : "Poured"}});
     x.empty("LayerRef", {{"name", layerName[z.layer]}});
     if (z.net >= 0) x.empty("NetRef", {{"name", netName(z.net)}});
+    auto thermal = [&](const char* element, const ZoneThermal& t) {
+      if (t.connection != PadConnection::Thermal) {
+        x.empty(element, {});
+        return;
+      }
+      const ZoneFillOptions fill;
+      x.open(element, {});
+      x.empty("Thermal", {{"spokeNum", "4"}, {"minSpokeNum", "1"}, {"angle", num(t.angle, 3)}, {"spokeWidth", mm(double(t.spoke > 0 ? t.spoke : fill.spokeWidth))},
+                          {"backoff", mm(double(t.gap > 0 ? t.gap : fill.thermalGap))}});
+      x.close();
+    };
+    thermal("ThermalPad", z.pads);
+    thermal("ThermalVia", z.vias);
     x.open("Shape");
     if (z.shape && (z.shape->kind != GraphicKind::Poly || z.shape->hasArcs())) {
       Graphic l = fstGraphic(*z.shape);

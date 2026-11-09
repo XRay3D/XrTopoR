@@ -114,15 +114,15 @@ void appendZones(const Board& b, const NetStyle& st, Node& root) {
       n.add(std::move(pr));
     }
     Node cp = Node::list("connect_pads");
-    if (z.padConnection == PadConnection::Solid) cp.addAtom("yes");
-    else if (z.padConnection == PadConnection::None) cp.addAtom("no");
-    cp.add(numNode("clearance", double(std::max(z.clearance, b.classOf(z.net).clearance))));
+    if (z.pads.connection == PadConnection::Solid) cp.addAtom("yes");
+    else if (z.pads.connection == PadConnection::None) cp.addAtom("no");
+    cp.add(numNode("clearance", double(b.zoneClearance(z))));
     n.add(std::move(cp));
     n.add(numNode("min_thickness", double(z.minWidth > 0 ? z.minWidth : mmToNm(0.2))));
     Node fill = Node::list("fill");
     fill.addAtom("yes");
-    fill.add(numNode("thermal_gap", double(z.thermalGap > 0 ? z.thermalGap : mmToNm(0.5))));
-    fill.add(numNode("thermal_bridge_width", double(z.spokeWidth > 0 ? z.spokeWidth : mmToNm(0.5))));
+    fill.add(numNode("thermal_gap", double(z.pads.gap > 0 ? z.pads.gap : mmToNm(0.5))));
+    fill.add(numNode("thermal_bridge_width", double(z.pads.spoke > 0 ? z.pads.spoke : mmToNm(0.5))));
     n.add(std::move(fill));
     Node poly = Node::list("polygon");
     Node pts = Node::list("pts");

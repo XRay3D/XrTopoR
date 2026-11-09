@@ -27,7 +27,8 @@ class PropertiesPanel : public QWidget {
   QWidget* wirePage(const std::vector<int>& tracks);
   QWidget* zipPage(int zip);
   QWidget* viaPage(const std::vector<int>& vias);
-  QWidget* zonePage(int zone);
+  // «Область металлизации»: several areas are edited together; those poured are poured again.
+  QWidget* zonePage(const std::vector<int>& zones);
   QWidget* keepoutPage(int keepout);
   // «Надпись»: «Общие» (the text, its layer, place, mirror, angle, the point it is aligned by) and «Стиль» (the
   // style, its font, height, bold, italic — saved into the style — and «Редактор стилей»); several texts are

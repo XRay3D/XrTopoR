@@ -1394,16 +1394,23 @@ struct Reader {
     z.layer = layer;
     if (auto* nr = c.find("NetRef")) z.net = b.addNet(std::string(nr->attr("name")));
     z.clearance = len(c.num("backoff"));
+    z.useClearance = c.flag("useBackoff");
     z.priority = int(c.num("priority"));
-    std::string cp(c.attr("connectPad"));
-    if (cp == "Direct" || cp == "Solid") z.padConnection = PadConnection::Solid;
-    else if (cp == "None" || cp == "NoConnect") z.padConnection = PadConnection::None;
-    if (auto* tp = c.find("ThermalPad"))
-      if (auto* th = tp->find("Thermal")) {
-        z.spokeWidth = len(th->num("spokeWidth"));
-        z.thermalGap = len(th->num("backoff"));
-        z.spokeAngle = th->num("angle");
-      }
+    // TopoR leaves out what is at its default: no connectPad is the direct connection.
+    auto connection = [&](ZoneThermal& t, const char* attr, const char* element) {
+      const std::string_view how = c.attr(attr);
+      t.connection = how == "Thermal" ? PadConnection::Thermal : how == "None" || how == "NoConnect" ? PadConnection::None : PadConnection::Solid;
+      if (auto* e = c.find(element))
+        if (auto* th = e->find("Thermal")) {
+          t.spoke = len(th->num("spokeWidth"));
+          t.gap = len(th->num("backoff"));
+          t.angle = th->num("angle");
+        }
+    };
+    connection(z.pads, "connectPad", "ThermalPad");
+    connection(z.vias, "connectVia", "ThermalVia");
+    z.removeIslands = c.flag("deleteUnconnected");
+    z.minIslandArea = c.num("minSquare") * double(len(1)) * double(len(1));
     // The area's figure as TopoR drew it: a circle, a rectangle, a contour with arcs.
     if (auto* sh = c.find("Shape"))
       for (auto& f : sh->kids) {
