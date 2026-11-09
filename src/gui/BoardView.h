@@ -65,7 +65,7 @@ class BoardView : public QWidget {
   void deleteSelection();
   void rotateSelection(double deg);  // with the attached wires; while dragging, turns the dragged fragment
   void flipSelection(bool vertical);  // S / Y: to the other side, about the vertical / horizontal axis
-  void changeLayer();                 // L: a via while routing, otherwise the layer menu for the selected wires
+  void changeLayer();                 // L: a via while routing, the layer menu for the selected wires, the next copper layer active with nothing selected
   void straighten();                  // C
   void unlinkSelection();             // U
   void changeNet();                   // Shift+N
@@ -208,6 +208,7 @@ class BoardView : public QWidget {
   void routeStart(const Pick& pk, Vec2 at);
   void routeAddPoint(Vec2 at, const Pick& pk);
   Vec2 constrained(Vec2 from, Vec2 to) const;
+  LayerId nextCopper(LayerId l) const;  // the copper layer after `l`, cyclic; the first for a layer that is no copper
   Vec2 snappedOnLine(Vec2 p, Vec2 dir) const;
   std::optional<Track> makeSegment(Vec2 from, Vec2 to) const;  // honours angle mode (arc)
   double rubberMargin(const Track& t) const;

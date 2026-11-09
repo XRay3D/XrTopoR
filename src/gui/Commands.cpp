@@ -70,7 +70,7 @@ Commands::Commands(QWidget* window) : QObject(window), window_(window) {
   add("Accel_Fix", tr("&Фиксировать"), tr("Фиксировать"), kObject, {key("F")}, "fix")
       ->setStatusTip(tr("Задать/отменить фиксацию выделенных компонентов, переходов и формы участков проводников"));
   add("Accel_Layer", tr("Изменить сло&й"), tr("Изменить слой"), kObject, {key("L")})
-      ->setStatusTip(tr("Изменить слой выделенных участков проводников"));
+      ->setStatusTip(tr("Изменить слой выделенных участков проводников; без выделения — следующий слой металлизации"));
   add("Accel_Width", tr("Изменить &ширину"), tr("Изменить ширину проводника"), kObject, {key("W")}, "width")
       ->setStatusTip(tr("Изменить ширину всех выделенных участков проводников"));
   add("Accel_Reduce", tr("Спр&ямить"), tr("Спрямить"), kObject, {key("C")}, "reduce")

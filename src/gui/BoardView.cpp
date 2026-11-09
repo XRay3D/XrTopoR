@@ -2954,15 +2954,17 @@ void BoardView::routeAddVia() {
   v.layers = b.allCopperMask();
   routeVias_.push_back(v);
   routeDir_.reset();
-  // Next copper layer (cyclic).
-  auto cu = b.copperLayers();
-  auto it = r::find(cu, routeLayer_);
-  size_t idx = it == cu.end() ? 0 : size_t(it - cu.begin());
-  routeLayer_ = cu[(idx + 1) % cu.size()];
+  routeLayer_ = nextCopper(routeLayer_);
   routeWidth_ = b.trackWidth(routeNet_, routeLayer_);
   doc_->setActiveLayer(routeLayer_);
   updateRouteHint();
   refresh();
+}
+
+LayerId BoardView::nextCopper(LayerId l) const {
+  auto cu = doc_->board()->copperLayers();
+  auto it = r::find(cu, l);
+  return it == cu.end() ? cu.front() : cu[size_t(it - cu.begin() + 1) % cu.size()];
 }
 
 void BoardView::toggleLayer() {
@@ -2976,6 +2978,14 @@ void BoardView::changeLayer() {
   }
   if (!doc_->hasBoard()) return;
   Board& b = *doc_->board();
+  if (doc_->selectedItems().empty() && doc_->selectedComponents().empty()) {
+    // Nothing selected: the next copper layer becomes the active one.
+    LayerId l = nextCopper(doc_->activeLayer());
+    doc_->setActiveLayer(l);
+    emit status(tr("Активный слой: %1").arg(QString::fromStdString(b.layers[l].name)));
+    refresh();
+    return;
+  }
   std::vector<int> tracks = selectedFragment().tracks;
   if (tracks.empty()) {
     emit status(tr("Выделите участки проводников"));
@@ -3530,10 +3540,7 @@ void BoardView::pairAddVia() {
     v.layers = b.allCopperMask();
     pr_.vias.push_back(v);
   }
-  auto cu = b.copperLayers();
-  auto it = r::find(cu, routeLayer_);
-  size_t idx = it == cu.end() ? 0 : size_t(it - cu.begin());
-  routeLayer_ = cu[(idx + 1) % cu.size()];
+  routeLayer_ = nextCopper(routeLayer_);
   doc_->setActiveLayer(routeLayer_);
   Coord w = pr_.w, gap = pr_.gap;
   if (b.pairRule(pr_.pair, routeLayer_, w, gap)) {

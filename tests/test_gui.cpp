@@ -856,6 +856,36 @@ TEST(Gui, ZipAxisAndFlexFixDrawn) {
 // The same with a change of layer (V): the section ends at a clasp, two vias abreast of it as far apart as the
 // vias and the gap need, the next section starts there on the other layer. Two sections, two vias, every
 // connection made, no violation.
+// L with nothing selected goes through the copper layers, the active one in turn; with something selected that is
+// no wire it leaves the active layer alone.
+TEST(Gui, LayerKeyWithoutSelectionCyclesTheCopper) {
+  Fixture f("topor/Example_05/MinVia_standard_routing.fst");
+  auto cu = f.b().copperLayers();
+  ASSERT_GE(cu.size(), 2u);
+  f.doc.setActiveLayer(cu[0]);
+  QSignalSpy told(&f.view, &BoardView::status);
+  for (size_t i = 1; i <= cu.size(); ++i) {
+    f.view.changeLayer();
+    EXPECT_EQ(f.doc.activeLayer(), cu[i % cu.size()]);
+    EXPECT_TRUE(told.takeLast()[0].toString().contains(QString::fromStdString(f.b().layers[cu[i % cu.size()]].name)));
+  }
+  // From a technical layer: the first copper one.
+  LayerId tech = -1;
+  for (LayerId l = 0; l < LayerId(f.b().layers.size()); ++l)
+    if (f.b().layers[l].kind == LayerKind::Silk) tech = l;
+  if (tech >= 0) {
+    f.doc.setActiveLayer(tech);
+    if (f.doc.activeLayer() == tech) {
+      f.view.changeLayer();
+      EXPECT_EQ(f.doc.activeLayer(), cu[0]);
+    }
+  }
+  f.doc.setActiveLayer(cu[0]);
+  f.doc.setSelection({}, {0});
+  f.view.changeLayer();
+  EXPECT_EQ(f.doc.activeLayer(), cu[0]);
+}
+
 TEST(Gui, RoutePairChangesLayer) {
   Fixture f("tt.kicad_pcb");
   auto board = std::make_unique<Board>();
