@@ -90,6 +90,73 @@ TEST(PcadIO, ReadAscii) {
   EXPECT_LE(c.ratsnest.size(), 3u);
 }
 
+// What a P-CAD design holds beside the copper: a pattern's other graphics, as an instance names them (a connector
+// placed by its «Second»: other pads), the bridges of a pour to its pads, the texts and their styles.
+TEST(PcadIO, PatternGraphicsThermalsAndTexts) {
+  auto file = io::readFile(data("el4134_pcad_ascii.pcb"));
+  ASSERT_TRUE(file) << file.error();
+  std::string text = *file;
+  auto insertAt = [&](size_t at, const std::string& what) {
+    ASSERT_NE(at, std::string::npos);
+    text.insert(at, what);
+  };
+  insertAt(text.find("(padStyleDef"), R"((textStyleDef "T60" (font (fontType Stroke) (fontHeight 50.0) (strokeWidth 6.0))
+    (font (fontType TrueType) (fontFace "Arial") (fontHeight 60.0)) (textStyleAllowTType True) (textStyleDisplayTType True))
+  (textStyleDef "S50" (font (fontType Stroke) (fontHeight 50.0) (strokeWidth 6.0)) (textStyleDisplayTType False))
+  (patternDefExtended "TWO_WAYS" (patternGraphicsNameRef "Primary")
+    (patternGraphicsDef (patternGraphicsNameDef "Primary") (multiLayer (pad (padNum 1) (padStyleRef "smd40x48") (pt 100.0 200.0))))
+    (patternGraphicsDef (patternGraphicsNameDef "Second") (multiLayer (pad (padNum 1) (padStyleRef "smd40x48") (pt 300.0 400.0)))))
+  )");
+  const size_t design = text.find("\n  (multiLayer");
+  insertAt(design + 15, R"((pattern (patternRef "TWO_WAYS") (refDesRef "ZA") (pt 1000.0 1000.0) (patternGraphicsNameRef "Second"))
+    (pattern (patternRef "TWO_WAYS") (refDesRef "ZB") (pt 2000.0 1000.0))
+    )");
+  insertAt(text.find("(layerContents (layerNumRef 1)", design) + 30, R"(
+    (text (pt 500.0 600.0) "NOTE" (textStyleRef "T60") (rotation 90.0) (justify Center))
+    (text (pt 700.0 600.0) "BACK" (textStyleRef "S50") (rotation 20.0) (isFlipped True) (justify UpperRight))
+    (copperPour95 (pcbPoly (pt 0.0 0.0) (pt 100.0 0.0) (pt 100.0 100.0))
+      (island (islandOutline (pt 0.0 0.0) (pt 100.0 0.0) (pt 100.0 100.0))
+        (thermal (pt 10.0 10.0) (pt 50.0 10.0) (thermalWidth 10.0))))
+    )");
+  auto r = io::readPcad(text, "t.pcb");
+  ASSERT_TRUE(r) << r.error();
+  const Board& b = **r;
+  auto padOf = [&](const char* ref) { return b.pads[size_t(b.components[size_t(b.findComponent(ref))].pads[0])].pos.v(); };
+  auto mil = [](double v) { return v * kNmPerMil; };
+  EXPECT_NEAR(padOf("ZA").x, mil(1300), 1);
+  EXPECT_NEAR(padOf("ZA").y, -mil(1400), 1);
+  EXPECT_NEAR(padOf("ZB").x, mil(2100), 1) << "no graphics named: the pattern's own";
+  EXPECT_NEAR(padOf("ZB").y, -mil(1200), 1);
+
+  auto textOf = [&](const char* what) { return r::find(b.texts, std::string(what), &Text::text); };
+  ASSERT_NE(textOf("NOTE"), b.texts.end());
+  ASSERT_NE(textOf("BACK"), b.texts.end());
+  const Text& note = *textOf("NOTE");
+  EXPECT_NEAR(note.pos.x, mil(500), 1);
+  EXPECT_NEAR(note.pos.y, -mil(600), 1);
+  EXPECT_EQ(note.angle, 90);
+  EXPECT_EQ(note.align, TextAlign::CM);
+  EXPECT_FALSE(note.mirror);
+  EXPECT_EQ(b.styleOf(note).font, "Arial");
+  EXPECT_NEAR(double(b.styleOf(note).height), mil(60 * 1.1875), 1);
+  const Text& back = *textOf("BACK");
+  EXPECT_TRUE(back.mirror);
+  EXPECT_EQ(back.angle, 340) << "turned the other way: the model mirrors first";
+  EXPECT_EQ(back.align, TextAlign::RT);
+  EXPECT_EQ(b.styleOf(back).font, "QUALITY");
+  EXPECT_NEAR(double(b.styleOf(back).height), mil(50), 1);
+
+  // The island and its bridge, 40 x 10 mil.
+  auto z = r::find_if(b.zones, [](const Zone& x) { return x.filled.size() == 2; });
+  ASSERT_NE(z, b.zones.end());
+  BBox bridge;
+  for (Vec2 p : z->filled[1]) bridge.add(p);
+  EXPECT_NEAR(bridge.width(), mil(40), 1);
+  EXPECT_NEAR(bridge.height(), mil(10), 1);
+  EXPECT_NEAR(bridge.center().x, mil(30), 1);
+  EXPECT_NEAR(bridge.center().y, -mil(10), 1);
+}
+
 TEST(PcadIO, WriterRoundTripAndRouting) {
   auto b = io::loadBoard(data("el4134_pcad_ascii.pcb"));
   ASSERT_TRUE(b);

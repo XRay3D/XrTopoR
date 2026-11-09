@@ -39,7 +39,13 @@ struct Reader {
   double unit = kNmPerMil;  // default file unit
   std::map<std::string, PadStyle> padStyles;
   std::map<std::string, PadStyle> viaStyles;
-  std::map<std::string, Pattern> patterns;
+  // A pattern has one or more graphics («Primary», «Second»: other pads and drawings), an instance names its own.
+  struct PatternDef {
+    std::map<std::string, Pattern> graphics;
+    std::string preferred;  // the one the definition names, else the first
+  };
+  std::map<std::string, PatternDef> patterns;
+  std::map<std::string, int> textStyleIndex;
   std::map<std::string, std::map<std::string, std::string>> compPinToPad;  // compDef -> pin -> padNum
   std::map<std::string, std::string> instToCompDef;                          // refdes -> compDef
   std::map<int, LayerId> layerMap;                                           // P-CAD layer number -> board layer
@@ -129,24 +135,32 @@ struct Reader {
   void readLibrary(const Node& lib) {
     for (auto* n : lib.findAll("padStyleDef")) padStyles[n->arg(0)] = readStyle(*n, "padShape");
     for (auto* n : lib.findAll("viaStyleDef")) viaStyles[n->arg(0)] = readStyle(*n, "viaShape");
+    for (auto* n : lib.findAll("textStyleDef")) readTextStyle(*n);
     for (auto* n : lib.findAll("patternDefExtended")) {
-      Pattern pat;
-      const Node* gd = n->find("patternGraphicsDef");
-      if (!gd) gd = n;
-      if (const Node* ml = gd->find("multiLayer"))
-        for (auto* pad : ml->findAll("pad")) {
-          PatPad pp;
-          if (const Node* pn = pad->find("padNum")) pp.num = pn->arg(0);
-          pp.style = str(pad->find("padStyleRef"));
-          pp.pos = ptOf(pad->find("pt"));
-          if (const Node* r = pad->find("rotation")) pp.rot = r->num(0);
-          pat.pads.push_back(pp);
+      PatternDef def;
+      def.preferred = str(n->find("patternGraphicsNameRef"));
+      auto defs = n->findAll("patternGraphicsDef");
+      if (defs.empty()) defs.push_back(n);
+      for (auto* gd : defs) {
+        Pattern pat;
+        if (const Node* ml = gd->find("multiLayer"))
+          for (auto* pad : ml->findAll("pad")) {
+            PatPad pp;
+            if (const Node* pn = pad->find("padNum")) pp.num = pn->arg(0);
+            pp.style = str(pad->find("padStyleRef"));
+            pp.pos = ptOf(pad->find("pt"));
+            if (const Node* r = pad->find("rotation")) pp.rot = r->num(0);
+            pat.pads.push_back(pp);
+          }
+        for (auto* lc : gd->findAll("layerContents")) {
+          int ln = lc->find("layerNumRef") ? int(lc->find("layerNumRef")->num(0)) : 0;
+          for (auto& k : lc->kids) readGraphic(k, ln, pat.graphics);
         }
-      for (auto* lc : gd->findAll("layerContents")) {
-        int ln = lc->find("layerNumRef") ? int(lc->find("layerNumRef")->num(0)) : 0;
-        for (auto& k : lc->kids) readGraphic(k, ln, pat.graphics);
+        const std::string name = str(gd->find("patternGraphicsNameDef"));
+        if (def.preferred.empty()) def.preferred = name;
+        def.graphics[name] = std::move(pat);
       }
-      patterns[toUtf8(n->arg(0))] = std::move(pat);
+      patterns[toUtf8(n->arg(0))] = std::move(def);
     }
     for (auto* cd : lib.findAll("compDef")) {
       auto& m = compPinToPad[toUtf8(cd->arg(0))];
@@ -265,7 +279,10 @@ struct Reader {
     std::string patName = str(inst.find("patternRef"));
     auto it = patterns.find(patName);
     if (it == patterns.end()) return;
-    const Pattern& pat = it->second;
+    auto graphics = it->second.graphics.find(str(inst.find("patternGraphicsNameRef")));
+    if (graphics == it->second.graphics.end()) graphics = it->second.graphics.find(it->second.preferred);
+    if (graphics == it->second.graphics.end()) return;
+    const Pattern& pat = graphics->second;
     Component c;
     c.ref = str(inst.find("refDesRef"));
     c.footprint = patName;
@@ -358,6 +375,46 @@ struct Reader {
     return out;
   }
 
+  // A text style has a stroke font and a TrueType one; the style says which is shown. P-CAD's height of a TrueType
+  // font is 1/1.1875 of the height of its text («extent» in the file), which is what a style's height is here.
+  void readTextStyle(const Node& n) {
+    TextStyle st;
+    st.name = toUtf8(n.arg(0));
+    const Node* stroke = nullptr;
+    const Node* trueType = nullptr;
+    for (auto* f : n.findAll("font")) (str(f->find("fontType")) == "TrueType" ? trueType : stroke) = f;
+    const Node* shown = n.find("textStyleDisplayTType");
+    if (trueType && (!stroke || (shown && shown->arg(0) == "True"))) {
+      st.font = str(trueType->find("fontFace"));
+      st.height = Coord(val1(trueType->find("fontHeight")) * 1.1875);
+    } else if (stroke) {
+      st.font = "QUALITY";
+      st.height = Coord(val1(stroke->find("fontHeight")));
+      st.lineWidth = Coord(val1(stroke->find("strokeWidth")));
+    }
+    if (textStyleIndex.empty()) b.textStyles.clear();
+    textStyleIndex[st.name] = int(b.textStyles.size());
+    b.textStyles.push_back(std::move(st));
+  }
+
+  void readText(const Node& k, LayerId l) {
+    Text t;
+    t.text = toUtf8(k.arg(1));
+    t.pos = toBoard(ptOf(k.find("pt")));
+    t.layer = l;
+    t.mirror = k.find("isFlipped") && k.find("isFlipped")->arg(0) == "True";
+    const double rot = k.find("rotation") ? k.find("rotation")->num(0) : 0;
+    // P-CAD turns a text and then mirrors it, the model mirrors first: a flipped text is turned the other way.
+    t.angle = std::fmod((t.mirror ? 720.0 - rot : rot + 360.0), 360.0);
+    if (auto st = textStyleIndex.find(str(k.find("textStyleRef"))); st != textStyleIndex.end()) t.style = st->second;
+    static const std::map<std::string, TextAlign> aligns{{"UpperLeft", TextAlign::LT}, {"UpperCenter", TextAlign::CT}, {"UpperRight", TextAlign::RT},
+                                                         {"Left", TextAlign::LM},      {"Center", TextAlign::CM},      {"Right", TextAlign::RM},
+                                                         {"LowerLeft", TextAlign::LB}, {"LowerCenter", TextAlign::CB}, {"LowerRight", TextAlign::RB}};
+    if (const Node* j = k.find("justify"))
+      if (auto a = aligns.find(j->arg(0)); a != aligns.end()) t.align = a->second;
+    b.texts.push_back(std::move(t));
+  }
+
   void readPour(const Node& k, LayerId l) {
     Zone z;
     z.layer = l;
@@ -377,6 +434,14 @@ struct Reader {
       std::vector<Polyline> holes;
       for (auto* c : isl->findAll("cutout")) holes.push_back(polyOf(c->find("cutoutOutline")));
       if (outer.size() >= 3) z.filled.push_back(fracture(outer, std::move(holes)));
+      // The bridges from the island to the pads of its net (the island's outline goes round the pad's gap).
+      for (auto* th : isl->findAll("thermal")) {
+        auto pts = th->findAll("pt");
+        if (pts.size() < 2) continue;
+        const Vec2 a = toBoard(ptOf(pts[0])), c = toBoard(ptOf(pts[1]));
+        const Vec2 side = (c - a).normalized().perp() * (val1(th->find("thermalWidth")) / 2);
+        if (side.len2() > 0) z.filled.push_back({a + side, c + side, c - side, a - side});
+      }
     }
     b.zones.push_back(std::move(z));
   }
@@ -409,6 +474,10 @@ struct Reader {
         if (!k.isList) continue;
         if (copper && (k.is("copperPour95") || k.is("copperPour"))) {
           readPour(k, l);
+          continue;
+        }
+        if (k.is("text")) {
+          readText(k, l);
           continue;
         }
         std::vector<std::pair<int, Graphic>> gs;
