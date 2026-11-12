@@ -3,6 +3,7 @@
 #include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
 
 #include <algorithm>
+#include <cmath>
 #include <deque>
 #include <map>
 
@@ -46,6 +47,20 @@ int edgeBetween(const LayerMesh& m, int t, int x, int y) {
 }  // namespace
 
 bool inCircle(Vec2 a, Vec2 p, Vec2 q, Vec2 b) {
+  // The determinant in doubles first, with the bound of its rounding error (Shewchuk's first stage: the bound holds
+  // with the differences rounded too); the exact predicate only where the sign is not sure by it — four pads of a
+  // grid on one circle. (The kernel's own filters were 6 % of F7: the flips round every step of every object.)
+  {
+    const double adx = a.x - b.x, ady = a.y - b.y, bdx = p.x - b.x, bdy = p.y - b.y, cdx = q.x - b.x, cdy = q.y - b.y;
+    const double bdxcdy = bdx * cdy, cdxbdy = cdx * bdy, cdxady = cdx * ady, adxcdy = adx * cdy, adxbdy = adx * bdy, bdxady = bdx * ady;
+    const double alift = adx * adx + ady * ady, blift = bdx * bdx + bdy * bdy, clift = cdx * cdx + cdy * cdy;
+    const double det = alift * (bdxcdy - cdxbdy) + blift * (cdxady - adxcdy) + clift * (adxbdy - bdxady);
+    const double permanent = (std::abs(bdxcdy) + std::abs(cdxbdy)) * alift + (std::abs(cdxady) + std::abs(adxcdy)) * blift + (std::abs(adxbdy) + std::abs(bdxady)) * clift;
+    constexpr double kBound = (10.0 + 96.0 * 1.1102230246251565e-16) * 1.1102230246251565e-16;
+    const double err = kBound * permanent;
+    if (det > err) return true;
+    if (-det > err) return false;
+  }
   K::Side_of_oriented_circle_2 side;
   return side(K::Point_2(a.x, a.y), K::Point_2(p.x, p.y), K::Point_2(q.x, q.y), K::Point_2(b.x, b.y)) == CGAL::ON_POSITIVE_SIDE;
 }
@@ -253,7 +268,17 @@ double load(const EdgeCapacity& c) {
 
 int flipLoop(Topology& t, LayerMesh& m, std::vector<int> seed, const FlipGate& gate, bool weighted) {
   std::deque<int> queue;
-  std::vector<char> queued(m.edges.size(), 0);
+  // Which edges wait in the queue: a thread's own marks, cleared as the edges leave it (a vector of all the edges'
+  // marks was made and zeroed for every call — for a seed of the six edges round one vertex).
+  thread_local std::vector<char> queued;
+  if (queued.size() < m.edges.size()) queued.resize(m.edges.size(), 0);
+  struct Unmark {
+    std::deque<int>& q;
+    std::vector<char>& marks;
+    ~Unmark() {
+      for (int e : q) marks[size_t(e)] = 0;
+    }
+  } unmark{queue, queued};
   auto push = [&](int e) {
     if (!queued[e]) {
       queued[e] = 1;

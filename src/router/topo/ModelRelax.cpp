@@ -497,7 +497,7 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
   };
   // `from`: a drawing of the model as it was before the steps taken since — this one is brought up from it, what
   // the steps reach computed again and the rest taken over (ModelTools.h; most of the objects stepped: computed whole).
-  int broughtUp = 0, laidAgain = 0;
+  int broughtUp = 0, laidAgain = 0, replays = 0;
   auto draw = [&](const Drawn* from) {
     ProfScope p("F7 model: drawing");
     std::optional<ProfScope> pc(std::in_place, "F7 model: copies");
@@ -806,18 +806,33 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
                        v.nets.first >= 0 ? b.nets[size_t(v.nets.first)].name : "-", v.nets.second >= 0 ? b.nets[size_t(v.nets.second)].name : "-",
                        v.pos.x / 1e6, -v.pos.y / 1e6, v.depth / 1e6);
       auto blamed = blameFor(addedBy(cur), tries);
-      bool any = false;
+      std::vector<size_t> back;  // the objects taken out by this try
       for (size_t k = 0; k < objs.size(); ++k)
         if (blamed[k] && !out[k]) {
           out[k] = 1;
           objs[k].scale = std::max(0.1, objs[k].scale * 0.6);
           objs[k].frozen = kFreeze;
-          any = true;
+          back.push_back(k);
         }
-      if (!any) break;
-      t = prev.model;
-      for (auto [k, d] : taken)
-        if (!out[k]) moveOwner(t, objs[k].owner, d);
+      if (back.empty()) break;
+      // The blamed objects step back where the walk stood. One that does not get there (the way back lies across an
+      // edge that does not flip: see shortAt): the others' steps are taken again from the model as it stood, without
+      // the blamed. (So it was done for every try, two or three hundred steps again to take back five: two thirds
+      // of all the steps F7 made in the model.)
+      static const bool kReplay = std::getenv("XR_F7_REPLAY") != nullptr;
+      bool there = !kReplay;
+      for (size_t k : back) {
+        if (!there) break;
+        const Vec2 d = prev.pos[k] - t.owners[objs[k].owner].c;
+        if (d.len2() > 0) moveOwner(t, objs[k].owner, d);
+        there = (t.owners[objs[k].owner].c - prev.pos[k]).len() < 1;
+      }
+      if (!there) {
+        ++replays;
+        t = prev.model;
+        for (auto [k, d] : taken)
+          if (!out[k]) moveOwner(t, objs[k].owner, d);
+      }
       cur = draw(&cur);
     }
     const bool kept = walkable(cur, best);
@@ -855,8 +870,8 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
   }
   if (debug) std::println(stderr, "F7 model: {} iterations, {} drawings, {} rollbacks", r.iterations, r.drawings, r.rollbacks);
   if (broughtUp > 0)
-    r.log.push_back(std::format("{} of {} drawings brought up from the one before, {:.0f} wires laid again each of {}; {} checked by their changed tracks alone", broughtUp,
-                                r.drawings, double(laidAgain) / broughtUp, best.wires, checkedLocally));
+    r.log.push_back(std::format("{} of {} drawings brought up from the one before, {:.0f} wires laid again each of {}; {} checked by their changed tracks alone; {} blame round(s) with the steps taken again", broughtUp,
+                                r.drawings, double(laidAgain) / broughtUp, best.wires, checkedLocally, replays));
   for (size_t k = 0; k < objs.size(); ++k)
     if ((best.pos[k] - objs[k].start).len() > 1000) ++(t.owners[objs[k].owner].kind == Owner::Kind::Via ? r.viaMoves : r.junctionMoves);
   r.forceAfter = sumOf(forcesOf(best));
