@@ -83,6 +83,7 @@ struct ClearancePair {
   LayerMask layers = 0;           // 0 = all copper layers
   Coord clearance = 0;
   std::vector<int> sortedA = {}, sortedB = {};  // as LayerRule::sorted
+  uint64_t stamp = 0;                           // markPairRules: the compiled list this rule is of (0: none)
   bool namesA(int net) const { return LayerRule::namesNet(netsA, sortedA, net); }
   bool namesB(int net) const { return LayerRule::namesNet(netsB, sortedB, net); }
   // The rule is for the two nets, in either order.
@@ -91,6 +92,10 @@ struct ClearancePair {
 
 // The last pair rule naming both nets on the layer (-1: only a rule of all layers counts), or 0.
 Coord pairClearance(const std::vector<ClearancePair>& pairs, int netA, int netB, LayerId layer);
+// Marks a list of pair rules as compiled: pairClearance remembers its answers for a marked list (the mark is
+// the list's, and its copies': a board's copy and the model's ask of the same answers). A list changed where it
+// lies afterwards is to be marked anew; one never marked (made by hand) is searched every time.
+void markPairRules(std::vector<ClearancePair>& pairs);
 // The clearance two nets keep on a layer: the larger of their own (class and layer rules), unless a pair
 // rule names them both. For a copy of the rules, without the board.
 Coord clearanceBetween(const std::vector<Coord>& byNet, const std::vector<LayerRule>& layerRules, const std::vector<ClearancePair>& pairs, int netA,

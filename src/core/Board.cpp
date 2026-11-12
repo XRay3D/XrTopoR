@@ -1,5 +1,8 @@
 #include "core/Board.h"
 
+#include <array>
+#include <atomic>
+#include <unordered_map>
 #include <algorithm>
 #include <cmath>
 
@@ -209,14 +212,55 @@ Coord Board::clearance(int net, LayerId layer) const {
   return c;
 }
 
+namespace {
+std::atomic<uint64_t> pairRulesStamp{0};
+}
+
+void markPairRules(std::vector<ClearancePair>& pairs) {
+  const uint64_t stamp = pairRulesStamp.fetch_add(1, std::memory_order_relaxed) + 1;
+  for (ClearancePair& p : pairs) p.stamp = stamp;
+}
+
 Coord pairClearance(const std::vector<ClearancePair>& pairs, int netA, int netB, LayerId layer) {
-  if (netA < 0 || netB < 0) return 0;
-  for (auto p = pairs.rbegin(); p != pairs.rend(); ++p) {
-    if (p->clearance <= 0) continue;
-    if (p->layers && (layer < 0 || !((p->layers >> layer) & 1))) continue;
-    if (p->namesBoth(netA, netB)) return p->clearance;
+  if (netA < 0 || netB < 0 || pairs.empty()) return 0;
+  auto search = [&] {
+    for (auto p = pairs.rbegin(); p != pairs.rend(); ++p) {
+      if (p->clearance <= 0) continue;
+      if (p->layers && (layer < 0 || !((p->layers >> layer) & 1))) continue;
+      if (p->namesBoth(netA, netB)) return p->clearance;
+    }
+    return Coord(0);
+  };
+  // The answers of a compiled list (markPairRules), by the nets and the layer: the search is a walk over every
+  // rule with two bisections each, and the realiser, the capacity and the DRC ask for every pair of neighbours
+  // (a sixth of F7 on a board with a hundred rules: 27 million searches). The list is known by its mark, which
+  // its copies carry: the board's, a copy of the board drawn on, the model's. A thread's own, of the few lists
+  // asked of last.
+  const uint64_t stamp = pairs.front().stamp;
+  if (stamp == 0 || pairs.back().stamp != stamp) return search();
+  struct Memo {
+    uint64_t stamp = 0;
+    size_t size = 0;
+    std::unordered_map<uint64_t, Coord> of;
+  };
+  thread_local std::array<Memo, 4> memos;
+  thread_local size_t next = 0;
+  Memo* memo = nullptr;
+  for (Memo& m : memos)
+    if (m.stamp == stamp && m.size == pairs.size()) memo = &m;
+  if (!memo) {
+    memo = &memos[next];
+    next = (next + 1) % memos.size();
+    memo->stamp = stamp;
+    memo->size = pairs.size();
+    memo->of.clear();
   }
-  return 0;
+  const int lo = std::min(netA, netB), hi = std::max(netA, netB);  // (a rule is for the two in either order)
+  const uint64_t key = (uint64_t(uint32_t(lo)) << 36) ^ (uint64_t(uint32_t(hi)) << 8) ^ uint64_t(uint8_t(layer + 1));
+  if (auto it = memo->of.find(key); it != memo->of.end()) return it->second;
+  const Coord found = search();
+  memo->of.emplace(key, found);
+  return found;
 }
 
 Coord clearanceBetween(const std::vector<Coord>& byNet, const std::vector<LayerRule>& layerRules, const std::vector<ClearancePair>& pairs, int netA,

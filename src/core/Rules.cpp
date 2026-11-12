@@ -267,6 +267,7 @@ void compileRules(Board& b) {
       p.sortedB = sorted(p.netsB);
     }
   b.layerRules = std::move(layerRules);
+  markPairRules(pairRules);
   b.pairRules = std::move(pairRules);
   b.nominalRules = std::move(nominalRules);
 
