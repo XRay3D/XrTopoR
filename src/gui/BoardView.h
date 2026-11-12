@@ -4,13 +4,15 @@
 // the ruler — with TopoR's mouse conventions.
 #include <QElapsedTimer>
 #include <QImage>
-#include <QWidget>
+#include <QOpenGLWidget>
 #include <functional>
 #include <optional>
 #include <vector>
 
 #include "core/Edit.h"
 #include "gui/Document.h"
+#include "gui/gl/Renderer.h"
+#include "gui/gl/Scene.h"
 #include "router/topo/Freestyle.h"
 #include "router/topo/TopoRouter.h"
 
@@ -24,10 +26,16 @@ enum class ViaKind { Single, Row, Matrix };
 enum class MeasureKind { Points, Objects };
 enum class RouteAngle { Free, Deg45, Arc };
 
-class BoardView : public QWidget {
+// The figure a drawing tool makes of the points clicked so far.
+std::vector<Graphic> figureOf(DrawShape shape, const std::vector<Vec2>& pts);
+
+// The board is drawn by the video card (gui/gl): the view keeps its scenes and gives them to the renderer; what is
+// in pixels (labels, handles, the selection frame, the ruler) is painted over the frame.
+class BoardView : public QOpenGLWidget {
   Q_OBJECT
  public:
   explicit BoardView(Document* doc, QWidget* parent = nullptr);
+  ~BoardView() override;
 
   Mode mode() const { return mode_; }
   RouteAngle routeAngle() const { return angle_; }
@@ -38,9 +46,18 @@ class BoardView : public QWidget {
   // Frame times of the rendering (xrtopor --render-bench): the whole board and zoomed in (drawn anew), panned (the
   // picture moved), the cursor moved with the ruler (the tools only); `frames` of each, painted at once.
   QString benchmark(int frames);
-  // The board's picture is drawn anew (an edit, the selection, the display settings); update() alone repaints only
-  // what is drawn over it (the tools, the handles, the route being laid) and pans it.
+  // The board's scene is built anew (an edit, the selection, the display settings); update() alone draws the frame
+  // from the scene as it is (a pan, a zoom, the tools, the route being laid).
   void refresh();
+  // The frame as drawn, from the framebuffer (QWidget::grab() does not reach it without a window on screen).
+  QImage picture();
+  // The board's scene as it would be drawn now (the tests look at its records).
+  gl::SceneData boardScene() const {
+    gl::SceneData s;
+    buildBoardScene(s);
+    return s;
+  }
+  bool drawable() const { return glOk_; }  // false: no OpenGL 3.3 context
   // The autorouter's progress shown in place of the board's tracks and vias (null: the board's again).
   void setRouteSketch(std::shared_ptr<const topo::RouteSketch> sketch);
   bool showsRouteSketch() const { return sketch_ != nullptr; }
@@ -118,7 +135,8 @@ class BoardView : public QWidget {
   void measured(const QString& text);
 
  protected:
-  void paintEvent(QPaintEvent*) override;
+  void initializeGL() override;
+  void paintGL() override;
   void mousePressEvent(QMouseEvent*) override;
   void mouseMoveEvent(QMouseEvent*) override;
   void mouseReleaseEvent(QMouseEvent*) override;
@@ -165,19 +183,19 @@ class BoardView : public QWidget {
   LayerMask visibleCopper() const;
   bool layerVisible(LayerId l) const;
 
-  void drawBoard(QPainter& p);
-  // The board's picture (background, grid, drawBoard), kept between frames: drawn anew when dirty or zoomed, moved
-  // when panned by whole pixels (the strips uncovered drawn), else used as it is.
-  void updateCache();
-  // The part `area` (in the widget's pixels) of the picture, in bands drawn in parallel.
-  void paintCache(const QRect& area);
-  void paintBand(QPainter& p, const QRectF& area);
-  bool seen(const BBox& bb) const;  // within the part being drawn (on this thread)
-  void drawLayer(QPainter& p, LayerId l);
-  void drawFill(QPainter& p, const Zone& z) const;  // the polygons of its fill in view, with the painter's pen and brush
-  void drawGrid(QPainter& p);
-  void drawVias(QPainter& p);
-  void drawHoles(QPainter& p);
+  // The scenes (BoardScene.cpp): the board in the order it is drawn, the selection and the marks, the tool's work.
+  void buildBoardScene(gl::SceneData& out) const;
+  void buildHighlightScene(gl::SceneData& out) const;
+  void buildOverlayScene(gl::SceneData& out) const;
+  void sceneLayer(gl::SceneBuilder& sb, LayerId l) const;
+  void sceneTrack(gl::SceneBuilder& sb, const Track& t, const QColor& c) const;
+  void sceneFlexFix(gl::SceneBuilder& sb, const Track& t) const;
+  void sceneText(gl::SceneBuilder& sb, const Text& t, const QColor& c) const;
+  void sceneGraphic(gl::SceneBuilder& sb, const Graphic& g, const QColor& c) const;
+  void sceneKeepout(gl::SceneBuilder& sb, const Keepout& k, const QColor& c) const;
+  BBox viewBox(double marginPx = 0) const;  // the part of the board in view
+  void releaseGl();  // the renderer's objects freed, with the context current
+  void frameNow();
   void drawLabels(QPainter& p);
   std::optional<QColor> netColor(int net, bool enabledForKind) const;
   bool componentVisible(int ci) const;
@@ -189,14 +207,6 @@ class BoardView : public QWidget {
   std::vector<ItemRef> wireOf(int track) const;  // the chain of one layer up to a pad, a via or a junction
   void measureClick(const Pick& pk, Vec2 w);
   void drawTools(QPainter& p);  // selection frame, ruler
-  void drawCentreline(QPainter& p, const Track& t);  // a track's centre line in the current pen
-  void drawTrack(QPainter& p, const Track& t, const QColor& c, double extra = 0);
-  void drawPad(QPainter& p, const Pad& pad, LayerId l, const QColor& c);
-  void drawVia(QPainter& p, const Via& v, const QColor& c);
-  void drawGraphic(QPainter& p, const Graphic& g, const QColor& c);
-  void drawOverlay(QPainter& p);
-  void drawKeepouts(QPainter& p);
-  void drawText(QPainter& p, const Text& t, const QColor& c);
   void drawDrawing(QPainter& p);  // the figure being drawn
   void drawClick(Vec2 w);
   void createShape(std::vector<Graphic> figure);  // what the drawing tool makes of a finished figure
@@ -219,10 +229,10 @@ class BoardView : public QWidget {
   RouteAngle angle_ = RouteAngle::Free;
   Vec2 center_;
   double scale_ = 1e-5;  // px per nm
-  QImage cache_;               // the board's picture (updateCache)
-  bool dirty_ = true;          // drawn anew at the next frame
-  Vec2 cacheCenter_;           // the view it was drawn for
-  double cacheScale_ = 0;
+  gl::Renderer renderer_;
+  gl::SceneData boardScene_, highlightScene_, overlayScene_;
+  bool sceneDirty_ = true;  // the board's and the selection's scenes are built anew at the next frame
+  bool glOk_ = false;
   QPointF lastMouse_;
   Vec2 cursor_;
   bool panning_ = false;

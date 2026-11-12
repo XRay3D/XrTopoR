@@ -38,6 +38,11 @@ void clearRecentFiles();
 bool toporImported();
 void setToporImported();
 
+// «Прозрачность меди», per cent (0: opaque): the copper layers are laid over one another that transparent, the
+// active one half as much.
+int copperTransparency();
+void setCopperTransparency(int percent);
+
 bool openLastProject();
 void setOpenLastProject(bool on);
 

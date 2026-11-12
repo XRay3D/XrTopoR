@@ -35,7 +35,13 @@
 
 namespace xr::gui {
 
-BoardView::BoardView(Document* doc, QWidget* parent) : QWidget(parent), doc_(doc) {
+BoardView::BoardView(Document* doc, QWidget* parent) : QOpenGLWidget(parent), doc_(doc) {
+  QSurfaceFormat fmt = format();
+  fmt.setVersion(3, 3);
+  fmt.setProfile(QSurfaceFormat::CoreProfile);
+  fmt.setSamples(4);  // the fills' edges; the strokes' are found in their shaders
+  fmt.setStencilBufferSize(8);
+  setFormat(fmt);
   setMouseTracking(true);
   setFocusPolicy(Qt::StrongFocus);
   setAutoFillBackground(false);
@@ -106,7 +112,7 @@ QString BoardView::benchmark(int frames) {
       step(i);
       QElapsedTimer t;
       t.start();
-      repaint();
+      frameNow();
       ms.push_back(double(t.nsecsElapsed()) / 1e6);
     }
     r::sort(ms);
@@ -119,10 +125,11 @@ QString BoardView::benchmark(int frames) {
                .arg(ms.back(), 0, 'f', 2);
   };
   fitAll();
-  series("whole", [&](int) { dirty_ = true; });
+  series("whole", [&](int) { sceneDirty_ = true; });
   const Vec2 c0 = center_;
   scale_ *= 4;
-  series("zoom4", [&](int) { dirty_ = true; });
+  series("zoom4", [&](int) { sceneDirty_ = true; });
+  series("view4", [&](int) {});  // the scene as it is: what a pan or a zoom costs
   series("pan", [&](int i) { center_ = c0 + Vec2{double(i % 25) * 20 / scale_, double(i % 25) * 7 / scale_}; });
   center_ = c0;
   setMode(Mode::Measure);
@@ -160,7 +167,8 @@ void BoardView::zoomBy(double factor) {
   refresh();
 }
 
-void BoardView::resizeEvent(QResizeEvent*) {
+void BoardView::resizeEvent(QResizeEvent* e) {
+  QOpenGLWidget::resizeEvent(e);
   if (autoFit_ && doc_->hasBoard()) {
     BBox bb = doc_->board()->bbox();
     if (bb.valid()) {
@@ -342,140 +350,20 @@ static QColor brighter(QColor c, int rate) {
 
 // Boxes that surely hold what is drawn of an item (for skipping what lies outside the part drawn).
 static BBox around(Vec2 c, double h) { return {c.x - h, c.y - h, c.x + h, c.y + h}; }
-static BBox trackBox(const Track& t) {
-  const double h = double(t.width) / 2;
-  if (t.mid)
-    if (ArcGeom g = ArcGeom::fromThreePoints(t.a.v(), t.mid->v(), t.b.v()); g.valid) return around(g.center, g.radius + h);
-  BBox bb = around(t.a.v(), h);
-  bb.add(around(t.b.v(), h));
-  return bb;
-}
 static BBox padBox(const Pad& p) {
   double h = std::max<double>(std::max(p.shape.w, p.shape.h), p.drill);
   for (Vec2 q : p.shape.poly) h = std::max(h, 2 * std::max(std::abs(q.x), std::abs(q.y)));
   return around(p.pos.v(), h);  // (twice the half size: a pad's shape on another layer may be larger)
 }
-static BBox textBounds(const Board& b, const Text& t) {
-  BBox bb;
-  for (Vec2 v : b.textBox(t)) bb.add(v);
-  return bb;
-}
-static BBox graphicBox(const Graphic& g) { return g.bbox().inflated(double(g.width) / 2); }
 
 void BoardView::refresh() {
-  dirty_ = true;
+  sceneDirty_ = true;
   update();
 }
 
-// Moves the picture by (dx, dy) pixels in place; what is uncovered keeps its old pixels.
-static void scrollImage(QImage& img, int dx, int dy) {
-  const int w = img.width(), h = img.height(), bpl = int(img.bytesPerLine());
-  const int n = w - std::abs(dx);
-  uchar* bits = img.bits();
-  auto row = [&](int y) {
-    uchar* to = bits + qsizetype(y) * bpl;
-    const uchar* from = bits + qsizetype(y - dy) * bpl;
-    std::memmove(to + std::max(dx, 0) * 4, from + std::max(-dx, 0) * 4, size_t(n) * 4);
-  };
-  if (dy > 0)
-    for (int y = h - 1; y >= dy; --y) row(y);
-  else
-    for (int y = 0; y < h + dy; ++y) row(y);
-}
-
-// The world's part being drawn by this thread, with a margin: what is outside is skipped.
-static thread_local BBox tlCull{-1e300, -1e300, 1e300, 1e300};
-bool BoardView::seen(const BBox& bb) const { return bb.intersects(tlCull); }
-// A point with what is drawn round it in pixels (a label, a marker), up to `px` pixels off it.
-static bool seenPx(Vec2 at, double px, double scale) {
-  return BBox{at.x, at.y, at.x, at.y}.inflated(px / scale).intersects(tlCull);
-}
-
-void BoardView::paintBand(QPainter& p, const QRectF& area) {
-  p.setClipRect(area);
-  // The items' boxes hold their pens; two pixels for the antialiasing (what is drawn in pixels, the labels and DRC
-  // markers, is looked for further: seenPx).
-  const double margin = 2 / scale_;
-  const Vec2 a = toWorld(area.topLeft()), b = toWorld(area.bottomRight());
-  tlCull = BBox{std::min(a.x, b.x), std::min(a.y, b.y), std::max(a.x, b.x), std::max(a.y, b.y)}.inflated(margin);
-  p.fillRect(area, doc_->color("background", 0x030b10));
-  {
-    ProfScope ps("paint.grid");
-    drawGrid(p);
-  }
-  p.setRenderHint(QPainter::Antialiasing, true);
-  drawBoard(p);
-  tlCull = BBox{-1e300, -1e300, 1e300, 1e300};
-}
-
-void BoardView::paintCache(const QRect& area) {
-  // Bands of rows of the picture, each drawn by its own painter on its rows; what the drawing computes lazily is
-  // computed first (Qt 6 draws text from any thread; drawText builds the glyphs' outlines one at a time).
-  const qreal dpr = cache_.devicePixelRatio();
-  const int top = int(std::floor(area.top() * dpr)), bottom = std::min(cache_.height(), int(std::ceil((area.bottom() + 1) * dpr)));
-  const int rows = bottom - top;
-  // A band to 400 thousand pixels, up to eight: further the painters' threads hinder each other (AMK310 maximised,
-  // the whole board: 70 ms in one band, 40 in four, 30 in eight, slower in sixteen and more).
-  const qsizetype pixels = qsizetype(rows) * qsizetype(std::ceil(area.width() * dpr));
-  const int bands = int(std::clamp<qsizetype>(pixels / 400'000, 1, std::min(8, parallelThreads())));
-  if (bands > 1 && doc_->display().flag("showNetLines")) doc_->connectivity();
-  parallelFor(size_t(bands), [&](size_t i) {
-    const int y0 = top + rows * int(i) / bands, y1 = top + rows * int(i + 1) / bands;
-    QImage band(cache_.bits() + qsizetype(y0) * cache_.bytesPerLine(), cache_.width(), y1 - y0, cache_.bytesPerLine(),
-                cache_.format());
-    band.setDevicePixelRatio(dpr);
-    QPainter p(&band);
-    p.translate(0, -y0 / dpr);
-    paintBand(p, QRectF(area).intersected(QRectF(0, y0 / dpr, width(), (y1 - y0) / dpr)));
-  });
-}
-
-void BoardView::updateCache() {
-  const qreal dpr = devicePixelRatioF();
-  const QSize dev = size() * dpr;
-  bool full = dirty_ || cache_.size() != dev || cache_.devicePixelRatio() != dpr || cacheScale_ != scale_;
-  if (!full && center_ == cacheCenter_) return;
-  ProfScope ps("paint.board");
-  if (!full) {
-    // Panned: by whole device pixels the picture moves and the strips uncovered are drawn.
-    const Vec2 d = (cacheCenter_ - center_) * (scale_ * dpr);
-    const double rx = std::round(d.x), ry = std::round(d.y);
-    if (std::abs(d.x - rx) > 1e-3 || std::abs(d.y - ry) > 1e-3 || std::abs(rx) >= dev.width() / 2 ||
-        std::abs(ry) >= dev.height() / 2) {
-      full = true;
-    } else {
-      const int dx = int(rx), dy = int(ry);
-      center_ = cacheCenter_ - Vec2{rx, ry} * (1 / (scale_ * dpr));  // exactly the pixels moved
-      scrollImage(cache_, dx, dy);
-      cacheCenter_ = center_;
-      // The strips in the widget's pixels (the device's divided by dpr, rounded outwards).
-      const int sx = int(std::ceil(std::abs(dx) / dpr)) + 1, sy = int(std::ceil(std::abs(dy) / dpr)) + 1;
-      if (dx) paintCache(dx > 0 ? QRect(0, 0, sx, height()) : QRect(width() - sx, 0, sx, height()));
-      if (dy) paintCache(dy > 0 ? QRect(0, 0, width(), sy) : QRect(0, height() - sy, width(), sy));
-      return;
-    }
-  }
-  if (cache_.size() != dev) cache_ = QImage(dev, QImage::Format_ARGB32_Premultiplied);
-  cache_.setDevicePixelRatio(dpr);
-  paintCache(rect());
-  cacheCenter_ = center_;
-  cacheScale_ = scale_;
-  dirty_ = false;
-}
-
-void BoardView::paintEvent(QPaintEvent*) {
-  QPainter p(this);
-  if (!doc_->hasBoard()) {
-    p.fillRect(rect(), QColor(0x03, 0x0b, 0x10));
-    return;
-  }
-  ProfScope frame("paint");
-  updateCache();
-  p.drawImage(QPointF(0, 0), cache_);
-  p.setRenderHint(QPainter::Antialiasing, true);
-  ProfScope ps("paint.tools");
-  drawOverlay(p);
-  drawTools(p);
+BBox BoardView::viewBox(double marginPx) const {
+  const Vec2 half{(width() / 2.0 + marginPx) / scale_, (height() / 2.0 + marginPx) / scale_};
+  return {center_.x - half.x, center_.y - half.y, center_.x + half.x, center_.y + half.y};
 }
 
 void BoardView::drawTools(QPainter& p) {
@@ -486,14 +374,12 @@ void BoardView::drawTools(QPainter& p) {
     p.setBrush(Qt::NoBrush);
     for (Vec2 v : viaSites(snapped(cursor_))) p.drawEllipse(toScreen(v), std::max(r, 2.0), std::max(r, 2.0));
   }
-  // The axis of a selected zipped section, thin between its conductors (TopoR: the pair is edited by it).
-  if (doc_->hasBoard() && mode_ == Mode::Select) {
-    const Board& b = *doc_->board();
-    p.setPen(QPen(QColor(0xff, 0xff, 0xff), 1));
-    p.setBrush(Qt::NoBrush);
-    for (int z : selectedZips())
-      for (const Track& t : b.zips[size_t(z)].axis) drawCentreline(p, t);
-  }
+  if (routing_ && !routePair_)
+    if (auto magnet = routeMagnet(cursor_)) {  // the place a click ends the route on
+      p.setPen(QPen(Qt::white, 1.5));
+      p.setBrush(Qt::NoBrush);
+      p.drawEllipse(toScreen(magnet->at), 6.0, 6.0);
+    }
   if (drag_ == Drag::None || !dragMoved_) {
     p.setPen(QPen(QColor(0x20, 0x20, 0x20), 1));
     p.setBrush(QColor(0xf0, 0xf0, 0xf0));
@@ -536,140 +422,6 @@ void BoardView::drawTools(QPainter& p) {
   }
 }
 
-void BoardView::drawGrid(QPainter& p) {
-  const DisplayControl& d = doc_->display();
-  if (!d.gridShow || d.gridX <= 0 || d.gridY <= 0) return;
-  // Too dense a grid is drawn at a multiple of its step.
-  double sx = d.gridX, sy = d.gridY;
-  while (px(sx) < 8) sx *= 2;
-  while (px(sy) < 8) sy *= 2;
-  Vec2 a = toWorld({0, 0}), b = toWorld({double(width()), double(height())});
-  QColor c = QColor::fromRgb(QRgb(d.gridColor));
-  c.setAlpha(d.gridDots ? 160 : 60);
-  p.setPen(QPen(c, d.gridDots ? 1.5 : 1));
-  if (d.gridDots) {
-    // One row of dots drawn once and copied to every row: tens of thousands of wide points cost a third of a frame.
-    const qreal dpr = p.device()->devicePixelRatioF();
-    QImage row(QSize(width(), 4) * dpr, QImage::Format_ARGB32_Premultiplied);
-    row.setDevicePixelRatio(dpr);
-    row.fill(Qt::transparent);
-    {
-      QPainter rp(&row);
-      rp.setPen(p.pen());
-      QVector<QPointF> pts;
-      for (double x = std::floor(a.x / sx) * sx; x <= b.x; x += sx) pts << QPointF(toScreen({x, 0}).x(), 2);
-      rp.drawPoints(pts.data(), int(pts.size()));
-    }
-    for (double y = std::floor(a.y / sy) * sy; y <= b.y; y += sy)
-      p.drawImage(QPointF(0, std::round((toScreen({0, y}).y() - 2) * dpr) / dpr), row);
-  } else {
-    // A stroked grid cost a third of a frame: each vertical line is a span per row. The vertical lines are one
-    // row of pixels repeated down the view by a texture brush (a span per row for all of them), the horizontal
-    // ones rectangles.
-    const qreal dpr = p.device()->devicePixelRatioF();
-    QImage comb(int(std::ceil(width() * dpr)), 1, QImage::Format_ARGB32_Premultiplied);
-    comb.fill(Qt::transparent);
-    const QRgb px1 = qPremultiply(c.rgba());
-    auto* line = reinterpret_cast<QRgb*>(comb.scanLine(0));
-    for (double x = std::floor(a.x / sx) * sx; x <= b.x; x += sx)
-      if (int i = int(std::floor(toScreen({x, 0}).x() * dpr)); i >= 0 && i < comb.width()) line[i] = px1;
-    comb.setDevicePixelRatio(dpr);
-    p.fillRect(rect(), QBrush(comb));
-    for (double y = std::floor(a.y / sy) * sy; y <= b.y; y += sy)
-      p.fillRect(QRectF(0, std::floor(toScreen({0, y}).y() * dpr) / dpr, width(), 1 / dpr), c);
-  }
-}
-
-void BoardView::drawCentreline(QPainter& p, const Track& t) {
-  if (!t.isArc()) {
-    p.drawLine(toScreen(t.a.v()), toScreen(t.b.v()));
-    return;
-  }
-  p.drawPolyline(toPoly(t.path(std::max(500.0, 0.3 / scale_)), [&](Vec2 v) { return toScreen(v); }));
-}
-
-void BoardView::drawTrack(QPainter& p, const Track& t, const QColor& c, double extra) {
-  const DisplayControl& d = doc_->display();
-  bool thin = d.flag("showThinWires", false);
-  QPen pen(c, thin ? 1.0 : px(double(t.width) + extra), Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
-  p.setPen(pen);
-  p.setBrush(Qt::NoBrush);
-  drawCentreline(p, t);
-  // The flexible fixation («гибкая фиксация»): a dashed centre line in the background's colour (over a thin
-  // line the line itself comes out dashed).
-  if (doc_->hasBoard() && doc_->board()->flexFixed(t.net) && d.flag("showFlexFix")) {
-    // (2 px: a 1 px line between two rows of pixels came out half as dark.)
-    QPen dash(doc_->color("background", 0x030b10), thin ? 1.0 : std::min(2.0, px(double(t.width)) / 3), Qt::CustomDashLine, Qt::FlatCap);
-    dash.setDashPattern({2, 2});
-    p.setPen(dash);
-    drawCentreline(p, t);
-  }
-}
-
-void BoardView::drawPad(QPainter& p, const Pad& pad, LayerId l, const QColor& c) {
-  // On a layer: the pad's shape there (its stack's detail: another size on an inner layer, the mask, the paste).
-  std::optional<Shape> on = l >= 0 ? padShapeOn(*doc_->board(), pad, l) : std::nullopt;
-  if (l >= 0 && !on) return;
-  Shape s = on ? *on : pad.shapeGeom();
-  p.setPen(Qt::NoPen);
-  p.setBrush(c);
-  if (s.kind == Shape::Kind::Point) {
-    QPointF ctr = toScreen(s.a);
-    double r = px(s.r);
-    p.drawEllipse(ctr, r, r);
-  } else {
-    auto outline = s.outline(std::max(2000.0, 0.5 / scale_));
-    p.drawPolygon(toPoly(outline, [&](Vec2 v) { return toScreen(v); }));
-  }
-}
-
-void BoardView::drawVia(QPainter& p, const Via& v, const QColor& c) {
-  p.setPen(Qt::NoPen);
-  p.setBrush(c);
-  QPointF ctr = toScreen(v.pos.v());
-  double r = px(v.diameter / 2.0);
-  p.drawEllipse(ctr, r, r);
-}
-
-void BoardView::drawGraphic(QPainter& p, const Graphic& g, const QColor& c) {
-  QPen pen(c, std::max(1.0, px(double(g.width))), Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
-  p.setPen(pen);
-  bool filled = doc_->board()->drawnFilled(g);
-  p.setBrush(filled ? QBrush(c) : Qt::NoBrush);
-  switch (g.kind) {
-    case GraphicKind::Line: p.drawLine(toScreen(g.a), toScreen(g.b)); break;
-    case GraphicKind::Arc: {
-      auto arc = ArcGeom::fromThreePoints(g.a, g.m, g.b);
-      if (!arc.valid) {
-        p.drawLine(toScreen(g.a), toScreen(g.b));
-        break;
-      }
-      p.drawPolyline(toPoly(arc.tessellate(std::max(2000.0, 0.5 / scale_)), [&](Vec2 v) { return toScreen(v); }));
-      break;
-    }
-    case GraphicKind::Circle: {
-      double r = px((g.b - g.a).len());
-      p.drawEllipse(toScreen(g.a), r, r);
-      break;
-    }
-    case GraphicKind::Rect: {
-      QPointF a = toScreen(g.a), b = toScreen(g.b);
-      p.drawRect(QRectF(a, b));
-      break;
-    }
-    case GraphicKind::Poly: {
-      if (g.pts.size() < 2) break;
-      QPolygonF poly = toPoly(g.path(std::max(2000.0, 0.5 / scale_)), [&](Vec2 v) { return toScreen(v); });
-      if (filled) p.drawPolygon(poly);
-      else {
-        poly << poly.first();
-        p.drawPolyline(poly);
-      }
-      break;
-    }
-  }
-}
-
 // Special colour of a net («Цепи» tab), if any and enabled for this kind of object.
 std::optional<QColor> BoardView::netColor(int net, bool enabledForKind) const {
   const DisplayControl& d = doc_->display();
@@ -678,174 +430,6 @@ std::optional<QColor> BoardView::netColor(int net, bool enabledForKind) const {
   for (auto& nc : d.netColors)
     if (nc.net == name) return QColor::fromRgb(QRgb(nc.color));
   return std::nullopt;
-}
-
-void BoardView::drawFill(QPainter& p, const Zone& z) const {
-  for (auto& f : z.filled) {
-    BBox box;
-    for (Vec2 v : f) box.add(v);
-    if (seen(box)) p.drawPolygon(toPoly(f, [&](Vec2 v) { return toScreen(v); }));
-  }
-}
-
-void BoardView::drawLayer(QPainter& p, LayerId l) {
-  const Board& b = *doc_->board();
-  const DisplayControl& d = doc_->display();
-  const LayerDisplay* ld = d.layer(b.layers[l].name);
-  QColor details = QColor::fromRgb(QRgb(ld ? ld->details : 0xc0c0c0));
-  QColor padColor = QColor::fromRgb(QRgb(ld ? ld->pads : 0xc0c0c0));
-  QColor fixColor = QColor::fromRgb(QRgb(ld ? ld->fix : 0x808080));
-  bool showDetails = !ld || ld->showDetails, showPads = !ld || ld->showPads;
-  const Layer& L = b.layers[l];
-  if (L.kind == LayerKind::Copper) {
-    if (d.flag("showCoppers")) {
-      ProfScope ps("layer.zones");
-      for (auto& z : sketch_ ? sketch_->zones : b.zones)
-        if (z.layer == l) {
-          QColor c = netColor(z.net, d.colorizeCopper).value_or(details);
-          p.setPen(Qt::NoPen);
-          p.setBrush(c);
-          drawFill(p, z);
-          // An unpoured area shows its outline; cutouts are dashed.
-          p.setBrush(Qt::NoBrush);
-          if (z.filled.empty()) {
-            p.setPen(QPen(c, 1));
-            p.drawPolygon(toPoly(z.outline, [&](Vec2 v) { return toScreen(v); }));
-          }
-          p.setPen(QPen(c, 1, Qt::DashLine));
-          for (auto& cut : z.cutouts) p.drawPolygon(toPoly(cut, [&](Vec2 v) { return toScreen(v); }));
-        }
-    }
-    if (d.flag("showWires") && showDetails) {
-      ProfScope ps("layer.tracks");
-      for (auto& t : shownTracks())
-        if (t.layer == l && seen(trackBox(t)))
-          drawTrack(p, t, netColor(t.net, d.colorizeWire).value_or(t.locked ? fixColor : details));
-      // The clasps («замки») of the zipped sections: a bar across the pair at each end of its axis.
-      p.setPen(QPen(details.lighter(170), 2));
-      for (const ZippedWire& z : b.zips) {
-        if (z.layer != l || z.axis.empty()) continue;
-        for (int end = 0; end < 2; ++end) {
-          const Track& piece = end ? z.axis.back() : z.axis.front();
-          const Vec2 at = end ? piece.b.v() : piece.a.v();
-          Vec2 dir;
-          if (piece.mid) {
-            const ArcGeom g = ArcGeom::fromThreePoints(piece.a.v(), piece.mid->v(), piece.b.v());
-            dir = (at - g.center).perp();
-          } else {
-            dir = piece.b.v() - piece.a.v();
-          }
-          if (dir.len2() < 1) continue;
-          const Vec2 n = dir.normalized().perp() * (double(z.width()) / 2.0);
-          p.drawLine(toScreen(at - n), toScreen(at + n));
-        }
-      }
-      // The axes of the zipped sections, thin between their conductors (a selected one's is drawn again, white,
-      // with its handles: drawTools).
-      if (d.flag("showZipAxis")) {
-        p.setPen(QPen(details.lighter(170), 1));
-        for (const ZippedWire& z : b.zips)
-          if (z.layer == l)
-            for (const Track& t : z.axis) drawCentreline(p, t);
-      }
-    }
-    if (d.flag("showMetalPads") && showPads) {
-      ProfScope ps("layer.pads");
-      bool special = d.flag("throughPad", false);
-      QColor through = doc_->color("clrThroughPads", 0xc0c0c0);
-      for (auto& pad : b.pads) {
-        if (!pad.onLayer(l) || !seen(padBox(pad))) continue;
-        if (pad.component >= 0 && !componentVisible(pad.component)) continue;
-        QColor c = special && pad.drill > 0 ? through : padColor;
-        drawPad(p, pad, l, netColor(pad.net, d.colorizePad).value_or(c));
-      }
-    }
-    if (d.flag("showTexts") && showDetails) {
-      ProfScope ps("layer.texts");
-      for (auto& t : b.texts)
-        if (t.layer == l && seen(textBounds(b, t))) drawText(p, t, details);
-    }
-    return;
-  }
-  // Technical layers: the pads' details on the mask and paste layers, drawings of the board and of visible
-  // components.
-  ProfScope ps("layer.mech");
-  int group = layerGroup(b, l);
-  bool groupPads = group == 0 ? d.flag("showTopMechPads") : group == 2 ? d.flag("showBotMechPads") : true;
-  if ((L.kind == LayerKind::Mask || L.kind == LayerKind::Paste) && showPads && groupPads)
-  {
-    for (auto& pad : b.pads)
-      if (pad.padstack >= 0 && seen(padBox(pad)) && (pad.component < 0 || componentVisible(pad.component)))
-        drawPad(p, pad, l, padColor);
-    // The vias' openings, as their type gives them.
-    if (d.flag("showVias") && b.rules) {
-      p.setPen(Qt::NoPen);
-      p.setBrush(padColor);
-      for (auto& v : b.vias)
-        if (Coord dia = viaDiameterOn(b, v, l); dia > 0 && seen(around(v.pos.v(), double(dia)))) {
-          double r = px(dia / 2.0);
-          p.drawEllipse(toScreen(v.pos.v()), r, r);
-        }
-    }
-  }
-  if (!showDetails || (group == 0 && !d.flag("showTopMechDetails")) || (group == 2 && !d.flag("showBotMechDetails")))
-    return;
-  auto draw = [&](const Graphic& g) {  // board contours are never filled
-    if (seen(graphicBox(g))) drawGraphic(p, g, details);
-  };
-  for (int ci = 0; ci < int(b.components.size()); ++ci)
-    if (componentVisible(ci))
-      for (auto& g : b.components[ci].graphics)
-        if (g.layer == l) draw(g);
-  for (auto& g : b.graphics)
-    if (g.layer == l) draw(g);
-  if (d.flag("showTexts"))
-    for (auto& t : b.texts)
-      if (t.layer == l && seen(textBounds(b, t))) drawText(p, t, details);
-}
-
-void BoardView::drawText(QPainter& p, const Text& t, const QColor& c) {
-  const TextStyle& st = doc_->board()->styleOf(t);
-  double h = px(double(st.height));
-  if (h < 2) {
-    // Too small to read: the box.
-    auto box = doc_->board()->textBox(t);
-    p.setPen(QPen(c, 1));
-    p.setBrush(Qt::NoBrush);
-    QPolygonF poly;
-    for (Vec2 v : box) poly << toScreen(v);
-    p.drawPolygon(poly);
-    return;
-  }
-  // The lines as the board lays them out (Board::textLayout), each in the style's font with its cell (ascent and
-  // descent) one character height; a line's top is the top of its capitals, as TopoR has it (a centred «2» in a
-  // circle: the top of the digit half the height above the point, its baseline under it by the rest).
-  QPainterPath path;
-  {
-    static std::mutex glyphs;  // (the bands of the picture are drawn in parallel; the outlines are built one at a time)
-    std::lock_guard lock(glyphs);
-    TextLayout l = doc_->board()->textLayout(t);
-    QFont f = textFont(st);
-    QFontMetricsF fm(f);
-    double k = l.lineHeight / (fm.ascent() + fm.descent());  // nm per font pixel
-    for (auto [i, line] : v::enumerate(l.lines)) {
-      QPainterPath one;
-      one.addText(0, fm.capHeight(), f, QString::fromUtf8(line.data(), qsizetype(line.size())));
-      path.addPath(QTransform().translate(l.left, l.top + double(i) * l.lineHeight).scale(k, k).map(one));
-    }
-  }
-  QTransform tr;
-  QPointF at = toScreen(t.pos);
-  tr.translate(at.x(), at.y());
-  tr.rotate(-t.angle);
-  if (t.mirror) tr.scale(-1, 1);
-  tr.scale(scale_, scale_);
-  p.save();
-  p.setTransform(tr, true);
-  p.setPen(Qt::NoPen);
-  p.setBrush(c);
-  p.drawPath(path);
-  p.restore();
 }
 
 bool BoardView::keepoutVisible(const Keepout& k) const {
@@ -857,81 +441,10 @@ bool BoardView::keepoutVisible(const Keepout& k) const {
   return (lm & visibleCopper()) != 0;
 }
 
-void BoardView::drawKeepouts(QPainter& p) {
-  const Board& b = *doc_->board();
-  for (const Keepout& k : b.keepouts) {
-    if (!keepoutVisible(k)) continue;
-    QColor c = k.role == Keepout::Role::Route ? doc_->color("keepoutWireAll", 0xff0000)
-               : k.side == Side::Top          ? doc_->color("keepoutPlaceTop", 0x259500)
-               : k.side == Side::Bottom       ? doc_->color("keepoutPlaceBot", 0x00aaaa)
-                                              : doc_->color("keepoutPlaceBoth", 0xf79646);
-    // A keepout on one layer takes that layer's colour, as TopoR shows them.
-    if (k.role == Keepout::Role::Route && std::popcount(k.layers) == 1) c = doc_->layerColor(std::countr_zero(k.layers));
-    for (auto& sh : k.shapes()) {
-      if (sh.kind == Shape::Kind::Segment) {
-        p.setPen(QPen(c, 2, Qt::DashLine));
-        p.drawLine(toScreen(sh.a), toScreen(sh.b));
-        continue;
-      }
-      QPolygonF poly = toPoly(sh.kind == Shape::Kind::Polygon ? sh.poly : sh.outline(std::max(2000.0, 0.5 / scale_)),
-                              [&](Vec2 v) { return toScreen(v); });
-      p.setPen(QPen(c, 1.5));
-      p.setBrush(QBrush(c, Qt::BDiagPattern));
-      p.drawPolygon(poly);
-    }
-  }
-  p.setBrush(Qt::NoBrush);
-}
-
-void BoardView::drawVias(QPainter& p) {
-  const DisplayControl& d = doc_->display();
-  if (!d.flag("showVias")) return;
-  LayerMask vis = visibleCopper();
-  QColor through = doc_->color("clrThroughVias", 0x949494), fixed = doc_->color("clrFixedVias", 0x7070b8);
-  bool showFixed = d.flag("fixedVia");
-  for (auto& v : shownVias())
-    if (v.layers & vis && seen(around(v.pos.v(), double(v.diameter)))) drawVia(p, v, netColor(v.net, d.colorizeVia).value_or(v.locked && showFixed ? fixed : through));
-}
-
-// Drill holes over everything, whatever layers are shown: the background dotted, a thin contour in the board
-// outline's colour. The dots are laid from each hole's centre, so a picture panned shows them where a picture drawn
-// anew does.
-void BoardView::drawHoles(QPainter& p) {
-  const Board& b = *doc_->board();
-  QColor edge = doc_->color("board", 0xd4d4d4);
-  constexpr int kStep = 7;
-  QImage tile(kStep, kStep, QImage::Format_ARGB32_Premultiplied);
-  tile.fill(doc_->color("background", 0x030b10));
-  tile.setPixelColor(kStep / 2, kStep / 2, edge);
-  QBrush dots(tile);
-  p.setPen(QPen(edge, 1));
-  auto hole = [&](Vec2 at, auto&& draw) {
-    QPointF c = toScreen(at);
-    p.setBrushOrigin(std::round(c.x()) - kStep / 2, std::round(c.y()) - kStep / 2);
-    p.setBrush(dots);
-    draw(c);
-  };
-  for (auto& pad : b.pads) {
-    if (pad.drill <= 0 || !seen(padBox(pad))) continue;
-    if (pad.drillH > 0 && pad.drillH != pad.drill) {
-      Shape s = Shape::rect(pad.pos.v(), double(pad.drill), double(pad.drillH), -degToRad(pad.angle),
-                            std::min(pad.drill, pad.drillH) / 2.0);
-      hole(pad.pos.v(), [&](QPointF) { p.drawPolygon(toPoly(s.outline(2000), [&](Vec2 v) { return toScreen(v); })); });
-    } else if (double r = px(pad.drill / 2.0); r >= 0.5) {
-      hole(pad.pos.v(), [&](QPointF c) { p.drawEllipse(c, r, r); });
-    }
-  }
-  if (doc_->display().flag("showVias"))
-    for (auto& v : shownVias())
-      if (double r = px(v.drill / 2.0); r >= 0.5 && seen(around(v.pos.v(), double(v.drill))))
-        hole(v.pos.v(), [&](QPointF c) { p.drawEllipse(c, r, r); });
-  p.setBrushOrigin(0, 0);
-  p.setBrush(Qt::NoBrush);
-}
-
 void BoardView::drawLabels(QPainter& p) {
   const Board& b = *doc_->board();
   const DisplayControl& d = doc_->display();
+  const BBox view = viewBox(64);
   QFont f = font();
   // Component names at the component origin.
   if (d.flag("showCompsDes")) {
@@ -940,7 +453,7 @@ void BoardView::drawLabels(QPainter& p) {
     p.setPen(doc_->color("compsName", 0xffffff));
     if (px(0.6 * kNmPerMm) >= 3)
       for (int ci = 0; ci < int(b.components.size()); ++ci)
-        if (componentVisible(ci) && seenPx(b.components[ci].pos.v(), 64, scale_)) {
+        if (componentVisible(ci) && view.contains(b.components[ci].pos.v())) {
           QRectF r(toScreen(b.components[ci].pos.v()) - QPointF(60, 10), QSizeF(120, 20));
           p.drawText(r, Qt::AlignCenter, QString::fromStdString(b.components[ci].ref));
         }
@@ -950,7 +463,7 @@ void BoardView::drawLabels(QPainter& p) {
   if (!names && !nets) return;
   for (auto& pad : b.pads) {
     if (pad.component >= 0 && !componentVisible(pad.component)) continue;
-    if (!(pad.copper & visibleCopper()) || !seen(padBox(pad).inflated(32 / scale_))) continue;
+    if (!(pad.copper & visibleCopper()) || !view.intersects(padBox(pad))) continue;
     double size = px(double(std::min(pad.shape.w, pad.shape.h)));
     if (size < 14) continue;
     f.setPixelSize(std::clamp(int(size / 3), 6, 14));
@@ -967,216 +480,10 @@ void BoardView::drawLabels(QPainter& p) {
   }
 }
 
-void BoardView::drawBoard(QPainter& p) {
-  const Board& b = *doc_->board();
-  const DisplayControl& d = doc_->display();
-  // Bottom side first, active copper last among copper, top side over it, documenting layers on top; an active
-  // mechanical or documenting layer over them all.
-  auto groupOf = [&](LayerId l) { return layerGroup(b, l); };
-  LayerId active = doc_->activeLayer();
-  bool activeCopper = b.layers[active].kind == LayerKind::Copper;
-  for (LayerId l = 0; l < LayerId(b.layers.size()); ++l)
-    if (groupOf(l) == 2 && l != active && layerVisible(l)) drawLayer(p, l);
-  auto cu = b.copperLayers();
-  for (LayerId l : cu | v::reverse)
-    if (l != active && layerVisible(l)) drawLayer(p, l);
-  if (activeCopper && layerVisible(active)) drawLayer(p, active);
-  {
-    ProfScope ps("board.vias");
-    drawVias(p);
-  }
-  ProfScope psHoles("board.rest");
-  for (LayerId l = 0; l < LayerId(b.layers.size()); ++l)
-    if ((groupOf(l) == 0 || groupOf(l) == 3) && l != active && layerVisible(l)) drawLayer(p, l);
-  if (!activeCopper && layerVisible(active)) drawLayer(p, active);
-  // Board outline.
-  if (d.flag("showBoardOutline")) {
-    p.setPen(QPen(doc_->color("board", 0xd4d4d4), 1));
-    p.setBrush(Qt::NoBrush);
-    for (auto& loop : b.outline) p.drawPolygon(toPoly(loop, [&](Vec2 v) { return toScreen(v); }));
-    for (LayerId l = 0; l < LayerId(b.layers.size()); ++l)
-      if (groupOf(l) == -1) drawLayer(p, l);
-  }
-  drawKeepouts(p);
-  // «Габариты»: the rectangle round the component's pads and drawings in its own frame, turned with it (TopoR
-  // draws the rectangle round the turned component, which grows at an odd angle).
-  if (d.flag("showCompsBound", false)) {
-    p.setPen(QPen(doc_->color("compsBound", 0xffffff), 1));
-    p.setBrush(Qt::NoBrush);
-    for (int ci = 0; ci < int(b.components.size()); ++ci) {
-      if (!componentVisible(ci)) continue;
-      const Component& c = b.components[ci];
-      if (BBox bb = componentBounds(b, ci); bb.valid())
-        p.drawPolygon(QPolygonF{toScreen(c.toBoard({bb.minX, bb.minY})), toScreen(c.toBoard({bb.maxX, bb.minY})),
-                                toScreen(c.toBoard({bb.maxX, bb.maxY})), toScreen(c.toBoard({bb.minX, bb.maxY}))});
-    }
-  }
-  drawHoles(p);
-  drawLabels(p);
-
-  // Ratsnest, with the «Показывать связи» filter; not over the autorouter's progress (the board's own connections).
-  if (d.flag("showNetLines") && !sketch_) {
-    QColor nl = doc_->color("netLines", 0xaf7d3a);
-    for (auto& r : doc_->connectivity().ratsnest) {
-      if (d.filterNetlines && !d.netlineNets.empty()) {
-        bool listed = r::contains(d.netlineNets, b.nets[r.net].name);
-        if (listed == d.hideFilteredNetlines) continue;
-      }
-      BBox rb = around(r.a, 0);
-      rb.add(r.b);
-      if (!seen(rb)) continue;
-      p.setPen(QPen(netColor(r.net, d.colorizeNetline).value_or(nl), 1));
-      p.drawLine(toScreen(r.a), toScreen(r.b));
-    }
-  }
-
-  // Selection and the highlighted net: others darkened by «Затемнение объектов», selected brightened.
-  auto items = doc_->selectedItems();
-  auto comps = doc_->selectedComponents();
-  int hn = doc_->highlightedNet();
-  if (!items.empty() || !comps.empty() || hn != kNoNet) {
-    if (d.darkRate > 0) {
-      QColor dark = doc_->color("background", 0x030b10);
-      dark.setAlpha(d.darkRate * 255 / 100);
-      p.fillRect(rect(), dark);
-    }
-    int rate = d.hilightRate;
-    auto lit = [&](LayerId l) { return brighter(doc_->layerColor(l), rate); };
-    auto litPad = [&](const Pad& pad) {
-      for (LayerId l : b.copperLayers())
-        if (pad.onLayer(l) && layerVisible(l)) {
-          const LayerDisplay* ld = d.layer(b.layers[l].name);
-          return brighter(QColor::fromRgb(QRgb(ld ? ld->pads : 0xc0c0c0)), rate);
-        }
-      return brighter(QColor(0xc0, 0xc0, 0xc0), rate);
-    };
-    QColor viaLit = brighter(doc_->color("clrThroughVias", 0x949494), rate);
-    if (hn != kNoNet) {
-      for (auto& t : b.tracks)
-        if (t.net == hn && layerVisible(t.layer) && seen(trackBox(t))) drawTrack(p, t, lit(t.layer));
-      for (auto& v : b.vias)
-        if (v.net == hn) drawVia(p, v, viaLit);
-      for (auto& pad : b.pads)
-        if (pad.net == hn) drawPad(p, pad, -1, litPad(pad));
-    }
-    for (ItemRef r : items) {
-      switch (r.type) {
-        case ItemType::Track: drawTrack(p, b.tracks[r.index], lit(b.tracks[r.index].layer)); break;
-        case ItemType::Via: drawVia(p, b.vias[r.index], viaLit); break;
-        case ItemType::Pad: drawPad(p, b.pads[r.index], -1, litPad(b.pads[r.index])); break;
-        case ItemType::Zone: {
-          const Zone& z = b.zones[r.index];
-          QColor c = lit(z.layer);
-          // The fill as the unselected one, no pen: an antialiased pen round thousands of points took more than the
-          // whole picture (and went along the seams of the fractured polygons).
-          p.setPen(Qt::NoPen);
-          p.setBrush(c);
-          drawFill(p, z);
-          p.setPen(QPen(c, 2));
-          p.setBrush(Qt::NoBrush);
-          p.drawPolygon(toPoly(z.outline, [&](Vec2 v) { return toScreen(v); }));
-          break;
-        }
-        case ItemType::Keepout:
-          for (auto& sh : b.keepouts[r.index].shapes()) {
-            p.setPen(QPen(QColor(0xff, 0xff, 0xff), 2));
-            p.setBrush(Qt::NoBrush);
-            if (sh.kind == Shape::Kind::Segment) p.drawLine(toScreen(sh.a), toScreen(sh.b));
-            else
-              p.drawPolygon(toPoly(sh.kind == Shape::Kind::Polygon ? sh.poly : sh.outline(std::max(2000.0, 0.5 / scale_)),
-                                   [&](Vec2 v) { return toScreen(v); }));
-          }
-          break;
-        case ItemType::Text: drawText(p, b.texts[r.index], lit(b.texts[r.index].layer)); break;
-        case ItemType::Detail: {
-          const Graphic& g = b.graphics[r.index];
-          drawGraphic(p, g, brighter(g.layer >= 0 && b.layers[g.layer].kind == LayerKind::Edge ? doc_->color("board", 0xd4d4d4)
-                                                                                                 : doc_->layerColor(g.layer),
-                                     rate));
-          break;
-        }
-      }
-    }
-    for (int ci : comps) {
-      const Component& c = b.components[ci];
-      for (auto& g : c.graphics)
-        if (g.layer >= 0 && layerVisible(g.layer)) drawGraphic(p, g, lit(g.layer));
-      for (int pi : c.pads) drawPad(p, b.pads[pi], -1, litPad(b.pads[pi]));
-    }
-  }
-
-  // DRC markers.
-  if (d.flag("showViolations") && d.flag("showDRCViolations")) {
-    p.setPen(QPen(doc_->color("drcViolation", 0xffffff), 2));
-    p.setBrush(Qt::NoBrush);
-    for (auto& v : doc_->drc()) {
-      if (!seenPx(v.pos, 10, scale_)) continue;
-      QPointF c = toScreen(v.pos);
-      p.drawEllipse(c, 7, 7);
-      p.drawLine(c + QPointF(-4, -4), c + QPointF(4, 4));
-      p.drawLine(c + QPointF(-4, 4), c + QPointF(4, -4));
-    }
-  }
-}
-
 void BoardView::setRouteSketch(std::shared_ptr<const topo::RouteSketch> sketch) {
   if (!sketch && !sketch_) return;
   sketch_ = std::move(sketch);
   refresh();
-}
-
-void BoardView::drawOverlay(QPainter& p) {
-  if (!routing_) return;
-  QColor c = doc_->layerColor(routeLayer_);
-  if (routePair_) {  // the pair: the sections laid, the one being laid, the rubber band, as conductors
-    for (const auto& sec : pr_.done)
-      for (const Track& t : pairCopper(sec)) drawTrack(p, t, doc_->layerColor(t.layer));
-    for (const Via& v : pr_.vias) drawVia(p, v, doc_->color("clrThroughVias", 0x949494));
-    PairRoute::Section cur{routeLayer_, routeTracks_, pr_.fromP, pr_.fromN, {}, {}, false};
-    const Vec2 at = constrained(routeLast_, snapped(cursor_));
-    if (!pr_.clasp) {  // the conductors converging from the pads to a clasp at the cursor
-      const Vec2 mid = (pr_.fromP + pr_.fromN) * 0.5;
-      Vec2 d = at - mid;
-      if (d.len2() < 1) return;
-      const Vec2 n = d.normalized().perp() * (double(pr_.w + pr_.gap) / 2.0);
-      const Vec2 side = (pr_.fromP - mid).dot(n) >= 0 ? n : n * -1.0;
-      p.setPen(QPen(brighter(c, 30), std::max(1.0, px(double(pr_.w))), Qt::SolidLine, Qt::RoundCap));
-      p.drawLine(toScreen(pr_.fromP), toScreen(at + side));
-      p.drawLine(toScreen(pr_.fromN), toScreen(at - side));
-      return;
-    }
-    if (auto seg = makeSegment(routeLast_, at)) cur.axis.push_back(*seg);
-    for (const Track& t : pairCopper(cur)) drawTrack(p, t, brighter(c, 30));
-    return;
-  }
-  for (auto& t : routeTracks_) drawTrack(p, t, doc_->layerColor(t.layer));
-  for (auto& v : routeVias_) drawVia(p, v, doc_->color("clrThroughVias", 0x949494));
-  // Where and how the wire is led to its target (dashed), or a pointer to it when there is no way.
-  if (!routeHint_.empty()) {
-    QColor hc = brighter(c, 50);
-    for (auto& t : routeHint_) {
-      QPen pen(hc, 1.5, Qt::DashLine);
-      p.setPen(pen);
-      p.setBrush(Qt::NoBrush);
-      auto pts = t.path(std::max(500.0, 0.3 / scale_));
-      p.drawPolyline(toPoly(pts, [&](Vec2 v) { return toScreen(v); }));
-    }
-  } else if (routeTarget_) {
-    p.setPen(QPen(brighter(c, 50), 1, Qt::DashLine));
-    p.drawLine(toScreen(routeLast_), toScreen(routeTarget_->at));
-  }
-  auto magnet = routeMagnet(cursor_);
-  if (auto seg = makeSegment(routeLast_, magnet ? magnet->at : constrained(routeLast_, snapped(cursor_)))) {
-    double m = rubberMargin(*seg);
-    QColor rc = m < 0 ? QColor(0xff, 0x30, 0x30) : brighter(c, 30);
-    rc.setAlpha(200);
-    drawTrack(p, *seg, rc);
-  }
-  if (magnet) {  // the place a click ends the route on
-    p.setPen(QPen(Qt::white, 1.5));
-    p.setBrush(Qt::NoBrush);
-    p.drawEllipse(toScreen(magnet->at), 6.0, 6.0);
-  }
 }
 
 // ---------------------------------------------------------------- mouse / keys
@@ -2319,8 +1626,6 @@ void BoardView::drawClick(Vec2 w) {
   refresh();
 }
 
-namespace {
-
 // The figure of a drawing tool from its points (empty if they do not make one yet).
 std::vector<Graphic> figureOf(DrawShape shape, const std::vector<Vec2>& pts) {
   std::vector<Graphic> out;
@@ -2387,6 +1692,8 @@ std::vector<Graphic> figureOf(DrawShape shape, const std::vector<Vec2>& pts) {
   }
   return out;
 }
+
+namespace {
 
 // A closed outline of the figure (copper areas and cutouts are polygons).
 Polyline polygonOf(const std::vector<Graphic>& fig) {
@@ -2510,20 +1817,13 @@ void BoardView::drawDrawing(QPainter& p) {
   QColor c(0xff, 0xff, 0x60);
   p.setPen(QPen(c, 1, Qt::DashLine));
   p.setBrush(Qt::NoBrush);
-  auto fig = figureOf(drawShape_, pts);
-  if (drawShape_ == DrawShape::Poly && pts.size() == 2) fig = figureOf(DrawShape::Line, pts);
+  // (The figure itself is in the overlay's scene: buildOverlayScene.)
   if (drawShape_ == DrawShape::ArcC && pts.size() == 2) {
     // The radius so far.
     p.drawLine(toScreen(pts[0]), toScreen(pts[1]));
     double r = px((pts[1] - pts[0]).len());
     p.drawEllipse(toScreen(pts[0]), r, r);
     return;
-  }
-  if (drawShape_ == DrawShape::ArcP && pts.size() == 2) fig = figureOf(DrawShape::Line, pts);
-  for (auto& g : fig) {
-    g.filled = false;
-    g.width = 0;
-    drawGraphic(p, g, c);
   }
   p.setPen(QPen(c, 1));
   p.setBrush(c);

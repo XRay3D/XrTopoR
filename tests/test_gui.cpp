@@ -833,7 +833,7 @@ TEST(Gui, ZipAxisAndFlexFixDrawn) {
   auto grab = [&] {
     f.view.refresh();
     QTest::qWait(10);
-    return f.view.grab().toImage();
+    return f.view.picture();
   };
   // The axis halfway along the first piece, 0.2 mm between the conductors: 16 px at 10 mm across the view.
   const Vec2 a0 = b.zips[0].axis[0].a.v(), a1 = b.zips[0].axis[0].b.v();
@@ -1242,11 +1242,11 @@ TEST(Gui, AutorouteShowsProcess) {
     if (!sk) return;
     shown |= view.showsRouteSketch();
     if (sk->stage.starts_with("pass") && !sk->tracks.empty()) {
-      if (dir && !sketchTracks) view.grab().save(QString(dir) + "/autoroute_sketch.png");
+      if (dir && !sketchTracks) view.picture().save(QString(dir) + "/autoroute_sketch.png");
       sketchTracks = true;
     }
     if (sk->stage.starts_with("geometry") || sk->stage == "realised") {
-      if (dir && !realised) view.grab().save(QString(dir) + "/autoroute_realised.png");
+      if (dir && !realised) view.picture().save(QString(dir) + "/autoroute_realised.png");
       realised |= !sk->tracks.empty();
     }
   });
@@ -1409,7 +1409,7 @@ TEST(Gui, BoardOutlineByItsHandles) {
   if (const char* dir = std::getenv("XR_SHOT_DIR")) {
     f.doc.setSelection({{ItemType::Detail, poly}}, {});
     f.view.fitBoard();
-    f.view.grab().save(QString(dir) + "/outline.png");
+    f.view.picture().save(QString(dir) + "/outline.png");
   }
 
   // A corner of the contour: the polygon's vertex and the two lines' ends meeting there go to the new place.
@@ -1564,7 +1564,7 @@ TEST(Gui, ComponentBoundsTurnWithIt) {
   Vec2 centre = c.toBoard(bb.center());
   f.look(centre, std::max(bb.width(), bb.height()) / kNmPerMm * 2);
   f.doc.display().show["showCompsBound"] = true;
-  if (const char* dir = std::getenv("XR_SHOT_DIR")) f.view.grab().save(QString(dir) + "/bounds-turned.png");
+  if (const char* dir = std::getenv("XR_SHOT_DIR")) f.view.picture().save(QString(dir) + "/bounds-turned.png");
 
   // 1 mm off the middle of the long side: inside the box round the turned component (at 45 degrees a side's
   // middle lies half the other side within it), outside its rectangle. Components only: tracks run over D1.
@@ -2271,7 +2271,7 @@ TEST(Gui, ComponentBounds) {
   QPoint edge = screenOf(view, Vec2{bb.minX, c.y}, c, s);  // the left side of the rectangle
   // The 1 px line is antialiased over two pixels: a light grey, unlike the dark background and the coloured copper.
   auto edgeIsBound = [&] {
-    QImage img = view.grab().toImage();
+    QImage img = view.picture();
     for (int dx = -1; dx <= 1; ++dx) {
       QColor px = img.pixelColor(edge + QPoint(dx, 0));
       if (std::min({px.red(), px.green(), px.blue()}) >= 0x60) return true;
@@ -2286,7 +2286,7 @@ TEST(Gui, ComponentBounds) {
   EXPECT_TRUE(edgeIsBound());
   if (const char* dir = std::getenv("XR_SHOT_DIR")) {
     view.fitBoard();
-    view.grab().save(QString(dir) + "/bounds.png");
+    view.picture().save(QString(dir) + "/bounds.png");
   }
   doc.display().show["showComponents"] = false;
   doc.displayChanged();
@@ -2927,11 +2927,11 @@ TEST(Gui, MaskLayerShowsDetails) {
     f.look(p.pos.v(), 10);
     f.view.refresh();
     QTest::qWait(10);
-    return f.view.grab().toImage().pixel(f.at(p.pos.v()) + QPoint(int(f.scale * mmToNm(0.9)), 0));  // in the ring
+    return f.view.picture().pixel(f.at(p.pos.v()) + QPoint(int(f.scale * mmToNm(0.9)), 0));  // in the ring
   };
   EXPECT_NE(at(*pr) & 0xffffff, bg & 0xffffff);
   EXPECT_EQ(at(*other) & 0xffffff, bg & 0xffffff);
-  if (const char* dir = std::getenv("XR_SHOT_DIR")) f.view.grab().save(QString(dir) + "/masklayer.png");
+  if (const char* dir = std::getenv("XR_SHOT_DIR")) f.view.picture().save(QString(dir) + "/masklayer.png");
 }
 
 // Every numeric field steps by 0.01, by 0.1 with Ctrl: the arrow keys, the wheel, the buttons.
@@ -3340,7 +3340,7 @@ TEST(Gui, MechanicalLayerActive) {
   auto pixel = [&] {
     f.view.refresh();
     QTest::qWait(10);
-    return f.view.grab().toImage().pixelColor(f.at(at(20, 10)));
+    return f.view.picture().pixelColor(f.at(at(20, 10)));
   };
   const QColor mechColor = QColor::fromRgb(0x00ff00);
   EXPECT_NE(pixel(), mechColor) << "the bottom mechanical layer under the metal";
@@ -3403,7 +3403,7 @@ TEST(Gui, HolesOverEverything) {
   auto shot = [&] {
     f.view.refresh();
     QTest::qWait(10);
-    return f.view.grab().toImage();
+    return f.view.picture();
   };
   const QColor edge = f.doc.color("board", 0xd4d4d4), back = f.doc.color("background", 0x030b10);
   auto check = [&](const char* what) {
@@ -3441,7 +3441,7 @@ TEST(Gui, PannedPictureAsDrawnAnew) {
   f.view.zoomBy(3);
   auto grab = [&] {
     QTest::qWait(5);
-    return f.view.grab().toImage().convertToFormat(QImage::Format_RGB32);
+    return f.view.picture().convertToFormat(QImage::Format_RGB32);
   };
   const QImage before = grab();
   const QPoint mid(800, 600);

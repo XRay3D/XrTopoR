@@ -78,11 +78,12 @@ add_library(xrrouter STATIC
 target_link_libraries(xrrouter PUBLIC xrcore xrdrc xrtopo CGAL::CGAL)
 
 if(XR_BUILD_GUI)
-  find_package(Qt6 REQUIRED COMPONENTS Widgets Concurrent)
+  find_package(Qt6 REQUIRED COMPONENTS Widgets Concurrent OpenGL OpenGLWidgets)
   set(CMAKE_AUTOMOC ON)
   add_library(xrgui STATIC
     gui/AppSettings.cpp
     gui/AutorouteWindow.cpp
+    gui/BoardScene.cpp
     gui/BoardView.cpp
     gui/BuiltinSchemes.cpp
     gui/Commands.cpp
@@ -106,8 +107,11 @@ if(XR_BUILD_GUI)
     gui/TextStylesDialog.cpp
     gui/ToporConfig.cpp
     gui/Units.cpp
+    gui/gl/Renderer.cpp
+    gui/gl/Scene.cpp
     gui/icons.qrc
+    gui/shaders.qrc
   )
   set_target_properties(xrgui PROPERTIES AUTORCC ON)
-  target_link_libraries(xrgui PUBLIC xrio xrdrc xrrouter Qt6::Widgets Qt6::Concurrent)
+  target_link_libraries(xrgui PUBLIC xrio xrdrc xrrouter Qt6::Widgets Qt6::Concurrent Qt6::OpenGL Qt6::OpenGLWidgets)
 endif()

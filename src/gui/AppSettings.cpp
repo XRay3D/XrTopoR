@@ -109,6 +109,20 @@ void clearRecentFiles() { writeRecent({}); }
 bool toporImported() { return QSettings().value("topor/imported", false).toBool(); }
 void setToporImported() { QSettings().setValue("topor/imported", true); }
 
+namespace {
+int copperCache = -1;  // (asked every frame)
+}
+
+int copperTransparency() {
+  if (copperCache < 0) copperCache = std::clamp(QSettings().value("view/copperTransparency", 0).toInt(), 0, 100);
+  return copperCache;
+}
+
+void setCopperTransparency(int percent) {
+  copperCache = std::clamp(percent, 0, 100);
+  QSettings().setValue("view/copperTransparency", copperCache);
+}
+
 bool openLastProject() { return QSettings().value("general/openLastProject", true).toBool(); }
 void setOpenLastProject(bool on) { QSettings().setValue("general/openLastProject", on); }
 

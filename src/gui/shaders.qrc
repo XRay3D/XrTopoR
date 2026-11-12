@@ -1,0 +1,19 @@
+<RCC>
+  <qresource prefix="/shaders">
+    <file alias="view.glsl">gl/shaders/view.glsl</file>
+    <file alias="cover.glsl">gl/shaders/cover.glsl</file>
+    <file alias="segment.vert">gl/shaders/segment.vert</file>
+    <file alias="segment.frag">gl/shaders/segment.frag</file>
+    <file alias="hole.frag">gl/shaders/hole.frag</file>
+    <file alias="arc.vert">gl/shaders/arc.vert</file>
+    <file alias="arc.frag">gl/shaders/arc.frag</file>
+    <file alias="fill.vert">gl/shaders/fill.vert</file>
+    <file alias="fill.frag">gl/shaders/fill.frag</file>
+    <file alias="box.vert">gl/shaders/box.vert</file>
+    <file alias="flat.frag">gl/shaders/flat.frag</file>
+    <file alias="grid.frag">gl/shaders/grid.frag</file>
+    <file alias="marker.vert">gl/shaders/marker.vert</file>
+    <file alias="marker.frag">gl/shaders/marker.frag</file>
+    <file alias="layer.frag">gl/shaders/layer.frag</file>
+  </qresource>
+</RCC>
