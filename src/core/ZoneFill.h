@@ -22,6 +22,15 @@ struct ZoneFillStats {
 
 ZoneFillStats fillZones(Board& b, const ZoneFillOptions& opt = {});
 void clearZoneFills(Board& b);
+
+// A piece of poured copper with the holes in it.
+struct Island {
+  Polyline outer;
+  std::vector<Polyline> holes;
+};
+// The copper of a zone's fill as islands: its polygons (fractured ones and pieces laid over others, like the thermal
+// bridges read from P-CAD) united, the seams of fracture undone into holes.
+std::vector<Island> zoneIslands(const Zone& z);
 // Plane layers become board-wide zones of their net (so connectivity, DRC and outputs see them).
 void addPlaneZones(Board& b);
 

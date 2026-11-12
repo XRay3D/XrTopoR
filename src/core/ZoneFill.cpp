@@ -77,6 +77,86 @@ void clearZoneFills(Board& b) {
   for (auto& z : b.zones) z.filled.clear();
 }
 
+namespace {
+
+// The rings of a polygon fractured into one contour: the seams (an edge walked there and back) go, what is left
+// joins up into closed rings.
+std::vector<Polyline> unfracture(const Polyline& pl) {
+  const size_t n = pl.size();
+  using Key = std::pair<std::pair<double, double>, std::pair<double, double>>;
+  auto key = [](Vec2 a, Vec2 b) { return Key{{a.x, a.y}, {b.x, b.y}}; };
+  std::vector<bool> kept(n, true);
+  std::map<Key, std::vector<size_t>> open;  // edges whose way back is not met yet
+  for (size_t i = 0; i < n; ++i) {
+    const Vec2 a = pl[i], b = pl[(i + 1) % n];
+    if (a == b) {
+      kept[i] = false;
+      continue;
+    }
+    if (auto back = open.find(key(b, a)); back != open.end() && !back->second.empty()) {
+      kept[i] = kept[back->second.back()] = false;
+      back->second.pop_back();
+    } else {
+      open[key(a, b)].push_back(i);
+    }
+  }
+  std::map<std::pair<double, double>, std::vector<size_t>> from;  // kept edges by their start
+  for (size_t i = n; i-- > 0;)
+    if (kept[i]) from[{pl[i].x, pl[i].y}].push_back(i);
+  std::vector<Polyline> rings;
+  std::vector<bool> used(n, false);
+  for (size_t s = 0; s < n; ++s) {
+    if (!kept[s] || used[s]) continue;
+    Polyline ring;
+    for (size_t e = s; !used[e];) {
+      used[e] = true;
+      ring.push_back(pl[e]);
+      const Vec2 end = pl[(e + 1) % n];
+      const size_t next = (e + 1) % n;
+      if (kept[next] && !used[next]) {
+        e = next;
+        continue;
+      }
+      auto& out = from[{end.x, end.y}];
+      std::erase_if(out, [&](size_t k) { return used[k]; });
+      if (out.empty()) break;
+      e = out.back();
+    }
+    if (ring.size() >= 3) rings.push_back(std::move(ring));
+  }
+  return rings;
+}
+
+}  // namespace
+
+std::vector<Island> zoneIslands(const Zone& z) {
+  std::vector<BMulti> pieces;
+  for (const Polyline& f : z.filled) {
+    std::vector<Polyline> rings = unfracture(f);
+    if (rings.empty()) continue;
+    // The largest ring is an outer one; those turning the other way are holes.
+    const double sign = polygonArea(*r::max_element(rings, {}, [](const Polyline& p) { return std::abs(polygonArea(p)); }));
+    std::vector<BMulti> outers, holes;
+    for (const Polyline& ring : rings) (polygonArea(ring) * sign > 0 ? outers : holes).push_back(toMulti(ring));
+    BMulti piece = unionAll(std::move(outers));
+    if (!holes.empty()) {
+      BMulti cut;
+      bg::difference(piece, unionAll(std::move(holes)), cut);
+      piece = std::move(cut);
+    }
+    pieces.push_back(std::move(piece));
+  }
+  std::vector<Island> out;
+  for (const BPoly& p : unionAll(std::move(pieces))) {
+    Island isl{ringToPolyline(p.outer()), {}};
+    if (isl.outer.size() < 3) continue;
+    for (auto& h : p.inners())
+      if (h.size() >= 4) isl.holes.push_back(ringToPolyline(h));
+    out.push_back(std::move(isl));
+  }
+  return out;
+}
+
 void addPlaneZones(Board& b) {
   for (LayerId l = 0; l < LayerId(b.layers.size()); ++l) {
     const Layer& L = b.layers[l];

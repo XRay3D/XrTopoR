@@ -282,6 +282,7 @@ struct Zone {
   bool removeIslands = true;     // pieces with no copper of the net go
   double minIslandArea = 1e10;   // nm²: smaller pieces go (TopoR's 0.01 mm²)
   Coord minWidth = 0;            // 0 = fill default
+  int source = -1;               // P-CAD: which pour of the file (counted through it) the area was read from
 };
 
 // «Запрет». A routing keepout keeps wires and/or vias off its copper layers, a placement keepout keeps

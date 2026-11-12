@@ -4,6 +4,7 @@
 #include <filesystem>
 
 #include "core/Connectivity.h"
+#include "core/ZoneFill.h"
 #include "io/BoardIO.h"
 #include "io/sexpr/SExpr.h"
 
@@ -164,6 +165,75 @@ TEST(PcadIO, PatternGraphicsThermalsAndTexts) {
   EXPECT_EQ(z->vias.connection, PadConnection::Thermal);
   EXPECT_EQ(z->vias.spoke, Coord(mil(15)));
   EXPECT_EQ(z->vias.angle, 45);
+}
+
+// The copper of a fill, holes taken away, nm².
+static double islandsArea(const Zone& z) {
+  double a = 0;
+  for (const Island& i : zoneIslands(z)) {
+    a += std::abs(polygonArea(i.outer));
+    for (const Polyline& h : i.holes) a -= std::abs(polygonArea(h));
+  }
+  return a;
+}
+
+TEST(PcadIO, PoursAreSavedAsTheAreasAre) {
+  auto b = io::loadBoard(data("el4134_pcad_ascii.pcb"));
+  ASSERT_TRUE(b);
+  Board& bd = **b;
+  ASSERT_FALSE(bd.zones.empty());
+  ASSERT_TRUE(r::any_of(bd.zones, [](const Zone& z) { return !z.filled.empty(); }));
+  // Changed here: the first area's settings, a new area poured with a hole in it.
+  bd.zones[0].useClearance = true;
+  bd.zones[0].clearance = mmToNm(0.4);
+  bd.zones[0].pads.angle = 45;
+  Zone fresh;
+  fresh.layer = bd.zones[0].layer;
+  fresh.net = bd.zones[0].net;
+  const double s = mmToNm(5);
+  fresh.outline = {{0, 0}, {s, 0}, {s, s}, {0, s}};
+  fresh.filled = {fracture(fresh.outline, {{{s / 4, s / 4}, {s / 2, s / 4}, {s / 2, s / 2}, {s / 4, s / 2}}})};
+  bd.zones.push_back(fresh);
+
+  auto text = io::writePcad(bd);
+  ASSERT_TRUE(text) << text.error();
+  auto again = io::readPcad(*text, "x.pcb");
+  ASSERT_TRUE(again) << again.error();
+  const Board& b2 = **again;
+  ASSERT_EQ(b2.zones.size(), bd.zones.size());
+  // Read back layer by layer: an area is found by its layer and outline.
+  auto same = [&](const Zone& z) {
+    return [&](const Zone& x) {
+      return x.layer == z.layer && x.outline.size() == z.outline.size() && (x.outline[0] - z.outline[0]).len() < 1000;
+    };
+  };
+  for (size_t i = 0; i < bd.zones.size(); ++i) {
+    const Zone& was = bd.zones[i];
+    auto it = r::find_if(b2.zones, same(was));
+    ASSERT_NE(it, b2.zones.end()) << i;
+    const Zone& now = *it;
+    EXPECT_EQ(now.net, was.net) << i;
+    const double area = islandsArea(was);
+    EXPECT_NEAR(islandsArea(now), area, area * 1e-4 + 1e6) << "the fill of area " << i << " is saved";
+  }
+  const Zone& first = *r::find_if(b2.zones, same(bd.zones[0]));
+  EXPECT_GT(islandsArea(first), 0);
+  EXPECT_TRUE(first.useClearance);
+  EXPECT_EQ(first.clearance, mmToNm(0.4));
+  EXPECT_EQ(first.pads.angle, 45);
+  const Zone& made = *r::find_if(b2.zones, same(fresh));
+  const auto islands = zoneIslands(made);
+  ASSERT_EQ(islands.size(), 1u);
+  EXPECT_EQ(islands[0].holes.size(), 1u) << "the hole of a fractured fill is a cutout of its island";
+  EXPECT_NEAR(islandsArea(made), s * s * (1 - 1.0 / 16), 1e6);
+
+  // An area deleted is gone from the file; the others keep their own settings.
+  bd.zones.erase(bd.zones.begin());
+  auto t3 = io::writePcad(bd);
+  ASSERT_TRUE(t3);
+  auto b3 = io::readPcad(*t3, "y.pcb");
+  ASSERT_TRUE(b3);
+  EXPECT_EQ((*b3)->zones.size(), bd.zones.size());
 }
 
 TEST(PcadIO, WriterRoundTripAndRouting) {

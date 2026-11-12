@@ -1,9 +1,10 @@
-// P-CAD 2002 ASCII writer: the source file is patched (placement, routing and vias replaced),
-// so libraries, netlist, layers, text and everything else round-trip unchanged.
+// P-CAD 2002 ASCII writer: the source file is patched (placement, routing and vias replaced,
+// pours written from the copper areas), so libraries, netlist, layers, text and everything else round-trip unchanged.
 #include <cmath>
 #include <cstdio>
 #include <map>
 
+#include "core/ZoneFill.h"
 #include "io/BoardIO.h"
 #include "io/Encoding.h"
 #include "io/sexpr/SExpr.h"
@@ -64,6 +65,107 @@ Node* findChild(Node& n, std::string_view head) {
   for (auto& k : n.kids)
     if (k.is(head)) return &k;
   return nullptr;
+}
+
+Node atomNode(const char* head, const char* v) {
+  Node n = Node::list(head);
+  n.addAtom(v);
+  return n;
+}
+
+// Puts `v` in place of n's child of the same head, or before `before` (at the end without it).
+void setChild(Node& n, Node v, std::string_view before = "pcbPoly") {
+  if (Node* old = findChild(n, v.head())) {
+    *old = std::move(v);
+    return;
+  }
+  auto at = r::find_if(n.kids, [&](const Node& k) { return k.is(before); });
+  n.kids.insert(at, std::move(v));
+}
+
+// The points of a (pcbPoly ...) in the board frame (Y down), nm.
+Polyline polyNm(const Node& n, double unit) {
+  Polyline out;
+  for (const Node& p : n.kids) {
+    if (!p.is("pt")) continue;
+    double xy[2]{};
+    size_t i = 1;
+    for (double& c : xy) {
+      if (i >= p.kids.size()) break;
+      c = std::atof(p.kids[i++].text.c_str());
+      double scale = unit;
+      if (i < p.kids.size() && !p.kids[i].isList) {
+        const std::string& u = p.kids[i].text;
+        if (u == "mm") scale = kNmPerMm, ++i;
+        else if (u == "mil") scale = kNmPerMil, ++i;
+        else if (u == "in") scale = 1000.0 * kNmPerMil, ++i;
+      }
+      c *= scale;
+    }
+    out.push_back({xy[0], -xy[1]});
+  }
+  return out;
+}
+
+Node outlineNode(const char* head, const Polyline& pts) {
+  Node n = Node::list(head);
+  for (Vec2 p : pts) n.add(pt(p));
+  return n;
+}
+
+// A pour as the area is: its own node of the file (the settings the model has not got, the fillets of an outline
+// left as it was) or a new one, the settings, the outline and the islands of the fill from the model.
+Node pourNode(const Zone& z, const std::string& net, const Node* own, double unit) {
+  Node n = own ? *own : Node::list("copperPour95");
+  if (!own) {
+    n.add(atomNode("pourType", "SolidPour"));
+    n.add(strNode("netNameRef", net));
+    n.add(mmNode("width", double(z.minWidth > 0 ? z.minWidth : mmToNm(0.254))));
+    n.add(mmNode("pourSpacing", double(mmToNm(0.762))));
+    n.add(mmNode("pourBackoff", double(z.clearance)));
+    n.add(atomNode("useDesignRules", "True"));
+    n.add(numNode("pourSmoothness", 3));
+    n.add(Node::list("pcbPoly"));
+  }
+  setChild(n, strNode("netNameRef", net));
+  setChild(n, mmNode("pourBackoff", double(z.clearance)));
+  setChild(n, atomNode("useDesignRules", z.useClearance ? "False" : "True"));
+  auto thermal = [&](const ZoneThermal& t, const char* type, const char* width, const char* spokes) {
+    const Node* was = findChild(n, type);
+    const bool wasSolid = was && (was->arg(0) == "NoTherm" || was->arg(0) == "Direct");
+    const char* how = t.connection == PadConnection::Solid ? (wasSolid ? nullptr : "NoTherm") : t.angle == 45 ? "Therm45" : "Therm90";
+    if (how) setChild(n, atomNode(type, how));
+    if (t.spoke > 0) setChild(n, mmNode(width, double(t.spoke)));
+    if (!findChild(n, spokes)) setChild(n, numNode(spokes, 4));
+  };
+  thermal(z.pads, "thermalType", "thermalWidth", "thermalSpokes");
+  thermal(z.vias, "viaThermalType", "viaThermalWidth", "viaThermalSpokes");
+  if (z.priority != 0 || findChild(n, "pourPriority")) setChild(n, numNode("pourPriority", z.priority));
+
+  Node* poly = findChild(n, "pcbPoly");
+  const Polyline was = polyNm(*poly, unit);
+  const bool same = was.size() == z.outline.size() &&
+                    r::equal(was, z.outline, [](Vec2 a, Vec2 b) { return (a - b).len2() < 100.0 * 100.0; });
+  if (!same) {
+    Node p = outlineNode("pcbPoly", z.outline);  // the fillets were the old outline's
+    p.add(strNode("netNameRef", net));
+    *poly = std::move(p);
+  } else if (Node* pn = findChild(*poly, "netNameRef")) {
+    *pn = strNode("netNameRef", net);
+  }
+
+  std::erase_if(n.kids, [](const Node& k) { return k.is("island"); });
+  for (const Island& isl : zoneIslands(z)) {
+    Node in = Node::list("island");
+    in.add(outlineNode("islandOutline", isl.outer));
+    for (const Polyline& h : isl.holes) {
+      Node c = Node::list("cutout");
+      c.add(outlineNode("cutoutOutline", h));
+      in.add(std::move(c));
+    }
+    n.add(std::move(in));
+  }
+  return n;
 }
 
 // Via style with the given diameter/drill: an existing one or a new copy of the first style.
@@ -162,6 +264,13 @@ Result<std::string> writePcad(const Board& b) {
     else if (std::abs(rot) > 1e-9) afterPt(numNode("rotation", rot));
   }
 
+  // The pours of the file in the order the reader counted them: an area read from one keeps what the model has not.
+  std::vector<Node> pours;
+  for (const Node& k : design->kids)
+    if (k.is("layerContents"))
+      for (const Node& p : k.kids)
+        if (p.is("copperPour95") || p.is("copperPour")) pours.push_back(p);
+
   // Routing: copper lines/arcs that belong to a net are replaced.
   std::map<int, Node*> contents;
   for (auto& k : design->kids) {
@@ -174,15 +283,11 @@ Result<std::string> writePcad(const Board& b) {
       if (layerNum(l) == num && b.layers[l].kind == LayerKind::Copper) copper = true;
     if (!copper) continue;
     std::erase_if(k.kids, [](const Node& n) { return (n.is("line") || n.is("arc")) && n.find("netNameRef"); });
-    // Pour islands were computed around the old routing: drop them, P-CAD repours the outline.
-    for (auto& pour : k.kids)
-      if (pour.is("copperPour95") || pour.is("copperPour"))
-        std::erase_if(pour.kids, [](const Node& n) { return n.is("island"); });
+    // The pours are written anew from the areas (below).
+    std::erase_if(k.kids, [](const Node& n) { return n.is("copperPour95") || n.is("copperPour"); });
     contents[num] = &k;
   }
-  for (const Track& t : b.tracks) {
-    int num = layerNum(t.layer);
-    if (num < 0) continue;
+  auto layerContents = [&](int num) -> Node& {
     Node*& lc = contents[num];
     if (!lc) {
       Node n = Node::list("layerContents");
@@ -194,6 +299,12 @@ Result<std::string> writePcad(const Board& b) {
         if (k.is("layerContents"))
           if (const Node* ln = k.find("layerNumRef")) contents[int(ln->num(0))] = &k;
     }
+    return *contents[num];
+  };
+  for (const Track& t : b.tracks) {
+    int num = layerNum(t.layer);
+    if (num < 0) continue;
+    layerContents(num);
     Node n;
     if (!t.isArc()) {
       n = Node::list("line");
@@ -217,6 +328,14 @@ Result<std::string> writePcad(const Board& b) {
     n.add(mmNode("width", double(t.width)));
     if (t.net >= 0) n.add(strNode("netNameRef", netName(t.net)));
     contents[num]->add(std::move(n));
+  }
+
+  // Copper areas.
+  for (const Zone& z : b.zones) {
+    int num = layerNum(z.layer);
+    if (num < 0 || b.layers[z.layer].kind != LayerKind::Copper || z.outline.size() < 3) continue;
+    const Node* own = z.source >= 0 && z.source < int(pours.size()) ? &pours[z.source] : nullptr;
+    layerContents(num).add(pourNode(z, netName(z.net), own, unit));
   }
 
   // Vias.

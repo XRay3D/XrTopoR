@@ -415,9 +415,10 @@ struct Reader {
     b.texts.push_back(std::move(t));
   }
 
-  void readPour(const Node& k, LayerId l) {
+  void readPour(const Node& k, LayerId l, int ordinal) {
     Zone z;
     z.layer = l;
+    z.source = ordinal;
     z.net = b.findNet(str(k.find("netNameRef")));
     z.clearance = Coord(val1(k.find("pourBackoff")));
     const Node* rules = k.find("useDesignRules");
@@ -472,17 +473,23 @@ struct Reader {
         b.vias.push_back(v);
       }
     }
+    // Pours are counted through the whole file, read or not: the writer finds an area's own by the count.
+    auto isPour = [](const Node& k) { return k.isList && (k.is("copperPour95") || k.is("copperPour")); };
+    int pours = 0;
     for (auto* lc : d.findAll("layerContents")) {
+      int pour = pours;
+      pours += int(r::count_if(lc->kids, isPour));
       int ln = lc->find("layerNumRef") ? int(lc->find("layerNumRef")->num(0)) : 0;
       LayerId l = mapLayer(ln, false);
       if (l < 0) continue;
       bool copper = b.layers[l].kind == LayerKind::Copper;
       for (auto& k : lc->kids) {
         if (!k.isList) continue;
-        if (copper && (k.is("copperPour95") || k.is("copperPour"))) {
-          readPour(k, l);
+        if (isPour(k) && copper) {
+          readPour(k, l, pour++);
           continue;
         }
+        if (isPour(k)) ++pour;
         if (k.is("text")) {
           readText(k, l);
           continue;
