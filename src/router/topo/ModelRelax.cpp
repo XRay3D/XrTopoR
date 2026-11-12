@@ -29,7 +29,6 @@ namespace {
 constexpr double kDepthCost = 100;             // a mm of shortfall is worth 100 mm of wire
 constexpr double kCountCost = 1 * kNmPerMm;    // ... and a violation, however shallow, 1 mm
 constexpr double kWalkSlack = 2 * kNmPerMm;    // the walk may stand this much above the best drawing seen
-constexpr int kWalkReal = 0;                   // ... but with no more real violations (2 let in: Arcs ended 63 mm longer, the best seven iterations back)
 constexpr double kNoise = 5000;                // nm: a shallower violation is the drawing's noise at the rule's edge
 constexpr int kFreeze = 3;                     // iterations an object stands still after its step was blamed
 constexpr double kBalanced = 0.01;             // a force below this is none: the object is where it should be
@@ -535,14 +534,17 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
   // The judge. A violation is not to be bought with length (Polubasov, 2010): one drawing is better than
   // another when it has less unrouted, then fewer places shorted, fewer deeper than the limit of a violation,
   // fewer real ones at all — and, those equal, a smaller sum of the length, 100 mm per mm of shortfall and 1 mm
-  // per place (what is left to weigh is the noise at the rule's edge). The result is the best drawing; the
-  // walk may stand a few mm above it, but never with more lost, shorted, deep or real.
+  // per place (what is left to weigh is the noise at the rule's edge). The result is the best drawing.
   auto keys = [](const Drawn& c) { return std::tuple(c.unrouted, c.shorts, c.deep, c.real); };
   auto better = [&](const Drawn& c, const Drawn& than) { return keys(c) < keys(than) || (keys(c) == keys(than) && c.score() < than.score()); };
+  // Where the walk may stand: on a drawing better than the best, or on one with nothing lost, no place of violation
+  // the best drawing has not or has shallower by more than the noise, and no longer than it by more than the slack.
+  // Place by place, not by the sums of the whole board: on a board with hundreds of violations left their depths
+  // wobble between any two drawings by more than any slack, nobody is to blame for it, and every iteration went back
+  // whole (AMK310, 624 places: the last eight of 31; with the places compared none of the five boards' but two).
   auto walkable = [&](const Drawn& c, const Drawn& best) {
     if (better(c, best)) return true;
-    return c.unrouted <= best.unrouted && c.shorts <= best.shorts && c.deep <= best.deep && c.real <= best.real + kWalkReal &&
-           c.score() <= best.score() + kWalkSlack;
+    return c.unrouted <= best.unrouted && c.length <= best.length + kWalkSlack && addedPlaces(best.places, c.places).empty();
   };
 
   OwnerGrid grid;
@@ -759,6 +761,9 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
     // What a drawing added to the one the walk stands on: the places of violation and the connections lost.
     auto addedBy = [&](const Drawn& now) {
       std::vector<Place> added = addedPlaces(prev.places, now.places);
+      // (... and against the best drawing: what the walk is held to.)
+      for (const Place& p : addedPlaces(best.places, now.places))
+        if (r::none_of(added, [&](const Place& q) { return q.nets == p.nets && (q.pos - p.pos).len() < 1; })) added.push_back(p);
       if (now.unrouted > prev.unrouted) r::copy(lostLinks(prev.loose, now.loose), std::back_inserter(added));
       return added;
     };
