@@ -23,7 +23,38 @@
 
 namespace xr::topo {
 
-RealWire sketchOf(const Board& b, const Topology& t, int wi) {
+const SlotPoints::Edge& SlotPoints::of(const Topology& t, const LayerMesh& m, int e, const SlotPoints* was) {
+  if (edges.size() < m.edges.size()) edges.resize(m.edges.size());
+  Edge& x = edges[size_t(e)];
+  if (x.at >= 0) return x;
+  const xr::topo::Edge& E = m.edges[size_t(e)];
+  const Vertex& U = m.verts[size_t(E.v[0])];
+  const Vertex& V = m.verts[size_t(E.v[1])];
+  x.v0 = E.v[0], x.v1 = E.v[1], x.along = E.along;
+  x.p0 = U.p, x.p1 = V.p, x.c0 = t.owners[size_t(U.owner)].c, x.c1 = t.owners[size_t(V.owner)].c;
+  x.at = int(wires.size());
+  x.n = int(E.cross.size());
+  for (int cid : E.cross) wires.push_back(t.crossings[size_t(cid)].wire);
+  mid.resize(wires.size());
+  // As it stood in the earlier drawing — the same ends where they were, the same wires in the same order: its
+  // points are that drawing's (the capacity is a function of those alone while the rules stand).
+  if (was && size_t(e) < was->edges.size()) {
+    const Edge& y = was->edges[size_t(e)];
+    if (y.at >= 0 && y.n == x.n && y.v0 == x.v0 && y.v1 == x.v1 && y.along == x.along && y.p0 == x.p0 && y.p1 == x.p1 && y.c0 == x.c0 && y.c1 == x.c1 &&
+        std::equal(wires.begin() + x.at, wires.end(), was->wires.begin() + y.at)) {
+      x.L = y.L;
+      std::copy_n(was->mid.begin() + y.at, x.n, mid.begin() + x.at);
+      return x;
+    }
+  }
+  const EdgeCapacity cap = edgeCapacity(t, m, e);
+  x.L = cap.L;
+  for (int k = 0; k < x.n; ++k) mid[size_t(x.at + k)] = slotOf(cap, k).mid();
+  return x;
+}
+
+RealWire sketchOf(const Board& b, const Topology& t, int wi, SlotPoints* slots, const SlotPoints* slotsWas, SketchKey* key, const RealWire* was,
+                  const SketchKey* wasKey) {
   const Wire& w = t.wires[wi];
   const LayerMesh& m = *t.mesh(w.layer);
   RealWire r;
@@ -57,15 +88,33 @@ RealWire sketchOf(const Board& b, const Topology& t, int wi) {
   for (int cid : w.cross) {
     const Crossing& c = t.crossings[cid];
     const Edge& E = m.edges[c.edge];
-    EdgeCapacity cap = edgeCapacity(t, m, c.edge);
     int k = int(r::find(E.cross, cid) - E.cross.begin());
-    Slot s = slotOf(cap, k);
+    double mid = 0, L = 1;
+    if (slots) {
+      const SlotPoints::Edge& x = slots->of(t, m, c.edge, slotsWas);
+      mid = slots->mid[size_t(x.at + k)];
+      L = x.L > 0 ? x.L : 1;
+    } else {
+      const EdgeCapacity cap = edgeCapacity(t, m, c.edge);
+      mid = slotOf(cap, k).mid();
+      L = cap.L > 0 ? cap.L : 1;
+    }
     Vec2 U = m.verts[E.v[0]].p, V = m.verts[E.v[1]].p;
-    double L = cap.L > 0 ? cap.L : 1;
-    pts.push_back({U + (V - U) * (s.mid() / L), c.edge});
+    pts.push_back({U + (V - U) * (mid / L), c.edge});
+    if (key) key->insert(key->end(), {double(E.v[0]), double(E.v[1]), U.x, U.y, V.x, V.y});
   }
   if (w.hasExit[1]) pts.push_back({w.exit[1]});
   pts.push_back({m.verts[w.endVertex[1]].p});
+  // What the sketch is made of: its points, and the corners of the triangles between them — the ends of the crossed
+  // edges (an owner's copper goes where its vertex goes). The same as the earlier drawing's: that sketch.
+  if (key) {
+    key->insert(key->end(), {double(w.endVertex[0]), double(w.endVertex[1])});
+    for (const Pt& q : pts) key->insert(key->end(), {q.p.x, q.p.y, double(q.edge)});
+    if (was && wasKey && *wasKey == *key) {
+      r.sketch = was->sketch;
+      return r;
+    }
+  }
   auto triOf = [&](const Pt& x, const Pt& y, int endVertex) {  // the triangle the chord x -> y lies in
     if (x.edge < 0 && y.edge < 0) return -1;  // an end and its exit point
     if (x.edge >= 0 && y.edge >= 0) {
@@ -152,9 +201,25 @@ RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int
                               std::vector<RealWire>* wiresOut, ModelDrawing* keep, const ModelDrawing* from) {
   ProfScope pAll("realizeFromModel");
   std::vector<RealWire> wires;
+  // The capacity of every crossed edge, found once: every wire's sketch asks for it at each of its crossings, and
+  // the crossings below once more (an edge with five wires was packed six times a drawing).
+  std::map<LayerId, SlotPoints> slotPoints;
+  auto slotsWas = [&](LayerId layer) -> const SlotPoints* {
+    if (!from) return nullptr;
+    const auto it = from->slotPoints.find(layer);
+    return it == from->slotPoints.end() ? nullptr : &it->second;
+  };
+  std::vector<SketchKey> sketchKeys;
   {
     ProfScope p("realize prep: sketches");
-    for (int wi : chosen) wires.push_back(sketchOf(b, t, wi));
+    // A wire whose crossed edges and slots stand as in the drawing this one comes from has that drawing's sketch.
+    const bool reuse = from && from->chosen == chosen && from->sketchKeys.size() == chosen.size() && from->wires.size() == chosen.size();
+    sketchKeys.resize(chosen.size());
+    for (size_t k = 0; k < chosen.size(); ++k) {
+      const LayerId layer = t.wires[size_t(chosen[k])].layer;
+      wires.push_back(sketchOf(b, t, chosen[k], &slotPoints[layer], slotsWas(layer), &sketchKeys[k], reuse ? &from->wires[k] : nullptr,
+                               reuse ? &from->sketchKeys[k] : nullptr));
+    }
   }
   if (wiresOut) *wiresOut = wires;
   auto inOwned = std::make_unique<RealizeInput>();
@@ -191,8 +256,8 @@ RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int
     std::println(stderr, "realizeFromModel: {} wires, {} stubs", NW, on);
   }
   in.hits.assign(NW, {});
-  std::map<int, int> localOf;  // model wire -> index in `wires`
-  for (int k = 0; k < NW; ++k) localOf[chosen[k]] = k;
+  std::vector<int> localOf(t.wires.size(), -1);  // model wire -> index in `wires` (-1: not drawn)
+  for (int k = 0; k < NW; ++k) localOf[size_t(chosen[k])] = k;
   // The obstacles of every layer drawn on: the mesh's vertices as the realiser's points, the owners' copper
   // as their shapes, the pads' corners and the outline's pieces as sides.
   std::set<LayerId> layersUsed;
@@ -296,7 +361,7 @@ RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int
     for (const Track& tr : b.tracks)
       if (tr.id && tr.layer == layer) trackById[tr.id] = &tr;
     for (const Wire& w : t.wires) {
-      if (w.layer != layer || localOf.contains(int(&w - t.wires.data()))) continue;
+      if (w.layer != layer || localOf[size_t(&w - t.wires.data())] >= 0) continue;
       for (uint32_t id : w.tracks)
         if (auto it = trackById.find(id); it != trackById.end()) {
           const Track& tr = *it->second;
@@ -344,17 +409,16 @@ RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int
     for (int e = 0; e < int(m.edges.size()); ++e) {
       const Edge& E = m.edges[e];
       // (The capacity only of an edge a drawn wire crosses: a few wires drawn again took it of every edge.)
-      if (r::none_of(E.cross, [&](int cid) { return localOf.contains(t.crossings[cid].wire); })) continue;
-      EdgeCapacity cap = edgeCapacity(t, m, e);
+      if (r::none_of(E.cross, [&](int cid) { return localOf[size_t(t.crossings[cid].wire)] >= 0; })) continue;
+      SlotPoints& sp = slotPoints[layer];
+      const SlotPoints::Edge& x = sp.of(t, m, e, slotsWas(layer));
       for (int k = 0; k < int(E.cross.size()); ++k) {
         const Crossing& c = t.crossings[E.cross[k]];
-        auto it = localOf.find(c.wire);
-        if (it == localOf.end()) continue;  // a wire that stays as it lies: its copper is in the obstacles
-        int li = it->second;
+        const int li = localOf[size_t(c.wire)];
+        if (li < 0) continue;  // a wire that stays as it lies: its copper is in the obstacles
         std::vector<EdgeHit>& hs = in.hits[li];
         if (hs.size() <= size_t(c.idx)) hs.resize(c.idx + 1);
-        Slot s = slotOf(cap, k);
-        hs[c.idx] = {E.v[0], E.v[1], cap.L > 0 ? s.mid() / cap.L : 0.5, false, -1, -1, false};
+        hs[c.idx] = {E.v[0], E.v[1], x.L > 0 ? sp.mid[size_t(x.at + k)] / x.L : 0.5, false, -1, -1, false};
       }
     }
     std::vector<int> dropFront(NW, 0);  // crossings a stub covers at the start of a wire
@@ -426,28 +490,26 @@ RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int
         int j = m.localVertex(into, hs[i].u);
         hs[i].uLeft = j >= 0 && m.tris[into].v[(j + 1) % 3] == hs[i].v;
       }
-      for (size_t i = 0; i < hs.size(); ++i) onEdge[{hs[i].u, hs[i].v}].push_back({k, int(i)});
     }
     // Along every edge the list runs from u to v, as Edge::cross does, but by hit indices of the wires
     // in that order (the wires not drawn left out).
-    // (The first edge of the mesh with the pair of vertices, found in one pass: a scan of all edges for
-    // every crossed one was quadratic.)
-    std::map<std::pair<int, int>, const Edge*> edgeOf;
-    for (const Edge& E : m.edges)
-      if (onEdge.contains({E.v[0], E.v[1]})) edgeOf.try_emplace({E.v[0], E.v[1]}, &E);
-    for (auto& [uv, list] : onEdge) {
-      auto found = edgeOf.find(uv);
-      if (found == edgeOf.end()) continue;
-      const Edge* E = found->second;
+    // (One pass over the mesh's edges, the lists put into the map in the order of their keys: a list was begun by
+    // every hit of every wire, then looked up again from every edge of the mesh and made anew — the map's
+    // comparisons were a fiftieth of F7.)
+    std::vector<std::pair<std::pair<int, int>, std::vector<std::pair<int, int>>>> lists;
+    for (const Edge& E : m.edges) {
+      if (E.v[0] < 0 || E.cross.empty()) continue;
       std::vector<std::pair<int, int>> ordered;
-      for (int cid : E->cross) {
-        auto it = localOf.find(t.crossings[cid].wire);
-        if (it == localOf.end()) continue;
-        int hi = t.crossings[cid].idx - dropFront[it->second];
-        if (hi >= 0 && hi < int(in.hits[it->second].size())) ordered.push_back({it->second, hi});
+      for (int cid : E.cross) {
+        const int li = localOf[size_t(t.crossings[cid].wire)];
+        if (li < 0) continue;
+        int hi = t.crossings[cid].idx - dropFront[li];
+        if (hi >= 0 && hi < int(in.hits[li].size())) ordered.push_back({li, hi});
       }
-      list = std::move(ordered);
+      if (!ordered.empty()) lists.push_back({{E.v[0], E.v[1]}, std::move(ordered)});
     }
+    r::sort(lists, {}, [](const auto& x) { return x.first; });
+    for (auto& [uv, list] : lists) onEdge.emplace_hint(onEdge.end(), uv, std::move(list));
   }
   phase.reset();
   DrawnWires drawn;
@@ -459,6 +521,8 @@ RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int
   forcesByOwner(t, chosen, st);
   if (keep) {
     keep->chosen = chosen;
+    keep->sketchKeys = std::move(sketchKeys);
+    keep->slotPoints = std::move(slotPoints);
     keep->wires = wires;
     keep->opt = opt;
     keep->in = std::move(inOwned);

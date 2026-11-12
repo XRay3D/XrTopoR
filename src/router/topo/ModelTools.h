@@ -5,13 +5,16 @@
 // does not hold) stops it before anything is drawn.
 #include <vector>
 
+#include <map>
 #include <memory>
+#include <optional>
 
 #include "router/topo/Drawn.h"
 #include "router/topo/RealizerInput.h"
 #include "core/Board.h"
 #include "drc/Drc.h"
 #include "router/topo/Realizer.h"
+#include "topo/Capacity.h"
 #include "topo/Topology.h"
 
 namespace xr::topo {
@@ -43,7 +46,28 @@ struct F5ModelResult {
 
 // The sketch the realiser gets for a wire of the model: its end vertices, the slot midpoints of its
 // crossings, a point in every triangle it passes (nudged towards the centroid, as the router does).
-RealWire sketchOf(const Board& b, const Topology& t, int wire);
+// Where the wires cross one layer's edges — every crossing's slot middle, from the edge's first end — found edge by
+// edge as asked for, once (every wire's sketch asks at each of its crossings, the realiser's input once more). An
+// edge that stands as in an earlier drawing's points (`was`: the same ends where they were, the same wires in
+// order) has that drawing's: the capacity that gives them is not computed again.
+struct SlotPoints {
+  struct Edge {
+    int v0 = -1, v1 = -1, along = -1;
+    int at = -1, n = 0;  // its crossings in `wires` and `mid` (at < 0: not asked for yet)
+    Vec2 p0, p1, c0, c1;  // its ends, and the centres of their owners
+    double L = 0;
+  };
+  std::vector<Edge> edges;   // by the mesh's edge number
+  std::vector<int> wires;    // the crossing wires of the edges asked for, in each edge's order
+  std::vector<double> mid;   // ... and the slot middle of each
+  const Edge& of(const Topology& t, const LayerMesh& m, int e, const SlotPoints* was = nullptr);
+};
+// `slots`: the layer's points for the sketches of many wires of one model, `slotsWas` an earlier drawing's.
+// `key` receives what the sketch is made of (the crossed edges' ends, the slot points); with `was` and `wasKey` — the
+// wire's sketch and key of an earlier drawing — the sketch is that one when the key is the same.
+using SketchKey = std::vector<double>;
+RealWire sketchOf(const Board& b, const Topology& t, int wire, SlotPoints* slots = nullptr, const SlotPoints* slotsWas = nullptr, SketchKey* key = nullptr,
+                  const RealWire* was = nullptr, const SketchKey* wasKey = nullptr);
 
 // Re-draws every unlocked wire of the model on the board: their tracks are replaced by the realiser's.
 F5ModelResult runF5Model(Board& b, Topology& t, const F5ModelOptions& o = {});
@@ -108,6 +132,8 @@ RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int
 struct ModelDrawing {
   std::vector<int> chosen;      // the model's wires drawn, in the realiser's order
   std::vector<RealWire> wires;  // ... as the realiser had them
+  std::vector<SketchKey> sketchKeys;  // ... and what each one's sketch was made of (sketchOf)
+  std::map<LayerId, SlotPoints> slotPoints;  // where the wires cross the edges, as the sketches and the input had it
   RealizeOptions opt;
   std::unique_ptr<RealizeInput> in;
   DrawnWires drawn;
