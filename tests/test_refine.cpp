@@ -17,6 +17,7 @@
 #include "router/topo/Optimizer.h"
 #include "router/topo/Wires.h"
 #include "router/topo/Refine.h"
+#include "topo/Move.h"
 #include "topo/RelayStats.h"
 
 using namespace xr;
@@ -217,6 +218,65 @@ TEST(Realizer, KeptDrawingMeasuresAsTheTracksDid) {
       EXPECT_DOUBLE_EQ(g.y, f.y) << name << " owner " << owner;
     }
     (void)before;
+  }
+}
+
+// How far a change goes (the ground of drawing only what changed): one via moved by 0.2 mm, the board drawn
+// again whole, and the two drawings compared wire by wire — a wire changed when a bend's centre, radius or
+// tangent point moved by more than a micrometre, or it has other bends. Printed: of the wires drawn, how many
+// changed, and how far from the via the furthest of them passes. The wave is local: far fewer than all.
+TEST(Realizer, AMovedViaChangesTheWiresNearIt) {
+  for (const char* name : {"topor/Example_03/arz_2L.fst", "topor/Example_04/Arcs_master.pcb"}) {
+    auto lb = io::loadBoard(data(name));
+    ASSERT_TRUE(lb.has_value()) << name;
+    topo::Topology::assignIds(**lb);
+    topo::Topology t0;
+    t0.build(**lb);
+    auto drawn = [&](topo::Topology t, topo::ModelDrawing& kept) {
+      Board b = **lb;
+      topo::RealizeStats st;
+      int wires = 0;
+      topo::drawModel(b, t, true, st, wires, false, nullptr, &kept);
+      return wires;
+    };
+    topo::ModelDrawing was;
+    const int wires = drawn(t0, was);
+    ASSERT_GT(wires, 0);
+    std::vector<int> vias;
+    for (int oi = 0; oi < int(t0.owners.size()); ++oi)
+      if (t0.owners[size_t(oi)].kind == topo::Owner::Kind::Via) vias.push_back(oi);
+    ASSERT_FALSE(vias.empty());
+    int tried = 0;
+    double meanChanged = 0, mostChanged = 0, furthest = 0;
+    for (size_t k = 0; k < vias.size() && tried < 12; k += std::max<size_t>(1, vias.size() / 12)) {
+      topo::Topology t = t0;
+      const Vec2 at = t.owners[size_t(vias[k])].c;
+      if (topo::moveOwner(t, vias[k], Vec2{0.2e6, 0.1e6}) <= 0) continue;
+      topo::ModelDrawing now;
+      if (drawn(t, now) != wires || now.chosen != was.chosen) continue;  // (a flip took another set of wires: not this measure)
+      ++tried;
+      int changed = 0;
+      for (size_t w = 0; w < was.chosen.size(); ++w) {
+        const auto& a = was.drawn.bends[w];
+        const auto& c = now.drawn.bends[w];
+        bool differs = a.size() != c.size();
+        for (size_t i = 0; i < a.size() && !differs; ++i)
+          differs = (a[i].c - c[i].c).len() > 1000 || std::abs(a[i].rho - c[i].rho) > 1000 || (was.drawn.tin[w][i] - now.drawn.tin[w][i]).len() > 1000 ||
+                    (was.drawn.tout[w][i] - now.drawn.tout[w][i]).len() > 1000;
+        if (!differs) continue;
+        ++changed;
+        double nearest = std::numeric_limits<double>::max();
+        for (Vec2 p : was.in->sketches[w]) nearest = std::min(nearest, (p - at).len());
+        furthest = std::max(furthest, nearest);
+      }
+      meanChanged += changed;
+      mostChanged = std::max(mostChanged, double(changed));
+    }
+    ASSERT_GT(tried, 0) << name;
+    meanChanged /= tried;
+    std::println("{}: {} wires drawn; a via moved 0.22 mm ({} tried) changes {:.1f} wires on average, {} at most; the furthest changed wire passes {:.1f} mm from the via",
+                 name, wires, tried, meanChanged, int(mostChanged), furthest / 1e6);
+    EXPECT_LT(mostChanged, wires * 0.5) << name;
   }
 }
 
