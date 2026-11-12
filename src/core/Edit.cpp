@@ -953,6 +953,23 @@ JunkRemoved removeJunkTracks(Board& b, bool twins) {
       drop[i] = 1;
     }
   }
+  auto crumb = [&](const Track& tr) { return plain(tr) && !tr.mid && (tr.a.v() - tr.b.v()).len() <= kCrumb; };
+  // A crumb's twin is junk whether the twins are asked for or not: two crumbs one on the other hold each other's
+  // ends, and neither end is loose (under a via of RMT19M_A8SWA_V5: two crumbs, each twice, an island of copper
+  // left behind when the via stepped — a connection lost).
+  if (!twins) {
+    std::map<Key, size_t> firstCrumb;
+    for (size_t i = 0; i < b.tracks.size(); ++i) {
+      const Track& tr = b.tracks[i];
+      if (!crumb(tr)) continue;
+      Point lo = tr.a, hi = tr.b;
+      if (std::pair{hi.x, hi.y} < std::pair{lo.x, lo.y}) std::swap(lo, hi);
+      if (!firstCrumb.try_emplace(Key{tr.layer, tr.net, lo.x, lo.y, hi.x, hi.y, false, 0, 0}, i).second) {
+        drop[i] = 1;
+        ++out.crumbs;
+      }
+    }
+  }
   // Crumbs with a loose end, one after another from the loose end in (a spur of several goes whole).
   using At = std::tuple<LayerId, int, Coord, Coord>;
   auto at = [](const Track& tr, Point p) { return At{tr.layer, tr.net, p.x, p.y}; };
@@ -962,7 +979,6 @@ JunkRemoved removeJunkTracks(Board& b, bool twins) {
       ++endsAt[at(b.tracks[i], b.tracks[i].a)];
       ++endsAt[at(b.tracks[i], b.tracks[i].b)];
     }
-  auto crumb = [&](const Track& tr) { return plain(tr) && !tr.mid && (tr.a.v() - tr.b.v()).len() <= kCrumb; };
   for (bool again = true; again;) {
     again = false;
     for (size_t i = 0; i < b.tracks.size(); ++i) {

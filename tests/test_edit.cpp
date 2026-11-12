@@ -534,12 +534,31 @@ TEST(Edit, JunkTracksAreRemoved) {
   ASSERT_EQ(b.tracks.size(), 3u);
   EXPECT_EQ(r::count(b.tracks, mmToNm(0.4), &Track::width), 1) << "of the twins the wider one stays";
   EXPECT_NEAR(b.tracksLength() / 1e6, length, 1e-6);
-  // Crumbs alone: the twin stays.
+  // Crumbs alone: the twin of a wire's track stays.
   Board c = b;
-  c.tracks.push_back(c.tracks[0]);
+  c.tracks.push_back(*r::max_element(c.tracks, {}, [](const Track& t) { return (t.b.v() - t.a.v()).len(); }));
   junk = edit::removeJunkTracks(c, false);
   EXPECT_EQ(junk.twins + junk.crumbs, 0);
   EXPECT_EQ(c.tracks.size(), 4u);
+  // ... but a crumb's twin goes: two crumbs off a wire's end, each twice, hold each other's ends (under a via of
+  // RMT19M_A8SWA_V5; the via stepped off them in F7 and a connection was lost).
+  Board d = b;
+  const size_t wires = d.tracks.size();
+  auto crumbAt = [&](double x0, double y0, double x1, double y1) {
+    Track t = d.tracks[0];
+    t.width = mmToNm(0.25);
+    t.a = Point(Vec2{x0 * 1e6, y0 * 1e6});
+    t.b = Point(Vec2{x1 * 1e6, y1 * 1e6});
+    d.tracks.push_back(t);
+  };
+  for (int twice = 0; twice < 2; ++twice) {
+    crumbAt(19.9991, 4.9991, 19.9996, 5.0004);  // from a point beside the wire's end to nowhere
+    crumbAt(19.9991, 4.9991, 20, 5);            // ... and to the wire's end
+  }
+  junk = edit::removeJunkTracks(d, false);
+  EXPECT_EQ(junk.twins, 0);
+  EXPECT_EQ(junk.crumbs, 4);
+  EXPECT_EQ(d.tracks.size(), wires);
 
   auto raw = io::readPcad(*io::readFile(data("el4134_pcad_ascii.pcb")), "x.pcb");
   auto loaded = io::loadBoard(data("el4134_pcad_ascii.pcb"));
