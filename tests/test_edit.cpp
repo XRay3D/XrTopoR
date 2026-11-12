@@ -502,3 +502,49 @@ TEST(ZoneFill, IslandsByTheAreasSettings) {
   EXPECT_FALSE(t.poured(2, 10));
   EXPECT_TRUE(t.poured(10 + 3, 10));
 }
+
+// The junk a design comes with (edit::removeJunkTracks): a track lying exactly on another goes, the widest stays; a
+// crumb of 5 um and less with a loose end goes, a spur of them whole; a piece that short with tracks at both its
+// ends is a piece of its wire and stays. The copper that is left joins what it joined. A P-CAD design read through
+// io::loadBoard has lost its loose crumbs and none of its connections.
+TEST(Edit, JunkTracksAreRemoved) {
+  Board b;
+  b.layers.push_back({"Top", LayerKind::Copper});
+  b.nets.push_back({"N"});
+  auto track = [&](double x0, double y0, double x1, double y1, double w = 0.25) {
+    Track t;
+    t.a = Point(Vec2{x0 * 1e6, y0 * 1e6});
+    t.b = Point(Vec2{x1 * 1e6, y1 * 1e6});
+    t.width = mmToNm(w);
+    t.layer = 0;
+    t.net = 0;
+    b.tracks.push_back(t);
+  };
+  track(0, 0, 10, 0);            // 0: a wire ...
+  track(10, 0, 10.003, 0);       // 1: ... a short piece of it ...
+  track(10.003, 0, 20, 5);       // 2: ... and on
+  track(10, 0, 0, 0, 0.4);       // 3: on track 0, the other way round, wider: track 0 goes
+  track(20, 5, 20.001, 5.001);   // 4: a spur of two crumbs off the wire's end ...
+  track(20.001, 5.001, 20.001, 5.002);  // 5: ... its loose end
+  track(30, 30, 30.002, 30);     // 6: a dot by itself
+  const double length = 10 + 0.003 + std::hypot(9.997, 5.0);
+  auto junk = edit::removeJunkTracks(b);
+  EXPECT_EQ(junk.twins, 1);
+  EXPECT_EQ(junk.crumbs, 3);
+  ASSERT_EQ(b.tracks.size(), 3u);
+  EXPECT_EQ(r::count(b.tracks, mmToNm(0.4), &Track::width), 1) << "of the twins the wider one stays";
+  EXPECT_NEAR(b.tracksLength() / 1e6, length, 1e-6);
+  // Crumbs alone: the twin stays.
+  Board c = b;
+  c.tracks.push_back(c.tracks[0]);
+  junk = edit::removeJunkTracks(c, false);
+  EXPECT_EQ(junk.twins + junk.crumbs, 0);
+  EXPECT_EQ(c.tracks.size(), 4u);
+
+  auto raw = io::readPcad(*io::readFile(data("el4134_pcad_ascii.pcb")), "x.pcb");
+  auto loaded = io::loadBoard(data("el4134_pcad_ascii.pcb"));
+  ASSERT_TRUE(raw && loaded);
+  EXPECT_EQ((*loaded)->junkRemoved.crumbs, 4);
+  EXPECT_EQ((*loaded)->tracks.size() + 4, (*raw)->tracks.size());
+  EXPECT_EQ(Connectivity::compute(**loaded).ratsnest.size(), Connectivity::compute(**raw).ratsnest.size());
+}

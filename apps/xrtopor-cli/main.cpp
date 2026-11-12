@@ -19,6 +19,7 @@
 #include "router/topo/ModelRelax.h"
 #include "router/topo/ModelTools.h"
 #include "topo/RelayStats.h"
+#include "core/Edit.h"
 #include "topo/Sidecar.h"
 #include "router/topo/Optimizer.h"
 #include "router/topo/Refine.h"
@@ -159,12 +160,16 @@ static void printViolations(const xr::Board& b, const xr::topo::Topology& t, con
 }
 
 // The model next to the board when it is fresh, else built from the tracks.
-static xr::topo::Topology loadModel(const xr::Board& b, const std::string& boardPath) {
+static xr::topo::Topology loadModel(xr::Board& b, const std::string& boardPath) {
   if (auto t = xr::topo::loadTopology(b, xr::topo::sidecarPath(boardPath))) {
     std::println("model: loaded from {}", xr::topo::sidecarPath(boardPath));
     return std::move(*t);
   } else {
     std::println("model: built from the tracks ({})", t.error());
+  }
+  if (int twins = xr::edit::removeJunkTracks(b).twins; twins > 0) {  // (no model of its own: the twins are junk)
+    std::println("junk removed: {} track(s) lying exactly on another", twins);
+    xr::topo::Topology::assignIds(b);
   }
   xr::topo::Topology t;
   t.build(b);
@@ -185,6 +190,8 @@ int main(int argc, char** argv) {
   Board& b = **loaded;
   auto second = [&]() -> std::string { return a.v.size() > 1 ? std::string(a.v[1]) : std::string(); };
 
+  if (b.junkRemoved.twins + b.junkRemoved.crumbs > 0)
+    std::println("junk removed on load: {} loose crumb(s) of 5 um and shorter", b.junkRemoved.crumbs);
   if (cmd == "info") return cmdInfo(b);
   if (cmd == "drc") {
     auto m = a.opt("--max");

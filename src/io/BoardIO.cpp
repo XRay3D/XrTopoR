@@ -1,3 +1,4 @@
+#include "core/Edit.h"
 #include "io/BoardIO.h"
 
 #include "core/Padstack.h"
@@ -60,6 +61,8 @@ Result<BoardPtr> loadBoard(const std::string& path) {
     case Format::Fst: b = readFst(*text, path); break;
     default: return std::unexpected("unsupported file format: " + path);
   }
+  // The crumbs with a loose end go as the design comes in (core/Edit.h; the twins where its model is built).
+  if (b) (*b)->junkRemoved = edit::removeJunkTracks(**b, false);
   if (b && (*b)->name.empty()) (*b)->name = std::filesystem::path(path).stem().string();
   // Every pad has a stack: those the reader did not give one share one with the pads alike.
   if (b) buildPadstacksFromPads(**b);

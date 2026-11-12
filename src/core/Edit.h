@@ -149,4 +149,17 @@ void erase(Board& b, const Fragment& f);
 // Removes zero-length tracks (drags leave them); returns old → new track index (-1 = removed).
 std::vector<int> removeDegenerate(Board& b);
 
+// The junk a design comes with: a track lying exactly on another of its net and layer (the widest of them stays),
+// and a crumb with a loose end — a straight track no longer than kCrumb from one of whose ends no other track of
+// its net goes on (a spur of such crumbs goes whole; a piece that short inside a wire, with tracks at both its
+// ends, stays: TopoR's own files have them). Two wires on one path are pushed apart by F5; a crumb under a via
+// stays where the via stood when F7 moves it, an island of its net that the drawing counts as a connection lost.
+// The crumbs go when a board is loaded (io::loadBoard), the twins when it is opened with no model of its own that
+// still fits (the main window, the CLI's loadModel); the counts are kept in Board::junkRemoved.
+constexpr double kCrumb = 5000;  // nm
+// `twins` false: the crumbs alone. A board saved with its model (.xrtopo) keeps its twins: two wires that leave
+// a pad by the same lead have its pieces each, and are two wires of that model; they are junk where the model is
+// to be built from the tracks (a design from another system, a file with its routing written twice).
+JunkRemoved removeJunkTracks(Board& b, bool twins = true);
+
 }  // namespace xr::edit

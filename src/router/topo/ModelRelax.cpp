@@ -283,6 +283,26 @@ std::vector<Place> addedPlaces(const std::vector<Place>& was, const std::vector<
   return added;
 }
 
+// The connections `now` has lost against `was`, as places to blame someone for: both ends of every line of a net
+// that has more lines now, that no line of `was` matches. (A drawing with a connection lost is refused whole; with
+// nobody to blame the walk stood still for good — every step of every iteration taken back.)
+std::vector<Place> lostLinks(const std::vector<RatsLine>& was, const std::vector<RatsLine>& now) {
+  std::map<int, int> more;
+  for (const RatsLine& l : now) ++more[l.net];
+  for (const RatsLine& l : was) --more[l.net];
+  std::vector<Place> lost;
+  for (const RatsLine& l : now) {
+    if (more[l.net] <= 0) continue;
+    auto same = [&](const RatsLine& q) {
+      return q.net == l.net && (((q.a - l.a).len() < kNmPerMm && (q.b - l.b).len() < kNmPerMm) || ((q.a - l.b).len() < kNmPerMm && (q.b - l.a).len() < kNmPerMm));
+    };
+    if (r::any_of(was, same)) continue;
+    lost.push_back({{l.net, l.net}, l.a, 0, true});
+    lost.push_back({{l.net, l.net}, l.b, 0, true});
+  }
+  return lost;
+}
+
 struct Obj {
   int owner = -1;
   Vec2 last;         // the force of the last iteration (Rprop)
@@ -298,6 +318,7 @@ struct Drawn {
   Topology owning;  // the same model, its wires owning the drawing's tracks
   Board board;
   std::vector<Place> places;
+  std::vector<RatsLine> loose;  // the connections not made
   std::vector<Vec2> pos;  // the objects' centres
   RealizeStats stats;
   int wires = 0;
@@ -420,7 +441,7 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
     DrcOptions d;
     d.unconnected = false;
     // The connections at the same time as the DRC (both read the board).
-    auto unrouted = std::async(std::launch::async, [&] { return Connectivity::compute(c.board).ratsnest.size(); });
+    auto unrouted = std::async(std::launch::async, [&] { return Connectivity::compute(c.board).ratsnest; });
     const std::vector<DrcViolation> vs = runDrc(c.board, d);
     c.conflicts = int(vs.size());
     c.shortfall = c.depth = 0;
@@ -434,12 +455,13 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
       if (p.shorted || p.depth > kNoise) ++c.real;
     }
     c.length = c.board.tracksLength();
-    c.unrouted = unrouted.get();
+    c.loose = unrouted.get();
+    c.unrouted = c.loose.size();
   };
   auto draw = [&] {
     ProfScope p("F7 model: drawing");
     std::optional<ProfScope> pc(std::in_place, "F7 model: copies");
-    Drawn c{t, t, b, {}, {}, {}};
+    Drawn c{t, t, b, {}, {}, {}, {}};
     pc.reset();
     for (const Obj& ob : objs) c.pos.push_back(t.owners[ob.owner].c);
     // The vias on the 0.1 um grid the board's files keep (a position between two of its points would be
@@ -528,8 +550,8 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
   r.lengthBefore = best.length;
   r.depthBefore = best.shortfall;
   r.forceBefore = sumOf(forcesOf(best));
-  r.log.push_back(std::format("start: {} conflict(s) in {} place(s) ({} deep, {} shorted), {:.3f} mm short, {:.1f} mm, forces {:.1f}", best.conflicts,
-                              best.places.size(), best.deep, best.shorts, best.shortfall / 1e6, best.length / 1e6, r.forceBefore));
+  r.log.push_back(std::format("start: {} conflict(s) in {} place(s) ({} deep, {} shorted, {} real), {} unrouted, {:.3f} mm short, {:.1f} mm, forces {:.1f}", best.conflicts,
+                              best.places.size(), best.deep, best.shorts, best.real, best.unrouted, best.shortfall / 1e6, best.length / 1e6, r.forceBefore));
 
   int clearRounds = o.clearRounds;
   int held = 0;
@@ -683,9 +705,15 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
     // The drawing judges. Not to be walked on: the objects blamed for what it added go back and stand still a
     // few iterations; what is still no good after four tries goes back whole.
     Drawn cur = draw();
+    // What a drawing added to the one the walk stands on: the places of violation and the connections lost.
+    auto addedBy = [&](const Drawn& now) {
+      std::vector<Place> added = addedPlaces(prev.places, now.places);
+      if (now.unrouted > prev.unrouted) r::copy(lostLinks(prev.loose, now.loose), std::back_inserter(added));
+      return added;
+    };
     if (debug) {
       std::println(stderr, "relax {}: attempts refused by copper {}, by the mesh {}, by the room {}", r.iterations + 1, why[0], why[1], why[2]);
-      for (const Place& v : addedPlaces(prev.places, cur.places))
+      for (const Place& v : addedBy(cur))
         std::println(stderr, "  added: {} / {} at ({:.3f}, {:.3f}) {:.3f} mm short{}", v.nets.first >= 0 ? b.nets[v.nets.first].name : "-",
                      v.nets.second >= 0 ? b.nets[v.nets.second].name : "-", v.pos.x / 1e6, -v.pos.y / 1e6, v.depth / 1e6, v.shorted ? ", shorted" : "");
     }
@@ -715,7 +743,13 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
     std::vector<char> out(objs.size(), 0);
     int tries = 0;
     for (; !walkable(cur, best) && tries < 4; ++tries) {
-      auto blamed = blameFor(addedPlaces(prev.places, cur.places), tries);
+      if (debug)
+        for (const Place& v : addedBy(cur))
+          std::println(stderr, "  try {}: {} {} / {} at ({:.3f}, {:.3f}), {:.3f} mm short", tries,
+                       v.nets.first == v.nets.second && v.depth == 0 ? "a connection lost," : v.shorted ? "shorted" : "added",
+                       v.nets.first >= 0 ? b.nets[size_t(v.nets.first)].name : "-", v.nets.second >= 0 ? b.nets[size_t(v.nets.second)].name : "-",
+                       v.pos.x / 1e6, -v.pos.y / 1e6, v.depth / 1e6);
+      auto blamed = blameFor(addedBy(cur), tries);
       bool any = false;
       for (size_t k = 0; k < objs.size(); ++k)
         if (blamed[k] && !out[k]) {
@@ -731,15 +765,19 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
       cur = draw();
     }
     const bool kept = walkable(cur, best);
+    if (cur.unrouted > prev.unrouted)
+      for (const Place& v : lostLinks(prev.loose, cur.loose))
+        r.log.push_back(std::format("relax {}: a connection of {} lost, an end at ({:.3f}, {:.3f})", r.iterations + 1,
+                                    v.nets.first >= 0 ? b.nets[size_t(v.nets.first)].name : "-", v.pos.x / 1e6, -v.pos.y / 1e6));
     if (!kept) {
       // Still worse: all of it goes back, and whoever stepped anywhere near what it added stands still a while.
-      auto blamed = blameFor(addedPlaces(prev.places, cur.places), 3);
+      auto blamed = blameFor(addedBy(cur), 3);
       for (size_t k = 0; k < objs.size(); ++k)
         if (blamed[k]) objs[k].frozen = 2 * kFreeze;
     }
-    r.log.push_back(std::format("relax {}: tol {:.3f} mm, {} step(s) ({} blocked){}; {} conflict(s) in {} place(s) ({} deep, {} shorted), {:.3f} mm short, {:.1f} mm, forces {:.1f} ({:.1f} free), {} blame round(s): {}",
+    r.log.push_back(std::format("relax {}: tol {:.3f} mm, {} step(s) ({} blocked){}; {} conflict(s) in {} place(s) ({} deep, {} shorted, {} real), {} unrouted, {:.3f} mm short, {:.1f} mm, forces {:.1f} ({:.1f} free), {} blame round(s): {}",
                                 r.iterations + 1, tol / kNmPerMm, stepped, blocked, clearing ? ", clearing" : "", cur.conflicts, cur.places.size(), cur.deep,
-                                cur.shorts, cur.shortfall / 1e6, cur.length / 1e6, sumOf(forcesOf(cur)), freeForce, tries, !kept ? "rolled back" : better(cur, best) ? "kept, the best" : "kept"));
+                                cur.shorts, cur.real, cur.unrouted, cur.shortfall / 1e6, cur.length / 1e6, sumOf(forcesOf(cur)), freeForce, tries, !kept ? "rolled back" : better(cur, best) ? "kept, the best" : "kept"));
     if (kept) {
       if (better(cur, best)) best = cur;
       prev = std::move(cur);

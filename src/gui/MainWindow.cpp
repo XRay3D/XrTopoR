@@ -27,6 +27,7 @@
 #include <QtConcurrent/QtConcurrent>
 
 #include "core/Edit.h"
+#include "topo/Sidecar.h"
 #include "core/ZoneFill.h"
 #include "gui/AppSettings.h"
 #include "gui/AutorouteWindow.h"
@@ -739,6 +740,10 @@ bool MainWindow::openDesign(const QString& file) {
     QMessageBox::warning(this, tr("Открыть"), QString::fromStdString(r.error()));
     return false;
   }
+  // A design with no model of its own that still fits (from another system; a file whose routing was written
+  // twice): its model will be built from the tracks, and the tracks lying exactly on another are junk there.
+  topo::Topology::assignIds(**r);
+  if (!topo::loadTopology(**r, topo::sidecarPath(file.toStdString()))) (*r)->junkRemoved.twins += edit::removeJunkTracks(**r).twins;
   doc_->setBoard(std::move(*r), QFileInfo(file).absoluteFilePath());
   showHint(tr("Открыт %1").arg(file));
   const Board& b = *doc_->board();
@@ -749,6 +754,11 @@ bool MainWindow::openDesign(const QString& file) {
                     .arg(b.nets.size())
                     .arg(b.tracks.size())
                     .arg(b.vias.size())});
+  if (b.junkRemoved.twins + b.junkRemoved.crumbs > 0)
+    doc_->addLog({LogMessage::Kind::Warning, tr("Документ"),
+                  tr("Удалён мусор: совпадающих дорожек %1, хвостиков короче 5 мкм со свободным концом %2. Сохраните дизайн, чтобы убрать их из файла.")
+                      .arg(b.junkRemoved.twins)
+                      .arg(b.junkRemoved.crumbs)});
   if (project_) {
     project_->setOpened(doc_->path());
     saveProject();

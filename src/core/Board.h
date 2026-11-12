@@ -350,7 +350,15 @@ void setTextMeasure(TextMeasure m);
 
 struct SourceDoc;
 
+// What removeJunkTracks (core/Edit.h) took out of a board as it was loaded.
+struct JunkRemoved {
+  int twins = 0;   // tracks lying exactly on another of their net and layer
+  int crumbs = 0;  // crumbs with a loose end: tracks of 5 um and less that lead nowhere
+};
+
 struct Board {
+  JunkRemoved junkRemoved;  // (of the load; not kept in any file)
+
   std::string name;
   std::vector<Layer> layers;
   std::vector<NetClass> netClasses{NetClass{}};

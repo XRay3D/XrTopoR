@@ -3,6 +3,7 @@
 #include "core/DiffPairs.h"
 #include "core/Runs.h"
 
+#include <tuple>
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -927,6 +928,63 @@ std::vector<int> removeDegenerate(Board& b) {
   }
   b.tracks = std::move(kept);
   return map;
+}
+
+JunkRemoved removeJunkTracks(Board& b, bool twins) {
+  JunkRemoved out;
+  std::vector<char> drop(b.tracks.size(), 0);
+  auto plain = [&](const Track& tr) { return tr.zip < 0 && tr.serp < 0; };  // (a pair's conductor, a serpentine's piece: as they are)
+  // Twins.
+  using Key = std::tuple<LayerId, int, Coord, Coord, Coord, Coord, bool, Coord, Coord>;
+  std::map<Key, size_t> first;
+  for (size_t i = 0; twins && i < b.tracks.size(); ++i) {
+    const Track& tr = b.tracks[i];
+    if (!plain(tr)) continue;
+    Point lo = tr.a, hi = tr.b;
+    if (std::pair{hi.x, hi.y} < std::pair{lo.x, lo.y}) std::swap(lo, hi);
+    const Point mid = tr.mid.value_or(Point{});
+    auto [it, fresh] = first.try_emplace(Key{tr.layer, tr.net, lo.x, lo.y, hi.x, hi.y, tr.mid.has_value(), mid.x, mid.y}, i);
+    if (fresh) continue;
+    ++out.twins;
+    if (b.tracks[it->second].width < tr.width) {  // the wider one stays
+      drop[it->second] = 1;
+      it->second = i;
+    } else {
+      drop[i] = 1;
+    }
+  }
+  // Crumbs with a loose end, one after another from the loose end in (a spur of several goes whole).
+  using At = std::tuple<LayerId, int, Coord, Coord>;
+  auto at = [](const Track& tr, Point p) { return At{tr.layer, tr.net, p.x, p.y}; };
+  std::map<At, int> endsAt;
+  for (size_t i = 0; i < b.tracks.size(); ++i)
+    if (!drop[i]) {
+      ++endsAt[at(b.tracks[i], b.tracks[i].a)];
+      ++endsAt[at(b.tracks[i], b.tracks[i].b)];
+    }
+  auto crumb = [&](const Track& tr) { return plain(tr) && !tr.mid && (tr.a.v() - tr.b.v()).len() <= kCrumb; };
+  for (bool again = true; again;) {
+    again = false;
+    for (size_t i = 0; i < b.tracks.size(); ++i) {
+      const Track& tr = b.tracks[i];
+      if (drop[i] || !crumb(tr)) continue;
+      if (endsAt[at(tr, tr.a)] > 1 && endsAt[at(tr, tr.b)] > 1) continue;  // a piece of a wire: tracks go on from both its ends
+      drop[i] = 1;
+      --endsAt[at(tr, tr.a)];
+      --endsAt[at(tr, tr.b)];
+      ++out.crumbs;
+      again = true;
+    }
+  }
+  if (out.twins + out.crumbs == 0) return out;
+  size_t k = 0;
+  for (size_t i = 0; i < b.tracks.size(); ++i)
+    if (!drop[i]) {
+      if (k != i) b.tracks[k] = std::move(b.tracks[i]);
+      ++k;
+    }
+  b.tracks.resize(k);
+  return out;
 }
 
 }  // namespace xr::edit
