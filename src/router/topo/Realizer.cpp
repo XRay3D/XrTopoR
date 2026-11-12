@@ -1927,8 +1927,11 @@ bool drawWires(const Board& b, const std::vector<RealWire>& wires, const Realize
   // nothing moves by more than kUpdateTol. Everything else is the earlier drawing's. A wire laid again has the radii
   // of that laying alone (through the rounds of a whole drawing they only grow; here they may have to shrink, and a
   // stack of n wires that shrinks comes to rest wire by wire, in n rounds).
-  // False: not this way — another set of wires or of obstacles, most of the board changed, an edge that takes its
-  // ends' shares back (the whole drawing begins again on that), no rest within the rounds.
+  // False: not this way — another set of wires or of obstacles, most of the wires with other crossings, an edge that
+  // takes its ends' shares back (the whole drawing begins again on that), no rest within the rounds.
+  // (However many wires have to be laid again — every via stepped, every wire's end moved — it is brought up: laid
+  // from what they were they come to rest in a round or two where the whole drawing takes three to six. F7's first
+  // drawing of an iteration was computed whole while half the wires touched was the limit: 28 of 108 on RMT19M.)
   auto drawChanged = [&](const DrawnBefore& was) -> bool {
     auto whole = [&](const char* why) {
       d.made.whole = why;
@@ -1956,7 +1959,8 @@ bool drawWires(const Board& b, const std::vector<RealWire>& wires, const Realize
         ptChanged[li][i] = !same;
       }
     }
-    std::vector<char> fresh(size_t(NW), 0);  // a wire of other crossings or ends: nothing of its earlier drawing holds
+    std::vector<char> fresh(size_t(NW), 0);  // a wire of other crossings: nothing of its earlier drawing holds
+    std::vector<char> endMoved(size_t(NW), 0);
     int nFresh = 0;
     for (int wi = 0; wi < NW; ++wi) {
       const RealWire& x = wires[wi];
@@ -1965,8 +1969,7 @@ bool drawWires(const Board& b, const std::vector<RealWire>& wires, const Realize
       const Polyline& sy = was.in.sketches[wi];
       bool same = x.net == y.net && x.layer == y.layer && x.width == y.width && x.widthMin == y.widthMin && x.clearance == y.clearance && x.zip == y.zip &&
                   x.pair == y.pair && x.condWidth == y.condWidth && x.netN == y.netN && x.pSide == y.pSide && hits[wi].size() == was.in.hits[wi].size() &&
-                  (sx.size() < 2) == (sy.size() < 2) && (sx.empty() || (sx.front() == sy.front() && sx.back() == sy.back())) &&
-                  was.d.rooms[wi].size() == hits[wi].size();
+                  (sx.size() < 2) == (sy.size() < 2) && was.d.rooms[wi].size() == hits[wi].size();
       for (size_t k = 0; same && k < hits[wi].size(); ++k) {
         const EdgeHit& h = hits[wi][k];
         const EdgeHit& g = was.in.hits[wi][k];
@@ -1979,8 +1982,10 @@ bool drawWires(const Board& b, const std::vector<RealWire>& wires, const Realize
       }
       fresh[wi] = !same;
       nFresh += !same;
+      // An end that moved (the via it hangs on stepped): the same crossings, laid again from what it was.
+      endMoved[wi] = same && !sx.empty() && (sx.front() != sy.front() || sx.back() != sy.back());
     }
-    if (nFresh * 3 > NW) return whole("most wires changed");
+    if (nFresh * 5 > NW * 3) return whole("most wires changed");
     auto clean = [&](size_t li, const std::pair<int, int>& uv, const std::vector<std::pair<int, int>>& list) {  // an edge as it was
       if (ptChanged[li][size_t(uv.first)] || ptChanged[li][size_t(uv.second)]) return false;
       const auto layer = was.in.edgeLists.find(layersDrawn[li]);
@@ -2041,7 +2046,6 @@ bool drawWires(const Board& b, const std::vector<RealWire>& wires, const Realize
     // Where to begin.
     std::vector<std::set<std::pair<int, int>>> dirtyE(NL);
     std::vector<char> dirtyW(size_t(NW), 0);
-    int seeds = 0;
     for (size_t li = 0; li < NL; ++li) {
       const LayerId L = layersDrawn[li];
       const LayerObstacles& ob = obstacles.at(L);
@@ -2056,7 +2060,7 @@ bool drawWires(const Board& b, const std::vector<RealWire>& wires, const Realize
       for (size_t i = 0; i < ob.pts.size(); ++i)
         if (ptChanged[li][i]) movedPts.push_back(int(i));
       for (int wi : byLayer.at(L)) {
-        if (fresh[wi]) dirtyW[size_t(wi)] = 1;
+        if (fresh[wi] || endMoved[wi]) dirtyW[size_t(wi)] = 1;
         if (dirtyW[size_t(wi)] || movedPts.empty()) continue;
         // A bend round a point that changed (round one that is the end of none of the wire's edges too: a guard
         // bend), a chord that passes a changed point within its rule (where a guard bend would be made).
@@ -2085,9 +2089,7 @@ bool drawWires(const Board& b, const std::vector<RealWire>& wires, const Realize
           }
         if (hit) dirtyW[size_t(wi)] = 1;
       }
-      for (int wi : byLayer.at(L)) seeds += dirtyW[size_t(wi)];
     }
-    if (seeds * 2 > NW) return whole("most wires changed");
     // The rounds.
     std::vector<char> laid(size_t(NW), 0);  // laid again in this update (its radii begun anew)
     std::vector<char> failed(NL, 0), active(NL, 0);
