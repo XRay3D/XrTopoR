@@ -528,7 +528,12 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
           EdgeCapacity c = edgeCapacity(t, m, e);
           const Vec2 other = m.verts[E.v[0] == v ? E.v[1] : E.v[0]].p;
           const double grown = (m.verts[v].p + d - other).len() - c.L;
-          s.least += std::max(0.0, -(c.slack + grown));  // `need` holds the ends' reach: the slack is of the whole length
+          // XR_F7_RESERVE=<um>: a step may not leave a spoke less room than that (it is refused before it is drawn,
+          // not blamed after). Tried 2026-11-12 at 20 / 50 / 100 um: RMT19M_A8SWA_V5 109 drawings -> 88 / 88 / 76 and
+          // 7.2 -> 5.5 s, the length 7485.9 -> 7483.6 / 7502.6 / 7500.7 mm, the violations left 0 -> 1 / 4 / 0;
+          // arz_2L and AMK310 neither faster nor shorter, the violations a few more or fewer either way. Off.
+          static const double kReserve = std::getenv("XR_F7_RESERVE") ? std::atof(std::getenv("XR_F7_RESERVE")) * 1000 : 0.0;
+          s.least += std::max(0.0, kReserve - (c.slack + grown));  // `need` holds the ends' reach: the slack is of the whole length
           if (!nominal) continue;
           double excess = 0;
           for (int end = 0; end < 2; ++end) {
