@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <set>
+
 #include <algorithm>
 
 #include <cstdio>
@@ -176,6 +178,46 @@ TEST(Realizer, TwinTracksAreOneWire) {
   EXPECT_EQ(b.tracks.size(), a.tracks.size());
   EXPECT_NEAR(length(b), length(a), 1000.0);
   EXPECT_EQ(conflicts(b), conflicts(a));
+}
+
+// A drawing kept (ModelDrawing: the realiser's input from the model and what it computed — the wires' places on
+// the edges, their bends and tangents) answers without a track made what the drawing answered when it made
+// them: the length of its tracks and the wires' forces on the vias and branch points; the board is not touched.
+TEST(Realizer, KeptDrawingMeasuresAsTheTracksDid) {
+  for (const char* name : {"topor/Example_03/arz_2L.fst", "topor/Example_04/Arcs_master.pcb"}) {
+    auto lb = io::loadBoard(data(name));
+    ASSERT_TRUE(lb.has_value()) << name;
+    Board& b = **lb;
+    topo::Topology::assignIds(b);
+    topo::Topology t;
+    t.build(b);
+    const size_t before = b.tracks.size();
+    std::set<uint32_t> old;
+    for (const Track& tr : b.tracks) old.insert(tr.id);
+    topo::RealizeStats drawn;
+    topo::ModelDrawing kept;
+    int wires = 0;
+    topo::drawModel(b, t, true, drawn, wires, false, nullptr, &kept);
+    ASSERT_GT(wires, 0) << name;
+    ASSERT_TRUE(kept.in) << name;
+    EXPECT_EQ(int(kept.chosen.size()), wires) << name;
+    double onBoard = 0;  // the tracks the drawing made
+    for (const Track& tr : b.tracks)
+      if (!old.contains(tr.id)) onBoard += tr.length();
+    EXPECT_NEAR(drawn.length, onBoard, 1000.0) << name;  // (but the pieces below the files' grid, dropped after)
+    const std::vector<Track> tracksWere = b.tracks;
+    const topo::RealizeStats measured = topo::measureDrawing(b, t, kept);
+    EXPECT_EQ(b.tracks.size(), tracksWere.size()) << name << ": measuring makes no track";
+    EXPECT_DOUBLE_EQ(measured.length, drawn.length) << name;
+    EXPECT_EQ(measured.arcs, drawn.arcs) << name;
+    ASSERT_EQ(measured.ownerForce.size(), drawn.ownerForce.size()) << name;
+    for (const auto& [owner, f] : drawn.ownerForce) {
+      const Vec2 g = measured.ownerForce.at(owner);
+      EXPECT_DOUBLE_EQ(g.x, f.x) << name << " owner " << owner;
+      EXPECT_DOUBLE_EQ(g.y, f.y) << name << " owner " << owner;
+    }
+    (void)before;
+  }
 }
 
 // F7 on the model: the vias and branch points go down the gradient of the drawn length (the wires' pull at

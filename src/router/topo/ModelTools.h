@@ -5,12 +5,18 @@
 // does not hold) stops it before anything is drawn.
 #include <vector>
 
+#include <memory>
+
+#include "router/topo/Drawn.h"
+#include "router/topo/RealizerInput.h"
 #include "core/Board.h"
 #include "drc/Drc.h"
 #include "router/topo/Realizer.h"
 #include "topo/Topology.h"
 
 namespace xr::topo {
+
+struct ModelDrawing;  // a drawing kept (below)
 
 struct F5ModelOptions {
   bool flips = true;      // Lawson's loop before drawing (the mesh is Delaunay after a conversion already)
@@ -54,7 +60,7 @@ int resolveCrossings(const Board& b, Topology& t);
 // pads they end at; the model's wires then own the new tracks.
 // `only` (with editedOnly false): these wires alone, the rest as they lie.
 void drawModel(Board& b, Topology& t, bool direct, RealizeStats& stats, int& nWires, bool editedOnly = false,
-               const std::vector<int>* only = nullptr);
+               const std::vector<int>* only = nullptr, ModelDrawing* keep = nullptr);
 
 // A connection for manual routing, on the model: a copy of it with the new wire laid over the triangles from `from` to
 // `to` on the layer (findRelay, as F6 re-lays a wire: among the wires as they run, each edge with room for it; squeezed
@@ -88,7 +94,24 @@ namespace xr::topo {
 // Draws the given wires of the model with the realiser fed from the model itself: the obstacles are the
 // mesh's vertices, every wire's crossings and the wires' order on every edge come from the model, nothing
 // is derived from the sketches again. Appends the tracks to the board; `wires` receives the sketches used.
+// `keep` receives the drawing itself: what was computed before the tracks were made (ModelDrawing).
 RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int>& chosen, const RealizeOptions& opt,
-                              std::vector<RealWire>* wires = nullptr);
+                              std::vector<RealWire>* wires = nullptr, ModelDrawing* keep = nullptr);
+
+// A drawing of wires of the model, kept: the realiser's input made from the model (the obstacles of every layer,
+// the wires' crossings in their order on every edge), and what it computed from it — every wire's place and
+// width on every edge it crosses, its bends and tangents (Drawn.h). The state that is to live with the model
+// between drawings; for now it is of the board and the model as they were when it was drawn, and answers
+// without a track made: measureDrawing.
+struct ModelDrawing {
+  std::vector<int> chosen;      // the model's wires drawn, in the realiser's order
+  std::vector<RealWire> wires;  // ... as the realiser had them
+  RealizeOptions opt;
+  std::unique_ptr<RealizeInput> in;
+  DrawnWires drawn;
+};
+// The counts, the length (RealizeStats::length) and the forces by owner (ownerForce) of a kept drawing, as
+// realizeFromModel returned them when it made the tracks; `b` is the board it was drawn on (the board is read).
+RealizeStats measureDrawing(const Board& b, const Topology& t, const ModelDrawing& drawing);
 
 }  // namespace xr::topo

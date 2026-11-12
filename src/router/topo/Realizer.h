@@ -59,6 +59,7 @@ struct RealizeStats {
   int sketchCrossings = 0;  // pairs of sketches that cross each other topologically (laid as drawn)
   std::vector<std::pair<int, int>> crossingNets;  // the nets of those pairs, each pair once
   std::vector<int> trackWire;  // wire index of every track appended, in order
+  double length = 0;           // of the tracks of the drawing (a pair's two conductors each), nm
   // What the wires as drawn do to the things they hang on and bend round (TopoR's forces: Bessonov, Luzin,
   // Lyachek, Popov, 2014): a wire pulls the element each of its ends is fixed to along itself, and presses on
   // an element it bends round with the sum of the unit vectors from the bend towards its neighbours on the

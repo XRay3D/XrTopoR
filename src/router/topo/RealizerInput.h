@@ -160,5 +160,11 @@ void prepareStubs(const Board& b, const std::vector<RealWire>& wires, const Real
 // Draws the wires from the input: slots on the crossed edges, bends, tangents, arcs, tracks on the board.
 RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const std::vector<RealVia>& vias,
                           const RealizeOptions& opt, RealizeInput& in, RealizeStats st);
+// The two halves of it: the drawing computed (the board is read only), and its tracks made.
+struct DrawnWires;
+void computeDrawn(const Board& b, const std::vector<RealWire>& wires, const RealizeOptions& opt, RealizeInput& in, DrawnWires& d, RealizeStats& st);
+// `dry`: nothing is put on the board — the counts, the length and the forces of the drawing alone.
+RealizeStats emitDrawn(Board& b, const std::vector<RealWire>& wires, const std::vector<RealVia>& vias, const RealizeOptions& opt, RealizeInput& in,
+                       const DrawnWires& d, RealizeStats st, bool dry = false);
 
 }  // namespace xr::topo

@@ -129,8 +129,27 @@ RealWire sketchOf(const Board& b, const Topology& t, int wi) {
   return r;
 }
 
+namespace {
+// The wires' forces by owner: the push at the bends, and the pull at the ends.
+void forcesByOwner(const Topology& t, const std::vector<int>& chosen, RealizeStats& st) {
+  st.ownerForce = st.ownerPush;
+  for (int k = 0; k < int(chosen.size()) && k < int(st.endDir.size()); ++k)
+    for (int end = 0; end < 2; ++end) {
+      const int owner = t.wires[size_t(chosen[size_t(k)])].end[end];
+      if (owner >= 0) st.ownerForce[owner] = st.ownerForce[owner] + st.endDir[size_t(k)][size_t(end)];
+    }
+}
+}  // namespace
+
+RealizeStats measureDrawing(const Board& b, const Topology& t, const ModelDrawing& drawing) {
+  // (A dry emission writes nothing to the board and reads the input.)
+  RealizeStats st = emitDrawn(const_cast<Board&>(b), drawing.wires, {}, drawing.opt, *drawing.in, drawing.drawn, RealizeStats{}, true);
+  forcesByOwner(t, drawing.chosen, st);
+  return st;
+}
+
 RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int>& chosen, const RealizeOptions& opt,
-                              std::vector<RealWire>* wiresOut) {
+                              std::vector<RealWire>* wiresOut, ModelDrawing* keep) {
   ProfScope pAll("realizeFromModel");
   std::vector<RealWire> wires;
   {
@@ -138,7 +157,8 @@ RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int
     for (int wi : chosen) wires.push_back(sketchOf(b, t, wi));
   }
   if (wiresOut) *wiresOut = wires;
-  RealizeInput in;
+  auto inOwned = std::make_unique<RealizeInput>();
+  RealizeInput& in = *inOwned;
   // No stubs out of narrow pads yet (XR_TOPO_STUBS=1 tries them): which of the model's crossings a stub
   // covers is not settled, and the wires of a fine-pitch row came out weaving (Arcs_master: 1500
   // violations against 25 without).
@@ -430,14 +450,18 @@ RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int
     }
   }
   phase.reset();
-  RealizeStats st = drawRealized(b, wires, {}, opt, in, RealizeStats{});
-  // The wires' forces by owner: the push at the bends, and the pull at the ends.
-  st.ownerForce = st.ownerPush;
-  for (int k = 0; k < NW && k < int(st.endDir.size()); ++k)
-    for (int end = 0; end < 2; ++end) {
-      const int owner = t.wires[chosen[k]].end[end];
-      if (owner >= 0) st.ownerForce[owner] = st.ownerForce[owner] + st.endDir[k][end];
-    }
+  DrawnWires drawn;
+  RealizeStats st;
+  computeDrawn(b, wires, opt, in, drawn, st);
+  st = emitDrawn(b, wires, {}, opt, in, drawn, std::move(st));
+  forcesByOwner(t, chosen, st);
+  if (keep) {
+    keep->chosen = chosen;
+    keep->wires = wires;
+    keep->opt = opt;
+    keep->in = std::move(inOwned);
+    keep->drawn = std::move(drawn);
+  }
   return st;
 }
 
@@ -580,7 +604,7 @@ void dropCrumbs(Board& b, size_t from, RealizeStats& stats) {
     if (z.axis.size() > 1) std::erase_if(z.axis, crumb);
 }
 
-void drawModel(Board& b, Topology& t, bool direct, RealizeStats& stats, int& nWires, bool editedOnly, const std::vector<int>* only) {
+void drawModel(Board& b, Topology& t, bool direct, RealizeStats& stats, int& nWires, bool editedOnly, const std::vector<int>* only, ModelDrawing* keep) {
   std::vector<int> chosen;
   std::set<uint32_t> gone;
   std::set<int> redrawnAt;
@@ -598,7 +622,7 @@ void drawModel(Board& b, Topology& t, bool direct, RealizeStats& stats, int& nWi
     redrawnAt.insert(w.end[0]);
     redrawnAt.insert(w.end[1]);
   }
-  // Drawn part of the board: with them the wires sharing an edge with one (their stack on that edge is packed with
+  // DrawnWires part of the board: with them the wires sharing an edge with one (their stack on that edge is packed with
   // them, as F5 of the whole board packs it; left as they lay, they were obstacles of points the drawn wires
   // bent round one by one — a zipped pair along a bend: 18 pieces of axis for 9).
   if (editedOnly || only) {
@@ -670,7 +694,7 @@ void drawModel(Board& b, Topology& t, bool direct, RealizeStats& stats, int& nWi
   const size_t before = b.tracks.size();
   {
     ProfScope p("F5 model: realize");
-    stats = direct ? realizeFromModel(b, t, chosen, opt) : realize(b, wires, {}, opt);
+    stats = direct ? realizeFromModel(b, t, chosen, opt, nullptr, keep) : realize(b, wires, {}, opt);
   }
   dropCrumbs(b, before, stats);
   Topology::assignIds(b);
