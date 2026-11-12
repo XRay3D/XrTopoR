@@ -27,6 +27,7 @@
 #include <QToolButton>
 #include <QVBoxLayout>
 
+#include "gui/AppSettings.h"
 #include "gui/Schemes.h"
 #include "gui/SpinBox.h"
 
@@ -350,9 +351,36 @@ void DisplayPanel::rebuild() {
   if (schemesTitle_) schemesTitle_->setText(tr("Схемы"));
   if (!doc_->hasBoard()) return;
   tabPages_[0]->layout()->addWidget(scrollPage(layersTab()));
+  tabPages_[0]->layout()->addWidget(copperTransparencyRow());
   tabPages_[1]->layout()->addWidget(scrollPage(objectsTab()));
   tabPages_[2]->layout()->addWidget(scrollPage(netsTab()));
   tabPages_[3]->layout()->addWidget(scrollPage(settingsTab()));
+}
+
+// Under the layers, over «Схемы», whatever the list is scrolled to.
+QWidget* DisplayPanel::copperTransparencyRow() {
+  // «Прозрачность меди»: the copper layers laid over one another that transparent (the active one half as much),
+  // so that every layer of a multilayer board shows; a setting of the program, not of the design.
+  auto* row = new QWidget;
+  auto* h = new QHBoxLayout(row);
+  h->setContentsMargins(6, 2, 6, 2);
+  h->addWidget(new QLabel(tr("Прозрачность меди:")));
+  auto* slider = new QSlider(Qt::Horizontal);
+  slider->setObjectName("copperTransparency");
+  slider->setRange(0, 100);
+  slider->setPageStep(10);
+  slider->setValue(AppSettings::copperTransparency());
+  auto* value = new QLabel(QString("%1 %").arg(slider->value()));
+  value->setMinimumWidth(value->fontMetrics().horizontalAdvance("100 %"));
+  value->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+  connect(slider, &QSlider::valueChanged, this, [this, value](int v) {
+    AppSettings::setCopperTransparency(v);
+    value->setText(QString("%1 %").arg(v));
+    emit doc_->appearanceChanged();
+  });
+  h->addWidget(slider, 1);
+  h->addWidget(value);
+  return row;
 }
 
 QWidget* DisplayPanel::layersTab() {

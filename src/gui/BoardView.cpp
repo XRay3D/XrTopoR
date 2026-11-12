@@ -11,6 +11,7 @@
 #include <QPainter>
 #include <QFontMetricsF>
 #include <QPainterPath>
+#include <QStaticText>
 #include <QWheelEvent>
 #include <algorithm>
 #include <cstring>
@@ -54,7 +55,9 @@ BoardView::BoardView(Document* doc, QWidget* parent) : QOpenGLWidget(parent), do
     autoFit_ = true;
   });
   connect(doc_, &Document::boardChanged, this, &BoardView::refresh);
-  connect(doc_, &Document::selectionChanged, this, &BoardView::refresh);
+  // The selection and the DRC's marks are a scene of their own: the board's stays as it is.
+  connect(doc_, &Document::selectionChanged, this, &BoardView::refreshMarks);
+  connect(doc_, &Document::appearanceChanged, this, qOverload<>(&QWidget::update));
   connect(doc_, &Document::layersChanged, this, [this] {
     // The 45° routing mode follows «Привязка к углу» of the display settings.
     if (doc_->hasBoard() && doc_->display().snapToAngle != (angle_ == RouteAngle::Deg45))
@@ -62,7 +65,7 @@ BoardView::BoardView(Document* doc, QWidget* parent) : QOpenGLWidget(parent), do
     emit viewChanged();
     refresh();
   });
-  connect(doc_, &Document::drcChanged, this, &BoardView::refresh);
+  connect(doc_, &Document::drcChanged, this, &BoardView::refreshMarks);
 }
 
 // ---------------------------------------------------------------- view transform
@@ -361,6 +364,11 @@ void BoardView::refresh() {
   update();
 }
 
+void BoardView::refreshMarks() {
+  marksDirty_ = true;
+  update();
+}
+
 BBox BoardView::viewBox(double marginPx) const {
   const Vec2 half{(width() / 2.0 + marginPx) / scale_, (height() / 2.0 + marginPx) / scale_};
   return {center_.x - half.x, center_.y - half.y, center_.x + half.x, center_.y + half.y};
@@ -441,42 +449,63 @@ bool BoardView::keepoutVisible(const Keepout& k) const {
   return (lm & visibleCopper()) != 0;
 }
 
+// The labels in pixels: component names, pin names and nets. A label is laid out once and kept (a text drawn into a
+// rectangle is laid out anew every time: four milliseconds a frame for a board's worth), and drawn with the others
+// of its size and colour.
 void BoardView::drawLabels(QPainter& p) {
   const Board& b = *doc_->board();
   const DisplayControl& d = doc_->display();
   const BBox view = viewBox(64);
-  QFont f = font();
+  struct Draw {
+    QPointF at;
+    const QStaticText* text;
+  };
+  std::map<std::pair<int, QRgb>, std::vector<Draw>> groups;  // by font size and colour
+  if (labels_.size() > 50000) labels_.clear();
+  // The label centred in x on `at`; in y its top, middle or bottom there (-1, 0, 1).
+  auto put = [&](int size, const QColor& c, QPointF at, int vertical, const std::string& text) {
+    auto [it, fresh] = labels_.try_emplace({size, text});
+    QStaticText& st = it->second;
+    if (fresh) {
+      QFont f = font();
+      f.setPixelSize(size);
+      st.setText(QString::fromStdString(text));
+      st.setTextFormat(Qt::PlainText);
+      st.setPerformanceHint(QStaticText::AggressiveCaching);
+      st.prepare({}, f);
+    }
+    const QSizeF sz = st.size();
+    const double y = vertical < 0 ? at.y() : vertical > 0 ? at.y() - sz.height() : at.y() - sz.height() / 2;
+    groups[{size, c.rgb()}].push_back({QPointF(std::round(at.x() - sz.width() / 2), std::round(y)), &st});
+  };
   // Component names at the component origin.
-  if (d.flag("showCompsDes")) {
-    f.setPixelSize(std::clamp(int(px(1.0 * kNmPerMm)), 7, 18));
-    p.setFont(f);
-    p.setPen(doc_->color("compsName", 0xffffff));
-    if (px(0.6 * kNmPerMm) >= 3)
-      for (int ci = 0; ci < int(b.components.size()); ++ci)
-        if (componentVisible(ci) && view.contains(b.components[ci].pos.v())) {
-          QRectF r(toScreen(b.components[ci].pos.v()) - QPointF(60, 10), QSizeF(120, 20));
-          p.drawText(r, Qt::AlignCenter, QString::fromStdString(b.components[ci].ref));
-        }
+  if (d.flag("showCompsDes") && px(0.6 * kNmPerMm) >= 3) {
+    const int size = std::clamp(int(px(1.0 * kNmPerMm)), 7, 18);
+    const QColor c = doc_->color("compsName", 0xffffff);
+    for (int ci = 0; ci < int(b.components.size()); ++ci)
+      if (componentVisible(ci) && view.contains(b.components[ci].pos.v())) put(size, c, toScreen(b.components[ci].pos.v()), 0, b.components[ci].ref);
   }
   // Pin names and nets inside pads big enough on screen.
   bool names = d.flag("showPinsName"), nets = d.flag("showPinsNet");
-  if (!names && !nets) return;
-  for (auto& pad : b.pads) {
-    if (pad.component >= 0 && !componentVisible(pad.component)) continue;
-    if (!(pad.copper & visibleCopper()) || !view.intersects(padBox(pad))) continue;
-    double size = px(double(std::min(pad.shape.w, pad.shape.h)));
-    if (size < 14) continue;
-    f.setPixelSize(std::clamp(int(size / 3), 6, 14));
+  if (names || nets) {
+    const LayerMask vis = visibleCopper();
+    const QColor nameColor = doc_->color("pinsName", 0xbad3ef), netColor = doc_->color("pinsNet", 0xbad3ef);
+    for (auto& pad : b.pads) {
+      double size = px(double(std::min(pad.shape.w, pad.shape.h)));
+      if (size < 14 || !(pad.copper & vis) || !view.intersects(padBox(pad))) continue;
+      if (pad.component >= 0 && !componentVisible(pad.component)) continue;
+      const int font = std::clamp(int(size / 3), 6, 14);
+      const QPointF at = toScreen(pad.pos.v());
+      if (names) put(font, nameColor, nets ? at - QPointF(0, size / 2) : at, nets ? -1 : 0, pad.number);
+      if (nets && pad.net >= 0) put(font, netColor, names ? at + QPointF(0, size / 2) : at, names ? 1 : 0, b.nets[pad.net].name);
+    }
+  }
+  QFont f = font();
+  for (auto& [key, draws] : groups) {
+    f.setPixelSize(key.first);
     p.setFont(f);
-    QRectF r(toScreen(pad.pos.v()) - QPointF(size, size / 2), QSizeF(2 * size, size));
-    if (names) {
-      p.setPen(doc_->color("pinsName", 0xbad3ef));
-      p.drawText(r, nets ? Qt::AlignHCenter | Qt::AlignTop : Qt::AlignCenter, QString::fromStdString(pad.number));
-    }
-    if (nets && pad.net >= 0) {
-      p.setPen(doc_->color("pinsNet", 0xbad3ef));
-      p.drawText(r, names ? Qt::AlignHCenter | Qt::AlignBottom : Qt::AlignCenter, QString::fromStdString(b.nets[pad.net].name));
-    }
+    p.setPen(QColor::fromRgb(key.second));
+    for (const Draw& dr : draws) p.drawStaticText(dr.at, *dr.text);
   }
 }
 

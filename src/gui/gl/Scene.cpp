@@ -164,9 +164,25 @@ void SceneBuilder::polygon(const std::vector<Contour>& contours, Color c, bool h
   for (const Contour& k : contours) fan(f, k, reversed);
 }
 
+// (A pour's polygons, thousands of points each: straight from the points, nothing copied.)
 void SceneBuilder::polygon(const Polyline& pts, Color c, bool hatch) {
-  if (pts.size() < 3) return;
-  polygon(std::vector<Contour>{{pts, {}}}, c, hatch);
+  const size_t n = pts.size();
+  if (n < 3) return;
+  Fill& f = fillOf(c, hatch);
+  const bool reversed = signedArea(pts) < 0;
+  for (Vec2 p : pts) f.box.add(p);
+  auto put = [&](size_t i) {
+    const Vec2 p = pts[reversed ? n - 1 - i : i];
+    f.v.push_back({nm(p.x), nm(p.y), 0, 0, 0});
+  };
+  auto halve = [&](auto&& self, size_t lo, size_t hi) -> void {
+    if (hi - lo < 2) return;
+    const size_t mid = (lo + hi) / 2;
+    put(lo), put(mid), put(hi);
+    self(self, lo, mid);
+    self(self, mid, hi);
+  };
+  halve(halve, 0, n - 1);
 }
 
 void SceneBuilder::path(const QPainterPath& p, const QTransform& tr, Color c) {

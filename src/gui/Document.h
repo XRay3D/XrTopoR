@@ -164,6 +164,7 @@ class Document : public QObject {
   void unitChanged();
   void selectionFilterChanged();
   void logChanged();
+  void appearanceChanged();  // a setting of the program that changes the picture, not the design (the copper's transparency)
 
  private:
   std::unique_ptr<Board> board_;

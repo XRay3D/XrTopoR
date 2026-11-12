@@ -32,6 +32,7 @@ class DisplayPanel : public QWidget {
   void edited();   // a control changed the display settings
   QWidget* selectionFilter();
   QWidget* layersTab();
+  QWidget* copperTransparencyRow();
   QWidget* objectsTab();
   QWidget* netsTab();
   QWidget* settingsTab();

@@ -8,6 +8,7 @@
 #include <QPushButton>
 #include <QTableWidget>
 #include <QFile>
+#include <QSlider>
 #include <QTimer>
 #include <QListWidget>
 #include <QDoubleSpinBox>
@@ -36,6 +37,7 @@
 #include "core/DiffPairs.h"
 #include "core/Edit.h"
 #include "core/ZoneFill.h"
+#include "gui/AppSettings.h"
 #include "gui/BoardView.h"
 #include "gui/Commands.h"
 #include "gui/Document.h"
@@ -444,6 +446,13 @@ TEST(Gui, SelectionFilter) {
   EXPECT_EQ(doc.selectedItems()[0].type, ItemType::Via);
 }
 
+// The tests that read the board's picture need an OpenGL context (a display, or a software one): skipped without.
+#define XR_NEEDS_GL(view)                                 \
+  do {                                                    \
+    (view).picture();                                     \
+    if (!(view).drawable()) GTEST_SKIP() << "no OpenGL";  \
+  } while (0)
+
 namespace {
 
 struct Fixture {
@@ -813,6 +822,7 @@ TEST(Gui, ZippedPairEditedByItsAxis) {
 // it); each goes with its display flag.
 TEST(Gui, ZipAxisAndFlexFixDrawn) {
   Fixture f("tt.kicad_pcb");
+  XR_NEEDS_GL(f.view);
   layPairByClicks(f);
   auto at = [](double x, double y) { return Vec2{x * kNmPerMm, y * kNmPerMm}; };
   Board& b = *f.doc.board();
@@ -2244,6 +2254,154 @@ TEST(Gui, ZoneProperties) {
   EXPECT_FALSE(props.findChild<QComboBox*>("layer")->itemText(0).isEmpty()) << "one layer: no empty line";
 }
 
+// The board goes to the video card one record an object: an arc wire is an arc by its centre, radius and sweep, a
+// via a disc, a round keepout's circle is cut by the circle itself; coordinates are whole nanometres.
+TEST(Gui, SceneHasARecordAnObject) {
+  RouteBoard f;
+  auto mm = [](double x, double y) { return RouteBoard::mm(x, y); };
+  Track& arc = f.wire(mm(30, 5), mm(30, 25));
+  arc.mid = Point(mm(40, 15));  // half a turn about (30, 15), 10 mm
+  f.wire(mm(12, 20), mm(22, 26));
+  Zone z;
+  z.net = f.n, z.layer = f.top;
+  z.filled.push_back({mm(42, 2), mm(48, 2), mm(48, 8), mm(42, 8)});
+  f.b->zones.push_back(z);
+  Keepout k;
+  Graphic round;
+  round.kind = GraphicKind::Circle;
+  round.a = mm(45, 20), round.b = mm(48, 20);
+  k.shape.push_back(round);
+  f.b->keepouts.push_back(k);
+  f.doc.invalidate();
+  const gl::SceneData s = f.view.boardScene();
+  const auto nm = [](double v) { return std::int32_t(std::llround(v * kNmPerMm)); };
+
+  // The arc: one record.
+  auto arcs = s.arcs | v::filter([&](const gl::ArcRec& a) { return a.half > 0; }) | r::to<std::vector>();
+  ASSERT_EQ(arcs.size(), 1u);
+  EXPECT_EQ(arcs[0].cx, nm(30));
+  EXPECT_EQ(arcs[0].cy, nm(15));
+  EXPECT_NEAR(arcs[0].radius, 10 * kNmPerMm, 1);
+  EXPECT_NEAR(arcs[0].halfSweep, kPi / 2, 1e-6);
+  EXPECT_NEAR(arcs[0].ux, 1, 1e-6) << "its middle at (40, 15)";
+  EXPECT_NEAR(arcs[0].half, 0.125 * kNmPerMm, 1);
+  // The straight wire: a segment; the via: a disc (a segment of one point) and its hole.
+  EXPECT_EQ(r::count_if(s.segments, [&](const gl::SegmentRec& g) { return g.ax == nm(12) && g.ay == nm(20) && g.bx == nm(22) && g.by == nm(26); }), 1);
+  EXPECT_EQ(r::count_if(s.segments, [&](const gl::SegmentRec& g) { return g.ax == nm(10) && g.ay == nm(10) && g.bx == g.ax && g.by == g.ay && g.half == 0.5f * kNmPerMm; }), 1);
+  ASSERT_EQ(s.holes.size(), 1u);
+  EXPECT_EQ(s.holes[0].half, 0.25f * kNmPerMm);
+  // The pour's square: two triangles, none curved, on its copper layer.
+  auto fills = s.steps | v::filter([](const gl::Step& t) { return t.kind == gl::Step::Kind::Fill; }) | r::to<std::vector>();
+  ASSERT_EQ(fills.size(), 2u);
+  EXPECT_EQ(fills[0].count, 6u);
+  EXPECT_FALSE(fills[0].curved);
+  EXPECT_FALSE(fills[0].hatch);
+  EXPECT_EQ(fills[0].blend, gl::Blend::ActiveCopper);
+  EXPECT_EQ(fills[0].box[0], nm(42));
+  // The round keepout: its four quarters, each two triangles more cut by the circle (unit places from its centre).
+  EXPECT_TRUE(fills[1].hatch);
+  EXPECT_TRUE(fills[1].curved);
+  EXPECT_EQ(fills[1].count, 6u + 4 * 6);
+  int onCircle = 0;
+  for (std::uint32_t i = fills[1].first; i < fills[1].first + fills[1].count; ++i)
+    if (const gl::FillVertex& v = s.fill[i]; v.kind == 1) {
+      ++onCircle;
+      EXPECT_NEAR(std::hypot(double(v.x) - nm(45), double(v.y) - nm(20)) / (3 * kNmPerMm), std::hypot(v.u, v.v), 1e-4);
+    }
+  EXPECT_EQ(onCircle, 24);
+  EXPECT_EQ(r::count_if(s.arcs, [&](const gl::ArcRec& a) { return a.cx == nm(45) && a.halfSweep > 3.14f; }), 1) << "its contour: a whole circle";
+}
+
+// An arc on the screen is the arc: far in, the copper ends at the radius and half the width from the centre at any
+// angle, its ends are round, and nothing is drawn of the circle beyond the sweep.
+TEST(Gui, ArcsAreDrawnAsArcs) {
+  RouteBoard f;
+  XR_NEEDS_GL(f.view);
+  const Vec2 centre = RouteBoard::mm(30, 15);
+  const double radius = 10 * kNmPerMm, half = 0.125 * kNmPerMm;
+  Track& arc = f.wire(RouteBoard::mm(30, 5), RouteBoard::mm(30, 25));
+  arc.mid = Point(RouteBoard::mm(40, 15));
+  f.doc.invalidate();
+  f.view.refresh();
+  const QColor copper = f.doc.layerColor(f.top), back = f.doc.color("background", 0x030b10);
+  auto like = [](QColor a, QColor b) { return std::abs(a.red() - b.red()) <= 2 && std::abs(a.green() - b.green()) <= 2 && std::abs(a.blue() - b.blue()) <= 2; };
+  const double px = 1e6 / 800;  // nm a pixel: the view is 1 mm wide
+  auto look = [&](Vec2 at) {
+    f.c = at, f.scale = 1 / px;
+    f.view.centerOn(at, 1);
+    return f.view.picture();
+  };
+  for (double deg : {-89.0, -60.0, -17.0, 0.0, 33.0, 71.0, 88.0}) {
+    SCOPED_TRACE(deg);
+    const Vec2 out{std::cos(degToRad(deg)), std::sin(degToRad(deg))};
+    const QImage img = look(centre + out * radius);
+    for (double side : {-1.0, 1.0}) {
+      EXPECT_TRUE(like(img.pixelColor(f.at(centre + out * (radius + side * (half - 2 * px)))), copper)) << "within the edge";
+      EXPECT_TRUE(like(img.pixelColor(f.at(centre + out * (radius + side * (half + 2 * px)))), back)) << "beyond the edge";
+    }
+  }
+  // Its end at (30, 5): round, by half the width past the end along the arc; the other half of the circle is not drawn.
+  const Vec2 end = RouteBoard::mm(30, 5), past{-1, 0};
+  QImage img = look(end);
+  EXPECT_TRUE(like(img.pixelColor(f.at(end + past * (half - 2 * px))), copper));
+  EXPECT_TRUE(like(img.pixelColor(f.at(end + past * (half + 2 * px))), back));
+  EXPECT_TRUE(like(img.pixelColor(f.at(end + past * (half * 0.7) + Vec2{0, half * 0.7 + 3 * px})), back)) << "the corner of a square end";
+  img = look(centre - Vec2{radius, 0});
+  EXPECT_TRUE(like(img.pixelColor(f.at(centre - Vec2{radius, 0})), back));
+}
+
+// «Прозрачность меди»: a setting of the program. The copper layers are laid over one another that transparent, the
+// active one half as much; what overlaps within a layer does not show; vias stay opaque.
+TEST(Gui, CopperTransparency) {
+  RouteBoard f;
+  XR_NEEDS_GL(f.view);
+  struct Restore {
+    ~Restore() { AppSettings::setCopperTransparency(0); }
+  } restore;
+  const LayerId bottom = f.b->copperLayers()[1];
+  auto mm = [](double x, double y) { return RouteBoard::mm(x, y); };
+  auto wide = [&](Vec2 a, Vec2 c, LayerId l) {
+    Track& t = f.wire(a, c);
+    t.width = mmToNm(2);
+    t.layer = l;
+  };
+  wide(mm(20, 15), mm(40, 15), f.top);      // across the view
+  wide(mm(30, 15), mm(40, 25), f.top);      // over it at (30..33, 15): the same layer
+  wide(mm(25, 5), mm(25, 25), bottom);      // under it at (25, 15)
+  f.doc.invalidate();
+  ASSERT_EQ(f.doc.activeLayer(), f.top);
+  DisplayPanel panel(&f.doc);
+  auto* slider = panel.findChild<QSlider*>("copperTransparency");
+  ASSERT_TRUE(slider);
+  EXPECT_EQ(slider->value(), 0);
+  const QColor back = f.doc.color("background", 0x030b10), top = f.doc.layerColor(f.top), bot = f.doc.layerColor(bottom);
+  auto over = [](QColor under, QColor c, double alpha) {
+    return QColor(int(std::lround(under.red() * (1 - alpha) + c.red() * alpha)), int(std::lround(under.green() * (1 - alpha) + c.green() * alpha)),
+                  int(std::lround(under.blue() * (1 - alpha) + c.blue() * alpha)));
+  };
+  auto expect = [&](const QImage& img, Vec2 at, QColor want, const char* what) {
+    const QColor got = img.pixelColor(f.at(at));
+    EXPECT_TRUE(std::abs(got.red() - want.red()) <= 3 && std::abs(got.green() - want.green()) <= 3 && std::abs(got.blue() - want.blue()) <= 3)
+        << what << ": " << got.name().toStdString() << ", wanted " << want.name().toStdString();
+  };
+  f.view.refresh();
+  QImage img = f.view.picture();
+  expect(img, mm(36, 15), top, "opaque");
+  expect(img, mm(25, 15), top, "opaque: the active layer over the other");
+
+  slider->setValue(60);
+  EXPECT_EQ(AppSettings::copperTransparency(), 60);
+  EXPECT_EQ(QSettings().value("view/copperTransparency").toInt(), 60);
+  img = f.view.picture();
+  const QColor topAlone = over(back, top, 0.7), botAlone = over(back, bot, 0.4);
+  expect(img, mm(36, 15), topAlone, "the active layer: 30 % transparent");
+  expect(img, mm(25, 22), botAlone, "another layer: 60 %");
+  expect(img, mm(25, 15), over(botAlone, top, 0.7), "the two crossing");
+  expect(img, mm(31, 15.3), topAlone, "two wires of one layer over one another: as one");
+  expect(img, mm(10, 10) + Vec2{0.35 * kNmPerMm, 0}, f.doc.color("clrThroughVias", 0x949494), "a via's ring");
+  if (const char* dir = std::getenv("XR_SHOT_DIR")) img.save(QString(dir) + "/transparency.png");
+}
+
 // «Габариты»: the component's bounding rectangle in the compsBound colour, only when the flag is on.
 TEST(Gui, ComponentBounds) {
   app();
@@ -2253,6 +2411,7 @@ TEST(Gui, ComponentBounds) {
   BoardView view(&doc);
   view.resize(800, 600);
   view.show();
+  XR_NEEDS_GL(view);
   doc.setBoard(std::move(*b), "x");
   QTest::qWait(50);
   const Board& brd = *doc.board();
@@ -2902,6 +3061,7 @@ TEST(Gui, ViaPadsDialog) {
 // The mask layer shows the pads' mask details (and nothing where a stack has none).
 TEST(Gui, MaskLayerShowsDetails) {
   Fixture f("topor/Example_04/Arcs_master_f5.fst");
+  XR_NEEDS_GL(f.view);
   Board& b = *f.doc.board();
   int round = -1;
   for (size_t i = 0; i < b.padstacks.size(); ++i)
@@ -3303,6 +3463,7 @@ TEST(Gui, ArcCentreHandle) {
 // layer.
 TEST(Gui, MechanicalLayerActive) {
   Fixture f("tt.kicad_pcb");
+  XR_NEEDS_GL(f.view);
   auto board = std::make_unique<Board>();
   Board& b = *board;
   const LayerId top = b.addLayer("Top", LayerKind::Copper, Side::Top);
@@ -3372,6 +3533,7 @@ TEST(Gui, MechanicalLayerActive) {
 // the background dotted.
 TEST(Gui, HolesOverEverything) {
   Fixture f("tt.kicad_pcb");
+  XR_NEEDS_GL(f.view);
   auto board = std::make_unique<Board>();
   Board& b = *board;
   const LayerId top = b.addLayer("Top", LayerKind::Copper, Side::Top);
@@ -3430,11 +3592,11 @@ TEST(Gui, HolesOverEverything) {
   check("the layers hidden");
 }
 
-// The board's picture is kept between frames: panned, it is moved and the strips uncovered drawn; what comes out is
-// the picture drawn anew (to a level of a pixel's colour, and for a few pixels of thin lines). The window is large
-// enough for the picture drawn anew to be drawn in bands in parallel.
+// A pan changes the view only, the scene stays: the picture panned is the picture of the scene built anew there, and
+// panned by whole pixels it is the same picture moved.
 TEST(Gui, PannedPictureAsDrawnAnew) {
   Fixture f("topor/Example_04/Arcs_master.pcb");
+  XR_NEEDS_GL(f.view);
   f.view.resize(1600, 1200);
   f.view.show();
   f.view.fitBoard();
@@ -3465,8 +3627,15 @@ TEST(Gui, PannedPictureAsDrawnAnew) {
       if (std::abs(qRed(u) - qRed(v)) > 2 || std::abs(qGreen(u) - qGreen(v)) > 2 || std::abs(qBlue(u) - qBlue(v)) > 2)
         ++off;
     }
-  // (A line one pixel wide cut at a strip's edge is rasterised from the cut: a few of its pixels a pixel aside.)
-  EXPECT_LT(off, 100) << "pixels unlike the picture drawn anew";
+  EXPECT_EQ(off, 0) << "pixels unlike the picture drawn anew";
+  // Moved by (31, 1) pixels in all: the same pixels there (but where the labels are, laid on whole pixels).
+  int shifted = 0;
+  for (int y = 100; y < fresh.height() - 100; ++y)
+    for (int x = 100; x < fresh.width() - 100; ++x) {
+      const QRgb u = moved.pixel(x, y), v = before.pixel(x - 31, y - 1);
+      if (std::abs(qRed(u) - qRed(v)) > 2 || std::abs(qGreen(u) - qGreen(v)) > 2 || std::abs(qBlue(u) - qBlue(v)) > 2) ++shifted;
+    }
+  EXPECT_LT(shifted, moved.width() * moved.height() / 200);
   if (const char* dir = std::getenv("XR_SHOT_DIR")) {
     moved.save(QString(dir) + "/panned.png");
     fresh.save(QString(dir) + "/fresh.png");

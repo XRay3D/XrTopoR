@@ -7,6 +7,7 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <bit>
+#include <format>
 
 #include "core/Padstack.h"
 #include "core/Prof.h"
@@ -56,15 +57,21 @@ void BoardView::sceneFlexFix(gl::SceneBuilder& sb, const Track& t) const {
 void BoardView::sceneText(gl::SceneBuilder& sb, const Text& t, const QColor& c) const {
   const Board& b = *doc_->board();
   const TextStyle& st = b.styleOf(t);
-  const TextLayout l = b.textLayout(t);
-  const QFont f = textFont(st);
-  const QFontMetricsF fm(f);
-  const double k = l.lineHeight / (fm.ascent() + fm.descent());  // nm per font pixel
-  QPainterPath path;
-  for (auto [i, line] : v::enumerate(l.lines)) {
-    QPainterPath one;
-    one.addText(0, fm.capHeight(), f, QString::fromUtf8(line.data(), qsizetype(line.size())));
-    path.addPath(QTransform().translate(l.left, l.top + double(i) * l.lineHeight).scale(k, k).map(one));
+  // The outlines of a text are kept from scene to scene (building them was most of a mechanical layer's time).
+  const std::string key = std::format("{}|{}|{}{}|{}|{}", st.font, st.height, int(st.bold), int(st.italic), int(t.align), t.text);
+  if (textPaths_.size() > 20000) textPaths_.clear();
+  auto [it, fresh] = textPaths_.try_emplace(key);
+  QPainterPath& path = it->second;
+  if (fresh) {
+    const TextLayout l = b.textLayout(t);
+    const QFont f = textFont(st);
+    const QFontMetricsF fm(f);
+    const double k = l.lineHeight / (fm.ascent() + fm.descent());  // nm per font pixel
+    for (auto [i, line] : v::enumerate(l.lines)) {
+      QPainterPath one;
+      one.addText(0, fm.capHeight(), f, QString::fromUtf8(line.data(), qsizetype(line.size())));
+      path.addPath(QTransform().translate(l.left, l.top + double(i) * l.lineHeight).scale(k, k).map(one));
+    }
   }
   QTransform tr;
   tr.translate(t.pos.x, t.pos.y);
@@ -475,12 +482,14 @@ void BoardView::paintGL() {
       if (sceneDirty_) {
         ProfScope ps("paint.scene");
         buildBoardScene(boardScene_);
-        buildHighlightScene(highlightScene_);
-        ProfScope pu("scene.upload");
         renderer_.upload(gl::Renderer::Board, boardScene_);
-        renderer_.upload(gl::Renderer::Highlight, highlightScene_);
-        sceneDirty_ = false;
       }
+      if (sceneDirty_ || marksDirty_) {
+        ProfScope ps("paint.marks");
+        buildHighlightScene(highlightScene_);
+        renderer_.upload(gl::Renderer::Highlight, highlightScene_);
+      }
+      sceneDirty_ = marksDirty_ = false;
       buildOverlayScene(overlayScene_);
       renderer_.upload(gl::Renderer::Overlay, overlayScene_);
     }
@@ -495,7 +504,10 @@ void BoardView::paintGL() {
   ProfScope ps("paint.tools");
   QPainter p(this);
   p.setRenderHint(QPainter::Antialiasing, true);
-  drawLabels(p);
+  {
+    ProfScope pl("tools.labels");
+    drawLabels(p);
+  }
   drawTools(p);
 }
 

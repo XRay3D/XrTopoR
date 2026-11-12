@@ -5,8 +5,12 @@
 #include <QElapsedTimer>
 #include <QImage>
 #include <QOpenGLWidget>
+#include <QPainterPath>
+#include <QStaticText>
+#include <map>
 #include <functional>
 #include <optional>
+#include <unordered_map>
 #include <vector>
 
 #include "core/Edit.h"
@@ -49,6 +53,7 @@ class BoardView : public QOpenGLWidget {
   // The board's scene is built anew (an edit, the selection, the display settings); update() alone draws the frame
   // from the scene as it is (a pan, a zoom, the tools, the route being laid).
   void refresh();
+  void refreshMarks();  // the selection or the DRC's marks changed: their scene alone
   // The frame as drawn, from the framebuffer (QWidget::grab() does not reach it without a window on screen).
   QImage picture();
   // The board's scene as it would be drawn now (the tests look at its records).
@@ -230,8 +235,11 @@ class BoardView : public QOpenGLWidget {
   Vec2 center_;
   double scale_ = 1e-5;  // px per nm
   gl::Renderer renderer_;
+  std::map<std::pair<int, std::string>, QStaticText> labels_;  // the labels laid out, by font size and text
+  mutable std::unordered_map<std::string, QPainterPath> textPaths_;  // a text's outlines in its own frame, by style and text
   gl::SceneData boardScene_, highlightScene_, overlayScene_;
   bool sceneDirty_ = true;  // the board's and the selection's scenes are built anew at the next frame
+  bool marksDirty_ = false;  // ... the selection's alone
   bool glOk_ = false;
   QPointF lastMouse_;
   Vec2 cursor_;
