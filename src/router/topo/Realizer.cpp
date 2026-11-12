@@ -1022,21 +1022,45 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
         if (ob.pts[size_t(p)].net < 0 && ob.pts[size_t(p)].net != kTransparent)
           for (const Side& sd : ob.adj[size_t(p)])
             if (sd.to > p && ob.pts[size_t(sd.to)].net < 0 && ob.pts[size_t(sd.to)].net != kTransparent) walls.push_back({p, sd.to});
+      // The points with a stack to keep off a wall, in a grid: a wall looks at those near it only (every wall
+      // against every point of the layer was an eighth of F7 on a board with a long outline).
+      std::vector<int> stacked;
+      BBox span;
+      double maxReach = 0;
+      for (size_t i = 0; i < of.size(); ++i) {
+        if (of[i] <= 0 || reach[i][1] <= reach[i][0] + 1 || ob.pts[i].net < 0) continue;
+        stacked.push_back(int(i));
+        span.add(ob.pts[i].p);
+        maxReach = std::max(maxReach, reach[i][1]);
+      }
+      const double cell = 2.0 * kNmPerMm;
+      const int gx = stacked.empty() ? 1 : std::clamp(int(span.width() / cell) + 1, 1, 1024);
+      const int gy = stacked.empty() ? 1 : std::clamp(int(span.height() / cell) + 1, 1, 1024);
+      auto col = [&](double x) { return std::clamp(int((x - span.minX) / cell), 0, gx - 1); };
+      auto row = [&](double y) { return std::clamp(int((y - span.minY) / cell), 0, gy - 1); };
+      std::vector<std::vector<int>> cells(size_t(gx) * size_t(gy));
+      for (int i : stacked) cells[size_t(row(ob.pts[size_t(i)].p.y)) * size_t(gx) + size_t(col(ob.pts[size_t(i)].p.x))].push_back(i);
       for (auto [p, q] : walls) {
+        if (stacked.empty()) break;
         const OPt& P = ob.pts[size_t(p)];
         const OPt& Q = ob.pts[size_t(q)];
         const double keep = std::max(P.clr, Q.clr) + kNominalRoom;
         BBox box;
         box.add(P.p);
         box.add(Q.p);
-        for (size_t i = 0; i < of.size(); ++i) {
-          if (of[i] <= 0 || reach[i][1] <= reach[i][0] + 1 || ob.pts[i].net < 0) continue;
-          const Vec2 c = ob.pts[i].p;
-          const double far = reach[i][1] + keep;
-          if (c.x < box.minX - far || c.x > box.maxX + far || c.y < box.minY - far || c.y > box.maxY + far) continue;
-          const double d = distPointSegment(c, P.p, Q.p);
-          of[i] = std::min(of[i], std::clamp((d - keep - reach[i][0]) / (reach[i][1] - reach[i][0]), 0.0, 1.0));
-        }
+        const double widest = maxReach + keep;
+        if (box.maxX + widest < span.minX || box.minX - widest > span.maxX || box.maxY + widest < span.minY || box.minY - widest > span.maxY) continue;
+        for (int y = row(box.minY - widest); y <= row(box.maxY + widest); ++y)
+          for (int x = col(box.minX - widest); x <= col(box.maxX + widest); ++x)
+            for (int ii : cells[size_t(y) * size_t(gx) + size_t(x)]) {
+              const size_t i = size_t(ii);
+              if (of[i] <= 0) continue;
+              const Vec2 c = ob.pts[i].p;
+              const double far = reach[i][1] + keep;
+              if (c.x < box.minX - far || c.x > box.maxX + far || c.y < box.minY - far || c.y > box.maxY + far) continue;
+              const double d = distPointSegment(c, P.p, Q.p);
+              of[i] = std::min(of[i], std::clamp((d - keep - reach[i][0]) / (reach[i][1] - reach[i][0]), 0.0, 1.0));
+            }
       }
       // One share for all the points of a pad (its centre, corners and ends).
       std::map<int, double> least;
