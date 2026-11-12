@@ -930,6 +930,10 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
   std::vector<std::vector<std::array<double, 2>>> bendR(NW);
   for (int wi = 0; wi < NW; ++wi) bendR[wi].assign(hits[wi].size(), {-1.0, -1.0});
   std::vector<std::vector<Circle>> bendsOf(NW);
+  // Per wire: the wires of its layer and of other nets whose sketches come within 5 mm of its own (made in the
+  // first round; a layer's thread touches its own wires' lists alone).
+  std::vector<std::vector<int>> nearSketches(static_cast<size_t>(NW));
+  std::vector<char> nearMade(static_cast<size_t>(NW), 0);
   std::vector<std::vector<Vec2>> tinOf(NW), toutOf(NW);
   // Where each wire's realised path actually crosses each of its edges (distance from u), from the
   // previous round: outer wires stack on these rather than on the packed minimum.
@@ -1309,24 +1313,30 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
   // outwards): a wire finds the wires whose sketches come near by one pass of four comparisons a wire, and asks the
   // exact boxes of the few left (the exact boxes of all of them, for every wire of every round, were the hottest
   // lines of F7 under perf once the bends were sifted so).
+  // (The sketches stand through the rounds of a drawing: a wire's list is made in the first of them, and the
+  // arrays for it then.)
   const std::vector<int>& layerWires = byLayer.at(L);
   const size_t nLayer = layerWires.size();
-  std::vector<float> boxX0(nLayer), boxX1(nLayer), boxY0(nLayer), boxY1(nLayer);
-  std::vector<unsigned char> boxHit(nLayer);
+  std::vector<float> boxX0, boxX1, boxY0, boxY1;
+  std::vector<unsigned char> boxHit;
   Vec2 boxOrg;
-  for (int wj : layerWires)
-    if (sketchBox[wj].valid()) {
-      boxOrg = {sketchBox[wj].minX, sketchBox[wj].minY};
-      break;
-    }
   constexpr float kBoxSlack = 64;  // nm: more than a float's rounding at the size of a board
-  for (size_t i = 0; i < nLayer; ++i) {
-    const BBox& sb = sketchBox[layerWires[i]];
-    boxX0[i] = float(sb.minX - boxOrg.x) - kBoxSlack;
-    boxX1[i] = float(sb.maxX - boxOrg.x) + kBoxSlack;
-    boxY0[i] = float(sb.minY - boxOrg.y) - kBoxSlack;
-    boxY1[i] = float(sb.maxY - boxOrg.y) + kBoxSlack;
-  }
+  auto boxesOfLayer = [&] {
+    if (!boxHit.empty() || nLayer == 0) return;
+    boxX0.resize(nLayer), boxX1.resize(nLayer), boxY0.resize(nLayer), boxY1.resize(nLayer), boxHit.resize(nLayer);
+    for (int wj : layerWires)
+      if (sketchBox[wj].valid()) {
+        boxOrg = {sketchBox[wj].minX, sketchBox[wj].minY};
+        break;
+      }
+    for (size_t i = 0; i < nLayer; ++i) {
+      const BBox& sb = sketchBox[layerWires[i]];
+      boxX0[i] = float(sb.minX - boxOrg.x) - kBoxSlack;
+      boxX1[i] = float(sb.maxX - boxOrg.x) + kBoxSlack;
+      boxY0[i] = float(sb.minY - boxOrg.y) - kBoxSlack;
+      boxY1[i] = float(sb.maxY - boxOrg.y) + kBoxSlack;
+    }
+  };
   bool radiiChanged = false;
   for (int wi : byLayer.at(L)) {
     const RealWire& w = wires[wi];
@@ -1461,18 +1471,23 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
       BBox mine;
       for (Vec2 q : sk) mine.add(q);
       mine = mine.inflated(5 * kNmPerMm);
-      {
+      std::vector<int>& near = nearSketches[size_t(wi)];
+      if (!nearMade[size_t(wi)]) {
+        nearMade[size_t(wi)] = 1;
+        boxesOfLayer();
         const float x0 = float(mine.minX - boxOrg.x) - kBoxSlack, x1 = float(mine.maxX - boxOrg.x) + kBoxSlack;
         const float y0 = float(mine.minY - boxOrg.y) - kBoxSlack, y1 = float(mine.maxY - boxOrg.y) + kBoxSlack;
         const float *bx0 = boxX0.data(), *bx1 = boxX1.data(), *by0 = boxY0.data(), *by1 = boxY1.data();
         unsigned char* hit = boxHit.data();
         for (size_t i = 0; i < nLayer; ++i) hit[i] = (bx1[i] >= x0) & (bx0[i] <= x1) & (by1[i] >= y0) & (by0[i] <= y1);
+        for (size_t i = 0; i < nLayer; ++i) {
+          if (!boxHit[i]) continue;
+          const int wj = layerWires[i];
+          if (wj != wi && wires[wj].net != w.net && mine.intersects(sketchBox[wj])) near.push_back(wj);
+        }
       }
-      for (size_t i = 0; i < nLayer; ++i) {
-        if (!boxHit[i]) continue;
-        const int wj = layerWires[i];
-        if (wj != wi && wires[wj].net != w.net && !bendsOf[wj].empty() && mine.intersects(sketchBox[wj])) nearWires.push_back(wj);
-      }
+      for (int wj : near)
+        if (!bendsOf[wj].empty()) nearWires.push_back(wj);
     }
     // Their bends, in the order they are tried in, each with the box its arc at the widest spacing from this wire
     // reaches — as four flat arrays of floats about the sketch's first point, rounded outwards. A chord sifts them
