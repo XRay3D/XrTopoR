@@ -458,6 +458,7 @@ void MainWindow::buildDocks() {
   });
   connect(projectPanel_, &ProjectPanel::projectEdited, this, &MainWindow::saveProject);
   connect(projectPanel_, &ProjectPanel::copyProjectRequested, this, &MainWindow::copyProject);
+  connect(projectPanel_, &ProjectPanel::projectNeeded, this, &MainWindow::newProject);
   auto* projectDock = addDock("Project_View", tr("Проект"), projectPanel_, Qt::LeftDockWidgetArea, "Accel_ViewProject");
   auto* search = new SearchPanel(doc_, view_, this);
   auto* searchDock = addDock("Search_View", tr("Поиск"), search, Qt::LeftDockWidgetArea, "Accel_ViewSearch");

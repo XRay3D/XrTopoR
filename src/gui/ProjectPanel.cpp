@@ -114,8 +114,8 @@ ProjectPanel::ProjectPanel(Document* doc, QWidget* parent) : QWidget(parent), do
   hv->addWidget(history_, 1);
   tabs->addTab(hpage, tr("История"));
 
-  connect(folder, &QToolButton::clicked, this, &ProjectPanel::createFolder);
-  connect(addFile, &QToolButton::clicked, this, &ProjectPanel::addFiles);
+  connect(folder, &QToolButton::clicked, this, [this] { createFolder(tree_->currentItem()); });
+  connect(addFile, &QToolButton::clicked, this, [this] { addFiles(tree_->currentItem()); });
   connect(props, &QToolButton::clicked, this, [this] { showProperties(pathOf(tree_->currentItem())); });
   connect(del, &QToolButton::clicked, this, [this] { deleteFromDisk(pathOf(tree_->currentItem())); });
   connect(sort_, &QComboBox::currentIndexChanged, this, &ProjectPanel::refresh);
@@ -190,14 +190,20 @@ void ProjectPanel::refresh() {
     auto* root = new QTreeWidgetItem(tree_, {QFileInfo(current).completeBaseName()});
     root->setIcon(0, rootIcon);
     root->setData(0, KindRole, KRoot);
-    auto* docs = new QTreeWidgetItem(root, {tr("Документы")});
-    docs->setIcon(0, folderIcon);
+    auto section = [&](const QString& name, int index) {
+      auto* s = new QTreeWidgetItem(root, {name});
+      s->setIcon(0, folderIcon);
+      s->setData(0, KindRole, KSection);
+      s->setData(0, FolderRole, index);
+      return s;
+    };
+    auto* docs = section(tr("Документы"), 0);
     auto* file = new QTreeWidgetItem(docs, {QFileInfo(current).fileName()});
     file->setIcon(0, fileIcon);
     file->setData(0, PathRole, current);
     file->setData(0, KindRole, KFile);
     boldIfCurrent(file, current);
-    (new QTreeWidgetItem(root, {tr("Варианты автотрассировки")}))->setIcon(0, folderIcon);
+    section(tr("Варианты автотрассировки"), 1);
     tree_->expandAll();
     updateFileInfo();
     return;
@@ -283,25 +289,38 @@ void ProjectPanel::showProperties(const QString& path) {
   box.exec();
 }
 
-void ProjectPanel::createFolder() {
-  if (!project_) return;
+io::FsProjFolder* ProjectPanel::targetFolder(QTreeWidgetItem* at) {
+  if (project_) {
+    io::FsProjFolder* f = folderOf(at);
+    return f ? f : &project_->data().documents;
+  }
+  // A design opened alone: its tree has the two sections only; the project is made first.
+  bool variants = false;
+  for (QTreeWidgetItem* cur = at; cur; cur = cur->parent())
+    if (cur->data(0, KindRole).toInt() == KSection) variants = cur->data(0, FolderRole).toInt() == 1;
+  emit projectNeeded();
+  if (!project_) return nullptr;
+  return variants ? &project_->data().autorouting : &project_->data().documents;
+}
+
+void ProjectPanel::createFolder(QTreeWidgetItem* at) {
+  io::FsProjFolder* parent = targetFolder(at);
+  if (!parent) return;
   bool ok = false;
   QString name = QInputDialog::getText(this, tr("Создать папку"), tr("Имя папки:"), QLineEdit::Normal, tr("Новая папка"), &ok);
   if (!ok || name.trimmed().isEmpty()) return;
-  io::FsProjFolder* parent = folderOf(tree_->currentItem());
-  if (!parent) parent = &project_->data().documents;
   parent->folders.push_back({name.trimmed().toStdString()});
   emit projectEdited();
   refresh();
 }
 
-void ProjectPanel::addFiles() {
-  if (!project_) return;
+void ProjectPanel::addFiles(QTreeWidgetItem* at) {
+  io::FsProjFolder* target = targetFolder(at);
+  if (!target) return;
   QStringList files = QFileDialog::getOpenFileNames(
       this, tr("Добавить файл в проект"), project_->dir(),
       tr("Дизайны (*.fst *.fsx *.kicad_pcb *.dsn *.pcb *.PCB);;Все файлы (*)"));
   if (files.isEmpty()) return;
-  io::FsProjFolder* target = folderOf(tree_->currentItem());
   for (auto& f : files) project_->add(QFileInfo(f).absoluteFilePath(), false, target);
   emit projectEdited();
   refresh();
@@ -364,16 +383,17 @@ void ProjectPanel::contextMenu(QPoint pos) {
     m.addAction(tr("Показать в папке"), this, showInFolder);
     m.addAction(tr("Переименовать"), this, [this, path] { renameFile(path); });
     m.addAction(tr("Свойства"), this, [this, path] { showProperties(path); });
-  } else if (kind == KRoot && project_) {
+  } else if (kind == KRoot) {
+    if (!project_) return;
     m.addAction(tr("Скопировать проект..."), this, &ProjectPanel::copyProjectRequested);
-    m.addAction(tr("Добавить файл в проект..."), this, &ProjectPanel::addFiles);
-    m.addAction(tr("Создать папку"), this, &ProjectPanel::createFolder);
+    m.addAction(QIcon(":/icons/import.svg"), tr("Добавить файл в проект..."), this, [this, it] { addFiles(it); });
+    m.addAction(QIcon(":/icons/new_project.svg"), tr("Создать папку"), this, [this, it] { createFolder(it); });
     m.addSeparator();
     m.addAction(tr("Показать в папке"), this, showInFolder);
     m.addAction(tr("Свойства"), this, [this, path] { showProperties(path); });
-  } else if (project_) {
-    m.addAction(tr("Добавить файл в проект..."), this, &ProjectPanel::addFiles);
-    m.addAction(tr("Создать папку"), this, &ProjectPanel::createFolder);
+  } else {  // a section or a folder, as in TopoR
+    m.addAction(QIcon(":/icons/new_project.svg"), tr("Создать папку"), this, [this, it] { createFolder(it); });
+    m.addAction(QIcon(":/icons/import.svg"), tr("Добавить файл в проект..."), this, [this, it] { addFiles(it); });
     if (kind == KFolder)
       m.addAction(tr("Удалить папку из проекта"), this, [this, it] {
         QTreeWidgetItem* parent = it->parent();
