@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <format>
 #include <map>
+#include <memory>
 #include <numeric>
 #include <optional>
 #include <print>
@@ -329,6 +330,7 @@ struct Drawn {
   int real = 0;              // places deeper than the noise (those two among them)
   double depth = 0, length = 0;
   size_t unrouted = 0;
+  std::shared_ptr<const ModelDrawing> kept;  // the drawing itself: the next one is brought up from it
   double score() const { return length + depth * kDepthCost + double(places.size()) * kCountCost; }
 };
 
@@ -476,7 +478,10 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
     }
     c.unrouted = c.loose.size();
   };
-  auto draw = [&] {
+  // `from`: a drawing of the model as it was before the steps taken since — this one is brought up from it, what
+  // the steps reach computed again and the rest taken over (ModelTools.h; most of the objects stepped: computed whole).
+  int broughtUp = 0, laidAgain = 0;
+  auto draw = [&](const Drawn* from) {
     ProfScope p("F7 model: drawing");
     std::optional<ProfScope> pc(std::in_place, "F7 model: copies");
     Drawn c{t, t, b, {}, {}, {}, {}};
@@ -487,7 +492,11 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
     for (const Owner& ow : t.owners)
       if (ow.kind == Owner::Kind::Via && ow.via >= 0 && ow.via < int(c.board.vias.size()))
         c.board.vias[ow.via].pos = Point(Vec2{std::round(ow.c.x / 100) * 100, std::round(ow.c.y / 100) * 100});
-    drawModel(c.board, c.owning, true, c.stats, c.wires, false, o.owners.empty() ? nullptr : &drawOnly);
+    auto kept = std::make_shared<ModelDrawing>();
+    drawModel(c.board, c.owning, true, c.stats, c.wires, false, o.owners.empty() ? nullptr : &drawOnly, kept.get(), from && from->kept ? from->kept.get() : nullptr);
+    if (kept->drawn.made.updated) ++broughtUp, laidAgain += kept->drawn.made.wires;
+    else if (debug && from) std::println(stderr, "F7 model: a drawing computed whole: {}", kept->drawn.made.whole);
+    c.kept = std::move(kept);
     judge(c);
     ++r.drawings;
     return c;
@@ -567,7 +576,7 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
     return s;
   };
 
-  Drawn prev = draw();  // where the walk stands
+  Drawn prev = draw(nullptr);  // where the walk stands
   Drawn best = prev;    // the best drawing seen: the result
   const Drawn first = prev;  // (the way back, should the result have lost a connection)
   r.conflictsBefore = best.conflicts;
@@ -728,7 +737,7 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
     }
     // The drawing judges. Not to be walked on: the objects blamed for what it added go back and stand still a
     // few iterations; what is still no good after four tries goes back whole.
-    Drawn cur = draw();
+    Drawn cur = draw(&prev);
     // What a drawing added to the one the walk stands on: the places of violation and the connections lost.
     auto addedBy = [&](const Drawn& now) {
       std::vector<Place> added = addedPlaces(prev.places, now.places);
@@ -786,7 +795,7 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
       t = prev.model;
       for (auto [k, d] : taken)
         if (!out[k]) moveOwner(t, objs[k].owner, d);
-      cur = draw();
+      cur = draw(&cur);
     }
     const bool kept = walkable(cur, best);
     if (cur.unrouted > prev.unrouted)
@@ -822,6 +831,8 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
     }
   }
   if (debug) std::println(stderr, "F7 model: {} iterations, {} drawings, {} rollbacks", r.iterations, r.drawings, r.rollbacks);
+  if (broughtUp > 0)
+    r.log.push_back(std::format("{} of {} drawings brought up from the one before, {:.0f} wires laid again each of {}", broughtUp, r.drawings, double(laidAgain) / broughtUp, best.wires));
   for (size_t k = 0; k < objs.size(); ++k)
     if ((best.pos[k] - objs[k].start).len() > 1000) ++(t.owners[objs[k].owner].kind == Owner::Kind::Via ? r.viaMoves : r.junctionMoves);
   r.forceAfter = sumOf(forcesOf(best));

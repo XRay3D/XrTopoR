@@ -4,8 +4,12 @@
 // and makes the tracks from it (emitDrawn); it is the state that is to live with the model between drawings —
 // what a wire's length, its pull on a via and its clearance from a neighbour are asked of with no track made.
 #include <array>
+#include <map>
+#include <set>
+#include <utility>
 #include <vector>
 
+#include "core/Board.h"
 #include "geom/Geometry.h"
 
 namespace xr::topo {
@@ -41,6 +45,21 @@ struct DrawnWires {
   // Per wire, per bend of its path (the first and the last are its ends, of no radius):
   std::vector<std::vector<Bend>> bends;
   std::vector<std::vector<Vec2>> tin, tout;               // where the wire comes on to the bend's circle and leaves it
+  // Per layer, per obstacle point: its share of the nominal clearance (0: the minimum, 1: the nominal), and how far
+  // the stack of wires round it reaches at the minimum and at the nominal.
+  std::map<LayerId, std::vector<double>> share;
+  std::map<LayerId, std::vector<std::array<double, 2>>> reach;
+  // ... the edges that were overfull at their ends' shares and took them back.
+  std::map<LayerId, std::set<std::pair<int, int>>> tookBack;
+  // The counts of the computation (RealizeStats).
+  int overflowEdges = 0, arcBends = 0, guardBends = 0, droppedApexes = 0;
+  // How it was last computed: whole, or brought up from an earlier drawing (updateDrawn) — the edges packed again and
+  // the wires laid again for it, the rounds it took; why it was computed whole when it was asked to be brought up.
+  struct Made {
+    bool updated = false;
+    int edges = 0, wires = 0, rounds = 0;
+    const char* whole = "";
+  } made;
 };
 
 }  // namespace xr::topo

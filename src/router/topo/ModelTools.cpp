@@ -149,7 +149,7 @@ RealizeStats measureDrawing(const Board& b, const Topology& t, const ModelDrawin
 }
 
 RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int>& chosen, const RealizeOptions& opt,
-                              std::vector<RealWire>* wiresOut, ModelDrawing* keep) {
+                              std::vector<RealWire>* wiresOut, ModelDrawing* keep, const ModelDrawing* from) {
   ProfScope pAll("realizeFromModel");
   std::vector<RealWire> wires;
   {
@@ -452,7 +452,9 @@ RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int
   phase.reset();
   DrawnWires drawn;
   RealizeStats st;
-  computeDrawn(b, wires, opt, in, drawn, st);
+  // From an earlier drawing of the same wires, when there is one: only what the model's changes reach is computed.
+  if (from && from->in && from->chosen == chosen && from->opt.nominal == opt.nominal) updateDrawn(b, wires, opt, in, drawn, st, from->wires, *from->in, from->drawn);
+  else computeDrawn(b, wires, opt, in, drawn, st);
   st = emitDrawn(b, wires, {}, opt, in, drawn, std::move(st));
   forcesByOwner(t, chosen, st);
   if (keep) {
@@ -604,7 +606,8 @@ void dropCrumbs(Board& b, size_t from, RealizeStats& stats) {
     if (z.axis.size() > 1) std::erase_if(z.axis, crumb);
 }
 
-void drawModel(Board& b, Topology& t, bool direct, RealizeStats& stats, int& nWires, bool editedOnly, const std::vector<int>* only, ModelDrawing* keep) {
+void drawModel(Board& b, Topology& t, bool direct, RealizeStats& stats, int& nWires, bool editedOnly, const std::vector<int>* only, ModelDrawing* keep,
+               const ModelDrawing* from) {
   std::vector<int> chosen;
   std::set<uint32_t> gone;
   std::set<int> redrawnAt;
@@ -694,7 +697,7 @@ void drawModel(Board& b, Topology& t, bool direct, RealizeStats& stats, int& nWi
   const size_t before = b.tracks.size();
   {
     ProfScope p("F5 model: realize");
-    stats = direct ? realizeFromModel(b, t, chosen, opt, nullptr, keep) : realize(b, wires, {}, opt);
+    stats = direct ? realizeFromModel(b, t, chosen, opt, nullptr, keep, from) : realize(b, wires, {}, opt);
   }
   dropCrumbs(b, before, stats);
   Topology::assignIds(b);

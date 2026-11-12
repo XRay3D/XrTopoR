@@ -885,7 +885,30 @@ void LayerObstacles::around(const BBox& box, std::vector<int>& out) const {
 
 // The wires' places on the edges they cross, their bends and tangents: the drawing before it is tracks. Left in
 // `d` (Drawn.h); the board is read only.
-void computeDrawn(const Board& b, const std::vector<RealWire>& wires, const RealizeOptions& opt, RealizeInput& in, DrawnWires& d, RealizeStats& st) {
+namespace {
+// What a room on an edge, a bend of a wire has to move by to count as changed when a drawing is brought up to a
+// changed input (updateDrawn): what moved less stays as it was, and so do the wires that read it. Well under the
+// realiser's margin (kRealizeMargin) and the grid the tracks are written on.
+constexpr double kUpdateTol = 100;
+constexpr int kUpdateRounds = 16;
+bool roomsDiffer(const EdgeRoom& a, const EdgeRoom& c) {
+  auto far = [](double x, double y) { return std::abs(x - y) > kUpdateTol; };
+  return far(a.lo, c.lo) || far(a.hi, c.hi) || far(a.xu, c.xu) || far(a.xv, c.xv) || far(a.ru, c.ru) || far(a.rv, c.rv) || far(a.du, c.du) || far(a.dv, c.dv) ||
+         (a.cu - c.cu).len2() > kUpdateTol * kUpdateTol || (a.cv - c.cv).len2() > kUpdateTol * kUpdateTol;
+}
+bool bendsDiffer(const Bend& a, Vec2 ai, Vec2 ao, const Bend& c, Vec2 ci, Vec2 co) {
+  const double t2 = kUpdateTol * kUpdateTol;
+  return a.obst != c.obst || a.width != c.width || std::abs(a.rho - c.rho) > kUpdateTol || (a.c - c.c).len2() > t2 || (ai - ci).len2() > t2 || (ao - co).len2() > t2;
+}
+// An earlier drawing and what it was made from.
+struct DrawnBefore {
+  const std::vector<RealWire>& wires;
+  const RealizeInput& in;
+  const DrawnWires& d;
+};
+// The drawing computed: whole (`was` null), or brought up from an earlier one (false: it cannot be, nothing of `d` holds).
+bool drawWires(const Board& b, const std::vector<RealWire>& wires, const RealizeOptions& opt, RealizeInput& in, DrawnWires& d, RealizeStats& st,
+               const DrawnBefore* was) {
   const int NW = int(wires.size());
   std::flat_map<LayerId, std::vector<int>> byLayer;
   for (int wi = 0; wi < NW; ++wi) byLayer[wires[wi].layer].push_back(wi);
@@ -946,8 +969,13 @@ void computeDrawn(const Board& b, const std::vector<RealWire>& wires, const Real
                     kDebug4 = std::getenv("XR_DEBUG4") != nullptr;
   static const std::optional<int> kDebug7 = std::getenv("XR_DEBUG7") ? std::optional(std::atoi(std::getenv("XR_DEBUG7"))) : std::nullopt;
   const bool nominal = opt.nominal && !kNoNominal && b.hasNominal();
-  std::map<LayerId, std::vector<double>> nominalShare;
-  std::map<LayerId, std::vector<std::array<double, 2>>> stackReach;  // per obstacle: the outermost wire's far side, at the minimum and at the nominal
+  std::map<LayerId, std::vector<double>>& nominalShare = d.share;
+  std::map<LayerId, std::vector<std::array<double, 2>>>& stackReach = d.reach;  // per obstacle: the outermost wire's far side, at the minimum and at the nominal
+  nominalShare.clear();
+  stackReach.clear();
+  d.tookBack.clear();
+  for (const auto& [layer, ob] : obstacles) d.tookBack[layer];  // (made here, not by the threads)
+  d.made = {};
   if (nominal)
     for (auto&& [layer, ob] : obstacles) {
       nominalShare[layer].assign(ob.pts.size(), 1.0);
@@ -999,16 +1027,12 @@ void computeDrawn(const Board& b, const std::vector<RealWire>& wires, const Real
   const size_t NL = layersDrawn.size();
   std::vector<RealizeStats> per(NL);  // the counts of each layer (st's are summed from them)
   auto inLayers = [&](auto&& fn) { parallelFor(NL, [&](size_t i) { fn(layersDrawn[i], per[i]); }); };
-  int restarts = 0;
-  for (int round = 0; round < 6; ++round) {
-  std::vector<char> againOf(NL, 0), radiiOf(NL, 0);
-  inLayers([&](LayerId L, RealizeStats& st) {
-  shareOfAll = -1;
-  bool again = false;  // an edge took its ends' shares of the nominal clearance back
-  for (int pass = nominal && round == 0 ? 0 : 1; pass < 2; ++pass) {  // 0: the obstacles' shares of the nominal clearance
-  if (pass == 1 && nominal && round == 0)
-    for (auto&& [layer, of] : nominalShare) {
-      if (layer != L) continue;
+  // The pieces of a round: the shares of the nominal clearance finished (the walls, one share a pad), an edge packed,
+  // a wire laid.
+  auto finishShares = [&](LayerId layer) {
+    const auto found = nominalShare.find(layer);
+    if (found == nominalShare.end()) return;
+    std::vector<double>& of = found->second;
       const LayerObstacles& ob = obstacles.at(layer);
       // The walls (the outline, a keepout's side): the slots keep a stack off their end points, not off the
       // wall between them — the arc of a larger radius between two edges of a fan came 12-27 um too near the
@@ -1069,11 +1093,11 @@ void computeDrawn(const Board& b, const std::vector<RealWire>& wires, const Real
         }
       for (size_t i = 0; i < of.size(); ++i)
         if (int k = key(ob.pts[i]); k != -1) of[i] = least[k];
-    }
-  for (auto&& [layer, ids] : byLayer) {
-    if (layer != L) continue;
+  };
+  // `changed` (a drawing brought up): a wire's room is written only where it moved, and the wire marked.
+  auto packEdge = [&](LayerId layer, const std::pair<int, int>& uv, const std::vector<std::pair<int, int>>& list, int pass, int round, RealizeStats& st, bool& again,
+                      std::vector<char>* changed) {
     const LayerObstacles& ob = obstacles.at(layer);
-    for (auto& [uv, list] : edgeLists[layer]) {
       const OPt& U = ob.pts[uv.first];
       const OPt& V = ob.pts[uv.second];
       double L = (V.p - U.p).len();
@@ -1155,6 +1179,11 @@ void computeDrawn(const Board& b, const std::vector<RealWire>& wires, const Real
       // the limit and narrowing cures it (topo/Capacity.h; the model's capacity decides the same way). The
       // decision comes from the wires' packing alone — not from the bends of the round before — so a wire
       // is as wide as it can be every round and widens back when the room returns.
+      std::vector<double> wasW;  // the widths the wires had here (a drawing brought up)
+      if (changed) {
+        wasW.resize(size_t(n));
+        for (int k = 0; k < n; ++k) wasW[size_t(k)] = wAt(k);
+      }
       {
         std::vector<double> nominal(n), mins(n), chosen;
         for (int k = 0; k < n; ++k) {
@@ -1216,13 +1245,14 @@ void computeDrawn(const Board& b, const std::vector<RealWire>& wires, const Real
             limit(uv.second, b0[k], bb[k], V.p);
           }
         }
-        continue;
+        return;
       }
       double slack = pack();
       if (slack < 0 && nominal) {
         std::vector<double>& of = nominalShare[layer];
         if (of[size_t(uv.first)] > 0 || of[size_t(uv.second)] > 0) {
           of[size_t(uv.first)] = of[size_t(uv.second)] = 0;
+          d.tookBack[layer].insert(uv);
           again = true;
           slack = pack();
         }
@@ -1241,7 +1271,7 @@ void computeDrawn(const Board& b, const std::vector<RealWire>& wires, const Real
         }
       }
       for (int k = 0; k < n; ++k) {
-        EdgeRoom& sl = slots[list[k].first][list[k].second];
+        EdgeRoom sl;
         if (slack < 0) {
           // Overflow: keep the order, share the deficit (a violation the DRC will report).
           double scale = (L > 0) ? L / (a[n - 1] + bb[n - 1]) : 1.0;
@@ -1279,35 +1309,35 @@ void computeDrawn(const Board& b, const std::vector<RealWire>& wires, const Real
         for (int j = 0; j < k; ++j) sl.du = std::max(sl.du, bentAround(j, 0));
         sl.dv = need(V, w, wAt(k));
         for (int j = k + 1; j < n; ++j) sl.dv = std::max(sl.dv, bentAround(j, 1));
+        EdgeRoom& kept = slots[list[k].first][list[k].second];
+        if (!changed) {
+          kept = sl;
+        } else if (wasW[size_t(k)] != wAt(k) || roomsDiffer(kept, sl)) {
+          kept = sl;
+          (*changed)[size_t(list[k].first)] = 1;
+        }
       }
-    }
-  }
-  }  // pass
-  againOf[size_t(&st - per.data())] = again;
-  });
-  const bool again = r::any_of(againOf, [](char c) { return c != 0; });
-  if (again && restarts < 4) {
-    ++restarts;
-    for (int wi = 0; wi < NW; ++wi) bendR[wi].assign(hits[wi].size(), {-1.0, -1.0});
-    round = -1;
-    continue;
-  }
-
-  // Taut path of every wire inside its slots: funnel over the slot segments, apexes become bends
-  // around the edge end obstacles with the slot radius, consecutive bends around one obstacle merge.
-  inLayers([&](LayerId L, RealizeStats& st) {
-  shareOfAll = -1;
+  };
+  // What a layer's wires share while they are laid: the boxes of their sketches (below).
+  struct LayerCtx {
+    const std::vector<int>* wires = nullptr;
+    std::vector<float> x0, x1, y0, y1;
+    std::vector<unsigned char> hit;
+    Vec2 org;
+  };
+  // True: the wire's radii round its obstacles grew.
+  auto layWire = [&](int wi, int round, RealizeStats& st, LayerCtx& lc) -> bool {
   // The boxes of the sketches of the layer's wires as flat arrays of floats (about the first box's corner, rounded
   // outwards): a wire finds the wires whose sketches come near by one pass of four comparisons a wire, and asks the
   // exact boxes of the few left (the exact boxes of all of them, for every wire of every round, were the hottest
   // lines of F7 under perf once the bends were sifted so).
   // (The sketches stand through the rounds of a drawing: a wire's list is made in the first of them, and the
   // arrays for it then.)
-  const std::vector<int>& layerWires = byLayer.at(L);
+  const std::vector<int>& layerWires = *lc.wires;
   const size_t nLayer = layerWires.size();
-  std::vector<float> boxX0, boxX1, boxY0, boxY1;
-  std::vector<unsigned char> boxHit;
-  Vec2 boxOrg;
+  std::vector<float>&boxX0 = lc.x0, &boxX1 = lc.x1, &boxY0 = lc.y0, &boxY1 = lc.y1;
+  std::vector<unsigned char>& boxHit = lc.hit;
+  Vec2& boxOrg = lc.org;
   constexpr float kBoxSlack = 64;  // nm: more than a float's rounding at the size of a board
   auto boxesOfLayer = [&] {
     if (!boxHit.empty() || nLayer == 0) return;
@@ -1326,12 +1356,11 @@ void computeDrawn(const Board& b, const std::vector<RealWire>& wires, const Real
     }
   };
   bool radiiChanged = false;
-  for (int wi : byLayer.at(L)) {
     const RealWire& w = wires[wi];
     const LayerObstacles& ob = obstacles.at(w.layer);
     const Polyline& sk = sketches[wi];
     bendsOf[wi].clear();
-    if (sk.size() < 2) continue;
+    if (sk.size() < 2) return false;
     std::vector<std::pair<Vec2, Vec2>> portals;
     portals.push_back({sk.front(), sk.front()});
     for (int k = 0; k < int(hits[wi].size()); ++k) {
@@ -1855,19 +1884,351 @@ void computeDrawn(const Board& b, const std::vector<RealWire>& wires, const Real
         actual[wi][k] = best;
       }
     }
+    return radiiChanged;
+  };
+  // A whole drawing: rounds over every edge and every wire.
+  auto drawAll = [&] {
+    int restarts = 0;
+    for (int round = 0; round < 6; ++round) {
+      std::vector<char> againOf(NL, 0), radiiOf(NL, 0);
+      inLayers([&](LayerId L, RealizeStats& st) {
+        shareOfAll = -1;
+        bool again = false;  // an edge took its ends' shares of the nominal clearance back
+        for (int pass = nominal && round == 0 ? 0 : 1; pass < 2; ++pass) {  // 0: the obstacles' shares of the nominal clearance
+          if (pass == 1 && nominal && round == 0) finishShares(L);
+          for (auto& [uv, list] : edgeLists[L]) packEdge(L, uv, list, pass, round, st, again, nullptr);
+        }
+        againOf[size_t(&st - per.data())] = again;
+      });
+      const bool again = r::any_of(againOf, [](char c) { return c != 0; });
+      if (again && restarts < 4) {
+        ++restarts;
+        for (int wi = 0; wi < NW; ++wi) bendR[wi].assign(hits[wi].size(), {-1.0, -1.0});
+        round = -1;
+        continue;
+      }
+      // Taut path of every wire inside its slots: funnel over the slot segments, apexes become bends
+      // around the edge end obstacles with the slot radius, consecutive bends around one obstacle merge.
+      inLayers([&](LayerId L, RealizeStats& st) {
+        shareOfAll = -1;
+        LayerCtx lc{&byLayer.at(L), {}, {}, {}, {}, {}, {}};
+        bool radiiChanged = false;
+        for (int wi : byLayer.at(L)) radiiChanged |= layWire(wi, round, st, lc);
+        radiiOf[size_t(&st - per.data())] = radiiChanged;
+      });
+      if (r::none_of(radiiOf, [](char c) { return c != 0; })) break;
+      for (RealizeStats& ls : per) ls.droppedApexes = 0;
+    }
+  };
+
+  // A drawing brought up from an earlier one of nearly the same input (a via moved, a few edges flipped): the edges
+  // whose ends, wires or shares changed are packed again, the wires whose rooms moved are laid again, and what their
+  // new bends change — the stacks on their edges, the chords of the wires near their arcs — goes round again, until
+  // nothing moves by more than kUpdateTol. Everything else is the earlier drawing's. A wire laid again has the radii
+  // of that laying alone (through the rounds of a whole drawing they only grow; here they may have to shrink, and a
+  // stack of n wires that shrinks comes to rest wire by wire, in n rounds).
+  // False: not this way — another set of wires or of obstacles, most of the board changed, an edge that takes its
+  // ends' shares back (the whole drawing begins again on that), no rest within the rounds.
+  auto drawChanged = [&](const DrawnBefore& was) -> bool {
+    auto whole = [&](const char* why) {
+      d.made.whole = why;
+      return false;
+    };
+    if (int(was.wires.size()) != NW || int(was.in.hits.size()) != NW || int(was.d.bends.size()) != NW || int(was.in.sketches.size()) != NW)
+      return whole("another set of wires");
+    // What of the input changed: the obstacle points, the wires' own crossings.
+    std::vector<std::vector<char>> ptChanged(NL), shareChanged(NL);
+    for (size_t li = 0; li < NL; ++li) {
+      const LayerId L = layersDrawn[li];
+      const auto found = was.in.obstacles.find(L);
+      if (found == was.in.obstacles.end()) return whole("another set of layers");
+      const LayerObstacles& now = obstacles.at(L);
+      const LayerObstacles& old = found->second;
+      if (now.pts.size() != old.pts.size() || now.shapes.size() != old.shapes.size() || now.cornersOf != old.cornersOf) return whole("another set of obstacles");
+      ptChanged[li].assign(now.pts.size(), 0);
+      shareChanged[li].assign(now.pts.size(), 0);
+      for (size_t i = 0; i < now.pts.size(); ++i) {
+        const OPt& x = now.pts[i];
+        const OPt& y = old.pts[i];
+        bool same = x.p == y.p && x.r == y.r && x.clr == y.clr && x.net == y.net && x.shape == y.shape && x.owner == y.owner && x.pair == y.pair &&
+                    x.claspCentre == y.claspCentre && x.round == y.round && now.adj[i].size() == old.adj[i].size();
+        for (size_t k = 0; same && k < now.adj[i].size(); ++k) same = now.adj[i][k].to == old.adj[i][k].to && now.adj[i][k].r == old.adj[i][k].r;
+        ptChanged[li][i] = !same;
+      }
+    }
+    std::vector<char> fresh(size_t(NW), 0);  // a wire of other crossings or ends: nothing of its earlier drawing holds
+    int nFresh = 0;
+    for (int wi = 0; wi < NW; ++wi) {
+      const RealWire& x = wires[wi];
+      const RealWire& y = was.wires[wi];
+      const Polyline& sx = sketches[wi];
+      const Polyline& sy = was.in.sketches[wi];
+      bool same = x.net == y.net && x.layer == y.layer && x.width == y.width && x.widthMin == y.widthMin && x.clearance == y.clearance && x.zip == y.zip &&
+                  x.pair == y.pair && x.condWidth == y.condWidth && x.netN == y.netN && x.pSide == y.pSide && hits[wi].size() == was.in.hits[wi].size() &&
+                  (sx.size() < 2) == (sy.size() < 2) && (sx.empty() || (sx.front() == sy.front() && sx.back() == sy.back())) &&
+                  was.d.rooms[wi].size() == hits[wi].size();
+      for (size_t k = 0; same && k < hits[wi].size(); ++k) {
+        const EdgeHit& h = hits[wi][k];
+        const EdgeHit& g = was.in.hits[wi][k];
+        same = h.u == g.u && h.v == g.v && h.uLeft == g.uLeft && h.pin == g.pin;
+      }
+      for (int end = 0; same && end < 2; ++end) {
+        const Stub& s = stubs[wi][end];
+        const Stub& o = was.in.stubs[wi][end];
+        same = s.on == o.on && (!s.on || (s.from == o.from && s.mid == o.mid && s.to == o.to && s.free == o.free && s.guard == o.guard && s.pad == o.pad));
+      }
+      fresh[wi] = !same;
+      nFresh += !same;
+    }
+    if (nFresh * 3 > NW) return whole("most wires changed");
+    auto clean = [&](size_t li, const std::pair<int, int>& uv, const std::vector<std::pair<int, int>>& list) {  // an edge as it was
+      if (ptChanged[li][size_t(uv.first)] || ptChanged[li][size_t(uv.second)]) return false;
+      const auto layer = was.in.edgeLists.find(layersDrawn[li]);
+      if (layer == was.in.edgeLists.end()) return false;
+      const auto it = layer->second.find(uv);
+      if (it == layer->second.end() || it->second != list) return false;
+      return r::none_of(list, [&](const std::pair<int, int>& wh) { return fresh[size_t(wh.first)] != 0; });
+    };
+    // The shares of the nominal clearance: of the input alone (the first round's packing, no bend yet), so found
+    // for the whole board as a whole drawing finds them; then the shares the edges standing as they were had taken
+    // back, and the packing once more, as the rounds begin again after one.
+    if (nominal) {
+      auto shares = [&] {
+        inLayers([&](LayerId L, RealizeStats& st) {
+          shareOfAll = -1;
+          bool again = false;
+          for (auto& [uv, list] : edgeLists[L]) packEdge(L, uv, list, 0, 0, st, again, nullptr);
+          finishShares(L);
+        });
+      };
+      shares();
+      bool carried = false;
+      for (size_t li = 0; li < NL; ++li) {
+        const LayerId L = layersDrawn[li];
+        const auto took = was.d.tookBack.find(L);
+        if (took == was.d.tookBack.end()) continue;
+        for (const std::pair<int, int>& uv : took->second) {
+          const auto it = edgeLists[L].find(uv);
+          if (it == edgeLists[L].end() || !clean(li, uv, it->second)) continue;
+          nominalShare[L][size_t(uv.first)] = nominalShare[L][size_t(uv.second)] = 0;
+          d.tookBack[L].insert(uv);
+          carried = true;
+        }
+      }
+      if (carried) shares();
+      for (size_t li = 0; li < NL; ++li) {
+        const LayerId L = layersDrawn[li];
+        const auto old = was.d.share.find(L);
+        const std::vector<double>& now = nominalShare[L];
+        if (old == was.d.share.end() || old->second.size() != now.size()) return whole("no shares kept");
+        for (size_t i = 0; i < now.size(); ++i) shareChanged[li][i] = std::abs(now[i] - old->second[i]) > 1e-9;
+      }
+    }
+    // The earlier drawing of every wire that stands.
+    for (int wi = 0; wi < NW; ++wi) {
+      if (fresh[wi]) {
+        hw[wi].assign(hits[wi].size(), double(wires[wi].width));
+        continue;
+      }
+      slots[wi] = was.d.rooms[wi];
+      hw[wi] = was.d.width[wi];
+      actual[wi] = was.d.actual[wi];
+      bendR[wi] = was.d.bendR[wi];
+      bendsOf[wi] = was.d.bends[wi];
+      tinOf[wi] = was.d.tin[wi];
+      toutOf[wi] = was.d.tout[wi];
+    }
+    // Where to begin.
+    std::vector<std::set<std::pair<int, int>>> dirtyE(NL);
+    std::vector<char> dirtyW(size_t(NW), 0);
+    int seeds = 0;
+    for (size_t li = 0; li < NL; ++li) {
+      const LayerId L = layersDrawn[li];
+      const LayerObstacles& ob = obstacles.at(L);
+      const LayerObstacles& old = was.in.obstacles.at(L);
+      for (const auto& [uv, list] : edgeLists[L]) {
+        const bool moved = ptChanged[li][size_t(uv.first)] || ptChanged[li][size_t(uv.second)];
+        if (moved || shareChanged[li][size_t(uv.first)] || shareChanged[li][size_t(uv.second)] || !clean(li, uv, list)) dirtyE[li].insert(uv);
+        if (moved)
+          for (const auto& [wi, hi] : list) dirtyW[size_t(wi)] = 1;  // (the same room along an edge that lies elsewhere)
+      }
+      std::vector<int> movedPts;
+      for (size_t i = 0; i < ob.pts.size(); ++i)
+        if (ptChanged[li][i]) movedPts.push_back(int(i));
+      for (int wi : byLayer.at(L)) {
+        if (fresh[wi]) dirtyW[size_t(wi)] = 1;
+        if (dirtyW[size_t(wi)] || movedPts.empty()) continue;
+        // A bend round a point that changed (round one that is the end of none of the wire's edges too: a guard
+        // bend), a chord that passes a changed point within its rule (where a guard bend would be made).
+        const std::vector<Bend>& cs = bendsOf[wi];
+        const size_t n = cs.size();
+        if (n < 2) continue;
+        const RealWire& w = wires[wi];
+        bool hit = r::any_of(cs, [&](const Bend& c) { return c.obst >= 0 && ptChanged[li][size_t(c.obst)]; });
+        BBox path;
+        for (size_t k = 0; k < n && !hit; ++k) {
+          path.add(cs[k].c);
+          path.add(tinOf[wi][k]);
+          path.add(toutOf[wi][k]);
+        }
+        for (size_t m = 0; m < movedPts.size() && !hit; ++m)
+          for (const OPt* op : {&ob.pts[size_t(movedPts[m])], &old.pts[size_t(movedPts[m])]}) {
+            if (op->net == kTransparent || (op->net == w.net && w.net != kNoNet) || (op->r <= 0 && op->shape < 0)) continue;
+            shareOfAll = 0;
+            const double R = (op->shape < 0 ? op->r : 3 * kNmPerMm) + clrTo(*op, w) + kMargin + double(w.width) / 2.0;
+            shareOfAll = -1;
+            if (!path.inflated(R).contains(op->p)) continue;
+            for (size_t k = 0; k + 1 < n && !hit; ++k) {
+              const Vec2 p = k == 0 ? cs[0].c : toutOf[wi][k], q = k + 1 == n - 1 ? cs[n - 1].c : tinOf[wi][k + 1];
+              hit = distPointSegment(op->p, p, q) < R;
+            }
+          }
+        if (hit) dirtyW[size_t(wi)] = 1;
+      }
+      for (int wi : byLayer.at(L)) seeds += dirtyW[size_t(wi)];
+    }
+    if (seeds * 2 > NW) return whole("most wires changed");
+    // The rounds.
+    std::vector<char> laid(size_t(NW), 0);  // laid again in this update (its radii begun anew)
+    std::vector<char> failed(NL, 0), active(NL, 0);
+    std::vector<int> packedOf(NL, 0), laidOf(NL, 0);
+    bool rest = false;
+    for (int round = 0; round < kUpdateRounds && !rest; ++round) {
+      inLayers([&](LayerId L, RealizeStats& st) {
+        const size_t li = size_t(&st - per.data());
+        active[li] = 0;
+        if (failed[li]) return;
+        shareOfAll = -1;
+        bool again = false;
+        const LayerObstacles& ob = obstacles.at(L);
+        std::set<std::pair<int, int>> edges;
+        edges.swap(dirtyE[li]);
+        for (const std::pair<int, int>& uv : edges)
+          if (const auto it = edgeLists[L].find(uv); it != edgeLists[L].end()) {
+            packEdge(L, uv, it->second, 1, 1, st, again, &dirtyW);
+            ++packedOf[li];
+          }
+        if (again) {
+          failed[li] = 1;
+          return;
+        }
+        LayerCtx lc{&byLayer.at(L), {}, {}, {}, {}, {}, {}};
+        for (int wi : byLayer.at(L)) {
+          if (!dirtyW[size_t(wi)]) continue;
+          dirtyW[size_t(wi)] = 0;
+          ++laidOf[li];
+          const RealWire& w = wires[wi];
+          // What it was: against the earlier drawing for a wire begun anew, against what stands for the rest.
+          const bool anew = fresh[wi] && !laid[size_t(wi)];
+          const std::vector<Bend> wasBends = anew ? was.d.bends[wi] : bendsOf[wi];
+          const std::vector<Vec2> wasIn = anew ? was.d.tin[wi] : tinOf[wi], wasOut = anew ? was.d.tout[wi] : toutOf[wi];
+          const std::vector<std::array<double, 2>> wasR = bendR[wi];
+          // Its radii anew every time: laid before the stack under it came to rest, it would keep that round's.
+          laid[size_t(wi)] = 1;
+          bendR[wi].assign(hits[wi].size(), {-1.0, -1.0});
+          layWire(wi, 1, st, lc);
+          // The radii: one that moved sends its edge round again; one that did not stays the number it was.
+          for (size_t k = 0; k < hits[wi].size(); ++k)
+            for (size_t end = 0; end < 2; ++end) {
+              if (std::abs(bendR[wi][k][end] - wasR[k][end]) > kUpdateTol) dirtyE[li].insert({hits[wi][k].u, hits[wi][k].v});
+              else bendR[wi][k][end] = wasR[k][end];
+            }
+          // The bends: the same within the tolerance, they stay the numbers they were (a wire not fresh); else the
+          // wires near whose chords pass a bend that changed, or that bend round the same obstacle, are laid again.
+          const std::vector<Bend>& cs = bendsOf[wi];
+          auto among = [](const Bend& c, Vec2 ci, Vec2 co, const std::vector<Bend>& of, const std::vector<Vec2>& in, const std::vector<Vec2>& out) {
+            for (size_t k = 0; k < of.size(); ++k)
+              if (!bendsDiffer(c, ci, co, of[k], in[k], out[k])) return true;
+            return false;
+          };
+          std::vector<std::pair<Bend, bool>> moved;  // (a bend, of the new drawing)
+          for (size_t k = 1; k + 1 < wasBends.size(); ++k)
+            if (wasBends[k].obst >= 0 && !among(wasBends[k], wasIn[k], wasOut[k], cs, tinOf[wi], toutOf[wi])) moved.push_back({wasBends[k], false});
+          for (size_t k = 1; k + 1 < cs.size(); ++k)
+            if (cs[k].obst >= 0 && !among(cs[k], tinOf[wi][k], toutOf[wi][k], wasBends, wasIn, wasOut)) moved.push_back({cs[k], true});
+          bool same = moved.empty() && cs.size() == wasBends.size();
+          for (size_t k = 0; same && k < cs.size(); ++k) same = !bendsDiffer(cs[k], tinOf[wi][k], toutOf[wi][k], wasBends[k], wasIn[k], wasOut[k]);
+          if (same) {
+            if (!anew) {
+              bendsOf[wi] = wasBends;
+              tinOf[wi] = wasIn;
+              toutOf[wi] = wasOut;
+            }
+            continue;
+          }
+          for (int wj : nearSketches[size_t(wi)]) {
+            if (dirtyW[size_t(wj)]) continue;
+            const std::vector<Bend>& ocs = bendsOf[wj];
+            const size_t n = ocs.size();
+            if (n < 2) continue;
+            const double between = clrBetween(w, wires[wj]);
+            bool hit = false;
+            for (size_t m = 0; m < moved.size() && !hit; ++m) {
+              const Bend& c = moved[m].first;
+              if (r::contains(ocs, c.obst, &Bend::obst)) hit = true;
+              const double far = std::abs(c.rho) + c.width / 2.0 + between + kMargin + double(wires[wj].width) / 2.0 + kUpdateTol;
+              for (size_t k = 0; k + 1 < n && !hit; ++k) {
+                const Vec2 p = k == 0 ? ocs[0].c : toutOf[wj][k], q = k + 1 == n - 1 ? ocs[n - 1].c : tinOf[wj][k + 1];
+                hit = distPointSegment(c.c, p, q) < far;
+              }
+            }
+            if (hit) dirtyW[size_t(wj)] = 1;
+          }
+        }
+        (void)ob;
+        active[li] = !dirtyE[li].empty() || r::any_of(byLayer.at(L), [&](int wi) { return dirtyW[size_t(wi)] != 0; });
+      });
+      if (r::any_of(failed, [](char c) { return c != 0; })) return whole("an edge took its shares back");
+      d.made.rounds = round + 1;
+      rest = r::none_of(active, [](char c) { return c != 0; });
+    }
+    if (!rest) return whole("no rest within the rounds");
+    for (size_t li = 0; li < NL; ++li) {
+      d.made.edges += packedOf[li];
+      d.made.wires += laidOf[li];
+    }
+    d.made.updated = true;
+    return true;
+  };
+
+  if (was) {
+    if (!drawChanged(*was)) return false;
+    // (The counts are the whole drawing's it came from.)
+    st.overflowEdges += was->d.overflowEdges;
+    st.arcBends += was->d.arcBends;
+    st.guardBends += was->d.guardBends;
+    st.droppedApexes += was->d.droppedApexes;
+    d.overflowEdges = was->d.overflowEdges, d.arcBends = was->d.arcBends, d.guardBends = was->d.guardBends, d.droppedApexes = was->d.droppedApexes;
+    return true;
   }
-  radiiOf[size_t(&st - per.data())] = radiiChanged;
-  });
-  if (r::none_of(radiiOf, [](char c) { return c != 0; })) break;
-  for (RealizeStats& ls : per) ls.droppedApexes = 0;
-  }  // rounds
+  drawAll();
   for (const RealizeStats& ls : per) {
     st.overflowEdges += ls.overflowEdges;
     st.arcBends += ls.arcBends;
     st.guardBends += ls.guardBends;
     st.droppedApexes += ls.droppedApexes;
   }
+  for (const RealizeStats& ls : per) d.overflowEdges += ls.overflowEdges, d.arcBends += ls.arcBends, d.guardBends += ls.guardBends, d.droppedApexes += ls.droppedApexes;
+  return true;
+}
+}  // namespace
 
+void computeDrawn(const Board& b, const std::vector<RealWire>& wires, const RealizeOptions& opt, RealizeInput& in, DrawnWires& d, RealizeStats& st) {
+  drawWires(b, wires, opt, in, d, st, nullptr);
+}
+
+bool updateDrawn(const Board& b, const std::vector<RealWire>& wires, const RealizeOptions& opt, RealizeInput& in, DrawnWires& d, RealizeStats& st,
+                 const std::vector<RealWire>& wiresWas, const RealizeInput& inWas, const DrawnWires& was) {
+  static const bool kOff = std::getenv("XR_NO_UPDATE") != nullptr;
+  const RealizeStats before = st;
+  const DrawnBefore from{wiresWas, inWas, was};
+  if (!kOff && drawWires(b, wires, opt, in, d, st, &from)) return true;
+  const char* why = kOff ? "switched off" : d.made.whole;
+  st = before;
+  d = DrawnWires{};
+  drawWires(b, wires, opt, in, d, st, nullptr);
+  d.made.whole = why;
+  return false;
 }
 
 // The tracks of a drawing, appended to the board (and the vias given), with the forces the wires as drawn put on

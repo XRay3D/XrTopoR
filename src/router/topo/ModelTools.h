@@ -59,8 +59,10 @@ int resolveCrossings(const Board& b, Topology& t);
 // Draws every unlocked wire of the model on the board: their tracks go, and the hand-drawn runs inside the
 // pads they end at; the model's wires then own the new tracks.
 // `only` (with editedOnly false): these wires alone, the rest as they lie.
+// `keep` receives the drawing (ModelDrawing, below); `from` is an earlier drawing of the same wires, of the model as it
+// was before a few of its objects moved: the drawing is brought up from it (updateDrawn) instead of computed whole.
 void drawModel(Board& b, Topology& t, bool direct, RealizeStats& stats, int& nWires, bool editedOnly = false,
-               const std::vector<int>* only = nullptr, ModelDrawing* keep = nullptr);
+               const std::vector<int>* only = nullptr, ModelDrawing* keep = nullptr, const ModelDrawing* from = nullptr);
 
 // A connection for manual routing, on the model: a copy of it with the new wire laid over the triangles from `from` to
 // `to` on the layer (findRelay, as F6 re-lays a wire: among the wires as they run, each edge with room for it; squeezed
@@ -96,7 +98,7 @@ namespace xr::topo {
 // is derived from the sketches again. Appends the tracks to the board; `wires` receives the sketches used.
 // `keep` receives the drawing itself: what was computed before the tracks were made (ModelDrawing).
 RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int>& chosen, const RealizeOptions& opt,
-                              std::vector<RealWire>* wires = nullptr, ModelDrawing* keep = nullptr);
+                              std::vector<RealWire>* wires = nullptr, ModelDrawing* keep = nullptr, const ModelDrawing* from = nullptr);
 
 // A drawing of wires of the model, kept: the realiser's input made from the model (the obstacles of every layer,
 // the wires' crossings in their order on every edge), and what it computed from it — every wire's place and

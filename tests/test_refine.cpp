@@ -280,6 +280,80 @@ TEST(Realizer, AMovedViaChangesTheWiresNearIt) {
   }
 }
 
+// A drawing brought up from the one before a via moved (updateDrawn: the edges and wires the move reaches, a wave
+// until nothing moves by 0.1 um) against the drawing computed whole from the moved model: the same wires within a
+// micrometre but for a few (a wire's radii only grow through the rounds of a whole drawing and keep what an early
+// round gave them; brought up, a wire begins from its neighbours as they came to rest), and a small part of the
+// work. Measured 2026-11-12, a via moved 0.22 mm, 24 vias a board: see the printed lines.
+TEST(Realizer, ADrawingBroughtUpIsTheWholeOne) {
+  for (const char* name : {"topor/Example_03/arz_2L.fst", "topor/Example_04/Arcs_master.pcb", "topor/Example_03/arz_4L.fst"}) {
+    auto lb = io::loadBoard(data(name));
+    ASSERT_TRUE(lb.has_value()) << name;
+    topo::Topology::assignIds(**lb);
+    topo::Topology t0;
+    t0.build(**lb);
+    struct Out {
+      int wires = 0;
+      double length = 0;
+    };
+    auto drawn = [&](topo::Topology t, topo::ModelDrawing& kept, const topo::ModelDrawing* from) {
+      Board b = **lb;
+      topo::RealizeStats st;
+      Out o;
+      topo::drawModel(b, t, true, st, o.wires, false, nullptr, &kept, from);
+      o.length = b.tracksLength();
+      return o;
+    };
+    topo::ModelDrawing was;
+    const Out first = drawn(t0, was, nullptr);
+    ASSERT_GT(first.wires, 0);
+    std::vector<int> vias;
+    for (int oi = 0; oi < int(t0.owners.size()); ++oi)
+      if (t0.owners[size_t(oi)].kind == topo::Owner::Kind::Via) vias.push_back(oi);
+    ASSERT_FALSE(vias.empty());
+    int tried = 0, updated = 0, exact = 0, wiresOff = 0, laid = 0, packed = 0, rounds = 0;
+    double worst = 0, lengthOff = 0;
+    std::map<std::string, int> whole;
+    for (size_t k = 0; k < vias.size() && tried < 24; k += std::max<size_t>(1, vias.size() / 24)) {
+      topo::Topology t = t0;
+      if (topo::moveOwner(t, vias[k], Vec2{0.2e6, 0.1e6}) <= 0) continue;
+      topo::ModelDrawing full, up;
+      const Out a = drawn(t, full, nullptr);
+      if (a.wires != first.wires || full.chosen != was.chosen) continue;
+      const Out c = drawn(t, up, &was);
+      ++tried;
+      EXPECT_EQ(c.wires, a.wires);
+      if (!up.drawn.made.updated) {
+        ++whole[up.drawn.made.whole];
+        continue;
+      }
+      ++updated;
+      laid += up.drawn.made.wires, packed += up.drawn.made.edges, rounds += up.drawn.made.rounds;
+      int off = 0;
+      for (size_t w = 0; w < full.chosen.size(); ++w) {
+        const auto& x = full.drawn.bends[w];
+        const auto& y = up.drawn.bends[w];
+        double dev = x.size() != y.size() ? 1e9 : 0;
+        for (size_t i = 0; i < x.size() && dev < 1e9; ++i)
+          dev = std::max({dev, (x[i].c - y[i].c).len(), std::abs(x[i].rho - y[i].rho), (full.drawn.tin[w][i] - up.drawn.tin[w][i]).len(),
+                          (full.drawn.tout[w][i] - up.drawn.tout[w][i]).len()});
+        if (dev > 1000) ++off;
+        if (dev < 1e9) worst = std::max(worst, dev);
+      }
+      wiresOff += off;
+      exact += off == 0;
+      lengthOff = std::max(lengthOff, std::abs(c.length - a.length));
+    }
+    ASSERT_GT(tried, 0) << name;
+    std::print("{}: {} wires; {} moves, {} brought up ({} the whole drawing's within 1 um; {} wires off in all, the worst bend of the same shape {:.2f} um off, the length {:.1f} um at most)",
+               name, first.wires, tried, updated, exact, wiresOff, worst / 1e3, lengthOff / 1e3);
+    if (updated) std::print("; a move: {:.1f} wires laid, {:.1f} edges packed, {:.1f} rounds", double(laid) / updated, double(packed) / updated, double(rounds) / updated);
+    for (const auto& [why, n] : whole) std::print("; whole {} times: {}", n, why);
+    std::println("");
+    EXPECT_GT(updated * 2, tried) << name;
+  }
+}
+
 // F7 on the model: the vias and branch points go down the gradient of the drawn length (the wires' pull at
 // their ends and their push at their bends, taken from the realiser's drawing), every iteration judged by the
 // drawing. Never worse than F5 from the model (the best drawing is kept), nothing lost, the mesh whole; and

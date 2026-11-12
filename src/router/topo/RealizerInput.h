@@ -163,6 +163,12 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
 // The two halves of it: the drawing computed (the board is read only), and its tracks made.
 struct DrawnWires;
 void computeDrawn(const Board& b, const std::vector<RealWire>& wires, const RealizeOptions& opt, RealizeInput& in, DrawnWires& d, RealizeStats& st);
+// The drawing brought up from an earlier one (`was`, made from `wiresWas` and `inWas`) to the input as it is now:
+// only what the changes reach is computed again (a via moved 0.2 mm: 5-10 wires of 400-750), the rest is the
+// earlier drawing's. Within kUpdateTol (0.1 um) of the whole computation where the two differ at all. False: it was
+// computed whole (DrawnWires::made says why); `d` is the drawing either way.
+bool updateDrawn(const Board& b, const std::vector<RealWire>& wires, const RealizeOptions& opt, RealizeInput& in, DrawnWires& d, RealizeStats& st,
+                 const std::vector<RealWire>& wiresWas, const RealizeInput& inWas, const DrawnWires& was);
 // `dry`: nothing is put on the board — the counts, the length and the forces of the drawing alone.
 RealizeStats emitDrawn(Board& b, const std::vector<RealWire>& wires, const std::vector<RealVia>& vias, const RealizeOptions& opt, RealizeInput& in,
                        const DrawnWires& d, RealizeStats st, bool dry = false);
