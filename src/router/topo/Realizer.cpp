@@ -860,15 +860,14 @@ RealizeStats realize(Board& b, const std::vector<RealWire>& wires, const std::ve
   return drawRealized(b, wires, vias, opt, in, st);
 }
 
-void LayerObstacles::around(const BBox& box, std::vector<int>& out) const {
-  out.clear();
+const LayerObstacles::Grid& LayerObstacles::grid() const {
   Grid& g = grid_;
   if (g.built != pts.size() || g.cells.empty()) {
     g = Grid{};
     g.built = pts.size();
     BBox all;
     for (const OPt& o : pts) all.add(o.p);
-    if (!all.valid()) return;
+    if (!all.valid()) return g;
     // About two points a cell, no finer than 0.5 mm.
     const double w = std::max(all.maxX - all.minX, 1.0), h = std::max(all.maxY - all.minY, 1.0);
     g.cell = std::max(0.5 * kNmPerMm, std::sqrt(w * h * 2 / double(std::max<size_t>(pts.size(), 1))));
@@ -884,6 +883,12 @@ void LayerObstacles::around(const BBox& box, std::vector<int>& out) const {
       if (pts[size_t(i)].r >= kFarRadius) g.far.push_back(i);
     }
   }
+  return g;
+}
+
+void LayerObstacles::around(const BBox& box, std::vector<int>& out) const {
+  out.clear();
+  const Grid& g = grid();
   if (!box.valid() || g.cells.empty()) return;
   const int x1 = std::clamp(int(std::floor((box.minX - g.x0) / g.cell)), 0, g.nx - 1), x2 = std::clamp(int(std::floor((box.maxX - g.x0) / g.cell)), 0, g.nx - 1);
   const int y1 = std::clamp(int(std::floor((box.minY - g.y0) / g.cell)), 0, g.ny - 1), y2 = std::clamp(int(std::floor((box.maxY - g.y0) / g.cell)), 0, g.ny - 1);
@@ -1300,7 +1305,28 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
   // around the edge end obstacles with the slot radius, consecutive bends around one obstacle merge.
   inLayers([&](LayerId L, RealizeStats& st) {
   shareOfAll = -1;
-  std::vector<int> guardNear;  // the obstacle points near a chord (LayerObstacles::around)
+  // The boxes of the sketches of the layer's wires as flat arrays of floats (about the first box's corner, rounded
+  // outwards): a wire finds the wires whose sketches come near by one pass of four comparisons a wire, and asks the
+  // exact boxes of the few left (the exact boxes of all of them, for every wire of every round, were the hottest
+  // lines of F7 under perf once the bends were sifted so).
+  const std::vector<int>& layerWires = byLayer.at(L);
+  const size_t nLayer = layerWires.size();
+  std::vector<float> boxX0(nLayer), boxX1(nLayer), boxY0(nLayer), boxY1(nLayer);
+  std::vector<unsigned char> boxHit(nLayer);
+  Vec2 boxOrg;
+  for (int wj : layerWires)
+    if (sketchBox[wj].valid()) {
+      boxOrg = {sketchBox[wj].minX, sketchBox[wj].minY};
+      break;
+    }
+  constexpr float kBoxSlack = 64;  // nm: more than a float's rounding at the size of a board
+  for (size_t i = 0; i < nLayer; ++i) {
+    const BBox& sb = sketchBox[layerWires[i]];
+    boxX0[i] = float(sb.minX - boxOrg.x) - kBoxSlack;
+    boxX1[i] = float(sb.maxX - boxOrg.x) + kBoxSlack;
+    boxY0[i] = float(sb.minY - boxOrg.y) - kBoxSlack;
+    boxY1[i] = float(sb.maxY - boxOrg.y) + kBoxSlack;
+  }
   bool radiiChanged = false;
   for (int wi : byLayer.at(L)) {
     const RealWire& w = wires[wi];
@@ -1435,8 +1461,18 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
       BBox mine;
       for (Vec2 q : sk) mine.add(q);
       mine = mine.inflated(5 * kNmPerMm);
-      for (int wj : byLayer.at(w.layer))
+      {
+        const float x0 = float(mine.minX - boxOrg.x) - kBoxSlack, x1 = float(mine.maxX - boxOrg.x) + kBoxSlack;
+        const float y0 = float(mine.minY - boxOrg.y) - kBoxSlack, y1 = float(mine.maxY - boxOrg.y) + kBoxSlack;
+        const float *bx0 = boxX0.data(), *bx1 = boxX1.data(), *by0 = boxY0.data(), *by1 = boxY1.data();
+        unsigned char* hit = boxHit.data();
+        for (size_t i = 0; i < nLayer; ++i) hit[i] = (bx1[i] >= x0) & (bx0[i] <= x1) & (by1[i] >= y0) & (by0[i] <= y1);
+      }
+      for (size_t i = 0; i < nLayer; ++i) {
+        if (!boxHit[i]) continue;
+        const int wj = layerWires[i];
         if (wj != wi && wires[wj].net != w.net && !bendsOf[wj].empty() && mine.intersects(sketchBox[wj])) nearWires.push_back(wj);
+      }
     }
     // Their bends, in the order they are tried in, each with the box its arc at the widest spacing from this wire
     // reaches — as four flat arrays of floats about the sketch's first point, rounded outwards. A chord sifts them
@@ -1712,28 +1748,32 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
           bb.add(q);
           bb = bb.inflated(3 * kNmPerMm + w.width);
           double width = std::min(cs[k].width, cs[k + 1].width);
-          ob.around(bb, guardNear);  // (the points the test below can let through, in the same order)
-          for (int o : guardNear) {
+          // The first of the points near, by their numbers, that the chord comes too near: the points are handed
+          // over in no order, and the least number that passes is kept (they were listed, sorted and tried in turn
+          // till the first passed: the listing and the sorting were a twentieth of F7).
+          int first = std::numeric_limits<int>::max();
+          ob.eachAround(bb, [&](int o) {
+            if (o >= first) return;
             const OPt& op = ob.pts[o];
-            if (op.net == kTransparent || (op.net == w.net && w.net != kNoNet)) continue;
+            if (op.net == kTransparent || (op.net == w.net && w.net != kNoNet)) return;
             // (A large round obstacle, a hole in the board, reaches the chord from far outside the box.)
-            if (!bb.contains(op.p) && (op.r < 3 * kNmPerMm || distPointSegment(op.p, p, q) > op.r + 3 * kNmPerMm + w.width)) continue;
-            if (op.r <= 0 && op.shape < 0) continue;  // a bare point (outline, keepout) has sides handled elsewhere
-            if (dropped.contains(o) || r::contains(cs, o, &Circle::obst)) continue;
+            if (!bb.contains(op.p) && (op.r < 3 * kNmPerMm || distPointSegment(op.p, p, q) > op.r + 3 * kNmPerMm + w.width)) return;
+            if (op.r <= 0 && op.shape < 0) return;  // a bare point (outline, keepout) has sides handled elsewhere
+            if (dropped.contains(o) || r::contains(cs, o, &Circle::obst)) return;
             Vec2 on = closestPointOnSegment(op.p, p, q);
             double t = (on - p).dot(q - p) / (q - p).len2();
-            if (t <= 0 || t >= 1) continue;
+            if (t <= 0 || t >= 1) return;
             // At the rule's minimum: a guard bend knows no stack (two wires that run into one via's nominal
             // room would both be bent round it at one radius — arz_4L, nets 59 and 69, seven shorts).
             shareOfAll = 0;
             double R = ob.reach(op, (on - op.p).normalized()) + clrTo(op, w) + kMargin + width / 2.0;
             shareOfAll = -1;
             if ((on - op.p).len() < R - 1000) {
-              at = int(k) + 1;
+              first = o;
               ins = {op.p, (orient(p, q, op.p) > 0 ? 1 : -1) * R, o, cs[k].portal, width};
-              break;
             }
-          }
+          });
+          if (first != std::numeric_limits<int>::max()) at = int(k) + 1;
         }
         if (at >= 0) ++st.guardBends;
       }

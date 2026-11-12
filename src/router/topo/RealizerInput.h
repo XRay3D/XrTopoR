@@ -3,6 +3,8 @@
 // the edges between them in order, the wires' order on every crossed edge, the sketches and the stubs out
 // of narrow pads. realize() derives all of it from the sketches (its own triangulation, a walk, the
 // topological order); the model fills it from its meshes and hands it to drawRealized().
+#include <algorithm>
+#include <cmath>
 #include <array>
 #include <map>
 #include <set>
@@ -90,6 +92,19 @@ struct LayerObstacles {
   // first query and again after points were added (a point added is not moved).
   static constexpr double kFarRadius = 3 * kNmPerMm;
   void around(const BBox& box, std::vector<int>& out) const;
+  // The same points handed to `fn` one by one, in no order and some of them twice (no list, no sorting): for a
+  // caller that wants the least of those that pass its own test.
+  template <class F>
+  void eachAround(const BBox& box, F&& fn) const {
+    const Grid& g = grid();
+    if (!box.valid() || g.cells.empty()) return;
+    const int x1 = std::clamp(int(std::floor((box.minX - g.x0) / g.cell)), 0, g.nx - 1), x2 = std::clamp(int(std::floor((box.maxX - g.x0) / g.cell)), 0, g.nx - 1);
+    const int y1 = std::clamp(int(std::floor((box.minY - g.y0) / g.cell)), 0, g.ny - 1), y2 = std::clamp(int(std::floor((box.maxY - g.y0) / g.cell)), 0, g.ny - 1);
+    for (int cy = y1; cy <= y2; ++cy)
+      for (int cx = x1; cx <= x2; ++cx)
+        for (int i : g.cells[size_t(cy) * size_t(g.nx) + size_t(cx)]) fn(i);
+    for (int i : g.far) fn(i);
+  }
 
  private:
   struct Grid {
@@ -100,6 +115,7 @@ struct LayerObstacles {
     std::vector<int> far;
   };
   mutable Grid grid_;
+  const Grid& grid() const;  // made on the first call, and again after points were added
 };
 
 // Constrained Delaunay triangulation of the obstacle points of one layer, optionally without
