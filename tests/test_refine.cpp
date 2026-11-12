@@ -354,6 +354,64 @@ TEST(Realizer, ADrawingBroughtUpIsTheWholeOne) {
   }
 }
 
+// The DRC of a board a few of whose tracks changed, from the check of the board before (runDrc with DrcEarlier: the
+// changed tracks and vias against everything, the rest taken over): the violations of the whole check, one for one
+// and in its order. A via of the model moved and the drawing brought up, on a board with violations to carry.
+TEST(Drc, TheChangedTracksAloneAreTheWholeCheck) {
+  for (const char* name : {"topor/Example_03/arz_2L.fst", "topor/AMK310/AMK310_MCU_V2.fst"}) {
+    auto lb = io::loadBoard(data(name));
+    ASSERT_TRUE(lb.has_value()) << name;
+    topo::Topology::assignIds(**lb);
+    topo::Topology t0;
+    t0.build(**lb);
+    auto drawn = [&](topo::Topology t, topo::ModelDrawing& kept, const topo::ModelDrawing* from) {
+      Board b = **lb;
+      for (const topo::Owner& ow : t.owners)
+        if (ow.kind == topo::Owner::Kind::Via && ow.via >= 0 && ow.via < int(b.vias.size())) b.vias[size_t(ow.via)].pos = Point(ow.c);
+      topo::RealizeStats st;
+      int wires = 0;
+      topo::drawModel(b, t, true, st, wires, false, nullptr, &kept, from);
+      return b;
+    };
+    DrcOptions opt;
+    opt.unconnected = false;
+    topo::ModelDrawing was;
+    const Board before = drawn(t0, was, nullptr);
+    const std::vector<DrcViolation> first = runDrc(before, opt);
+    std::vector<int> vias;
+    for (int oi = 0; oi < int(t0.owners.size()); ++oi)
+      if (t0.owners[size_t(oi)].kind == topo::Owner::Kind::Via && !t0.owners[size_t(oi)].locked) vias.push_back(oi);
+    ASSERT_FALSE(vias.empty());
+    int tried = 0;
+    size_t most = 0, carried = 0;
+    for (size_t k = 0; k < vias.size() && tried < 8; k += std::max<size_t>(1, vias.size() / 8)) {
+      topo::Topology t = t0;
+      if (topo::moveOwner(t, vias[k], Vec2{0.2e6, 0.1e6}) <= 0) continue;
+      topo::ModelDrawing now;
+      const Board after = drawn(t, now, &was);
+      size_t changed = 0;
+      const DrcEarlier earlier = drcEarlier(before, first, after, &changed);
+      ASSERT_TRUE(earlier.violations) << name;
+      if (changed * 2 > after.tracks.size()) continue;  // (computed whole: nearly every track another)
+      ++tried;
+      most = std::max(most, changed);
+      const std::vector<DrcViolation> whole = runDrc(after, opt), local = runDrc(after, opt, earlier);
+      carried += whole.size();
+      ASSERT_EQ(local.size(), whole.size()) << name << ", via " << vias[k];
+      for (size_t i = 0; i < whole.size(); ++i) {
+        const DrcViolation& x = whole[i];
+        const DrcViolation& y = local[i];
+        const bool same = x.type == y.type && x.a == y.a && x.hasB == y.hasB && (!x.hasB || x.b == y.b) && x.actual == y.actual && x.required == y.required &&
+                          (x.pos - y.pos).len() < 1 && x.layer == y.layer;
+        EXPECT_TRUE(same) << name << ", via " << vias[k] << ", violation " << i << ": " << x.message << " / " << y.message;
+        if (!same) break;
+      }
+    }
+    EXPECT_GT(tried, 0) << name;
+    std::println("{}: {} tracks, {} violations; {} moves, at most {} tracks and vias changed, {} violations compared", name, before.tracks.size(), first.size(), tried, most, carried);
+  }
+}
+
 // F7 on the model: the vias and branch points go down the gradient of the drawn length (the wires' pull at
 // their ends and their push at their bends, taken from the realiser's drawing), every iteration judged by the
 // drawing. Never worse than F5 from the model (the best drawing is kept), nothing lost, the mesh whole; and

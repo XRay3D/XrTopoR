@@ -331,6 +331,7 @@ struct Drawn {
   double depth = 0, length = 0;
   size_t unrouted = 0;
   std::shared_ptr<const ModelDrawing> kept;  // the drawing itself: the next one is brought up from it
+  std::shared_ptr<const std::vector<DrcViolation>> violations;  // the DRC's: the next check takes over those of what stands
   double score() const { return length + depth * kDepthCost + double(places.size()) * kCountCost; }
 };
 
@@ -448,7 +449,10 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
     int wires = 0, drawn = 0;
     std::vector<RatsLine> loose;
   } counted;
-  auto judge = [&](Drawn& c, bool count = false) {
+  // `from`: the drawing this one was brought up from — the tracks that stand keep its violations, the changed ones
+  // alone are checked (runDrc with DrcEarlier: the same violations in the same order).
+  int checkedLocally = 0;
+  auto judge = [&](Drawn& c, bool count = false, const Drawn* from = nullptr) {
     ProfScope pj("F7 model: judging");
     DrcOptions d;
     d.unconnected = false;
@@ -456,7 +460,21 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
     // The connections at the same time as the DRC (both read the board).
     std::future<std::vector<RatsLine>> unrouted;
     if (count) unrouted = std::async(std::launch::async, [&] { return Connectivity::compute(c.board).ratsnest; });
-    const std::vector<DrcViolation> vs = runDrc(c.board, d);
+    static const bool kWholeDrc = std::getenv("XR_F7_WHOLE_DRC") != nullptr;
+    std::vector<DrcViolation> found;
+    bool local = false;
+    if (from && from->violations && !kWholeDrc) {
+      size_t changed = 0;
+      const DrcEarlier earlier = drcEarlier(from->board, *from->violations, c.board, &changed);
+      if (earlier.violations && changed * 3 < c.board.tracks.size()) {
+        found = runDrc(c.board, d, earlier);
+        local = true;
+        ++checkedLocally;
+      }
+    }
+    if (!local) found = runDrc(c.board, d);
+    c.violations = std::make_shared<const std::vector<DrcViolation>>(std::move(found));
+    const std::vector<DrcViolation>& vs = *c.violations;
     c.conflicts = int(vs.size());
     c.shortfall = c.depth = 0;
     c.deep = c.shorts = c.real = 0;
@@ -497,7 +515,7 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
     if (kept->drawn.made.updated) ++broughtUp, laidAgain += kept->drawn.made.wires;
     else if (debug && from) std::println(stderr, "F7 model: a drawing computed whole: {}", kept->drawn.made.whole);
     c.kept = std::move(kept);
-    judge(c);
+    judge(c, false, from);
     ++r.drawings;
     return c;
   };
@@ -832,7 +850,8 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
   }
   if (debug) std::println(stderr, "F7 model: {} iterations, {} drawings, {} rollbacks", r.iterations, r.drawings, r.rollbacks);
   if (broughtUp > 0)
-    r.log.push_back(std::format("{} of {} drawings brought up from the one before, {:.0f} wires laid again each of {}", broughtUp, r.drawings, double(laidAgain) / broughtUp, best.wires));
+    r.log.push_back(std::format("{} of {} drawings brought up from the one before, {:.0f} wires laid again each of {}; {} checked by their changed tracks alone", broughtUp,
+                                r.drawings, double(laidAgain) / broughtUp, best.wires, checkedLocally));
   for (size_t k = 0; k < objs.size(); ++k)
     if ((best.pos[k] - objs[k].start).len() > 1000) ++(t.owners[objs[k].owner].kind == Owner::Kind::Via ? r.viaMoves : r.junctionMoves);
   r.forceAfter = sumOf(forcesOf(best));

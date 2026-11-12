@@ -31,6 +31,19 @@ struct DrcOptions {
 };
 
 std::vector<DrcViolation> runDrc(const Board& b, const DrcOptions& opt = {});
+// The check of a board that differs in a few tracks and vias from one checked before (its pads, zones, outline and
+// rules the same): the violations between things that stand are the earlier check's, the changed tracks and vias
+// are checked against everything. The same violations in the same order as the check of the whole board gives.
+// Without the connections (opt.unconnected off); a board with as many violations as the options' limit is checked whole.
+struct DrcEarlier {
+  const std::vector<DrcViolation>* violations = nullptr;  // runDrc's of the earlier board, by the same options
+  std::vector<int> trackWas, viaWas;  // per track / via of this board: its number on the earlier one; -1: new or changed
+};
+std::vector<DrcViolation> runDrc(const Board& b, const DrcOptions& opt, const DrcEarlier& earlier);
+// The earlier check for it: the tracks of `now` that `was` has just so (found by what they are: ends, arc, width,
+// layer, net), the vias that stand where they stood. `changed` receives how many tracks and vias do not.
+// With other pads or zones the two boards are not for it: no violations in the result, and runDrc checks the whole.
+DrcEarlier drcEarlier(const Board& was, const std::vector<DrcViolation>& violations, const Board& now, size_t* changed = nullptr);
 // Required clearance between two nets (max of their class clearances).
 double requiredClearance(const Board& b, int netA, int netB, LayerMask layers = 0);
 const char* drcTypeName(DrcViolation::Type t);
