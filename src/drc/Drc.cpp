@@ -1,3 +1,4 @@
+#include "core/BoxGrid.h"
 #include "drc/Drc.h"
 
 #include "core/Parallel.h"
@@ -187,8 +188,18 @@ ConflictSum regionConflicts(const Board& b, const SpatialIndex& idx, const BBox&
 
 std::vector<DrcViolation> runDrc(const Board& b, const DrcOptions& opt) {
   std::vector<DrcViolation> out;
-  SpatialIndex idx;
-  idx.build(b);
+  // The tree of the items' boxes, for the checks that still ask it (the keepouts, the connections): made when the
+  // first of them asks. The clearances have a grid of their own from the shapes they make anyway — the tree was
+  // built from every item's shapes made once more, for nothing where the keepouts are none and the connections
+  // are not asked for (F7's judge of every drawing).
+  std::optional<SpatialIndex> tree;
+  auto index = [&]() -> const SpatialIndex& {
+    if (!tree) {
+      tree.emplace();
+      tree->build(b);
+    }
+    return *tree;
+  };
   double maxClr = double(b.maxClearance());
 
   if (opt.clearance) {
@@ -221,15 +232,47 @@ std::vector<DrcViolation> runDrc(const Board& b, const DrcOptions& opt) {
       return out;
     };
     std::vector<char> ownCopper(b.tracks.size(), 0);
-    parallelFor(order.size() + b.zones.size(), [&](size_t k) {
-      const ItemRef r = k < order.size() ? order[k] : ItemRef{ItemType::Zone, int(k - order.size())};
+    // The items in a grid by the boxes of their shapes (BoxGrid): the tracks, the vias, the pads, then the zones.
+    // The neighbours of an item come from it, by ascending number (a tree of boxes was asked before, built from
+    // every item's shapes made once more, and answered in the order its nodes lay).
+    const size_t nItems = order.size() + b.zones.size();
+    auto refOf = [&](size_t k) { return k < order.size() ? order[k] : ItemRef{ItemType::Zone, int(k - order.size())}; };
+    std::vector<BBox> itemBox(nItems);
+    std::vector<LayerMask> itemMask(nItems);
+    parallelFor(nItems, [&](size_t k) {
+      const ItemRef r = refOf(k);
       shapeCache[slot(r.type)][size_t(r.index)] = itemShapes(b, r);
       boxCache[slot(r.type)][size_t(r.index)] = boxesFor(shapeCache[slot(r.type)][size_t(r.index)]);
-      if (r.type == ItemType::Track) ownCopper[size_t(r.index)] = inOwnCopper(b, idx, r);
+      for (const BBox& sb : boxCache[slot(r.type)][size_t(r.index)]) itemBox[k].add(sb);
+      itemMask[k] = itemLayers(b, r);
     });
-    // (The index holds pads, tracks, vias and zones only.)
+    BoxGrid grid;
+    grid.build(itemBox);
+    // (The grid holds pads, tracks, vias and zones only.)
     auto shapesOf = [&](ItemRef r) -> const std::vector<Shape>& { return shapeCache[slot(r.type)][size_t(r.index)]; };
     auto boxesOf = [&](ItemRef r) -> const std::vector<BBox>& { return boxCache[slot(r.type)][size_t(r.index)]; };
+    // A straight track lying wholly inside the copper of a pad or via of its own net is that copper (inOwnCopper,
+    // from the shapes made above).
+    {
+      std::vector<int> near;
+      for (size_t ti = 0; ti < b.tracks.size(); ++ti) {
+        const Track& t = b.tracks[ti];
+        if (t.net == kNoNet || t.isArc()) continue;
+        const double hw = t.width / 2.0 - kDrcTolerance;
+        BBox q;
+        q.add(t.a.v());
+        q.add(t.b.v());
+        grid.query(q, near);
+        for (int j : near) {
+          const ItemRef o = refOf(size_t(j));
+          if (!((itemMask[size_t(j)] >> t.layer) & 1) || (o.type != ItemType::Pad && o.type != ItemType::Via) || itemNet(b, o) != t.net) continue;
+          if (r::any_of(shapesOf(o), [&](const Shape& sh) { return sh.distance(t.a.v()) <= -hw && sh.distance(t.b.v()) <= -hw; })) {
+            ownCopper[ti] = 1;
+            break;
+          }
+        }
+      }
+    }
     auto inOwn = [&](ItemRef r) { return r.type == ItemType::Track && ownCopper[size_t(r.index)]; };
     auto gid = [&](ItemRef r) { return uint64_t(int(r.type) * 10'000'000 + r.index); };
     // Per item: its neighbours in the order met, each with the violation the pair makes seen from it (-1 none).
@@ -255,7 +298,9 @@ std::vector<DrcViolation> runDrc(const Board& b, const DrcOptions& opt) {
         me.skip = true;
         return;
       }
-      idx.query(bb.inflated(maxClr), lm, [&](ItemRef c) {
+      thread_local std::vector<int> near;
+      grid.query(bb.inflated(maxClr), near);
+      auto visit = [&](ItemRef c) {
         if (c == a || skipPair(b, a, c) || inOwn(c)) return;
         const uint64_t ka = gid(a), kc = gid(c);
         me.met.push_back({std::min(ka, kc) << 32 | std::max(ka, kc), -1});
@@ -344,7 +389,9 @@ std::vector<DrcViolation> runDrc(const Board& b, const DrcOptions& opt) {
                     " [" + netName(b, nc) + "]";
         me.met.back().violation = int(me.found.size());
         me.found.push_back(std::move(v));
-      });
+      };
+      for (int j : near)
+        if (itemMask[size_t(j)] & lm) visit(refOf(size_t(j)));
     };
     parallelFor(order.size(), check);
     std::unordered_set<uint64_t> seen;
@@ -413,7 +460,7 @@ std::vector<DrcViolation> runDrc(const Board& b, const DrcOptions& opt) {
       BBox kb;
       for (auto& s : ks) kb.add(s.bbox());
       LayerMask lm = k.layers ? k.layers : b.allCopperMask();
-      idx.query(kb, lm, [&](ItemRef r) {
+      index().query(kb, lm, [&](ItemRef r) {
         bool kept = (r.type == ItemType::Track && k.wires) || (r.type == ItemType::Via && k.vias) ||
                     (r.type == ItemType::Zone && k.wires);
         if (!kept || out.size() >= opt.maxViolations) return;
@@ -435,7 +482,7 @@ std::vector<DrcViolation> runDrc(const Board& b, const DrcOptions& opt) {
     }
 
   if (opt.unconnected) {
-    auto conn = Connectivity::compute(b, idx);
+    auto conn = Connectivity::compute(b, index());
     for (auto& r : conn.ratsnest) {
       DrcViolation v;
       v.type = DrcViolation::Type::Unconnected;
