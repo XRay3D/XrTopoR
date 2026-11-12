@@ -280,6 +280,50 @@ TEST(Realizer, AMovedViaChangesTheWiresNearIt) {
   }
 }
 
+// Copper the model does not hold — crumbs under a via, each twice, as RMT19M_A8SWA_V5 had them (the loader takes
+// them out now; here they are put on the board in memory) — is left where it lies when the via steps, an island:
+// a connection lost. F7 sees it on that very drawing, takes the via back and goes on with the rest. (With the
+// connections counted for the first drawing and the result alone it walked on, found the loss at the end and threw
+// the whole result away: nothing moved, 8178.9 -> 8178.9 mm on that board.)
+TEST(Optimizer, ModelRelaxGoesOnWhereAViaLeavesCopperBehind) {
+  auto lb = io::loadBoard(data("topor/Example_04/Arcs_master.pcb"));
+  ASSERT_TRUE(lb.has_value());
+  Board& b = **lb;
+  int put = 0;
+  for (size_t i = 0; i < b.vias.size() && put < 6; i += std::max<size_t>(1, b.vias.size() / 6)) {
+    const Via& v = b.vias[i];
+    if (v.net == kNoNet || v.locked) continue;
+    LayerId layer = -1;
+    for (LayerId l = 0; l < LayerId(b.layers.size()) && layer < 0; ++l)
+      if (v.onLayer(l) && b.layers[size_t(l)].kind == LayerKind::Copper) layer = l;
+    if (layer < 0) continue;
+    const Vec2 c = v.pos.v(), a = c + Vec2{-900, -900};
+    for (int twice = 0; twice < 2; ++twice)
+      for (Vec2 to : {a + Vec2{500, 1300}, c}) {
+        Track t;
+        t.a = Point(a);
+        t.b = Point(to);
+        t.width = mmToNm(0.2);
+        t.layer = layer;
+        t.net = v.net;
+        b.tracks.push_back(t);
+      }
+    ++put;
+  }
+  ASSERT_GT(put, 2);
+  const size_t unrouted = Connectivity::compute(b).ratsnest.size();
+  topo::Topology::assignIds(b);
+  topo::Topology t;
+  t.build(b);
+  auto res = topo::optimizeModel(b, t);
+  ASSERT_TRUE(res.drawn);
+  std::println("crumbs under {} vias: F7 model {} iterations, {} drawings ({} rolled back), {} vias moved, length {:.1f} -> {:.1f} mm", put, res.iterations, res.drawings,
+               res.rollbacks, res.viaMoves, res.lengthBefore / 1e6, res.lengthAfter / 1e6);
+  EXPECT_LT(res.lengthAfter, res.lengthBefore - 100 * kNmPerMm);
+  EXPECT_GT(res.viaMoves, 50);
+  EXPECT_LE(Connectivity::compute(b).ratsnest.size(), unrouted);
+}
+
 // A drawing brought up from the one before a via moved (updateDrawn: the edges and wires the move reaches, a wave
 // until nothing moves by 0.1 um) against the drawing computed whole from the moved model: the same wires within a
 // micrometre but for a few (a wire's radii only grow through the rounds of a whole drawing and keep what an early

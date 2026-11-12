@@ -319,7 +319,6 @@ struct Drawn {
   Board board;
   std::vector<Place> places;
   std::vector<RatsLine> loose;  // the connections not made
-  bool counted = false;         // ... counted on this very drawing (else taken over from the one counted last)
   std::vector<Vec2> pos;  // the objects' centres
   RealizeStats stats;
   int wires = 0;
@@ -439,26 +438,20 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
     for (int wi = 0; wi < int(t.wires.size()); ++wi)
       if (objOf.contains(t.wires[size_t(wi)].end[0]) || objOf.contains(t.wires[size_t(wi)].end[1])) drawOnly.push_back(wi);
 
-  // The connections of a drawing are the model's: a wire drawn joins what it joins in the model. They are counted
-  // on the board for the first drawing and for the result; a drawing between with as many wires drawn as the one
-  // counted last has its connections (a third of the judging, and on no board of the benchmark did the count ever
-  // move once the crumbs were gone — see edit::removeJunkTracks).
-  struct Counted {
-    bool known = false;
-    int wires = 0, drawn = 0;
-    std::vector<RatsLine> loose;
-  } counted;
+  // The connections are counted on the board for every drawing. (Once only for the first drawing and the result,
+  // the ones between taken to have the model's: on the benchmark boards the count never moved. On a board with
+  // copper the model does not hold — crumbs under a via, see edit::removeJunkTracks — a via that stepped off them
+  // lost a connection nobody saw, and at the end the whole result was thrown away: F7 did nothing at all.)
   // `from`: the drawing this one was brought up from — the tracks that stand keep its violations, the changed ones
   // alone are checked (runDrc with DrcEarlier: the same violations in the same order).
   int checkedLocally = 0;
-  auto judge = [&](Drawn& c, bool count = false, const Drawn* from = nullptr) {
+  auto judge = [&](Drawn& c, const Drawn* from = nullptr) {
     ProfScope pj("F7 model: judging");
     DrcOptions d;
     d.unconnected = false;
-    count |= !counted.known || c.wires != counted.wires || c.stats.wires != counted.drawn;
     // The connections at the same time as the DRC (both read the board).
     std::future<std::vector<RatsLine>> unrouted;
-    if (count) unrouted = std::async(std::launch::async, [&] { return Connectivity::compute(c.board).ratsnest; });
+    unrouted = std::async(std::launch::async, [&] { return Connectivity::compute(c.board).ratsnest; });
     static const bool kWholeDrc = std::getenv("XR_F7_WHOLE_DRC") != nullptr;
     std::vector<DrcViolation> found;
     bool local = false;
@@ -486,13 +479,7 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
       if (p.shorted || p.depth > kNoise) ++c.real;
     }
     c.length = c.board.tracksLength();
-    if (count) {
-      c.loose = unrouted.get();
-      c.counted = true;
-      counted = {true, c.wires, c.stats.wires, c.loose};
-    } else {
-      c.loose = counted.loose;
-    }
+    c.loose = unrouted.get();
     c.unrouted = c.loose.size();
   };
   // `from`: a drawing of the model as it was before the steps taken since — this one is brought up from it, what
@@ -514,7 +501,7 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
     if (kept->drawn.made.updated) ++broughtUp, laidAgain += kept->drawn.made.wires;
     else if (debug && from) std::println(stderr, "F7 model: a drawing computed whole: {}", kept->drawn.made.whole);
     c.kept = std::move(kept);
-    judge(c, false, from);
+    judge(c, from);
     ++r.drawings;
     return c;
   };
@@ -598,7 +585,6 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
 
   Drawn prev = draw(nullptr);  // where the walk stands
   Drawn best = prev;    // the best drawing seen: the result
-  const Drawn first = prev;  // (the way back, should the result have lost a connection)
   r.conflictsBefore = best.conflicts;
   r.lengthBefore = best.length;
   r.depthBefore = best.shortfall;
@@ -858,15 +844,6 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
       for (Obj& ob : objs) ob.scale = std::max(0.1, ob.scale * 0.6);
     }
     schedule();
-  }
-  // The result's connections counted on its own board: a drawing that lost one is not the result.
-  if (!best.counted) {
-    const size_t before = first.unrouted;
-    judge(best, true);
-    if (best.unrouted > before) {
-      r.log.push_back(std::format("the best drawing has {} connection(s) unrouted for {}: left as it was drawn first", best.unrouted, before));
-      best = first;
-    }
   }
   if (debug) std::println(stderr, "F7 model: {} iterations, {} drawings, {} rollbacks", r.iterations, r.drawings, r.rollbacks);
   if (broughtUp > 0)
