@@ -481,8 +481,10 @@ std::vector<DrcViolation> check(const Board& b, const DrcOptions& opt, const Drc
           me.found.push_back(std::move(*v));
         }
       };
+      // Only the neighbours that come after it: a pair is the business of the one that comes first (every pair was
+      // measured from both, and the second measure thrown away when the two lists were put together).
       for (int j : near)
-        if (itemMask[size_t(j)] & lm) visit(refOf(size_t(j)));
+        if (size_t(j) > k && (itemMask[size_t(j)] & lm)) visit(refOf(size_t(j)));
     };
     if (earlier) {
       // A board checked before, a few of its tracks and vias changed since: the violations of what stands are that
