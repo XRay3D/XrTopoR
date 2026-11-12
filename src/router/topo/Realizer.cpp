@@ -1438,6 +1438,35 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
       for (int wj : byLayer.at(w.layer))
         if (wj != wi && wires[wj].net != w.net && !bendsOf[wj].empty() && mine.intersects(sketchBox[wj])) nearWires.push_back(wj);
     }
+    // Their bends, in the order they are tried in, each with the box its arc at the widest spacing from this wire
+    // reaches — as four flat arrays of floats about the sketch's first point, rounded outwards. A chord sifts them
+    // by its own box in one pass of four comparisons a bend (the compiler makes it a vector loop) and measures the
+    // few left; every chord of every iteration measured its distance to every bend of every near wire before, a
+    // fifth of F7's instructions. (The other wires' bends stand while this wire is laid.)
+    struct NearArc {
+      int wire, bend;
+    };
+    std::vector<NearArc> arcs;
+    std::vector<float> arcX0, arcX1, arcY0, arcY1;
+    std::vector<unsigned char> arcHit;
+    const Vec2 arcOrg = sk.front();
+    constexpr float kFloatSlack = 64;  // nm: more than a float's rounding at the size of a board
+    double widest = double(w.width);     // (a chord is as wide as the narrower of its two bends)
+    for (const Circle& c : cs) widest = std::max(widest, c.width);
+    for (int wj : nearWires) {
+      const auto& ocs = bendsOf[wj];
+      const double between = clrBetween(w, wires[wj]);
+      for (size_t m = 1; m + 1 < ocs.size(); ++m) {
+        if (ocs[m].obst < 0) continue;
+        const double far = std::abs(ocs[m].rho) + widest / 2.0 + between + kMargin + ocs[m].width / 2.0;
+        arcs.push_back({wj, int(m)});
+        arcX0.push_back(float(ocs[m].c.x - far - arcOrg.x) - kFloatSlack);
+        arcX1.push_back(float(ocs[m].c.x + far - arcOrg.x) + kFloatSlack);
+        arcY0.push_back(float(ocs[m].c.y - far - arcOrg.y) - kFloatSlack);
+        arcY1.push_back(float(ocs[m].c.y + far - arcOrg.y) + kFloatSlack);
+      }
+    }
+    arcHit.resize(arcs.size());
     for (int iter = 0; iter < 400; ++iter) {
       size_t n = cs.size();
       // A bend round a point of a wall whose circle lies within the bend round the wall as a whole (a hole, a
@@ -1591,12 +1620,22 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
           Vec2 q = k + 1 == n - 1 ? cs[n - 1].c : ti[k + 1];
           if ((q - p).len2() < 1) continue;
           double width = std::min(cs[k].width, cs[k + 1].width);
-          for (int wj : nearWires) {
+          {
+            const float x0 = float(std::min(p.x, q.x) - arcOrg.x) - kFloatSlack, x1 = float(std::max(p.x, q.x) - arcOrg.x) + kFloatSlack;
+            const float y0 = float(std::min(p.y, q.y) - arcOrg.y) - kFloatSlack, y1 = float(std::max(p.y, q.y) - arcOrg.y) + kFloatSlack;
+            const size_t na = arcs.size();
+            const float *ax0 = arcX0.data(), *ax1 = arcX1.data(), *ay0 = arcY0.data(), *ay1 = arcY1.data();
+            unsigned char* hit = arcHit.data();
+            for (size_t i = 0; i < na; ++i) hit[i] = (ax1[i] >= x0) & (ax0[i] <= x1) & (ay1[i] >= y0) & (ay0[i] <= y1);
+          }
+          for (size_t an = 0; an < arcs.size(); ++an) {
+            if (!arcHit[an]) continue;
+            const int wj = arcs[an].wire;
+            const size_t m = size_t(arcs[an].bend);
             const RealWire& o = wires[wj];
             const auto& ocs = bendsOf[wj];
-            for (size_t m = 1; m + 1 < ocs.size(); ++m) {
+            {
               const Circle& oc = ocs[m];
-              if (oc.obst < 0) continue;
               // The wire's own end (the other wire bends round this wire's pad, and the way into the pad
               // crosses that arc) is no obstacle to bend round: a bend about the point the wire ends at
               // is a loop, and the tangents past it come in from the wrong side (MinVia_standard_routing
@@ -1655,7 +1694,6 @@ RealizeStats drawRealized(Board& b, const std::vector<RealWire>& wires, const st
               if (dropped.contains(oc.obst) || r::contains(cs, oc.obst, &Circle::obst)) continue;
               at = int(k) + 1;
               ins = {oc.c, (orient(p, q, oc.c) > 0 ? 1 : -1) * radius, oc.obst, cs[k].portal, width};
-              break;
             }
             if (at >= 0) break;
           }
