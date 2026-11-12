@@ -1,6 +1,7 @@
 #include "geom/Shape.h"
 
 #include <algorithm>
+#include <limits>
 
 namespace xr {
 
@@ -31,6 +32,12 @@ Shape Shape::polygon(Polyline p, double r) {
   return s;
 }
 
+Shape Shape::indexedPolygon(Polyline p, double r) {
+  Shape s = polygon(std::move(p), r);
+  if (s.poly.size() >= 48) s.index = std::make_shared<const PolyIndex>(s.poly);
+  return s;
+}
+
 Shape Shape::rect(Vec2 c, double w, double h, double angle, double cr) {
   cr = std::clamp(cr, 0.0, std::min(w, h) / 2);
   double hw = w / 2 - cr, hh = h / 2 - cr;
@@ -47,7 +54,11 @@ BBox Shape::bbox() const {
   switch (kind) {
     case Kind::Point: b.add(a); break;
     case Kind::Segment: b.add(a); b.add(this->b); break;
-    case Kind::Polygon: for (auto& v : poly) b.add(v); break;
+    case Kind::Polygon:
+      if (index) b = index->bbox();
+      else
+        for (auto& v : poly) b.add(v);
+      break;
   }
   return b.inflated(r);
 }
@@ -69,31 +80,66 @@ double Shape::coreDistance(Vec2 p) const {
   switch (kind) {
     case Kind::Point: return (p - a).len();
     case Kind::Segment: return distPointSegment(p, a, b);
-    case Kind::Polygon: return distPointPolygon(p, poly);
+    case Kind::Polygon: return index ? (index->contains(p) ? 0.0 : index->distPoint(p)) : distPointPolygon(p, poly);
   }
   return 0;
 }
+
+namespace {
+
+constexpr double kNoCutoff = std::numeric_limits<double>::max();
+
+// As distPointPolygon / distSegmentPolygon / distPolygonPolygon, the polygon's sides from its index; exact up to
+// the cutoff (of the cores' distance).
+double indexedToPoint(const PolyIndex& ix, Vec2 p, double cutoff) { return ix.contains(p) ? 0.0 : ix.distPoint(p, cutoff); }
+
+double indexedToSegment(const PolyIndex& ix, Vec2 s0, Vec2 s1, double cutoff) {
+  if (ix.contains(s0) || ix.contains(s1)) return 0;
+  return ix.distSegment(s0, s1, cutoff);
+}
+
+double indexedToPolygon(const PolyIndex& ix, const Polyline& big, const Polyline& small, double cutoff) {
+  if (!small.empty() && ix.contains(small[0])) return 0;
+  if (small.size() >= 3 && !big.empty() && pointInPolygon(big[0], small)) return 0;
+  double d = kNoCutoff;
+  const size_t n = small.size();
+  for (size_t i = 0, j = n - 1; i < n; j = i++) {
+    d = std::min(d, indexedToSegment(ix, small[j], small[i], cutoff));
+    if (d <= 0) break;
+  }
+  return d;
+}
+
+}  // namespace
 
 double Shape::distanceToSegment(Vec2 s0, Vec2 s1) const {
   double d = 0;
   switch (kind) {
     case Kind::Point: d = distPointSegment(a, s0, s1); break;
     case Kind::Segment: d = distSegmentSegment(a, b, s0, s1); break;
-    case Kind::Polygon: d = distSegmentPolygon(s0, s1, poly); break;
+    case Kind::Polygon: d = index ? indexedToSegment(*index, s0, s1, kNoCutoff) : distSegmentPolygon(s0, s1, poly); break;
   }
   return d - r;
 }
 
-double Shape::distance(const Shape& o) const {
+double Shape::distance(const Shape& o) const { return distance(o, kNoCutoff); }
+
+double Shape::distance(const Shape& o, double cutoff) const {
+  // (The cutoff is of the shapes' distance: the cores are further apart by the two radii.)
+  const double coreCut = cutoff < kNoCutoff ? cutoff + r + o.r : kNoCutoff;
   double d = 0;
   if (o.kind == Kind::Point) {
-    d = coreDistance(o.a);
+    d = index ? indexedToPoint(*index, o.a, coreCut) : coreDistance(o.a);
   } else if (kind == Kind::Point) {
-    d = o.coreDistance(a);
+    d = o.index ? indexedToPoint(*o.index, a, coreCut) : o.coreDistance(a);
   } else if (o.kind == Kind::Segment) {
-    d = distanceToSegment(o.a, o.b) + r;
+    d = index ? indexedToSegment(*index, o.a, o.b, coreCut) : distanceToSegment(o.a, o.b) + r;
   } else if (kind == Kind::Segment) {
-    d = o.distanceToSegment(a, b) + o.r;
+    d = o.index ? indexedToSegment(*o.index, a, b, coreCut) : o.distanceToSegment(a, b) + o.r;
+  } else if (index) {
+    d = indexedToPolygon(*index, poly, o.poly, coreCut);
+  } else if (o.index) {
+    d = indexedToPolygon(*o.index, o.poly, poly, coreCut);
   } else {
     d = distPolygonPolygon(poly, o.poly);
   }

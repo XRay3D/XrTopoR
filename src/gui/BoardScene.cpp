@@ -284,7 +284,11 @@ void BoardView::buildBoardScene(gl::SceneData& out) const {
   // Ratsnest, with the «Показывать связи» filter; not over the autorouter's progress (the board's own connections).
   if (d.flag("showNetLines") && !sketch_) {
     QColor nl = doc_->color("netLines", 0xaf7d3a);
-    for (auto& r : doc_->connectivity().ratsnest) {
+    const auto& ratsnest = [&]() -> const auto& {
+      ProfScope ps("scene.connectivity");
+      return doc_->connectivity().ratsnest;
+    }();
+    for (auto& r : ratsnest) {
       if (d.filterNetlines && !d.netlineNets.empty()) {
         bool listed = r::contains(d.netlineNets, b.nets[r.net].name);
         if (listed == d.hideFilteredNetlines) continue;
@@ -487,6 +491,7 @@ void BoardView::paintGL() {
       if (sceneDirty_) {
         ProfScope ps("paint.scene");
         buildBoardScene(boardScene_);
+        ProfScope pu("scene.upload");
         renderer_.upload(gl::Renderer::Board, boardScene_);
       }
       if (sceneDirty_ || marksDirty_) {

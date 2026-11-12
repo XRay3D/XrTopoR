@@ -4,6 +4,8 @@
 #include <map>
 #include <numeric>
 
+#include "core/Prof.h"
+
 namespace xr {
 
 namespace {
@@ -22,7 +24,10 @@ struct Anchor {
 
 Connectivity Connectivity::compute(const Board& b) {
   SpatialIndex idx;
-  idx.build(b);
+  {
+    ProfScope ps("conn.index");
+    idx.build(b);
+  }
   return compute(b, idx);
 }
 
@@ -40,25 +45,59 @@ Connectivity Connectivity::compute(const Board& b, const SpatialIndex& idx) {
   Dsu dsu(P + T + V + Z);
   const double eps = 1000;  // 1 um contact tolerance
 
+  // An item's shapes and their boxes, made once: a pour's fill is polygons of thousands of points, and every
+  // track, via and pad of its net asks for them (made anew for each, a board with four pours took 130 ms).
+  struct Cached {
+    std::vector<Shape> shapes;
+    std::vector<BBox> boxes;
+    bool made = false;
+  };
+  std::vector<Cached> cache(size_t(P + T + V + Z));
+  auto shapesOf = [&](ItemRef r) -> const Cached& {
+    Cached& c = cache[size_t(id(r))];
+    if (!c.made) {
+      c.shapes = itemShapes(b, r);
+      c.boxes.reserve(c.shapes.size());
+      for (const Shape& s : c.shapes) c.boxes.push_back(s.bbox());
+      c.made = true;
+    }
+    return c;
+  };
+  // Two shapes whose boxes are further apart than the tolerance do not touch: no need to measure.
+  auto apart = [&](const BBox& p, const BBox& q) {
+    return p.minX - q.maxX > eps || q.minX - p.maxX > eps || p.minY - q.maxY > eps || q.minY - p.maxY > eps;
+  };
   auto connect = [&](ItemRef r) {
     int net = itemNet(b, r);
     if (net == kNoNet) return;
-    auto shapes = itemShapes(b, r);
+    const Cached& mine = shapesOf(r);
     LayerMask lm = itemLayers(b, r);
     BBox bb;
-    for (auto& s : shapes) bb.add(s.bbox());
+    for (const BBox& sb : mine.boxes) bb.add(sb);
     idx.query(bb.inflated(eps), lm, [&](ItemRef o) {
       if (o == r || itemNet(b, o) != net) return;
       if (dsu.find(id(o)) == dsu.find(id(r))) return;
-      auto os = itemShapes(b, o);
-      for (auto& s1 : shapes)
-        for (auto& s2 : os)
-          if (s1.distance(s2) <= eps) { dsu.unite(id(r), id(o)); return; }
+      const Cached& theirs = shapesOf(o);
+      for (size_t i = 0; i < mine.shapes.size(); ++i)
+        for (size_t k = 0; k < theirs.shapes.size(); ++k) {
+          if (apart(mine.boxes[i], theirs.boxes[k])) continue;
+          if (mine.shapes[i].distance(theirs.shapes[k], eps) <= eps) { dsu.unite(id(r), id(o)); return; }
+        }
     });
   };
-  for (int i = 0; i < T; ++i) connect({ItemType::Track, i});
-  for (int i = 0; i < V; ++i) connect({ItemType::Via, i});
-  for (int i = 0; i < Z; ++i) connect({ItemType::Zone, i});
+  {
+    ProfScope ps("conn.tracks");
+    for (int i = 0; i < T; ++i) connect({ItemType::Track, i});
+  }
+  {
+    ProfScope ps("conn.vias");
+    for (int i = 0; i < V; ++i) connect({ItemType::Via, i});
+  }
+  {
+    ProfScope ps("conn.zones");
+    for (int i = 0; i < Z; ++i) connect({ItemType::Zone, i});
+  }
+  ProfScope psMst("conn.clusters");
 
   Connectivity c;
   c.padCluster.assign(P, -1);

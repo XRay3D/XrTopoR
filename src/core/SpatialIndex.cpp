@@ -33,7 +33,7 @@ std::vector<Shape> itemShapes(const Board& b, ItemRef r, double expand, LayerId 
     }
     case ItemType::Zone: {
       const Zone& z = b.zones[r.index];
-      for (auto& f : z.filled) out.push_back(Shape::polygon(f, expand));
+      for (auto& f : z.filled) out.push_back(Shape::indexedPolygon(f, expand));
       break;
     }
     case ItemType::Keepout:
@@ -96,6 +96,12 @@ LayerMask itemLayers(const Board& b, ItemRef r) {
 }
 
 BBox itemBBox(const Board& b, ItemRef r) {
+  if (r.type == ItemType::Zone) {  // (the fill's points as they are: no shapes, no index of their sides)
+    BBox bb;
+    for (const Polyline& f : b.zones[r.index].filled)
+      for (Vec2 p : f) bb.add(p);
+    return bb;
+  }
   BBox bb;
   for (auto& s : itemShapes(b, r)) bb.add(s.bbox());
   return bb;

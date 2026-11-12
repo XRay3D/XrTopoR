@@ -1,6 +1,9 @@
 #include <gtest/gtest.h>
 
 #include "geom/Geometry.h"
+#include <random>
+
+#include "geom/PolyIndex.h"
 #include "geom/Shape.h"
 
 using namespace xr;
@@ -65,4 +68,59 @@ TEST(Shape, OutlineAndRayExit) {
   EXPECT_NEAR(bb.height(), 2.0, 1e-9);
   EXPECT_NEAR(r.rayExit({0, 0}, {1, 0}), 2.0, 1e-6);
   EXPECT_DOUBLE_EQ(r.rayExit({10, 0}, {1, 0}), 0.0);
+}
+
+// The sides of a large polygon in a grid (PolyIndex): the answers of the plain loops over every side, to the bit
+// (the same functions are called, on the sides near), and with a cutoff the distance when it is within it.
+TEST(Geometry, PolyIndexAnswersAsThePlainLoops) {
+  std::mt19937 rng(7);
+  std::uniform_real_distribution<double> u(0, 1);
+  // A star of 700 points about the origin, radii 20 to 60 mm: narrow spikes, concave between them.
+  Polyline poly;
+  const int n = 700;
+  for (int i = 0; i < n; ++i) {
+    double ang = 2 * kPi * i / n, rad = (20 + 40 * u(rng)) * 1e6;
+    poly.push_back({std::round(rad * std::cos(ang)), std::round(rad * std::sin(ang))});
+  }
+  PolyIndex ix(poly);
+  auto plainPoint = [&](Vec2 p) {
+    double d = std::numeric_limits<double>::max();
+    for (size_t i = 0, j = poly.size() - 1; i < poly.size(); j = i++) d = std::min(d, distPointSegment(p, poly[j], poly[i]));
+    return d;
+  };
+  auto plainSegment = [&](Vec2 a, Vec2 b) {
+    double d = std::numeric_limits<double>::max();
+    for (size_t i = 0, j = poly.size() - 1; i < poly.size(); j = i++) d = std::min(d, distSegmentSegment(a, b, poly[j], poly[i]));
+    return d;
+  };
+  auto point = [&] { return Vec2{(u(rng) - 0.5) * 160e6, (u(rng) - 0.5) * 160e6}; };
+  for (int k = 0; k < 4000; ++k) {
+    const Vec2 p = k % 5 == 0 ? poly[size_t(k) % poly.size()] + Vec2{u(rng) * 2000 - 1000, u(rng) * 2000 - 1000} : point();
+    ASSERT_EQ(ix.contains(p), pointInPolygon(p, poly)) << k;
+    const double d = plainPoint(p);
+    ASSERT_EQ(ix.distPoint(p), d) << k;
+    const double cut = u(rng) * 5e6;
+    if (d <= cut) ASSERT_EQ(ix.distPoint(p, cut), d) << k;
+    else ASSERT_GT(ix.distPoint(p, cut), cut) << k;
+    const Vec2 q = p + Vec2{(u(rng) - 0.5) * 6e6, (u(rng) - 0.5) * 6e6};
+    const double ds = plainSegment(p, q);
+    ASSERT_EQ(ix.distSegment(p, q), ds) << k;
+    if (ds <= cut) ASSERT_EQ(ix.distSegment(p, q, cut), ds) << k;
+    else ASSERT_GT(ix.distSegment(p, q, cut), cut) << k;
+  }
+  // The shapes: an indexed polygon against circles, capsules and a rectangle, as the plain one.
+  const Shape plain = Shape::polygon(poly), fast = Shape::indexedPolygon(poly);
+  ASSERT_TRUE(fast.index);
+  for (int k = 0; k < 2000; ++k) {
+    const Vec2 p = point(), q = p + Vec2{(u(rng) - 0.5) * 8e6, (u(rng) - 0.5) * 8e6};
+    const double rad = u(rng) * 1e6;
+    for (const Shape& s : {Shape::circle(p, rad), Shape::capsule(p, q, rad), Shape::rect(p, 3e6, 1e6, u(rng) * kPi, 0.1e6)}) {
+      ASSERT_EQ(fast.distance(s), plain.distance(s)) << k;
+      ASSERT_EQ(s.distance(fast), s.distance(plain)) << k;
+      ASSERT_EQ(fast.contains(p), plain.contains(p)) << k;
+      const double d = plain.distance(s);
+      if (d <= 1000) ASSERT_EQ(fast.distance(s, 1000), d) << k;
+      else ASSERT_GT(fast.distance(s, 1000), 1000) << k;
+    }
+  }
 }

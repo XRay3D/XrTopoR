@@ -22,6 +22,7 @@
 
 #include "core/Parallel.h"
 #include "core/Prof.h"
+#include "gui/AppSettings.h"
 #include "gui/Schemes.h"
 #include "gui/SmallDialogs.h"
 #include "gui/TextFont.h"
@@ -107,12 +108,17 @@ void BoardView::fitAll() {
 
 QString BoardView::benchmark(int frames) {
   QString out;
-  auto series = [&](const char* name, const std::function<void(int)>& step) {
+  makeCurrent();
+  out += QString("renderer: %1\n").arg(reinterpret_cast<const char*>(context()->functions()->glGetString(GL_RENDERER)));
+  doneCurrent();
+  // `whole`: the step's own work (the edit of a drag) is timed with the frame.
+  auto series = [&](const QString& name, const std::function<void(int)>& step, bool whole = false) {
     std::vector<double> ms;
     for (int i = 0; i < frames; ++i) {
-      step(i);
       QElapsedTimer t;
-      t.start();
+      if (whole) t.start();
+      step(i);
+      if (!whole) t.start();
       frameNow();
       ms.push_back(double(t.nsecsElapsed()) / 1e6);
     }
@@ -120,30 +126,70 @@ QString BoardView::benchmark(int frames) {
     double sum = 0;
     for (double m : ms) sum += m;
     out += QString("%1: mean %2 ms, median %3, max %4\n")
-               .arg(name, -8)
+               .arg(name, -10)
                .arg(sum / double(ms.size()), 0, 'f', 2)
                .arg(ms[ms.size() / 2], 0, 'f', 2)
                .arg(ms.back(), 0, 'f', 2);
   };
-  fitAll();
-  series("whole", [&](int) { sceneDirty_ = true; });
-  const Vec2 c0 = center_;
-  scale_ *= 4;
-  series("zoom4", [&](int) { sceneDirty_ = true; });
-  series("pan", [&](int i) { center_ = c0 + Vec2{double(i % 25) * 20 / scale_, double(i % 25) * 7 / scale_}; });
-  center_ = c0;
-  setMode(Mode::Measure);
-  const QPointF mid(width() / 2.0, height() / 2.0);
-  QMouseEvent press(QEvent::MouseButtonPress, mid, mapToGlobal(mid), Qt::LeftButton, Qt::LeftButton, {});
-  QMouseEvent release(QEvent::MouseButtonRelease, mid, mapToGlobal(mid), Qt::LeftButton, {}, {});
-  QCoreApplication::sendEvent(this, &press);
-  QCoreApplication::sendEvent(this, &release);
-  series("cursor", [&](int i) {
-    const QPointF at = mid + QPointF(double(i % 25) * 7, double(i % 7) * 5);
-    QMouseEvent move(QEvent::MouseMove, at, mapToGlobal(at), Qt::NoButton, {}, {});
-    QCoreApplication::sendEvent(this, &move);
-  });
-  setMode(Mode::Select);
+  const int transparencyWas = AppSettings::copperTransparency();
+  for (int transparency : {0, 65}) {  // «Прозрачность меди»: each copper layer drawn apart and laid over the others
+    AppSettings::setCopperTransparency(transparency);
+    const QString tag = transparency ? QString("/t%1").arg(transparency) : QString();
+    fitAll();
+    series("whole" + tag, [&](int) { sceneDirty_ = true; });
+    const Vec2 c0 = center_;
+    const double s0 = scale_;
+    // The wheel turned: the scale changes about the middle, a step in and a step out.
+    series("wheel" + tag, [&](int i) {
+      QWheelEvent wheel(QPointF(width() / 2.0, height() / 2.0), mapToGlobal(QPointF(width() / 2.0, height() / 2.0)), {}, QPoint(0, i % 2 ? -120 : 120),
+                        Qt::NoButton, {}, Qt::NoScrollPhase, false);
+      QCoreApplication::sendEvent(this, &wheel);
+    }, true);
+    center_ = c0;
+    scale_ = s0 * 4;
+    series("zoom4" + tag, [&](int) { sceneDirty_ = true; });
+    series("pan" + tag, [&](int i) { center_ = c0 + Vec2{double(i % 25) * 20 / scale_, double(i % 25) * 7 / scale_}; });
+    center_ = c0;
+    // A component dragged: the press on the one nearest the middle of the view, then the moves — the edit and the
+    // frame of each.
+    setMode(Mode::Select);
+    doc_->clearSelection();
+    int nearest = -1;
+    {
+      const Board& b = *doc_->board();
+      for (int ci = 0; ci < int(b.components.size()); ++ci)
+        if (nearest < 0 || (b.components[size_t(ci)].pos.v() - c0).len2() < (b.components[size_t(nearest)].pos.v() - c0).len2()) nearest = ci;
+    }
+    if (nearest >= 0) {
+      const QPointF at = toScreen(doc_->board()->components[size_t(nearest)].pos.v());
+      QMouseEvent press(QEvent::MouseButtonPress, at, mapToGlobal(at), Qt::LeftButton, Qt::LeftButton, {});
+      QCoreApplication::sendEvent(this, &press);
+      series("drag" + tag, [&](int i) {
+        const QPointF to = at + QPointF(double(i % 12 + 2) * 4, double(i % 7 + 2) * 3);
+        QMouseEvent move(QEvent::MouseMove, to, mapToGlobal(to), Qt::NoButton, Qt::LeftButton, {});
+        QCoreApplication::sendEvent(this, &move);
+      }, true);
+      QKeyEvent esc(QEvent::KeyPress, Qt::Key_Escape, {});
+      QCoreApplication::sendEvent(this, &esc);
+      QMouseEvent release(QEvent::MouseButtonRelease, at, mapToGlobal(at), Qt::LeftButton, {}, {});
+      QCoreApplication::sendEvent(this, &release);
+      if (doc_->undoStack()->canUndo()) doc_->undoStack()->undo();
+    }
+    if (transparency) continue;
+    setMode(Mode::Measure);
+    const QPointF mid(width() / 2.0, height() / 2.0);
+    QMouseEvent press(QEvent::MouseButtonPress, mid, mapToGlobal(mid), Qt::LeftButton, Qt::LeftButton, {});
+    QMouseEvent release(QEvent::MouseButtonRelease, mid, mapToGlobal(mid), Qt::LeftButton, {}, {});
+    QCoreApplication::sendEvent(this, &press);
+    QCoreApplication::sendEvent(this, &release);
+    series("cursor", [&](int i) {
+      const QPointF at = mid + QPointF(double(i % 25) * 7, double(i % 7) * 5);
+      QMouseEvent move(QEvent::MouseMove, at, mapToGlobal(at), Qt::NoButton, {}, {});
+      QCoreApplication::sendEvent(this, &move);
+    });
+    setMode(Mode::Select);
+  }
+  AppSettings::setCopperTransparency(transparencyWas);
   Prof::get().report("render");
   return out;
 }
@@ -1466,8 +1512,12 @@ void BoardView::startDrag(Drag kind, Vec2 at, std::optional<Marker> marker) {
 }
 
 void BoardView::applyDrag() {
+  ProfScope whole("drag.edit");
   Board& b = *doc_->board();
-  dragBefore_->apply(b);
+  {
+    ProfScope ps("drag.restore");
+    dragBefore_->apply(b);
+  }
   Vec2 to = snapped(cursor_);
   Vec2 d = to - dragStart_;
   edit::Motion m;

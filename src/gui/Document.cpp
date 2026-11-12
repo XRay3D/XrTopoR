@@ -1,5 +1,7 @@
 #include "gui/Document.h"
 
+#include "core/Prof.h"
+
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
@@ -99,6 +101,7 @@ void Document::setActiveLayer(LayerId l) {
 
 const SpatialIndex& Document::index() {
   if (!index_) {
+    ProfScope ps("doc.index");
     index_.emplace();
     index_->build(*board_);
   }
