@@ -22,6 +22,8 @@ struct ItemRef {
 // The copper of an item as shapes; `layer` >= 0: a pad's shape on that layer (pads with another shape on some
 // copper layers), else its outer shape.
 std::vector<Shape> itemShapes(const Board& b, ItemRef r, double expand = 0, LayerId layer = -1);
+// The same, an arc track as one shape (Shape::Kind::Arc) and not as chords: for what only measures distances.
+std::vector<Shape> itemShapesExact(const Board& b, ItemRef r);
 int itemNet(const Board& b, ItemRef r);
 LayerMask itemLayers(const Board& b, ItemRef r);
 BBox itemBBox(const Board& b, ItemRef r);

@@ -3,6 +3,7 @@
 #include "geom/Geometry.h"
 #include <random>
 
+#include "geom/ArcDist.h"
 #include "geom/PolyIndex.h"
 #include "geom/Shape.h"
 
@@ -163,5 +164,83 @@ TEST(Shape, RayExitByFormulaIsTheHalvings) {
     const double dir = u(rng) * 2 * kPi;
     const Vec2 d{std::cos(dir), std::sin(dir)};
     ASSERT_NEAR(s.rayExit(p, d), halved(s, p, d), 1e-3) << k;
+  }
+}
+
+// Distances to an arc by the formulas (geom/ArcDist.h) against the arc cut into 20000 chords: a point, a segment
+// and another arc, at random — far, near, touching, crossing, one inside the other, concentric, sweeps over half
+// a turn either way. As shapes with a width too: against a circle, a capsule, a rectangle and a large polygon
+// with its sides indexed.
+TEST(Geometry, ArcDistancesAreTheChordsLimit) {
+  std::mt19937 rng(23);
+  std::uniform_real_distribution<double> u(0, 1);
+  auto arcAt = [&](Vec2 about, double spread) {
+    ArcCurve a;
+    a.c = about + Vec2{(u(rng) - 0.5) * spread, (u(rng) - 0.5) * spread};
+    a.R = (0.2 + 5 * u(rng)) * 1e6;
+    a.a0 = u(rng) * 2 * kPi;
+    a.sweep = (u(rng) < 0.5 ? -1 : 1) * (0.05 + u(rng) * 1.9 * kPi);
+    return a;
+  };
+  auto chords = [](const ArcCurve& a, int n) {
+    Polyline pts;
+    for (int i = 0; i <= n; ++i) pts.push_back(a.at(a.a0 + a.sweep * i / n));
+    return pts;
+  };
+  const double tol = 2.0;  // nm: the chords of a 5 mm arc cut 20000 times lie within a nanometre of it
+  for (int k = 0; k < 400; ++k) {
+    const ArcCurve a = arcAt({0, 0}, 0);
+    const Polyline ap = chords(a, 20000);
+    // A point.
+    const Vec2 p{(u(rng) - 0.5) * 14e6, (u(rng) - 0.5) * 14e6};
+    double want = std::numeric_limits<double>::max();
+    for (size_t i = 1; i < ap.size(); ++i) want = std::min(want, distPointSegment(p, ap[i - 1], ap[i]));
+    ASSERT_NEAR(distPointArc(p, a), want, tol) << k;
+    // A segment (some through the arc, some from its centre).
+    const Vec2 s0 = k % 7 == 0 ? a.c : p, s1 = s0 + Vec2{(u(rng) - 0.5) * 12e6, (u(rng) - 0.5) * 12e6};
+    want = std::numeric_limits<double>::max();
+    for (size_t i = 1; i < ap.size(); ++i) want = std::min(want, distSegmentSegment(s0, s1, ap[i - 1], ap[i]));
+    ASSERT_NEAR(distSegmentArc(s0, s1, a), want, tol) << k;
+    // Another arc: at random, or about the same centre.
+    ArcCurve b = arcAt({0, 0}, 9e6);
+    if (k % 5 == 0) b.c = a.c;
+    const Polyline bp = chords(b, 600);
+    want = std::numeric_limits<double>::max();
+    {
+      const ArcCurve fine = b;
+      for (size_t i = 1; i < bp.size(); ++i) want = std::min(want, distSegmentArc(bp[i - 1], bp[i], a));  // (a's side exact, b's in 600 chords)
+      (void)fine;
+    }
+    ASSERT_NEAR(distArcArc(a, b), want, 5 * b.R * b.sweep * b.sweep / (8.0 * 600 * 600) + tol) << k;
+    ASSERT_NEAR(distArcArc(b, a), distArcArc(a, b), 1e-3) << k;
+    // The box holds the arc.
+    const BBox box = a.bbox();
+    for (size_t i = 0; i < ap.size(); i += 97) ASSERT_TRUE(box.inflated(1).contains(ap[i])) << k;
+    // As shapes.
+    const double half = (0.05 + 0.2 * u(rng)) * 1e6;
+    const Shape arcShape = Shape::arcOf(a, half);
+    std::vector<Shape> asChords;
+    for (size_t i = 1; i < ap.size(); i += 1) asChords.push_back(Shape::capsule(ap[i - 1], ap[i], half));
+    auto chordsTo = [&](const Shape& o) {
+      double d = std::numeric_limits<double>::max();
+      for (const Shape& c : asChords) d = std::min(d, c.distance(o));
+      return d;
+    };
+    if (k % 8 == 0) {  // (20000 capsules a shape: a sample)
+      Polyline star;
+      for (int i = 0; i < 300; ++i) {
+        const double t = 2 * kPi * i / 300, rad = (3 + 4 * u(rng)) * 1e6;
+        star.push_back(Vec2{6e6, 0} + Vec2{rad * std::cos(t), rad * std::sin(t)});
+      }
+      for (const Shape& o : {Shape::circle(p, 0.3e6), Shape::capsule(s0, s1, 0.15e6), Shape::rect(p, 2e6, 0.8e6, u(rng) * kPi, 0.1e6),
+                             Shape::indexedPolygon(star)}) {
+        const double d = chordsTo(o);
+        if (d <= 0) ASSERT_LE(arcShape.distance(o), tol) << k;  // (inside a polygon the plain distance is nought all over)
+        else ASSERT_NEAR(arcShape.distance(o), d, tol) << k;
+        ASSERT_NEAR(o.distance(arcShape), arcShape.distance(o), 1e-3) << k;
+        if (d > 0 && d <= 0.5e6) ASSERT_NEAR(arcShape.distance(o, 0.5e6), d, tol) << k;
+        if (d > 0.5e6 + tol) ASSERT_GT(arcShape.distance(o, 0.5e6), 0.5e6) << k;
+      }
+    }
   }
 }

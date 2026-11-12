@@ -7,15 +7,17 @@
 // Distances between shapes reduce to distances between cores minus both radii.
 #include <memory>
 
+#include "geom/ArcDist.h"
 #include "geom/Geometry.h"
 #include "geom/PolyIndex.h"
 
 namespace xr {
 
 struct Shape {
-  enum class Kind { Point, Segment, Polygon };
+  enum class Kind { Point, Segment, Polygon, Arc };
   Kind kind = Kind::Point;
-  Vec2 a, b;      // Point: a; Segment: a-b
+  Vec2 a, b;      // Point: a; Segment: a-b; Arc: its ends
+  ArcCurve arc;   // Arc: the centre line, a circular arc as it is (no chords)
   Polyline poly;  // Polygon core (CCW or CW, simple)
   double r = 0;
   // A large polygon's sides in a grid (indexed()): the distances and `contains` look at the sides near only. Shared
@@ -24,6 +26,9 @@ struct Shape {
 
   static Shape circle(Vec2 c, double r);
   static Shape capsule(Vec2 a, Vec2 b, double r);
+  // A circular arc of half-width r: an arc track as one shape. Only what asks for it gets one (itemShapesExact:
+  // the DRC, the connectivity); the rest of the code knows points, segments and polygons.
+  static Shape arcOf(const ArcCurve& arc, double r);
   static Shape polygon(Polyline p, double r = 0);
   // The polygon with its sides indexed when it has many (a copper area's fill).
   static Shape indexedPolygon(Polyline p, double r = 0);

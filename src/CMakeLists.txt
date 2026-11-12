@@ -2,6 +2,7 @@ add_library(xrgeom STATIC
   geom/Geometry.cpp
   geom/Shape.cpp
   geom/PolyIndex.cpp
+  geom/ArcDist.cpp
 )
 target_include_directories(xrgeom PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 

@@ -33,6 +33,16 @@ Shape Shape::polygon(Polyline p, double r) {
   return s;
 }
 
+Shape Shape::arcOf(const ArcCurve& arc, double r) {
+  Shape s;
+  s.kind = Kind::Arc;
+  s.arc = arc;
+  s.a = arc.start();
+  s.b = arc.end();
+  s.r = r;
+  return s;
+}
+
 Shape Shape::indexedPolygon(Polyline p, double r) {
   Shape s = polygon(std::move(p), r);
   if (s.poly.size() >= 48) s.index = std::make_shared<const PolyIndex>(s.poly);
@@ -60,6 +70,7 @@ BBox Shape::bbox() const {
       else
         for (auto& v : poly) b.add(v);
       break;
+    case Kind::Arc: b = arc.bbox(); break;
   }
   return b.inflated(r);
 }
@@ -68,6 +79,7 @@ Vec2 Shape::center() const {
   switch (kind) {
     case Kind::Point: return a;
     case Kind::Segment: return (a + b) * 0.5;
+    case Kind::Arc: return arc.mid();
     case Kind::Polygon: {
       Vec2 c;
       for (auto& v : poly) c += v;
@@ -82,6 +94,7 @@ double Shape::coreDistance(Vec2 p) const {
     case Kind::Point: return (p - a).len();
     case Kind::Segment: return distPointSegment(p, a, b);
     case Kind::Polygon: return index ? (index->contains(p) ? 0.0 : index->distPoint(p)) : distPointPolygon(p, poly);
+    case Kind::Arc: return distPointArc(p, arc);
   }
   return 0;
 }
@@ -119,6 +132,7 @@ double Shape::distanceToSegment(Vec2 s0, Vec2 s1) const {
     case Kind::Point: d = distPointSegment(a, s0, s1); break;
     case Kind::Segment: d = distSegmentSegment(a, b, s0, s1); break;
     case Kind::Polygon: d = index ? indexedToSegment(*index, s0, s1, kNoCutoff) : distSegmentPolygon(s0, s1, poly); break;
+    case Kind::Arc: d = distSegmentArc(s0, s1, arc); break;
   }
   return d - r;
 }
@@ -137,6 +151,24 @@ double Shape::distance(const Shape& o, double cutoff) const {
     d = index ? indexedToSegment(*index, o.a, o.b, coreCut) : distanceToSegment(o.a, o.b) + r;
   } else if (kind == Kind::Segment) {
     d = o.index ? indexedToSegment(*o.index, a, b, coreCut) : o.distanceToSegment(a, b) + o.r;
+  } else if (kind == Kind::Arc && o.kind == Kind::Arc) {
+    d = distArcArc(arc, o.arc);
+  } else if (kind == Kind::Arc || o.kind == Kind::Arc) {
+    // An arc and a polygon: nought when the arc starts inside it, else the least to a side — of an indexed
+    // polygon (a fill) the sides near the arc, within the cutoff.
+    const Shape& pg = kind == Kind::Arc ? o : *this;
+    const ArcCurve& ac = kind == Kind::Arc ? arc : o.arc;
+    if (pg.coreDistance(ac.start()) <= 0) {
+      d = 0;
+    } else {
+      d = kNoCutoff;
+      const Polyline& pts = pg.poly;
+      const size_t n = pts.size();
+      auto side = [&](size_t i) { d = std::min(d, distSegmentArc(pts[i ? i - 1 : n - 1], pts[i], ac)); };
+      if (pg.index && coreCut < kNoCutoff) pg.index->eachSideNear(ac.bbox().inflated(coreCut), side);
+      else
+        for (size_t i = 0; i < n; ++i) side(i);
+    }
   } else if (index) {
     d = indexedToPolygon(*index, poly, o.poly, coreCut);
   } else if (o.index) {
@@ -166,6 +198,22 @@ Polyline Shape::outline(double tol) const {
       double ang = std::atan2(d.y, d.x);
       addArc(b, ang - kPi / 2, kPi);
       addArc(a, ang + kPi / 2, kPi);
+      break;
+    }
+    case Kind::Arc: {
+      // Round the arc at its half-width: the outer side, the cap at the end, the inner side back, the cap at the start.
+      const double sg = arc.sweep >= 0 ? 1.0 : -1.0;
+      auto along = [&](double radius, bool back) {
+        if (radius <= 0) { out.push_back(arc.c); return; }
+        const double from = back ? arc.a0 + arc.sweep : arc.a0;
+        auto g = ArcGeom::fromCenter(arc.c, arc.c + Vec2(std::cos(from), std::sin(from)) * radius, back ? -arc.sweep : arc.sweep);
+        auto pts = g.tessellate(tol);
+        out.insert(out.end(), pts.begin(), pts.end());
+      };
+      along(arc.R + sg * r, false);
+      addArc(arc.end(), arc.a0 + arc.sweep, sg * kPi);
+      along(arc.R - sg * r, true);
+      addArc(arc.start(), arc.a0 + kPi, sg * kPi);
       break;
     }
     case Kind::Polygon: {

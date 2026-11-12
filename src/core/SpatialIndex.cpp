@@ -66,6 +66,16 @@ std::vector<Shape> itemShapes(const Board& b, ItemRef r, double expand, LayerId 
   return out;
 }
 
+std::vector<Shape> itemShapesExact(const Board& b, ItemRef r) {
+  if (r.type == ItemType::Track) {
+    const Track& t = b.tracks[r.index];
+    if (t.mid)
+      if (const ArcGeom g = ArcGeom::fromThreePoints(t.a.v(), t.mid->v(), t.b.v()); g.valid && g.radius > 0)
+        return {Shape::arcOf(ArcCurve{g.center, g.radius, g.startAngle, g.sweep}, t.width / 2.0)};
+  }
+  return itemShapes(b, r);
+}
+
 int itemNet(const Board& b, ItemRef r) {
   switch (r.type) {
     case ItemType::Pad: return b.pads[r.index].net;

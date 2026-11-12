@@ -27,6 +27,10 @@ const char* drcTypeName(DrcViolation::Type t) {
 // Files store coordinates with 0.1 um (TopoR) or 1 nm (KiCad) precision and arcs are tessellated:
 // deficits below this are rounding, not design errors.
 constexpr double kDrcTolerance = 2000;
+// The ends of a track are whole nanometres: a tool that lays copper at the tolerance's very edge (they do) is put a
+// nanometre inside it or outside by the rounding. Not a violation either way. (While arcs were measured as chords,
+// up to 0.2 um inside the arc, that edge was never met.)
+constexpr double kGridSlack = 2;
 
 double requiredClearance(const Board& b, int netA, int netB, LayerMask layers) {
   if (!layers) return double(b.clearance(netA, netB, -1));
@@ -110,7 +114,7 @@ double shapeMargin(const Board& b, const SpatialIndex& idx, const Shape& s, Laye
     int on = itemNet(b, r);
     if (net != kNoNet && on == net) return;
     double req = requiredClearance(b, net, on, layers & itemLayers(b, r));
-    for (auto& os : itemShapes(b, r)) {
+    for (auto& os : itemShapesExact(b, r)) {  // (as the DRC measures: an arc as it is)
       double m = s.distance(os) - req;
       if (m < worst) {
         worst = m;
@@ -139,7 +143,7 @@ ConflictSum regionConflicts(const Board& b, const SpatialIndex& idx, const BBox&
   std::unordered_map<int, std::vector<Shape>> cache;
   auto shapesOf = [&](ItemRef r) -> const std::vector<Shape>& {
     auto it = cache.find(gid(r));
-    if (it == cache.end()) it = cache.emplace(gid(r), itemShapes(b, r)).first;
+    if (it == cache.end()) it = cache.emplace(gid(r), itemShapesExact(b, r)).first;
     return it->second;
   };
   for (ItemRef a : idx.query(region, ~LayerMask(0))) {
@@ -160,7 +164,7 @@ ConflictSum regionConflicts(const Board& b, const SpatialIndex& idx, const BBox&
       const auto& cshapes = shapesOf(c);
       for (auto& s1 : shapes)
         for (auto& s2 : cshapes) best = std::min(best, s1.distance(s2));
-      if (best < req - kDrcTolerance) {
+      if (best < req - kDrcTolerance - kGridSlack) {
         ++sum.count;
         if (best <= 0) ++sum.shorts;
         sum.depth += req - best;
@@ -178,7 +182,7 @@ ConflictSum regionConflicts(const Board& b, const SpatialIndex& idx, const BBox&
         if (!sb.intersects(near)) continue;  // farther than the edge clearance
         for (auto& s : shapes) edge = std::min(edge, s.distanceToSegment(p0, p1));
       }
-    if (edge < ec - kDrcTolerance) {
+    if (edge < ec - kDrcTolerance - kGridSlack) {
       ++sum.count;
       sum.depth += ec - edge;
     }
@@ -241,7 +245,7 @@ std::vector<DrcViolation> runDrc(const Board& b, const DrcOptions& opt) {
     std::vector<LayerMask> itemMask(nItems);
     parallelFor(nItems, [&](size_t k) {
       const ItemRef r = refOf(k);
-      shapeCache[slot(r.type)][size_t(r.index)] = itemShapes(b, r);
+      shapeCache[slot(r.type)][size_t(r.index)] = itemShapesExact(b, r);  // (an arc track is one shape: no chords)
       boxCache[slot(r.type)][size_t(r.index)] = boxesFor(shapeCache[slot(r.type)][size_t(r.index)]);
       for (const BBox& sb : boxCache[slot(r.type)][size_t(r.index)]) itemBox[k].add(sb);
       itemMask[k] = itemLayers(b, r);
@@ -332,6 +336,12 @@ std::vector<DrcViolation> runDrc(const Board& b, const DrcOptions& opt) {
             auto keyPts = [](const Shape& s) {
               if (s.kind == Shape::Kind::Point) return Polyline{s.a};
               if (s.kind == Shape::Kind::Segment) return Polyline{s.a, (s.a + s.b) * 0.5, s.b};
+              if (s.kind == Shape::Kind::Arc) {
+                Polyline along;  // the arc's ends and points between, a chord's worth apart
+                const int n = std::max(2, int(std::abs(s.arc.sweep) * s.arc.R / 100000.0));
+                for (int i = 0; i <= n; ++i) along.push_back(s.arc.at(s.arc.a0 + s.arc.sweep * i / n));
+                return along;
+              }
               return s.poly;
             };
             double bd = std::numeric_limits<double>::max();
@@ -358,7 +368,7 @@ std::vector<DrcViolation> runDrc(const Board& b, const DrcOptions& opt) {
             Vec2 at;
             double rq = double(b.clearance(na, nc, l));
             const std::vector<Shape> sa = itemShapes(b, a, 0, l), sc = itemShapes(b, c, 0, l);
-            double d = measure(sa, boxesFor(sa), sc, boxesFor(sc), rq - opt.tolerance, at);
+            double d = measure(sa, boxesFor(sa), sc, boxesFor(sc), rq - opt.tolerance - kGridSlack, at);
             if (d - rq < worst) {
               worst = d - rq;
               best = d;
@@ -370,9 +380,9 @@ std::vector<DrcViolation> runDrc(const Board& b, const DrcOptions& opt) {
           if (worstLayer < 0) return;
         } else {
           req = requiredClearance(b, na, nc, common);
-          best = measure(shapes, boxes, shapesOf(c), boxesOf(c), req - opt.tolerance, where);
+          best = measure(shapes, boxes, shapesOf(c), boxesOf(c), req - opt.tolerance - kGridSlack, where);
         }
-        if (best >= req - opt.tolerance) return;
+        if (best >= req - opt.tolerance - kGridSlack) return;
         DrcViolation v;
         v.type = best <= 0 ? DrcViolation::Type::Short : DrcViolation::Type::Clearance;
         v.a = a;

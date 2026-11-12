@@ -52,7 +52,7 @@ Connectivity Connectivity::compute(const Board& b) {
     for (size_t k = 0; k < N; ++k) {
       const ItemRef r = refOf(k);
       if (itemNet(b, r) == kNoNet) continue;  // (joins nothing, and nothing asks for it)
-      made[k].shapes = itemShapes(b, r);
+      made[k].shapes = itemShapesExact(b, r);
       made[k].boxes.reserve(made[k].shapes.size());
       for (const Shape& sh : made[k].shapes) {
         made[k].boxes.push_back(sh.bbox());
@@ -103,7 +103,7 @@ Connectivity Connectivity::compute(const Board& b, const SpatialIndex& idx) {
   auto shapesOf = [&](ItemRef r) -> const Cached& {
     Cached& c = cache[size_t(id(r))];
     if (!c.made) {
-      c.shapes = itemShapes(b, r);
+      c.shapes = itemShapesExact(b, r);
       c.boxes.reserve(c.shapes.size());
       for (const Shape& s : c.shapes) c.boxes.push_back(s.bbox());
       c.made = true;
