@@ -1,6 +1,7 @@
 #include "geom/Shape.h"
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 
 namespace xr {
@@ -187,8 +188,79 @@ Polyline Shape::outline(double tol) const {
   return out;
 }
 
+namespace {
+
+// The greatest t >= 0 with p + t d (d a unit vector) in the disc / in the rectangle of half-width R along a - b /
+// on a side of the polygon; negative when the ray misses it.
+double exitDisc(Vec2 c, double R, Vec2 p, Vec2 d) {
+  const Vec2 m = p - c;
+  const double bq = m.dot(d), disc = bq * bq - (m.len2() - R * R);
+  return disc < 0 ? -1.0 : -bq + std::sqrt(disc);
+}
+
+double exitBar(Vec2 a, Vec2 b, double R, Vec2 p, Vec2 d) {
+  const double L = (b - a).len();
+  if (L <= 0) return -1.0;
+  const Vec2 u = (b - a) / L, n = u.perp();
+  double lo = 0, hi = std::numeric_limits<double>::max();
+  auto slab = [&](double x, double v, double x0, double x1) {  // x + t v within [x0, x1]
+    if (v == 0) return x >= x0 && x <= x1;
+    double t0 = (x0 - x) / v, t1 = (x1 - x) / v;
+    if (t0 > t1) std::swap(t0, t1);
+    lo = std::max(lo, t0);
+    hi = std::min(hi, t1);
+    return lo <= hi;
+  };
+  if (!slab((p - a).dot(u), d.dot(u), 0, L) || !slab((p - a).dot(n), d.dot(n), -R, R)) return -1.0;
+  return hi;
+}
+
+double exitCapsule(Vec2 a, Vec2 b, double R, Vec2 p, Vec2 d) { return std::max({exitDisc(a, R, p, d), exitDisc(b, R, p, d), exitBar(a, b, R, p, d)}); }
+
+bool convex(const Polyline& poly) {
+  const size_t n = poly.size();
+  if (n < 3) return false;
+  int sign = 0;
+  for (size_t i = 0; i < n; ++i) {
+    const double o = orient(poly[i], poly[(i + 1) % n], poly[(i + 2) % n]);
+    if (o == 0) continue;
+    if (sign == 0) sign = o > 0 ? 1 : -1;
+    else if ((o > 0) != (sign > 0)) return false;
+  }
+  return sign != 0;
+}
+
+}  // namespace
+
+// Where the ray leaves the shape. A disc, a capsule and a convex polygon with its rounding are convex: the ray
+// from a point inside leaves once, at the furthest point of the ray in any of the pieces the shape is the union
+// of (the discs at the ends or corners, the bars along the sides, the polygon itself) — by the formula. (It was
+// forty halvings of the ray, each a distance from the point to the shape: a tenth of F7's instructions, asked by
+// the capacity of every edge at both its ends.) A polygon that is not convex may be left and entered again:
+// there the halving stays.
 double Shape::rayExit(Vec2 p, Vec2 d) const {
   if (!contains(p)) return 0;
+  switch (d.len2() > 0.25 ? kind : Kind(-1)) {  // (no direction: the halving's answer, the shape's size)
+    case Kind::Point: return std::max(0.0, exitDisc(a, r, p, d));
+    case Kind::Segment: return std::max(0.0, exitCapsule(a, b, r, p, d));
+    case Kind::Polygon:
+      if (!convex(poly)) break;
+      {
+        double t = -1.0;
+        const size_t n = poly.size();
+        for (size_t i = 0, j = n - 1; i < n; j = i++) {
+          // The side crossed: p + t d = poly[j] + s (poly[i] - poly[j]), 0 <= s <= 1.
+          const Vec2 e = poly[i] - poly[j], w = poly[j] - p;
+          if (const double den = d.cross(e); den != 0) {
+            const double ts = w.cross(e) / den, ss = w.cross(d) / den;
+            if (ss >= 0 && ss <= 1) t = std::max(t, ts);
+          }
+          if (r > 0) t = std::max(t, exitCapsule(poly[j], poly[i], r, p, d));
+        }
+        return std::max(0.0, t);
+      }
+    default: break;
+  }
   BBox bb = bbox();
   double hi = std::hypot(bb.width(), bb.height()) + 1;
   double lo = 0;

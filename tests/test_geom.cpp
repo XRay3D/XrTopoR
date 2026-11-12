@@ -124,3 +124,44 @@ TEST(Geometry, PolyIndexAnswersAsThePlainLoops) {
     }
   }
 }
+
+// rayExit by the formula (a disc, a capsule, a convex polygon with its rounding) is where the halving of the ray
+// ends: checked against the halving done here, from points inside, in every direction.
+TEST(Shape, RayExitByFormulaIsTheHalvings) {
+  std::mt19937 rng(11);
+  std::uniform_real_distribution<double> u(0, 1);
+  auto halved = [](const Shape& s, Vec2 p, Vec2 d) {
+    if (!s.contains(p)) return 0.0;
+    BBox bb = s.bbox();
+    double hi = std::hypot(bb.width(), bb.height()) + 1, lo = 0;
+    for (int i = 0; i < 60; ++i) {
+      double m = (lo + hi) / 2;
+      if (s.contains(p + d * m)) lo = m; else hi = m;
+    }
+    return hi;
+  };
+  for (int k = 0; k < 3000; ++k) {
+    const Vec2 c{u(rng) * 50e6, u(rng) * 50e6};
+    const double ang = u(rng) * 2 * kPi, rad = (0.05 + u(rng)) * 1e6;
+    Shape s;
+    switch (k % 4) {
+      case 0: s = Shape::circle(c, rad); break;
+      case 1: s = Shape::capsule(c, c + Vec2{std::cos(ang), std::sin(ang)} * (u(rng) * 4e6), rad); break;
+      case 2: s = Shape::rect(c, (0.3 + u(rng) * 3) * 1e6, (0.3 + u(rng) * 3) * 1e6, ang, u(rng) < 0.5 ? 0.0 : 0.1e6); break;
+      default: {  // a convex polygon: points on an ellipse, rounded or not
+        Polyline pts;
+        const int n = 3 + k % 6;
+        for (int i = 0; i < n; ++i) {
+          const double t = 2 * kPi * (i + 0.3 * u(rng)) / n;
+          pts.push_back(c + Vec2{2e6 * std::cos(t), 1e6 * std::sin(t)}.rotated(ang));
+        }
+        s = Shape::polygon(pts, u(rng) < 0.5 ? 0.0 : 0.15e6);
+      }
+    }
+    const BBox bb = s.bbox();
+    const Vec2 p{bb.minX + u(rng) * bb.width(), bb.minY + u(rng) * bb.height()};
+    const double dir = u(rng) * 2 * kPi;
+    const Vec2 d{std::cos(dir), std::sin(dir)};
+    ASSERT_NEAR(s.rayExit(p, d), halved(s, p, d), 1e-3) << k;
+  }
+}
