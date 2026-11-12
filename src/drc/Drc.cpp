@@ -212,14 +212,24 @@ std::vector<DrcViolation> runDrc(const Board& b, const DrcOptions& opt) {
         default: return -1;
       }
     };
+    using Boxes = std::vector<std::vector<BBox>>;
+    Boxes boxCache[4] = {Boxes(b.tracks.size()), Boxes(b.vias.size()), Boxes(b.pads.size()), Boxes(b.zones.size())};
+    auto boxesFor = [](const std::vector<Shape>& shapes) {
+      std::vector<BBox> out;
+      out.reserve(shapes.size());
+      for (const Shape& sh : shapes) out.push_back(sh.bbox());
+      return out;
+    };
     std::vector<char> ownCopper(b.tracks.size(), 0);
     parallelFor(order.size() + b.zones.size(), [&](size_t k) {
       const ItemRef r = k < order.size() ? order[k] : ItemRef{ItemType::Zone, int(k - order.size())};
       shapeCache[slot(r.type)][size_t(r.index)] = itemShapes(b, r);
+      boxCache[slot(r.type)][size_t(r.index)] = boxesFor(shapeCache[slot(r.type)][size_t(r.index)]);
       if (r.type == ItemType::Track) ownCopper[size_t(r.index)] = inOwnCopper(b, idx, r);
     });
     // (The index holds pads, tracks, vias and zones only.)
     auto shapesOf = [&](ItemRef r) -> const std::vector<Shape>& { return shapeCache[slot(r.type)][size_t(r.index)]; };
+    auto boxesOf = [&](ItemRef r) -> const std::vector<BBox>& { return boxCache[slot(r.type)][size_t(r.index)]; };
     auto inOwn = [&](ItemRef r) { return r.type == ItemType::Track && ownCopper[size_t(r.index)]; };
     auto gid = [&](ItemRef r) { return uint64_t(int(r.type) * 10'000'000 + r.index); };
     // Per item: its neighbours in the order met, each with the violation the pair makes seen from it (-1 none).
@@ -237,8 +247,9 @@ std::vector<DrcViolation> runDrc(const Board& b, const DrcOptions& opt) {
       const ItemRef a = order[k];
       Seen& me = seenBy[k];
       const std::vector<Shape>& shapes = shapesOf(a);
+      const std::vector<BBox>& boxes = boxesOf(a);
       BBox bb;
-      for (auto& s : shapes) bb.add(s.bbox());
+      for (const BBox& sb : boxes) bb.add(sb);
       LayerMask lm = itemLayers(b, a);
       if (inOwn(a)) {
         me.skip = true;
@@ -252,16 +263,25 @@ std::vector<DrcViolation> runDrc(const Board& b, const DrcOptions& opt) {
         LayerMask common = lm & itemLayers(b, c);
         // The closest points of two lists of shapes: the distance and a marker near the contact (of the pair
         // of shapes nearest).
-        auto measure = [&](const std::vector<Shape>& as, const std::vector<Shape>& cs, Vec2& where) {
+        // Only a distance below `limit` (the clearance less the tolerance) is a violation and has to be exact: a
+        // pair of shapes whose boxes are as far apart as the least found, or as the limit, is not measured (an arc
+        // is tens of capsules, and every one was measured against every one of the neighbour's: a sixth of F7).
+        auto measure = [&](const std::vector<Shape>& as, const std::vector<BBox>& ab, const std::vector<Shape>& cs, const std::vector<BBox>& cb,
+                           double limit, Vec2& where) {
           double best = std::numeric_limits<double>::max();
           const Shape *n1 = nullptr, *n2 = nullptr;
-          for (auto& s1 : as)
-            for (auto& s2 : cs)
-              if (double d = s1.distance(s2); d < best) {
+          for (size_t i = 0; i < as.size(); ++i)
+            for (size_t k = 0; k < cs.size(); ++k) {
+              const double bound = std::min(best, limit);
+              const double gap = std::max({ab[i].minX - cb[k].maxX, cb[k].minX - ab[i].maxX, ab[i].minY - cb[k].maxY, cb[k].minY - ab[i].maxY});
+              if (gap >= bound) continue;
+              if (double d = as[i].distance(cs[k], bound); d < best) {
                 best = d;
-                n1 = &s1;
-                n2 = &s2;
+                n1 = &as[i];
+                n2 = &cs[k];
               }
+            }
+          if (best >= limit) return best;  // (no violation: no marker)
           if (n1) {
             // Marker near the actual contact: the closest of the shapes' key points to the other shape.
             auto keyPts = [](const Shape& s) {
@@ -291,8 +311,9 @@ std::vector<DrcViolation> runDrc(const Board& b, const DrcOptions& opt) {
           for (LayerId l = 0; l < 64; ++l) {
             if (!((common >> l) & 1)) continue;
             Vec2 at;
-            double d = measure(itemShapes(b, a, 0, l), itemShapes(b, c, 0, l), at);
             double rq = double(b.clearance(na, nc, l));
+            const std::vector<Shape> sa = itemShapes(b, a, 0, l), sc = itemShapes(b, c, 0, l);
+            double d = measure(sa, boxesFor(sa), sc, boxesFor(sc), rq - opt.tolerance, at);
             if (d - rq < worst) {
               worst = d - rq;
               best = d;
@@ -304,7 +325,7 @@ std::vector<DrcViolation> runDrc(const Board& b, const DrcOptions& opt) {
           if (worstLayer < 0) return;
         } else {
           req = requiredClearance(b, na, nc, common);
-          best = measure(shapes, shapesOf(c), where);
+          best = measure(shapes, boxes, shapesOf(c), boxesOf(c), req - opt.tolerance, where);
         }
         if (best >= req - opt.tolerance) return;
         DrcViolation v;
