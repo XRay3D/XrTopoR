@@ -4,6 +4,7 @@
 #include <map>
 #include <numeric>
 
+#include "core/BoxGrid.h"
 #include "core/Prof.h"
 
 namespace xr {
@@ -22,13 +23,62 @@ struct Anchor {
 };
 }  // namespace
 
+namespace {
+// What touches what: the items of `near(r, box, layers, fn)` that are of r's net and whose shapes come within the
+// contact tolerance of r's are joined with it.
+template <class Shapes, class Near>
+Connectivity computeWith(const Board& b, Shapes&& shapesOf, Near&& near);
+}  // namespace
+
+// With no index given: the shapes of every item are made once, and the neighbours come from a grid of their
+// boxes (BoxGrid). (A tree of boxes was built first, from every item's shapes made for it alone: the shapes of
+// an arc track are tens of capsules, and F7's judge asks for the connections of every drawing.)
 Connectivity Connectivity::compute(const Board& b) {
-  SpatialIndex idx;
+  const int P = int(b.pads.size()), T = int(b.tracks.size()), V = int(b.vias.size()), Z = int(b.zones.size());
+  const size_t N = size_t(P + T + V + Z);
+  auto refOf = [&](size_t k) {
+    const int i = int(k);
+    return i < P ? ItemRef{ItemType::Pad, i} : i < P + T ? ItemRef{ItemType::Track, i - P} : i < P + T + V ? ItemRef{ItemType::Via, i - P - T} : ItemRef{ItemType::Zone, i - P - T - V};
+  };
+  struct Made {
+    std::vector<Shape> shapes;
+    std::vector<BBox> boxes;
+  };
+  std::vector<Made> made(N);
+  std::vector<BBox> itemBox(N);
+  std::vector<LayerMask> itemMask(N);
   {
     ProfScope ps("conn.index");
-    idx.build(b);
+    for (size_t k = 0; k < N; ++k) {
+      const ItemRef r = refOf(k);
+      if (itemNet(b, r) == kNoNet) continue;  // (joins nothing, and nothing asks for it)
+      made[k].shapes = itemShapes(b, r);
+      made[k].boxes.reserve(made[k].shapes.size());
+      for (const Shape& sh : made[k].shapes) {
+        made[k].boxes.push_back(sh.bbox());
+        itemBox[k].add(made[k].boxes.back());
+      }
+      itemMask[k] = itemLayers(b, r);
+    }
   }
-  return compute(b, idx);
+  BoxGrid grid;
+  grid.build(itemBox);
+  auto idOf = [&](ItemRef r) {
+    switch (r.type) {
+      case ItemType::Pad: return size_t(r.index);
+      case ItemType::Track: return size_t(P + r.index);
+      case ItemType::Via: return size_t(P + T + r.index);
+      default: return size_t(P + T + V + r.index);
+    }
+  };
+  std::vector<int> hits;
+  return computeWith(
+      b, [&](ItemRef r) -> const Made& { return made[idOf(r)]; },
+      [&](ItemRef, const BBox& box, LayerMask layers, auto&& fn) {
+        grid.query(box, hits);
+        for (int j : hits)
+          if (itemMask[size_t(j)] & layers) fn(refOf(size_t(j)));
+      });
 }
 
 Connectivity Connectivity::compute(const Board& b, const SpatialIndex& idx) {
@@ -42,9 +92,6 @@ Connectivity Connectivity::compute(const Board& b, const SpatialIndex& idx) {
     }
     return 0;
   };
-  Dsu dsu(P + T + V + Z);
-  const double eps = 1000;  // 1 um contact tolerance
-
   // An item's shapes and their boxes, made once: a pour's fill is polygons of thousands of points, and every
   // track, via and pad of its net asks for them (made anew for each, a board with four pours took 130 ms).
   struct Cached {
@@ -63,6 +110,24 @@ Connectivity Connectivity::compute(const Board& b, const SpatialIndex& idx) {
     }
     return c;
   };
+  return computeWith(b, shapesOf, [&](ItemRef, const BBox& box, LayerMask layers, auto&& fn) { idx.query(box, layers, fn); });
+}
+
+namespace {
+template <class Shapes, class Near>
+Connectivity computeWith(const Board& b, Shapes&& shapesOf, Near&& near) {
+  const int P = int(b.pads.size()), T = int(b.tracks.size()), V = int(b.vias.size()), Z = int(b.zones.size());
+  auto id = [&](ItemRef r) {
+    switch (r.type) {
+      case ItemType::Pad: return r.index;
+      case ItemType::Track: return P + r.index;
+      case ItemType::Via: return P + T + r.index;
+      case ItemType::Zone: return P + T + V + r.index;
+    }
+    return 0;
+  };
+  Dsu dsu(P + T + V + Z);
+  const double eps = 1000;  // 1 um contact tolerance
   // Two shapes whose boxes are further apart than the tolerance do not touch: no need to measure.
   auto apart = [&](const BBox& p, const BBox& q) {
     return p.minX - q.maxX > eps || q.minX - p.maxX > eps || p.minY - q.maxY > eps || q.minY - p.maxY > eps;
@@ -70,14 +135,14 @@ Connectivity Connectivity::compute(const Board& b, const SpatialIndex& idx) {
   auto connect = [&](ItemRef r) {
     int net = itemNet(b, r);
     if (net == kNoNet) return;
-    const Cached& mine = shapesOf(r);
+    const auto& mine = shapesOf(r);
     LayerMask lm = itemLayers(b, r);
     BBox bb;
     for (const BBox& sb : mine.boxes) bb.add(sb);
-    idx.query(bb.inflated(eps), lm, [&](ItemRef o) {
+    near(r, bb.inflated(eps), lm, [&](ItemRef o) {
       if (o == r || itemNet(b, o) != net) return;
       if (dsu.find(id(o)) == dsu.find(id(r))) return;
-      const Cached& theirs = shapesOf(o);
+      const auto& theirs = shapesOf(o);
       for (size_t i = 0; i < mine.shapes.size(); ++i)
         for (size_t k = 0; k < theirs.shapes.size(); ++k) {
           if (apart(mine.boxes[i], theirs.boxes[k])) continue;
@@ -161,5 +226,6 @@ Connectivity Connectivity::compute(const Board& b, const SpatialIndex& idx) {
   }
   return c;
 }
+}  // namespace
 
 }  // namespace xr
