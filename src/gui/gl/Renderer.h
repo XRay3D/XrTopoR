@@ -33,9 +33,14 @@ class Renderer : protected QOpenGLExtraFunctions {
   // With the context current. False: `error` says what the context lacks or which shader failed.
   bool init(QString* error);
   void upload(Slot slot, const SceneData& scene);
-  // A frame into the framebuffer `target`: cleared, the grid; then the slots in turn.
+  // A frame into the framebuffer `target`: begin() (the state and the view), clear() (the background and the grid),
+  // the slots in turn, end(). keep() takes what is drawn so far into a texture and restore() puts it back in a later
+  // frame of the same size (the board as drawn, under the tool's work, while the view stands).
   void begin(const Frame& f, unsigned target);
+  void clear();
   void draw(Slot slot);
+  void keep();
+  bool restore();  // false: nothing kept of this size
   void end();
   void destroy();  // with the context current
 
@@ -53,7 +58,7 @@ class Renderer : protected QOpenGLExtraFunctions {
 
   std::array<std::unique_ptr<QOpenGLShaderProgram>, kProgs> prog_;
   std::array<Gpu, kSlots> gpu_;
-  std::unique_ptr<QOpenGLFramebufferObject> layerMs_, layer_;
+  std::unique_ptr<QOpenGLFramebufferObject> layerMs_, layer_, kept_;
   Frame frame_;
   unsigned target_ = 0;
   bool sampleShading_ = false;

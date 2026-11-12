@@ -8,6 +8,7 @@
 #include <QPainterPath>
 #include <QStaticText>
 #include <map>
+#include <array>
 #include <functional>
 #include <optional>
 #include <unordered_map>
@@ -240,6 +241,7 @@ class BoardView : public QOpenGLWidget {
   gl::SceneData boardScene_, highlightScene_, overlayScene_;
   bool sceneDirty_ = true;  // the board's and the selection's scenes are built anew at the next frame
   bool marksDirty_ = false;  // ... the selection's alone
+  std::array<double, 6> keptView_{};  // the view the picture kept by the renderer was drawn for
   bool glOk_ = false;
   QPointF lastMouse_;
   Vec2 cursor_;

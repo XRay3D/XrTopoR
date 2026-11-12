@@ -66,6 +66,7 @@ void Renderer::destroy() {
   for (auto& p : prog_) p.reset();
   layerMs_.reset();
   layer_.reset();
+  kept_.reset();
 }
 
 void Renderer::upload(Slot slot, const SceneData& s) {
@@ -91,7 +92,7 @@ void Renderer::begin(const Frame& f, unsigned target) {
   glStencilMask(0xff);
   glClearColor(f.background.r / 255.f, f.background.g / 255.f, f.background.b / 255.f, 1);
   glClearStencil(0);
-  glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+  glClear(GL_STENCIL_BUFFER_BIT);
   glEnable(GL_BLEND);
   glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);  // premultiplied
   // The view: the centre in whole nanometres and its rest.
@@ -106,6 +107,11 @@ void Renderer::begin(const Frame& f, unsigned target) {
   prog_[Hole]->bind();
   prog_[Hole]->setUniformValue("uEdge", vec(f.holeEdge));
   prog_[Hole]->setUniformValue("uBack", vec(f.background));
+}
+
+void Renderer::clear() {
+  const Frame& f = frame_;
+  glClear(GL_COLOR_BUFFER_BIT);
   if (f.grid && f.gridX > 0 && f.gridY > 0) {
     QOpenGLShaderProgram& p = *prog_[Grid];
     p.bind();
@@ -117,6 +123,30 @@ void Renderer::begin(const Frame& f, unsigned target) {
     p.setUniformValue("uColor", vec(f.gridColor));
     wholeView(Grid);
   }
+}
+
+void Renderer::keep() {
+  const QSize size(frame_.w, frame_.h);
+  if (!kept_ || kept_->size() != size) kept_ = std::make_unique<QOpenGLFramebufferObject>(size, QOpenGLFramebufferObjectFormat());
+  glBindFramebuffer(GL_READ_FRAMEBUFFER, target_);
+  glBindFramebuffer(GL_DRAW_FRAMEBUFFER, kept_->handle());
+  glBlitFramebuffer(0, 0, frame_.w, frame_.h, 0, 0, frame_.w, frame_.h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+  glBindFramebuffer(GL_FRAMEBUFFER, target_);
+}
+
+bool Renderer::restore() {
+  if (!kept_ || kept_->size() != QSize(frame_.w, frame_.h)) return false;
+  glDisable(GL_BLEND);
+  QOpenGLShaderProgram& p = *prog_[Layer];
+  p.bind();
+  glActiveTexture(GL_TEXTURE0);
+  glBindTexture(GL_TEXTURE_2D, kept_->texture());
+  p.setUniformValue("uLayer", 0);
+  p.setUniformValue("uAlpha", 1.f);
+  wholeView(Layer);
+  glBindTexture(GL_TEXTURE_2D, 0);
+  glEnable(GL_BLEND);
+  return true;
 }
 
 void Renderer::end() {
@@ -279,7 +309,17 @@ void Renderer::drawStep(Gpu& g, const Step& s) {
       p.setUniformValue("uColor", vec(s.color));
       p.setUniformValue("uHatch", s.hatch);
       unused(0);
+      if (s.hatch) {
+        // The hatch leaves pixels out, and their count would stay for the next fill: drawn with the count kept,
+        // then the count taken back with nothing drawn.
+        glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        glStencilOp(GL_KEEP, GL_KEEP, GL_ZERO);
+        glColorMask(false, false, false, false);
+        p.setUniformValue("uHatch", false);
+      }
       glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+      glColorMask(true, true, true, true);
       glDisable(GL_STENCIL_TEST);
       break;
     }

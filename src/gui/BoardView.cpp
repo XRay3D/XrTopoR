@@ -14,11 +14,9 @@
 #include <QStaticText>
 #include <QWheelEvent>
 #include <algorithm>
-#include <cstring>
 #include <bit>
 #include <cmath>
 #include <map>
-#include <mutex>
 #include <numeric>
 #include <ranges>
 
@@ -132,7 +130,6 @@ QString BoardView::benchmark(int frames) {
   const Vec2 c0 = center_;
   scale_ *= 4;
   series("zoom4", [&](int) { sceneDirty_ = true; });
-  series("view4", [&](int) {});  // the scene as it is: what a pan or a zoom costs
   series("pan", [&](int i) { center_ = c0 + Vec2{double(i % 25) * 20 / scale_, double(i % 25) * 7 / scale_}; });
   center_ = c0;
   setMode(Mode::Measure);

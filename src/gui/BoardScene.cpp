@@ -479,6 +479,10 @@ void BoardView::paintGL() {
       const double t = AppSettings::copperTransparency() / 100.0;
       f.copperAlpha = float(1 - t);
       f.activeAlpha = float(1 - t / 2);  // the active layer is less transparent
+      // The board and the marks as drawn are kept while the view stands: a frame of the tool's work alone (the
+      // cursor moved, the rubber band) puts them back and draws over them.
+      const std::array<double, 6> view{center_.x, center_.y, scale_, double(f.w), double(f.h), t};
+      const bool fresh = sceneDirty_ || marksDirty_ || view != keptView_;
       if (sceneDirty_) {
         ProfScope ps("paint.scene");
         buildBoardScene(boardScene_);
@@ -492,22 +496,36 @@ void BoardView::paintGL() {
       sceneDirty_ = marksDirty_ = false;
       buildOverlayScene(overlayScene_);
       renderer_.upload(gl::Renderer::Overlay, overlayScene_);
+      ProfScope ps("paint.board");
+      renderer_.begin(f, defaultFramebufferObject());
+      if (fresh || !renderer_.restore()) {
+        renderer_.clear();
+        renderer_.draw(gl::Renderer::Board);
+        renderer_.draw(gl::Renderer::Highlight);
+        renderer_.end();
+        {  // (the labels are of the picture kept: painted before it is taken)
+          ProfScope pl("tools.labels");
+          QPainter p(this);
+          p.setRenderHint(QPainter::Antialiasing, true);
+          drawLabels(p);
+        }
+        renderer_.begin(f, defaultFramebufferObject());
+        renderer_.keep();
+        keptView_ = view;
+      }
+      renderer_.draw(gl::Renderer::Overlay);
+      renderer_.end();
+    } else {
+      renderer_.begin(f, defaultFramebufferObject());
+      renderer_.clear();
+      renderer_.end();
     }
-    ProfScope ps("paint.board");
-    renderer_.begin(f, defaultFramebufferObject());
-    if (doc_->hasBoard())
-      for (auto slot : {gl::Renderer::Board, gl::Renderer::Highlight, gl::Renderer::Overlay}) renderer_.draw(slot);
-    renderer_.end();
   }
   if (!doc_->hasBoard()) return;
-  // Over the picture, the little that is in pixels: the labels, the handles, the selection frame, the ruler.
+  // Over the picture, the little that is in pixels: the handles, the selection frame, the ruler.
   ProfScope ps("paint.tools");
   QPainter p(this);
   p.setRenderHint(QPainter::Antialiasing, true);
-  {
-    ProfScope pl("tools.labels");
-    drawLabels(p);
-  }
   drawTools(p);
 }
 
