@@ -570,11 +570,50 @@ void orderOnEdge(Topology& self, const Board& b, const LayerMesh& m, const std::
 }  // namespace
 
 void Topology::convertWires(const Board& b, BuildScratch& scratch) {
+  // A track lying exactly on another of its net and layer (a file with its routing written twice; P-CAD designs
+  // have a few of their own) is that track's twin: no wire of its own — two wires on one path are pushed a
+  // clearance apart by the first F5, the board comes out with every wire doubled — but listed with the other's
+  // wire, so that it goes when the wire is redrawn. Of twins the widest is the track.
+  std::vector<int> twinOf(b.tracks.size(), -1);
+  twins = 0;
+  {
+    using Key = std::tuple<LayerId, int, Coord, Coord, Coord, Coord, bool, Coord, Coord>;
+    std::map<Key, int> first;
+    for (int i = 0; i < int(b.tracks.size()); ++i) {
+      const Track& tr = b.tracks[size_t(i)];
+      if (tr.zip >= 0 || tr.serp >= 0) continue;
+      Point lo = tr.a, hi = tr.b;
+      if (std::pair{hi.x, hi.y} < std::pair{lo.x, lo.y}) std::swap(lo, hi);
+      const Point mid = tr.mid.value_or(Point{});
+      auto [it, fresh] = first.try_emplace(Key{tr.layer, tr.net, lo.x, lo.y, hi.x, hi.y, tr.mid.has_value(), mid.x, mid.y}, i);
+      if (fresh) continue;
+      if (b.tracks[size_t(it->second)].width < tr.width) {  // the wider one is the track, the other its twin
+        twinOf[size_t(it->second)] = i;
+        it->second = i;
+      } else {
+        twinOf[size_t(i)] = it->second;
+      }
+      ++twins;
+    }
+  }
+  auto twinRoot = [&](int i) {
+    while (twinOf[size_t(i)] >= 0) i = twinOf[size_t(i)];
+    return i;
+  };
   std::vector<char> all(b.tracks.size(), 1);
+  for (size_t i = 0; i < all.size(); ++i) all[i] = twinOf[i] < 0;
   WireGraph g = wireGraph(b, all);
   OwnCopper copper(b);
   effectiveWidths(b, g, copper);
   std::vector<WireChain> chains = wireChains(b, g, all, copper);
+  if (twins > 0) {
+    std::vector<int> chainOf(b.tracks.size(), -1);
+    for (int ci = 0; ci < int(chains.size()); ++ci)
+      for (int ti : chains[size_t(ci)].tracks) chainOf[size_t(ti)] = ci;
+    for (int i = 0; i < int(b.tracks.size()); ++i)
+      if (twinOf[size_t(i)] >= 0)
+        if (int ci = chainOf[size_t(twinRoot(i))]; ci >= 0) chains[size_t(ci)].tracks.push_back(i);
+  }
   std::erase_if(chains, [](const WireChain& c) { return c.closed || c.path.size() < 2; });
   // The zipped sections of the differential pairs: one chain each, the axis as its path (the pair's one wire,
   // as wide as the pair), the conductors as its tracks.
@@ -724,6 +763,14 @@ void Topology::convertWires(const Board& b, BuildScratch& scratch) {
     auto it = junctionAt.find(std::tuple{g.vid[i][0], tr.layer, tr.net});
     if (it != junctionAt.end()) ownerTracks.push_back({it->second, tr.id});
   }
+  for (int i = 0; i < int(b.tracks.size()); ++i) {  // ... and their twins
+    if (twinOf[size_t(i)] < 0) continue;
+    const size_t root = size_t(twinRoot(i));
+    if (!g.relevant[root] || !g.tiny[root]) continue;
+    const Track& tr = b.tracks[root];
+    auto it = junctionAt.find(std::tuple{g.vid[root][0], tr.layer, tr.net});
+    if (it != junctionAt.end()) ownerTracks.push_back({it->second, b.tracks[size_t(i)].id});
+  }
   buildMeshes(b, scratch);
 
   // The copper of the other nets, for pushing a wire out of a pad it was drawn through.
@@ -821,6 +868,13 @@ void Topology::convertWires(const Board& b, BuildScratch& scratch) {
       }
   }
   (void)kJoin;
+  // A track is one owner's, once: a tiny one glued at a branch point is listed there and again with the chain
+  // it is glued into when that chain is its end's copper (the model file names a track by its content, and a
+  // board has one track for the two).
+  {
+    std::set<uint32_t> seen;
+    std::erase_if(ownerTracks, [&](const std::pair<int, uint32_t>& ot) { return !seen.insert(ot.second).second; });
+  }
 }
 
 // A wire drawn through a keepout (an area or a line), across a cutout, or out of the board and back is

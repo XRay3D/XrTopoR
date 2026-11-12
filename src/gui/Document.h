@@ -134,6 +134,7 @@ class Document : public QObject {
   std::vector<int> selectedComponents() const { return selComponents_; }
   void setSelection(std::vector<ItemRef> items, std::vector<int> comps);
   void clearSelection() { setSelection({}, {}); }
+  bool itemExists(ItemRef r) const;  // the item a reference names is there (its index within its list)
   void validateSelection();  // drops references to items that no longer exist (after undo/redo)
   int highlightedNet() const { return highlightNet_; }
   void setHighlightedNet(int net);

@@ -169,6 +169,7 @@ static xr::topo::Topology loadModel(const xr::Board& b, const std::string& board
   xr::topo::Topology t;
   t.build(b);
   if (t.untangled > 0) std::println("model: {} double crossing(s) taken apart", t.untangled);
+  if (t.twins > 0) std::println("model: {} track(s) lying exactly on another taken as one with it", t.twins);
   return t;
 }
 

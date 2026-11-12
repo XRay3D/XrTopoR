@@ -145,6 +145,39 @@ TEST(Realizer, ModelReshapeIsAFixedPoint) {
   }
 }
 
+// A board with every track twice (a file whose routing was written a second time over the first; P-CAD designs
+// have a few such tracks of their own): the twins are one wire with their track, and F5 draws the board as it
+// draws the one without them — the same wires, as many tracks, the same length. Two wires on one path would
+// be pushed a clearance apart, every wire of the board doubled.
+TEST(Realizer, TwinTracksAreOneWire) {
+  const char* name = "topor/Example_03/arz_2L.fst";
+  auto clean = io::loadBoard(data(name));
+  auto twice = io::loadBoard(data(name));
+  ASSERT_TRUE(clean.has_value() && twice.has_value());
+  Board& a = **clean;
+  Board& b = **twice;
+  const size_t n = b.tracks.size();
+  for (size_t i = 0; i < n; ++i) {
+    Track t = b.tracks[i];
+    t.id = 0;
+    if (i % 2) std::swap(t.a, t.b);  // the other way round is the same track
+    b.tracks.push_back(t);
+  }
+  topo::Topology::assignIds(a);
+  topo::Topology::assignIds(b);
+  topo::Topology ta, tb;
+  ta.build(a);
+  tb.build(b);
+  EXPECT_EQ(tb.twins, ta.twins + int(n));
+  ASSERT_EQ(tb.wires.size(), ta.wires.size());
+  auto ra = topo::runF5Model(a, ta);
+  auto rb = topo::runF5Model(b, tb);
+  ASSERT_TRUE(ra.drawn && rb.drawn);
+  EXPECT_EQ(b.tracks.size(), a.tracks.size());
+  EXPECT_NEAR(length(b), length(a), 1000.0);
+  EXPECT_EQ(conflicts(b), conflicts(a));
+}
+
 // F7 on the model: the vias and branch points go down the gradient of the drawn length (the wires' pull at
 // their ends and their push at their bends, taken from the realiser's drawing), every iteration judged by the
 // drawing. Never worse than F5 from the model (the best drawing is kept), nothing lost, the mesh whole; and

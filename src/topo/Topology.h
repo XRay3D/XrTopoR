@@ -156,6 +156,7 @@ struct Topology {
   std::vector<Violation> violations;
   uint64_t boardHash = 0;
   int untangled = 0;  // double crossings of wires taken apart when the tracks were converted (Chains.h untangleChains)
+  int twins = 0;      // tracks lying exactly on another of their net and layer: listed with its wire, no wire of their own
   std::vector<int> padOwner, viaOwner;  // board index -> owner (-1: none)
   // The keepouts that keep vias out (areas, circles, lines as capsules): no mesh of their own, a via is
   // held off them where it is placed (insertVertex) and moved (F7's push).

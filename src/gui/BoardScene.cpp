@@ -332,6 +332,7 @@ void BoardView::buildHighlightScene(gl::SceneData& out) const {
         if (pad.net == hn) sb.shape(pad.shapeGeom(), col(litPad(pad)));
     }
     for (ItemRef r : items) {
+      if (!doc_->itemExists(r)) continue;  // (a selection outliving its items is not drawn)
       switch (r.type) {
         case ItemType::Track: tracks.push_back(&b.tracks[r.index]); break;
         case ItemType::Via: sb.disc(b.vias[r.index].pos.v(), b.vias[r.index].diameter / 2.0, viaLit); break;

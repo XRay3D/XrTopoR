@@ -1256,6 +1256,7 @@ void MainWindow::refineModel(bool thenLayers) {
     b.zips = work->zips;  // (the pairs' axes are redrawn with their conductors)
     b.vias = work->vias;
     b.zones = work->zones;
+    doc_->clearSelection();  // the tracks are other tracks now: an index names another one, or none
     doc_->commitEdit(before, tr("Перекладка проводников"), false);
     const int untangled = untangledBefore + res.untangled;
     topo->untangled = 0;
@@ -1434,6 +1435,7 @@ void MainWindow::optimizeModel(bool thenRefine) {
     b.zips = work->zips;  // (the pairs' axes are redrawn with their conductors)
     b.vias = work->vias;
     b.zones = work->zones;
+    doc_->clearSelection();  // the tracks are other tracks now: an index names another one, or none
     doc_->commitEdit(before, tr("Подвижка"), false);
     const int untangled = untangledBefore + res.untangled;
     topo->untangled = 0;

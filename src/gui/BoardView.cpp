@@ -2137,6 +2137,10 @@ bool BoardView::recomputeShapesModel(bool editedOnly) {
     msg += tr("; распутано двойных пересечений: %1").arg(live.untangled);
     live.untangled = 0;
   }
+  if (topo::Topology& live = doc_->topology(); live.twins > 0) {
+    msg += tr("; совпадающих дорожек объединено: %1").arg(live.twins);
+    live.twins = 0;
+  }
   emit status(msg);
   return true;
 }

@@ -214,22 +214,24 @@ void Document::setSelection(std::vector<ItemRef> items, std::vector<int> comps) 
   emit selectionChanged();
 }
 
+bool Document::itemExists(ItemRef r) const {
+  if (!board_ || r.index < 0) return false;
+  switch (r.type) {
+    case ItemType::Track: return r.index < int(board_->tracks.size());
+    case ItemType::Via: return r.index < int(board_->vias.size());
+    case ItemType::Pad: return r.index < int(board_->pads.size());
+    case ItemType::Zone: return r.index < int(board_->zones.size());
+    case ItemType::Keepout: return r.index < int(board_->keepouts.size());
+    case ItemType::Text: return r.index < int(board_->texts.size());
+    case ItemType::Detail: return r.index < int(board_->graphics.size());
+  }
+  return false;
+}
+
 void Document::validateSelection() {
   if (!board_) return;
-  auto valid = [&](ItemRef r) {
-    switch (r.type) {
-      case ItemType::Track: return r.index < int(board_->tracks.size());
-      case ItemType::Via: return r.index < int(board_->vias.size());
-      case ItemType::Pad: return r.index < int(board_->pads.size());
-      case ItemType::Zone: return r.index < int(board_->zones.size());
-      case ItemType::Keepout: return r.index < int(board_->keepouts.size());
-      case ItemType::Text: return r.index < int(board_->texts.size());
-      case ItemType::Detail: return r.index < int(board_->graphics.size());
-    }
-    return false;
-  };
   size_t n = selection_.size() + selComponents_.size();
-  std::erase_if(selection_, [&](ItemRef r) { return r.index < 0 || !valid(r); });
+  std::erase_if(selection_, [&](ItemRef r) { return !itemExists(r); });
   std::erase_if(selComponents_, [&](int c) { return c < 0 || c >= int(board_->components.size()); });
   if (selection_.size() + selComponents_.size() != n) emit selectionChanged();
 }
@@ -318,6 +320,7 @@ void Document::commitEdit(const EditSnapshot& before, const QString& title, bool
   // An edit by hand is followed by the model; a tool that draws from it (F5, F6, F7) hands it back itself.
   followModel(before, markEdited);
   undo_.push(new SnapshotCommand(this, before, EditSnapshot::take(*board_), title));
+  validateSelection();  // an edit that left fewer items than the selection names
   emit boardChanged();
 }
 
