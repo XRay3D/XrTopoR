@@ -72,3 +72,10 @@ the cursor moved, each drawn to its last pixel (`glFinish`). At 1830x1060, ms, t
 | AMK310_MCU_V2 | 31 -> 7 | 16 -> 7 | 8 -> 2.7 | 1.7 -> 0.7 |
 
 Of a frame of RMT19M_A68U_V4_: the scene's build 5 ms (on an edit only), the labels 2 ms, the rest the video card.
+
+The benchmark also has `wheel` (a step of the wheel) and `drag` (a component pressed and moved: the edit and the
+frame of each step), and repeats the series with the copper 65 % transparent (`/t65`). RMT19M_A8SWA_V5 (four pours
+filled), 1829x1060, Radeon 780M, ms: whole 5.5, wheel 6, zoomed in 12, panned 7; with the transparency +1-2.
+A step of a drag was 138: not the picture but the connectivity computed anew for the ratsnest at every move, 128 of
+it the pours' fills measured side by side against every item of their nets. With the fills' sides in a grid
+(`geom/PolyIndex`) a step is 16-25.
