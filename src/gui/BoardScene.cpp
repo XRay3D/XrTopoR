@@ -160,14 +160,17 @@ void BoardView::sceneLayer(gl::SceneBuilder& sb, LayerId l) const {
         if (!pad.onLayer(l)) continue;
         if (pad.component >= 0 && !componentVisible(pad.component)) continue;
         // On a layer: the pad's shape there (its stack's detail: another size on an inner layer).
-        if (auto on = padShapeOn(b, pad, l)) sb.shape(*on, col(netColor(pad.net, d.colorizePad).value_or(special && pad.drill > 0 ? through : padColor)));
+        // A locked component's pads in the layer's colour of the fixed, as its locked wires.
+        const bool fixedPad = pad.component >= 0 && b.components[size_t(pad.component)].locked;
+        if (auto on = padShapeOn(b, pad, l))
+          sb.shape(*on, col(netColor(pad.net, d.colorizePad).value_or(fixedPad ? fixColor : special && pad.drill > 0 ? through : padColor)));
       }
       sb.flush();
     }
     if (showDetails) {
       ProfScope ps("scene.texts");
       for (auto& t : b.texts)
-        if (t.layer == l && textShown(t)) sceneText(sb, t, details);
+        if (t.layer == l && textShown(t)) sceneText(sb, t, t.isLabel() && b.components[size_t(t.component)].locked ? fixColor : details);
       sb.flush();
     }
     return;
@@ -180,7 +183,8 @@ void BoardView::sceneLayer(gl::SceneBuilder& sb, LayerId l) const {
   if ((L.kind == LayerKind::Mask || L.kind == LayerKind::Paste) && showPads && groupPads) {
     for (auto& pad : b.pads)
       if (pad.padstack >= 0 && (pad.component < 0 || componentVisible(pad.component)))
-        if (auto on = padShapeOn(b, pad, l)) sb.shape(*on, col(padColor));
+        if (auto on = padShapeOn(b, pad, l))
+          sb.shape(*on, col(pad.component >= 0 && b.components[size_t(pad.component)].locked ? fixColor : padColor));
     // The vias' openings, as their type gives them.
     if (d.flag("showVias") && b.rules)
       for (auto& v : b.vias)
@@ -191,13 +195,13 @@ void BoardView::sceneLayer(gl::SceneBuilder& sb, LayerId l) const {
   for (int ci = 0; ci < int(b.components.size()); ++ci)
     if (componentVisible(ci))
       for (auto& g : b.components[ci].graphics)
-        if (g.layer == l) sceneGraphic(sb, g, details);
+        if (g.layer == l) sceneGraphic(sb, g, b.components[size_t(ci)].locked ? fixColor : details);
   for (auto& g : b.graphics)
     if (g.layer == l) sceneGraphic(sb, g, details);
   sb.flush();
   {
     for (auto& t : b.texts)
-      if (t.layer == l && textShown(t)) sceneText(sb, t, details);
+      if (t.layer == l && textShown(t)) sceneText(sb, t, t.isLabel() && b.components[size_t(t.component)].locked ? fixColor : details);
     sb.flush();
   }
 }
