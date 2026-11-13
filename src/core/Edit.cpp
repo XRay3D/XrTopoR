@@ -3,6 +3,10 @@
 #include "core/DiffPairs.h"
 #include "core/Runs.h"
 
+#include <cstdio>
+#include <cstdlib>
+#include <set>
+
 #include <tuple>
 #include <algorithm>
 #include <bit>
@@ -930,68 +934,107 @@ std::vector<int> removeDegenerate(Board& b) {
   return map;
 }
 
-JunkRemoved removeJunkTracks(Board& b, bool twins) {
+std::vector<char> junkTracks(const Board& b, bool twins, double crumbLength, JunkRemoved* counts) {
   JunkRemoved out;
   std::vector<char> drop(b.tracks.size(), 0);
   auto plain = [&](const Track& tr) { return tr.zip < 0 && tr.serp < 0; };  // (a pair's conductor, a serpentine's piece: as they are)
-  // Twins.
+  auto crumb = [&](const Track& tr) { return plain(tr) && !tr.mid && (tr.a.v() - tr.b.v()).len() <= crumbLength; };
   using Key = std::tuple<LayerId, int, Coord, Coord, Coord, Coord, bool, Coord, Coord>;
-  std::map<Key, size_t> first;
-  for (size_t i = 0; twins && i < b.tracks.size(); ++i) {
-    const Track& tr = b.tracks[i];
-    if (!plain(tr)) continue;
+  auto keyOf = [](const Track& tr) {
     Point lo = tr.a, hi = tr.b;
     if (std::pair{hi.x, hi.y} < std::pair{lo.x, lo.y}) std::swap(lo, hi);
     const Point mid = tr.mid.value_or(Point{});
-    auto [it, fresh] = first.try_emplace(Key{tr.layer, tr.net, lo.x, lo.y, hi.x, hi.y, tr.mid.has_value(), mid.x, mid.y}, i);
-    if (fresh) continue;
-    ++out.twins;
-    if (b.tracks[it->second].width < tr.width) {  // the wider one stays
-      drop[it->second] = 1;
-      it->second = i;
-    } else {
-      drop[i] = 1;
-    }
-  }
-  auto crumb = [&](const Track& tr) { return plain(tr) && !tr.mid && (tr.a.v() - tr.b.v()).len() <= kCrumb; };
-  // A crumb's twin is junk whether the twins are asked for or not: two crumbs one on the other hold each other's
-  // ends, and neither end is loose (under a via of RMT19M_A8SWA_V5: two crumbs, each twice, an island of copper
-  // left behind when the via stepped — a connection lost).
-  if (!twins) {
-    std::map<Key, size_t> firstCrumb;
+    return Key{tr.layer, tr.net, lo.x, lo.y, hi.x, hi.y, tr.mid.has_value(), mid.x, mid.y};
+  };
+  // Twins.
+  if (twins) {
+    std::map<Key, size_t> first;
     for (size_t i = 0; i < b.tracks.size(); ++i) {
       const Track& tr = b.tracks[i];
-      if (!crumb(tr)) continue;
-      Point lo = tr.a, hi = tr.b;
-      if (std::pair{hi.x, hi.y} < std::pair{lo.x, lo.y}) std::swap(lo, hi);
-      if (!firstCrumb.try_emplace(Key{tr.layer, tr.net, lo.x, lo.y, hi.x, hi.y, false, 0, 0}, i).second) {
+      if (!plain(tr)) continue;
+      auto [it, fresh] = first.try_emplace(keyOf(tr), i);
+      if (fresh) continue;
+      ++out.twins;
+      if (b.tracks[it->second].width < tr.width) {  // the wider one stays
+        drop[it->second] = 1;
+        it->second = i;
+      } else {
         drop[i] = 1;
-        ++out.crumbs;
       }
     }
   }
-  // Crumbs with a loose end, one after another from the loose end in (a spur of several goes whole).
-  using At = std::tuple<LayerId, int, Coord, Coord>;
-  auto at = [](const Track& tr, Point p) { return At{tr.layer, tr.net, p.x, p.y}; };
-  std::map<At, int> endsAt;
+  // The crumbs (few, on most boards none: what follows looks at them and at their ends alone).
+  std::vector<size_t> crumbs;
   for (size_t i = 0; i < b.tracks.size(); ++i)
-    if (!drop[i]) {
-      ++endsAt[at(b.tracks[i], b.tracks[i].a)];
-      ++endsAt[at(b.tracks[i], b.tracks[i].b)];
+    if (!drop[i] && crumb(b.tracks[i])) crumbs.push_back(i);
+  if (!crumbs.empty()) {
+    // A crumb's twin is junk whether the twins are asked for or not: two crumbs one on the other hold each other's
+    // ends, and neither end is loose (under a via of RMT19M_A8SWA_V5: two crumbs, each twice, an island of copper
+    // left behind when the via stepped — a connection lost).
+    if (!twins) {
+      std::map<Key, size_t> firstCrumb;
+      std::erase_if(crumbs, [&](size_t i) {
+        if (firstCrumb.try_emplace(keyOf(b.tracks[i]), i).second) return false;
+        drop[i] = 1;
+        ++out.crumbs;
+        return true;
+      });
     }
-  for (bool again = true; again;) {
-    again = false;
-    for (size_t i = 0; i < b.tracks.size(); ++i) {
-      const Track& tr = b.tracks[i];
-      if (drop[i] || !crumb(tr)) continue;
-      if (endsAt[at(tr, tr.a)] > 1 && endsAt[at(tr, tr.b)] > 1) continue;  // a piece of a wire: tracks go on from both its ends
-      drop[i] = 1;
-      --endsAt[at(tr, tr.a)];
-      --endsAt[at(tr, tr.b)];
-      ++out.crumbs;
-      again = true;
+    // Crumbs with a loose end, one after another from the loose end in (a spur of several goes whole). An end is
+    // held by another track that ends there, or by the centre of a pad or a via of the net with copper on the
+    // layer: the last piece of a wire into its pad is no junk (our own drawings have such pieces, and a board
+    // saved with them was another board when read again: its model file stale).
+    using At = std::tuple<LayerId, int, Coord, Coord>;
+    auto at = [](const Track& tr, Point p) { return At{tr.layer, tr.net, p.x, p.y}; };
+    constexpr Coord kAtCentre = 300;  // nm
+    std::map<At, int> endsAt;  // (of the crumbs' ends only)
+    for (size_t i : crumbs) {
+      endsAt.try_emplace(at(b.tracks[i], b.tracks[i].a), 0);
+      endsAt.try_emplace(at(b.tracks[i], b.tracks[i].b), 0);
+    }
+    for (size_t i = 0; i < b.tracks.size(); ++i)
+      if (!drop[i])
+        for (Point p : {b.tracks[i].a, b.tracks[i].b})
+          if (auto it = endsAt.find(at(b.tracks[i], p)); it != endsAt.end()) ++it->second;
+    std::set<At> held;
+    for (const auto& [key, n] : endsAt) {
+      const auto& [layer, net, x, y] = key;
+      const Point p{x, y};
+      const LayerId l = layer;
+      const int nt = net;
+      // (At the centre within the files' rounding: a pad's place is written as its part's and its own in the part,
+      // each rounded, and comes back a tenth of a micrometre off the track's end written whole.)
+      auto there = [&](Point c) { return std::abs(c.x - p.x) <= kAtCentre && std::abs(c.y - p.y) <= kAtCentre; };
+      if (r::any_of(b.vias, [&](const Via& v) { return v.net == nt && there(v.pos) && v.onLayer(l); }) ||
+          r::any_of(b.pads, [&](const Pad& pd) { return pd.net == nt && there(pd.pos) && ((pd.copper >> l) & 1); }))
+        held.insert(key);
+    }
+    auto loose = [&](const Track& tr, Point p) { return endsAt[at(tr, p)] <= 1 && !held.contains(at(tr, p)); };
+    for (bool again = true; again;) {
+      again = false;
+      for (size_t i : crumbs) {
+        const Track& tr = b.tracks[i];
+        if (drop[i]) continue;
+        if (!loose(tr, tr.a) && !loose(tr, tr.b)) continue;  // a piece of a wire: it goes on from both its ends
+        if (static const bool debug = std::getenv("XR_JUNK_DEBUG") != nullptr; debug)
+          std::fprintf(stderr, "junk: crumb of %s on layer %d, (%.4f, %.4f) - (%.4f, %.4f), %.2f um; tracks at its ends %d and %d, held %d and %d\n",
+                       tr.net >= 0 ? b.nets[size_t(tr.net)].name.c_str() : "-", int(tr.layer), tr.a.x / 1e6, tr.a.y / 1e6, tr.b.x / 1e6, tr.b.y / 1e6,
+                       (tr.a.v() - tr.b.v()).len() / 1e3, endsAt[at(tr, tr.a)], endsAt[at(tr, tr.b)], int(held.contains(at(tr, tr.a))), int(held.contains(at(tr, tr.b))));
+        drop[i] = 1;
+        --endsAt[at(tr, tr.a)];
+        --endsAt[at(tr, tr.b)];
+        ++out.crumbs;
+        again = true;
+      }
     }
   }
+  if (counts) *counts = out;
+  return drop;
+}
+
+JunkRemoved removeJunkTracks(Board& b, bool twins) {
+  JunkRemoved out;
+  const std::vector<char> drop = junkTracks(b, twins, kCrumb, &out);
   if (out.twins + out.crumbs == 0) return out;
   size_t k = 0;
   for (size_t i = 0; i < b.tracks.size(); ++i)

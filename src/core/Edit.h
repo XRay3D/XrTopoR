@@ -161,5 +161,8 @@ constexpr double kCrumb = 5000;  // nm
 // a pad by the same lead have its pieces each, and are two wires of that model; they are junk where the model is
 // to be built from the tracks (a design from another system, a file with its routing written twice).
 JunkRemoved removeJunkTracks(Board& b, bool twins = true);
+// Which tracks that takes out (per track of the board), with crumbs of `crumbLength` and shorter; nothing is changed.
+// An end at the centre of a pad or a via of the net is held as by a track: a wire's last piece into its pad stays.
+std::vector<char> junkTracks(const Board& b, bool twins, double crumbLength = kCrumb, JunkRemoved* counts = nullptr);
 
 }  // namespace xr::edit

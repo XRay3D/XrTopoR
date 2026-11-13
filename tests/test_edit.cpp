@@ -559,11 +559,25 @@ TEST(Edit, JunkTracksAreRemoved) {
   EXPECT_EQ(junk.twins, 0);
   EXPECT_EQ(junk.crumbs, 4);
   EXPECT_EQ(d.tracks.size(), wires);
+  // A wire's last piece into the centre of its via is no junk (the centre a tenth of a micrometre off, as a file's
+  // rounding leaves it); a crumb from that centre to nowhere is.
+  Via via;
+  via.pos = Point(Vec2{-0.003e6 + 100, 100});
+  via.diameter = mmToNm(0.6);
+  via.net = 0;
+  via.layers = 1;
+  d.vias.push_back(via);
+  crumbAt(0, 0, -0.003, 0);
+  crumbAt(-0.003, 0, -0.003, 0.002);
+  junk = edit::removeJunkTracks(d, false);
+  EXPECT_EQ(junk.crumbs, 1);
+  EXPECT_EQ(d.tracks.size(), wires + 1);
 
   auto raw = io::readPcad(*io::readFile(data("el4134_pcad_ascii.pcb")), "x.pcb");
   auto loaded = io::loadBoard(data("el4134_pcad_ascii.pcb"));
   ASSERT_TRUE(raw && loaded);
-  EXPECT_EQ((*loaded)->junkRemoved.crumbs, 4);
-  EXPECT_EQ((*loaded)->tracks.size() + 4, (*raw)->tracks.size());
+  // (Its four pieces of a few micrometres are wires' last pieces into their pads' centres: they stay.)
+  EXPECT_EQ((*loaded)->junkRemoved.crumbs, 0);
+  EXPECT_EQ((*loaded)->tracks.size(), (*raw)->tracks.size());
   EXPECT_EQ(Connectivity::compute(**loaded).ratsnest.size(), Connectivity::compute(**raw).ratsnest.size());
 }

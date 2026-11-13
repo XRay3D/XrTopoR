@@ -701,6 +701,8 @@ void Topology::convertWires(const Board& b, BuildScratch& scratch) {
   // Keyed by the wire graph's glued vertex: the ends of the chains meeting at a branch point lie within
   // the glue of each other (a 50 um track between two of them on Arcs_master), one junction for all.
   std::map<std::tuple<int, LayerId, int>, int> junctionAt;
+  // ... and the pad or via a chain ends on, by the same vertex (for the tiny tracks glued into it, below).
+  std::map<std::tuple<int, LayerId, int>, int> copperAt;
   // The poured zones of a layer, as owners; a chain's end in one of its net is the zone's.
   std::map<LayerId, std::vector<int>> zonesOn;
   for (int zo : scratch.zoneOwner)
@@ -722,6 +724,7 @@ void Topology::convertWires(const Board& b, BuildScratch& scratch) {
       Vec2 p = end ? c.b() : c.a();
       if (auto r = copper.at(p, c.net, c.layer)) {
         ends[ci][end].owner = r->type == ItemType::Pad ? padOwner[r->index] : viaOwner[r->index];
+        copperAt.try_emplace(std::tuple{c.vertex[end], c.layer, c.net}, ends[ci][end].owner);
         continue;
       }
       if (int co = claspAt(p, c.net, c.layer, c.width); co >= 0) {
@@ -756,20 +759,27 @@ void Topology::convertWires(const Board& b, BuildScratch& scratch) {
     }
   }
   // The tiny tracks at a branch point (glued into its vertex, in no chain) are the junction's: they go
-  // when its wires are redrawn, or they would be left behind by a move.
+  // when its wires are redrawn, or they would be left behind by a move. Those at a pad or a via a wire ends on
+  // are that copper's likewise: P-CAD ends a track half a micrometre off its via's centre and joins the two with a
+  // track of that length — nobody's, it stayed where the via stood when the via stepped, an island of its net
+  // (RMT19M_A8SWA_V5: a connection lost in F7), and stayed loose when the wire was drawn to the centre (the loader
+  // then took it for junk, and the board read was not the board written: its model file stale).
+  auto ownerOfTiny = [&](size_t i) {
+    const Track& tr = b.tracks[i];
+    const auto key = std::tuple{g.vid[i][0], tr.layer, tr.net};
+    if (auto it = junctionAt.find(key); it != junctionAt.end()) return it->second;
+    if (auto it = copperAt.find(key); it != copperAt.end()) return it->second;
+    return -1;
+  };
   for (size_t i = 0; i < b.tracks.size(); ++i) {
     if (!g.relevant[i] || !g.tiny[i]) continue;
-    const Track& tr = b.tracks[i];
-    auto it = junctionAt.find(std::tuple{g.vid[i][0], tr.layer, tr.net});
-    if (it != junctionAt.end()) ownerTracks.push_back({it->second, tr.id});
+    if (const int o = ownerOfTiny(i); o >= 0) ownerTracks.push_back({o, b.tracks[i].id});
   }
   for (int i = 0; i < int(b.tracks.size()); ++i) {  // ... and their twins
     if (twinOf[size_t(i)] < 0) continue;
     const size_t root = size_t(twinRoot(i));
     if (!g.relevant[root] || !g.tiny[root]) continue;
-    const Track& tr = b.tracks[root];
-    auto it = junctionAt.find(std::tuple{g.vid[root][0], tr.layer, tr.net});
-    if (it != junctionAt.end()) ownerTracks.push_back({it->second, b.tracks[size_t(i)].id});
+    if (const int o = ownerOfTiny(root); o >= 0) ownerTracks.push_back({o, b.tracks[size_t(i)].id});
   }
   buildMeshes(b, scratch);
 
@@ -1057,6 +1067,8 @@ bool Topology::relayTracks(const Board& b, const std::vector<uint32_t>& changedI
       }
     }
     std::map<std::tuple<int, LayerId, int>, int> junctionAt;
+  // ... and the pad or via a chain ends on, by the same vertex (for the tiny tracks glued into it, below).
+  std::map<std::tuple<int, LayerId, int>, int> copperAt;
     std::vector<int> made;  // the branch points put in on this pass
     for (size_t ci = 0; ci < chains.size(); ++ci) {
       if (!take[ci]) continue;

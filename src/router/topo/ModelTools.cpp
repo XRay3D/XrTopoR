@@ -18,6 +18,7 @@
 #include "topo/Flip.h"
 #include "topo/Move.h"
 #include "topo/Relay.h"
+#include "core/Edit.h"
 #include "drc/Drc.h"
 #include "geom/Geometry.h"
 
@@ -673,6 +674,15 @@ void dropCrumbs(Board& b, size_t from, RealizeStats& stats) {
     }
   for (ZippedWire& z : b.zips)
     if (z.axis.size() > 1) std::erase_if(z.axis, crumb);
+  // ... and what the loader takes for junk (edit::junkTracks: a crumb with a loose end — the last few micrometres of
+  // a wire that ends in the open), with the files' rounding to spare: a board is to be read as it was written.
+  const std::vector<char> junk = edit::junkTracks(b, false, edit::kCrumb + 300);
+  for (size_t k = b.tracks.size(); k-- > from;)
+    if (junk[k]) {
+      const size_t i = k - from;
+      if (i < stats.trackWire.size()) stats.trackWire.erase(stats.trackWire.begin() + long(i));
+      b.tracks.erase(b.tracks.begin() + long(k));
+    }
 }
 
 void drawModel(Board& b, Topology& t, bool direct, RealizeStats& stats, int& nWires, bool editedOnly, const std::vector<int>* only, ModelDrawing* keep,
