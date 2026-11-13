@@ -262,7 +262,10 @@ BoardView::Pick BoardView::pick(QPointF screen) const {
   // nearby (a click inside a pad takes its component, not the wire ending there).
   double best = std::numeric_limits<double>::max();
   int bestRank = 99;
+  auto passed = [&](ItemRef r) { return r::contains(cycleSkipItems_, r); };
   auto consider = [&](ItemRef r, int rank) {
+    if (passed(r)) return;
+    if (r.type == ItemType::Pad && (filter & SelComponents) && r::contains(cycleSkipComps_, b.pads[r.index].component)) return;
     for (auto& s : itemShapes(b, r)) {
       double dist = s.distance(w);
       if (dist > tol) continue;
@@ -310,7 +313,7 @@ BoardView::Pick BoardView::pick(QPointF screen) const {
     for (int i = int(b.texts.size()) - 1; i >= 0; --i) {
       const Text& t = b.texts[i];
       auto c = b.textBox(t);
-      if (layerVisible(t.layer) && pointInPolygon(w, {c.begin(), c.end()})) {
+      if (layerVisible(t.layer) && pointInPolygon(w, {c.begin(), c.end()}) && !passed({ItemType::Text, i})) {
         pk.item = ItemRef{ItemType::Text, i};
         return pk;
       }
@@ -326,7 +329,7 @@ BoardView::Pick BoardView::pick(QPointF screen) const {
     };
     if (filter & SelKeepouts)
       for (int i = 0; i < int(b.keepouts.size()); ++i) {
-        if (!keepoutVisible(b.keepouts[i])) continue;
+        if (!keepoutVisible(b.keepouts[i]) || passed({ItemType::Keepout, i})) continue;
         for (auto& sh : b.keepouts[i].shapes())
           if (double dd = edgeDist(sh); dd <= bd) {
             bd = dd;
@@ -339,6 +342,7 @@ BoardView::Pick BoardView::pick(QPointF screen) const {
       bool edge = b.layers[l].kind == LayerKind::Edge;
       if (edge ? !(filter & SelBoard) || !d.flag("showBoardOutline") : !(filter & SelMechDetails) || !layerVisible(l)) continue;
       // Drawings lying on one another (TopoR's contour beside the outline's lines): the selected one is taken.
+      if (passed({ItemType::Detail, i})) continue;
       bool chosen = r::contains(doc_->selectedItems(), ItemRef{ItemType::Detail, i});
       for (auto& sh : itemShapes(b, {ItemType::Detail, i}))
         if (double dd = std::max(0.0, sh.distance(w)); dd < bd || (dd == bd && (chosen || !pk.item))) {
@@ -351,7 +355,7 @@ BoardView::Pick BoardView::pick(QPointF screen) const {
   // Component by the rectangle round its pads and visible drawings, in its own frame (turned with it).
   if ((filter & SelComponents) && d.flag("showComponents"))
     for (int ci = 0; ci < int(b.components.size()); ++ci) {
-      if (!componentVisible(ci)) continue;
+      if (!componentVisible(ci) || r::contains(cycleSkipComps_, ci)) continue;
       BBox bb = componentBounds(b, ci, [&](LayerId l) { return l >= 0 && layerVisible(l); });
       if (bb.valid() && bb.inflated(tol).contains(b.components[ci].toLocal(w))) {
         pk.component = ci;
@@ -363,7 +367,7 @@ BoardView::Pick BoardView::pick(QPointF screen) const {
     int best = -1;
     for (int zi = 0; zi < int(b.zones.size()); ++zi) {
       const Zone& z = b.zones[zi];
-      if (!layerVisible(z.layer) || z.outline.size() < 3) continue;
+      if (!layerVisible(z.layer) || z.outline.size() < 3 || passed({ItemType::Zone, zi})) continue;
       // A poured area is taken by its copper, an unpoured one by its contour alone: its inside is empty board, and a
       // click there meant what lies there (the areas of a board with its pours taken off covered everything).
       bool hit = false;
@@ -591,7 +595,25 @@ void BoardView::mousePressEvent(QMouseEvent* e) {
     return;
   }
   if (e->button() != Qt::LeftButton || !doc_->hasBoard()) return;
+  // One more plain click where the last one was goes on to the next thing lying there (on release, if it was no
+  // drag); any other press starts from the top.
+  const bool plain = !(e->modifiers() & (Qt::ShiftModifier | Qt::ControlModifier));
+  const bool again = mode_ == Mode::Select && plain && (e->position() - cyclePos_).manhattanLength() <= 3 && (!cycleSkipItems_.empty() || !cycleSkipComps_.empty());
+  std::vector<ItemRef> skipItems;
+  std::vector<int> skipComps;
+  if (again) {  // (this press is read as the first one was: it may be the start of a drag of what is selected)
+    skipItems = std::move(cycleSkipItems_);
+    skipComps = std::move(cycleSkipComps_);
+  }
+  cycleSkipItems_.clear();
+  cycleSkipComps_.clear();
+  cyclePending_ = false;
   Pick pk = pick(e->position());
+  if (again) {
+    cycleSkipItems_ = std::move(skipItems);
+    cycleSkipComps_ = std::move(skipComps);
+  }
+  cyclePos_ = e->position();
   Vec2 w = snapped(toWorld(e->position()));
   emit clicked(w);
   switch (mode_) {
@@ -602,6 +624,8 @@ void BoardView::mousePressEvent(QMouseEvent* e) {
         if (auto mk = markerAt(e->position())) {
           startDrag(mk->kind == Marker::End ? Drag::Vertex : mk->kind == Marker::Middle ? Drag::Bend : Drag::Centre, w, mk);
           if (pk.item || pk.component >= 0) pendingClick_ = pk;  // a click there still selects
+          cyclePending_ = again;  // (... the next thing, when it is one more click at the same place)
+          if (!again) cycleTook(pk);
           break;
         }
       if (!pk.item && pk.component < 0) {
@@ -617,8 +641,16 @@ void BoardView::mousePressEvent(QMouseEvent* e) {
       // Pressing a selected object drags the whole selection; a click without a drag selects it alone.
       bool selected = (pk.component >= 0 && r::contains(doc_->selectedComponents(), pk.component)) ||
                       (pk.component < 0 && pk.item && r::contains(doc_->selectedItems(), *pk.item));
-      if (selected) pendingClick_ = pk;
-      else clickSelect(pk, {});
+      if (again && !doc_->selectedItems().empty() + !doc_->selectedComponents().empty() > 0) {
+        pendingClick_ = pk;
+        cyclePending_ = true;
+      } else if (selected) {
+        pendingClick_ = pk;
+        cycleTook(pk);
+      } else {
+        clickSelect(pk, {});
+        cycleTook(pk);
+      }
       edit::Fragment f = selectedFragment();
       // A conductor of a zipped section, the section alone selected: the piece of its axis there moves across
       // itself, the conductors made again from it.
@@ -760,6 +792,11 @@ void BoardView::mousePressEvent(QMouseEvent* e) {
     }
   }
   refresh();
+}
+
+void BoardView::cycleTook(const Pick& pk) {
+  if (pk.component >= 0) cycleSkipComps_.push_back(pk.component);
+  else if (pk.item) cycleSkipItems_.push_back(*pk.item);
 }
 
 void BoardView::clickSelect(const Pick& pk, Qt::KeyboardModifiers mods) {
@@ -2014,10 +2051,28 @@ void BoardView::finishDrag() {
     return;
   }
   if (!dragMoved_) {
-    if (pendingClick_) clickSelect(*pendingClick_, {});
+    if (cyclePending_) {
+      // The next thing under the cursor, past those the clicks here have taken; after the last, the first again.
+      cyclePending_ = false;
+      Pick next = pick(cyclePos_);
+      if (!next.item && next.component < 0) {
+        cycleSkipItems_.clear();
+        cycleSkipComps_.clear();
+        next = pick(cyclePos_);
+      }
+      if (next.item || next.component >= 0) {
+        clickSelect(next, {});
+        cycleTook(next);
+      }
+    } else if (pendingClick_) {
+      clickSelect(*pendingClick_, {});
+    }
     pendingClick_.reset();
     return;
   }
+  cyclePending_ = false;
+  cycleSkipItems_.clear();  // (a drag: the next click here starts from the top)
+  cycleSkipComps_.clear();
   Board& b = *doc_->board();
   if (kind == Drag::Vertex && dragMarker_.item.type != ItemType::Track)
     editMarked([](std::vector<Graphic>& list, int i) { edit::tidyFigure(list[i]); });

@@ -1,5 +1,8 @@
 #include <gtest/gtest.h>
 
+#include <map>
+#include <tuple>
+
 #include "core/Connectivity.h"
 #include "core/Edit.h"
 #include "core/ZoneFill.h"
@@ -703,4 +706,50 @@ TEST(ZoneFill, NoBridgeToNowhere) {
   EXPECT_TRUE(t.poured(10 + 0.75, 1.9));
   EXPECT_FALSE(t.poured(10, 1.9 - 0.75)) << "no bridge down: nothing there to reach";
   EXPECT_EQ(Connectivity::compute(t.b).ratsnest.size(), 0u);
+}
+
+// A net taken out of a design: its objects are of no net, the nets after it keep their objects and their rules; a
+// net named anew keeps what the rules give it, or is not renamed.
+TEST(Edit, ANetIsTakenOutAndNamedAnew) {
+  auto lb = io::loadBoard(std::string(XR_TEST_DATA) + "/topor/Example_03/arz_2L.fst");
+  ASSERT_TRUE(lb);
+  Board& b = **lb;
+  ASSERT_GT(b.nets.size(), 10u);
+  const int gone = 3;
+  const std::string goneName = b.nets[size_t(gone)].name;
+  // What every other net has, by name.
+  auto census = [&](const Board& x) {
+    std::map<std::string, std::tuple<size_t, size_t, size_t, Coord, Coord>> out;
+    for (int n = 0; n < int(x.nets.size()); ++n) {
+      size_t pads = 0, tracks = 0, vias = 0;
+      for (const Pad& p : x.pads) pads += p.net == n;
+      for (const Track& t : x.tracks) tracks += t.net == n;
+      for (const Via& v : x.vias) vias += v.net == n;
+      out[x.nets[size_t(n)].name] = {pads, tracks, vias, x.trackWidth(n, 0), x.clearance(n, 0)};
+    }
+    return out;
+  };
+  auto before = census(b);
+  size_t orphans = 0;
+  for (const Pad& p : b.pads) orphans += p.net == kNoNet || p.net == gone;
+  EXPECT_EQ(edit::removeNet(b, gone), "");
+  auto after = census(b);
+  EXPECT_FALSE(after.contains(goneName));
+  before.erase(goneName);
+  EXPECT_EQ(after, before);
+  size_t none = 0;
+  for (const Pad& p : b.pads) none += p.net == kNoNet;
+  EXPECT_EQ(none, orphans);
+  // Named anew: the same objects under the new name; a name that is taken is refused.
+  const std::string old = b.nets[5].name, other = b.nets[6].name;
+  EXPECT_NE(edit::renameNet(b, 5, other), "");
+  EXPECT_EQ(b.nets[5].name, old);
+  const std::string why = edit::renameNet(b, 5, "RENAMED_NET");
+  if (why.empty()) {
+    EXPECT_EQ(b.nets[5].name, "RENAMED_NET");
+    auto renamed = census(b);
+    EXPECT_EQ(renamed["RENAMED_NET"], after[old]);
+  } else {
+    EXPECT_EQ(b.nets[5].name, old) << why;
+  }
 }

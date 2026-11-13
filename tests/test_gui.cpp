@@ -1718,6 +1718,59 @@ TEST(Gui, FreestyleDrag) {
   EXPECT_EQ(f.view.mode(), Mode::Select);
 }
 
+// Clicks at one place go through what lies there (TopoR): the wire, then the component it runs over, then the wire
+// again; a click elsewhere starts anew, and the selection filter holds for every one of them.
+TEST(Gui, ClicksAtOnePlaceGoThroughWhatLiesThere) {
+  Fixture f("topor/Example_04/Arcs_master.pcb");
+  const Board& b = f.b();
+  // A point of a track inside a component's rectangle, off its pads.
+  int track = -1, comp = -1;
+  Vec2 at;
+  for (int ti = 0; ti < int(b.tracks.size()) && track < 0; ++ti) {
+    const Track& t = b.tracks[size_t(ti)];
+    if (t.isArc() || (t.b.v() - t.a.v()).len() < 2 * kNmPerMm) continue;
+    const Vec2 m = (t.a.v() + t.b.v()) * 0.5;
+    for (int ci = 0; ci < int(b.components.size()) && track < 0; ++ci) {
+      const BBox bb = componentBounds(b, ci);
+      if (!bb.valid() || !bb.inflated(-0.3 * kNmPerMm).contains(b.components[size_t(ci)].toLocal(m))) continue;
+      bool onPad = false;
+      for (int pi : b.components[size_t(ci)].pads) onPad |= b.pads[size_t(pi)].shapeGeom().distance(m) < 0.5 * kNmPerMm;
+      bool crowded = false;
+      for (int tj = 0; tj < int(b.tracks.size()); ++tj)
+        if (tj != ti && distPointSegment(m, b.tracks[size_t(tj)].a.v(), b.tracks[size_t(tj)].b.v()) < 0.4 * kNmPerMm) crowded = true;
+      if (onPad || crowded) continue;
+      track = ti, comp = ci, at = m;
+    }
+  }
+  ASSERT_GE(track, 0) << "no track over a component";
+  f.doc.setActiveLayer(b.tracks[size_t(track)].layer);
+  f.look(at, 6);
+  const QPoint p = f.at(at);
+  auto click = [&](QPoint q) {
+    QTest::mousePress(&f.view, Qt::LeftButton, {}, q);
+    QTest::mouseRelease(&f.view, Qt::LeftButton, {}, q);
+  };
+  click(p);
+  ASSERT_EQ(f.doc.selectedItems().size(), 1u);
+  EXPECT_EQ(f.doc.selectedItems()[0], (ItemRef{ItemType::Track, track}));
+  EXPECT_TRUE(f.doc.selectedComponents().empty());
+  click(p);
+  EXPECT_EQ(f.doc.selectedComponents(), std::vector<int>{comp}) << "the second click: the component under the wire";
+  EXPECT_TRUE(r::none_of(f.doc.selectedItems(), [](ItemRef r) { return r.type == ItemType::Track; }));
+  click(p);
+  click(p);
+  click(p);
+  EXPECT_FALSE(f.doc.selectedItems().empty() && f.doc.selectedComponents().empty()) << "round and round: something is always taken";
+  // With the components filtered out the clicks stay with the wire.
+  f.doc.setSelectionFilter(f.doc.selectionFilter() & ~uint32_t(SelComponents | SelPins));
+  click(p + QPoint(40, 40));
+  click(p);
+  click(p);
+  EXPECT_TRUE(f.doc.selectedComponents().empty());
+  ASSERT_EQ(f.doc.selectedItems().size(), 1u);
+  EXPECT_EQ(f.doc.selectedItems()[0].type, ItemType::Track);
+}
+
 // A wire dragged in Freestyle: while the mouse is down the board stands and the way the wire would take through the
 // cursor is there to be drawn dashed; on release the wire is laid that way — on the other side of the via it was
 // dragged over —, in one step that undo takes back.

@@ -116,6 +116,13 @@ LayerChange changeLayer(Board& b, const std::vector<int>& tracks, LayerId layer)
 int unlink(Board& b, const Fragment& f);
 // «Изменить цепь» (Shift+N) of tracks, vias, pads and copper areas.
 void changeNet(Board& b, const Fragment& f, const std::vector<int>& pads, int net);
+// A net taken out of the design: what was of it — pads, wires, vias, areas — is of no net, the nets after it are
+// numbered one less everywhere, the rules are compiled again. Empty: done; else why not (a plane's net; a design
+// whose rules name nets by number and cannot be compiled again).
+std::string removeNet(Board& b, int net);
+// A net named anew. Empty: done; else why not (the name is taken; the net's rules name it — width, clearance, pair
+// or layers would be other with the new name).
+std::string renameNet(Board& b, int net, const std::string& name);
 // «Удалить избыточные переходы»: unlocked vias connecting nothing or one layer only. Returns the count.
 int removeExcessVias(Board& b);
 // The copper layers a via is needed on by what is not a track: a pad of its net it stands on, a copper area or

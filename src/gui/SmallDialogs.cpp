@@ -9,6 +9,9 @@
 #include <QFormLayout>
 #include <QHeaderView>
 #include <QInputDialog>
+#include <QHBoxLayout>
+#include <QMessageBox>
+#include <QToolButton>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -16,6 +19,8 @@
 #include <QTableWidget>
 #include <QVBoxLayout>
 #include <algorithm>
+
+#include "core/Edit.h"
 #include <cmath>
 #include <map>
 
@@ -218,12 +223,85 @@ std::optional<int> askNet(QWidget* parent, Document* doc, std::optional<int> cur
     it->setData(Qt::UserRole, n);
     if (current && n == *current) list->setCurrentItem(it);
   };
-  add(kNoNet);
-  std::vector<int> order(b.nets.size());
-  r::iota(order, 0);
-  r::sort(order, {}, [&](int n) { return b.nets[size_t(n)].name; });
-  for (int n : order) add(n);
+  // The list filled anew after a net is made, named or taken out; `select`: the net to stand on.
+  auto fill = [&](std::optional<int> select) {
+    list->clear();
+    auto* none = new QListWidgetItem(netName(kNoNet), list);
+    none->setData(Qt::UserRole, kNoNet);
+    std::vector<int> order(b.nets.size());
+    r::iota(order, 0);
+    r::sort(order, {}, [&](int n) { return b.nets[size_t(n)].name; });
+    for (int n : order) add(n);
+    if (current && *current == kNoNet) list->setCurrentItem(none);
+    if (select)
+      for (int i = 0; i < list->count(); ++i)
+        if (list->item(i)->data(Qt::UserRole).toInt() == *select) list->setCurrentItem(list->item(i));
+  };
+  // TopoR's three buttons over the list: a new net, the chosen one named anew, the chosen one taken out.
+  auto* tools = new QHBoxLayout;
+  auto tool = [&](const char* name, const QString& text, const QString& tip) {
+    auto* t = new QToolButton;
+    t->setObjectName(name);
+    t->setText(text);
+    t->setToolTip(tip);
+    tools->addWidget(t);
+    return t;
+  };
+  QToolButton* newNet = tool("newNet", QStringLiteral("＋"), QObject::tr("Новая цепь"));
+  QToolButton* renNet = tool("renameNet", QStringLiteral("✎"), QObject::tr("Переименовать"));
+  QToolButton* delNet = tool("deleteNet", QStringLiteral("✕"), QObject::tr("Удалить цепь"));
+  tools->addStretch();
+  v->addLayout(tools);
+  fill({});
   v->addWidget(list);
+  auto chosen = [&]() -> int { return list->currentItem() ? list->currentItem()->data(Qt::UserRole).toInt() : kNoNet; };
+  auto refuse = [&](const std::string& why) {
+    const QString text = why == "the name is taken"                           ? QObject::tr("Цепь с таким именем уже есть")
+                         : why == "the design's rules name the net"           ? QObject::tr("Цепь названа в правилах проекта: сначала измените правила")
+                         : why == "the net of a plane layer"                  ? QObject::tr("Это цепь экранного слоя")
+                         : why == "the design's rules name nets by number"    ? QObject::tr("Правила проекта ссылаются на цепи: удалить нельзя")
+                                                                              : QString::fromStdString(why);
+    QMessageBox::warning(&dlg, dlg.windowTitle(), text);
+  };
+  QObject::connect(newNet, &QToolButton::clicked, &dlg, [&] {
+    bool ok = false;
+    const QString name = QInputDialog::getText(&dlg, QObject::tr("Новая цепь"), QObject::tr("Имя цепи:"), QLineEdit::Normal, {}, &ok).trimmed();
+    if (!ok || name.isEmpty()) return;
+    if (r::contains(b.nets, name.toStdString(), &Net::name)) return refuse("the name is taken");
+    auto before = doc->beginEdit();
+    const int n = doc->board()->addNet(name.toStdString());
+    doc->commitEdit(before, QObject::tr("Новая цепь"), false);
+    fill(n);
+  });
+  QObject::connect(renNet, &QToolButton::clicked, &dlg, [&] {
+    const int n = chosen();
+    if (n == kNoNet) return;
+    bool ok = false;
+    const QString name = QInputDialog::getText(&dlg, QObject::tr("Переименовать"), QObject::tr("Имя цепи:"), QLineEdit::Normal, netName(n), &ok).trimmed();
+    if (!ok || name.isEmpty()) return;
+    auto before = doc->beginEdit();
+    if (const std::string why = edit::renameNet(*doc->board(), n, name.toStdString()); !why.empty()) return refuse(why);
+    doc->commitEdit(before, QObject::tr("Переименовать цепь"), false);
+    fill(n);
+  });
+  QObject::connect(delNet, &QToolButton::clicked, &dlg, [&] {
+    const int n = chosen();
+    if (n == kNoNet) return;
+    size_t used = 0;
+    for (const Pad& p : b.pads) used += p.net == n;
+    for (const Track& t : b.tracks) used += t.net == n;
+    for (const Via& x : b.vias) used += x.net == n;
+    for (const Zone& z : b.zones) used += z.net == n;
+    if (used > 0 && QMessageBox::question(&dlg, QObject::tr("Удалить цепь"),
+                                          QObject::tr("К цепи %1 относится объектов: %2. Они останутся без цепи. Удалить?").arg(netName(n)).arg(used)) != QMessageBox::Yes)
+      return;
+    auto before = doc->beginEdit();
+    if (const std::string why = edit::removeNet(*doc->board(), n); !why.empty()) return refuse(why);
+    doc->invalidateModel();
+    doc->commitEdit(before, QObject::tr("Удалить цепь"), false);
+    if (current) current = *current == n ? kNoNet : *current > n ? *current - 1 : *current;
+    fill({});
+  });
   QObject::connect(filter, &QLineEdit::textChanged, list, [list](const QString& t) {
     for (int i = 0; i < list->count(); ++i) list->item(i)->setHidden(!t.isEmpty() && !list->item(i)->text().contains(t, Qt::CaseInsensitive));
   });

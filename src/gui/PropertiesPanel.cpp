@@ -791,7 +791,20 @@ QWidget* PropertiesPanel::padPage(int pi) {
   auto* f = new QFormLayout(w);
   QString owner = p.component >= 0 ? QString::fromStdString(b.components[p.component].ref) + "-" : QString();
   f->addRow(title(tr("Контакт %1%2").arg(owner, QString::fromStdString(p.number))));
-  f->addRow(tr("Цепь:"), new QLabel(p.net >= 0 ? QString::fromStdString(b.nets[p.net].name) : tr("(без цепи)")));
+  // The pad's net: a button to the nets' dialog (the list, a new net, a net named anew or taken out).
+  auto* net = new QPushButton(p.net >= 0 ? QString::fromStdString(b.nets[p.net].name) : tr("(без цепи)"));
+  net->setObjectName("net");
+  connect(net, &QPushButton::clicked, this, [this, pi, owner] {
+    const Board& bd = *doc_->board();
+    const auto picked = askNet(this, doc_, bd.pads[size_t(pi)].net, tr("контакт %1%2").arg(owner, QString::fromStdString(bd.pads[size_t(pi)].number)));
+    if (!picked) {
+      rebuild();  // (a net may have been named anew or taken out in the dialog)
+      return;
+    }
+    edit(tr("Изменить цепь"), [&](Board& x) { edit::changeNet(x, {}, {pi}, *picked); });
+    rebuild();
+  });
+  f->addRow(tr("Цепь:"), net);
   f->addRow(tr("Положение:"), new QLabel(QString("(%1; %2)").arg(len(p.pos.x), len(-double(p.pos.y)))));
   f->addRow(tr("Угол:"), new QLabel(QString("%1°").arg(p.angle)));
   f->addRow(tr("Размер:"), new QLabel(QString("%1 x %2").arg(len(p.shape.w), len(p.shape.h))));

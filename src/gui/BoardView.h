@@ -287,6 +287,14 @@ class BoardView : public QOpenGLWidget {
   void selectSection(int zip);
   std::optional<EditSnapshot> dragBefore_;
   std::optional<Pick> pendingClick_;  // press on a selected object: selects it alone if not dragged
+  // Clicks at one place go through what lies there, one after another (TopoR: the wire, then the component under
+  // it, ...): where the last plain click was, what it and the clicks before it there have taken already (pick()
+  // passes those by), and whether the press now down is one more such click.
+  QPointF cyclePos_{-1e9, -1e9};
+  std::vector<ItemRef> cycleSkipItems_;
+  std::vector<int> cycleSkipComps_;
+  bool cyclePending_ = false;
+  void cycleTook(const Pick& pk);
   bool placing_ = false;                // a pasted fragment follows the cursor
   // vias: a single one, or a row / matrix between two clicks
   ViaKind viaKind_ = ViaKind::Single;

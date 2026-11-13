@@ -1,5 +1,7 @@
 #include "gui/Document.h"
 
+#include "core/Rules.h"
+
 #include "core/Prof.h"
 
 #include <set>
@@ -34,6 +36,10 @@ class SnapshotCommand : public QUndoCommand {
   void apply(const EditSnapshot& s, const EditSnapshot& from) {
     if (!doc_->hasBoard()) return;
     s.apply(*doc_->board());
+    if (s.nets.size() != from.nets.size()) {  // a net taken out or put back: the rules by the nets' numbers again
+      if (doc_->board()->rules) compileRules(*doc_->board());
+      doc_->invalidateModel();
+    }
     doc_->invalidate();
     doc_->followModel(from);
     doc_->validateSelection();

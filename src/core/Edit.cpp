@@ -1,5 +1,7 @@
 #include "core/Edit.h"
 
+#include "core/Rules.h"
+
 #include "core/DiffPairs.h"
 #include "core/Runs.h"
 
@@ -773,6 +775,59 @@ void changeNet(Board& b, const Fragment& f, const std::vector<int>& pads, int ne
   for (int vi : f.vias) b.vias[vi].net = net;
   for (int zi : f.zones) b.zones[zi].net = net;
   for (int pi : pads) b.pads[pi].net = net;
+}
+
+std::string removeNet(Board& b, int net) {
+  if (net < 0 || net >= int(b.nets.size())) return "no such net";
+  if (r::any_of(b.layers, [&](const Layer& l) { return l.plane && l.planeNet == net; })) return "the net of a plane layer";
+  const bool numbered = r::any_of(b.layerRules, [](const LayerRule& x) { return !x.nets.empty(); }) ||
+                        r::any_of(b.pairRules, [](const ClearancePair& x) { return !x.netsA.empty() || !x.netsB.empty(); }) ||
+                        r::any_of(b.nominalRules, [](const ClearancePair& x) { return !x.netsA.empty() || !x.netsB.empty(); });
+  if (!b.rules && numbered) return "the design's rules name nets by number";
+  auto fix = [&](int& n) {
+    if (n == net) n = kNoNet;
+    else if (n > net) --n;
+  };
+  for (Pad& p : b.pads) fix(p.net);
+  for (Track& t : b.tracks) fix(t.net);
+  for (Via& v : b.vias) fix(v.net);
+  for (Zone& z : b.zones) fix(z.net);
+  for (Layer& l : b.layers) fix(l.planeNet);
+  for (ZippedWire& z : b.zips) {
+    fix(z.netP);
+    fix(z.netN);
+  }
+  b.nets.erase(b.nets.begin() + net);
+  if (b.rules) compileRules(b);
+  return {};
+}
+
+std::string renameNet(Board& b, int net, const std::string& name) {
+  if (net < 0 || net >= int(b.nets.size())) return "no such net";
+  if (name.empty()) return "an empty name";
+  if (b.nets[size_t(net)].name == name) return {};
+  if (r::contains(b.nets, name, &Net::name)) return "the name is taken";
+  if (!b.rules) {
+    b.nets[size_t(net)].name = name;
+    return {};
+  }
+  // The rules name nets by their names: what they give the net must be the same under the new one.
+  auto given = [&](const Board& x) {
+    std::vector<long> out{x.nets[size_t(net)].netClass, x.pairOfNet(net), long(x.assignedLayers(net))};
+    for (LayerId l : x.copperLayers()) {
+      out.push_back(x.trackWidth(net, l));
+      out.push_back(x.minTrackWidth(net, l));
+      out.push_back(x.clearance(net, l));
+      for (int other = 0; other < int(x.nets.size()); ++other) out.push_back(x.clearance(net, other, l));
+    }
+    return out;
+  };
+  Board trial = b;
+  trial.nets[size_t(net)].name = name;
+  compileRules(trial);
+  if (given(trial) != given(b)) return "the design's rules name the net";
+  b = std::move(trial);
+  return {};
 }
 
 LayerMask viaHeldBy(const Board& b, const Via& v) {
