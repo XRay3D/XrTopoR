@@ -521,7 +521,10 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
   // another when it has less unrouted, then fewer places shorted, fewer deeper than the limit of a violation,
   // fewer real ones at all — and, those equal, a smaller sum of the length, 100 mm per mm of shortfall and 1 mm
   // per place (what is left to weigh is the noise at the rule's edge). The result is the best drawing.
-  auto keys = [](const Drawn& c) { return std::tuple(c.unrouted, c.shorts, c.deep, c.real); };
+  // (... and fewer places at all, the shallow ones too: since the arcs are measured as they are, a place of a few
+  // micrometres is no noise of the measure — it is there, and the DRC names it. Left to the score, two such places
+  // were bought with 4 mm of wire: RMT19M_A8SWA_V5 ended with 3 violations of 2-3 um for none, arz_2L with 9 for 7.)
+  auto keys = [](const Drawn& c) { return std::tuple(c.unrouted, c.shorts, c.deep, c.real, c.places.size()); };
   auto better = [&](const Drawn& c, const Drawn& than) { return keys(c) < keys(than) || (keys(c) == keys(than) && c.score() < than.score()); };
   // Where the walk may stand: on a drawing better than the best, or on one with nothing lost, no place of violation
   // the best drawing has not or has shallower by more than the noise, and no longer than it by more than the slack.
