@@ -230,10 +230,14 @@ uint64_t boardHashOf(const Board& b, bool places) {
   for (const Zone& z : b.zones)
     item([&](Fnv& f) {
       f.s(netName(b, z.net));
-      f.i(z.layer);
+      f.s(layerName(b, z.layer));  // (by its name: a file of another format numbers the layers its own way)
       f.i(z.useClearance ? q(double(z.clearance)) : -1);
       f.i(z.filled.empty() ? 0 : 1);
       for (Vec2 p : z.outline) f.v(p);
+      if (debug)
+        std::fprintf(stderr, "hash zone: net %s layer %d (%s) clearance %lld filled %d, %zu points, first (%lld, %lld)\n", netName(b, z.net).c_str(), int(z.layer),
+                     layerName(b, z.layer).c_str(), static_cast<long long>(z.useClearance ? q(double(z.clearance)) : -1), z.filled.empty() ? 0 : 1, z.outline.size(),
+                     static_cast<long long>(z.outline.empty() ? 0 : q(z.outline.front().x)), static_cast<long long>(z.outline.empty() ? 0 : q(z.outline.front().y)));
     });
   report("zones");
   // The differential pairs and their zipped sections: the rule, and of the axis its pieces by number only (its
