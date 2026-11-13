@@ -3,6 +3,8 @@
 // triangulation follows with flips (the wires keep their crossings, the flips carry them); a new via's
 // vertex splits the triangle it lands in (the chords through it cross the new edges); a vertex no wire
 // ends at goes, its star flipped down to three edges and merged into one triangle.
+#include <span>
+
 #include "topo/Flip.h"
 #include "topo/Topology.h"
 
@@ -13,6 +15,14 @@ namespace xr::topo {
 // counter-clockwise, with Lawson's loop over the star between them; a constrained or rigid edge in the
 // way stops it. Returns the fraction of d that went (1: all of it).
 double moveOwner(Topology& t, int owner, Vec2 d, const FlipGate& gate = {}, int rounds = 8);
+// The same for several owners that go as one body (a component's pads; a fragment dragged whole): one fraction of
+// d for all of them, a triangle between three of them going as it is. Nothing of the body gets ahead of the rest:
+// where one of its vertices is stopped, all of it stops.
+double moveOwners(Topology& t, std::span<const int> owners, Vec2 d, const FlipGate& gate = {}, int rounds = 8);
+// The body turned about `pivot` by `degrees` (the board's turn: rotateBoard), in pieces of a few degrees: the
+// owners' centres, axes and copper, their vertices' offsets, the exits of the wires ending at them. Returns the
+// part of the turn made.
+double turnOwners(Topology& t, std::span<const int> owners, Vec2 pivot, double degrees, const FlipGate& gate = {}, int rounds = 8);
 // Turns an owner's axis (a clasp across its pair) to `axis`, its centre standing: the vertices at t slide to
 // c + axis * t, as far as the triangles allow, as moveOwner steps. Returns the part of the turn made.
 double reshapeOwner(Topology& t, int owner, Vec2 axis, const FlipGate& gate = {}, int rounds = 8);

@@ -958,8 +958,32 @@ bool Topology::follow(const Board& old, const Board& now, std::vector<int>* wire
     viaOwnerNow[size_t(it->second)] = oi;
     if (oi >= 0) owners[size_t(oi)].via = it->second;
   }
+  // The pads: a component's are one body — turned about its origin as it stood, then shifted (pad by pad, the first
+  // one stopped by the mesh left the rest ahead of it and the model apart from the board); the rest by themselves.
+  if (old.components.size() != now.components.size()) return refused(5);
+  std::vector<char> inBody(now.pads.size(), 0);
+  for (size_t ci = 0; ci < now.components.size(); ++ci) {
+    const Component& a = old.components[ci];
+    const Component& c = now.components[ci];
+    if (a.pads != c.pads || a.side != c.side) return refused(7);
+    double turn = std::fmod(c.angle - a.angle, 360.0);
+    if (turn > 180) turn -= 360;
+    if (turn <= -180) turn += 360;
+    const Vec2 shift = c.pos.v() - a.pos.v();
+    std::vector<int> body;
+    for (int pi : c.pads) {
+      if (pi < 0 || pi >= int(now.pads.size())) return refused(7);
+      inBody[size_t(pi)] = 1;
+      // (The board's pads are the body turned and shifted, to the rounding of their places.)
+      if ((now.pads[size_t(pi)].pos.v() - (c.pos.v() + rotateBoard(old.pads[size_t(pi)].pos.v() - a.pos.v(), turn))).len() > 3) return refused(8);
+      if (size_t(pi) < padOwner.size() && padOwner[size_t(pi)] >= 0) body.push_back(padOwner[size_t(pi)]);
+    }
+    if (body.empty() || (turn == 0 && shift.len2() < 1)) continue;
+    if (turn != 0 && turnOwners(*this, body, a.pos.v(), turn) < 1 - 1e-9) return refused(6);
+    if (shift.len2() >= 1 && moveOwners(*this, body, shift) < 1 - 1e-9) return refused(6);
+  }
   for (size_t i = 0; i < now.pads.size(); ++i)
-    if (!moved(i < padOwner.size() ? padOwner[i] : -1, now.pads[i].pos.v() - old.pads[i].pos.v())) return refused(6);
+    if (!inBody[i] && !moved(i < padOwner.size() ? padOwner[i] : -1, now.pads[i].pos.v() - old.pads[i].pos.v())) return refused(6);
   // A via that is new: an owner with a vertex in the mesh of every layer it is copper on. The wires crossing the
   // edges round the new vertex are laid again by their tracks (the insertion passes them round it on the side the
   // split triangle says, the tracks say where they are drawn), and so are the tracks of its net that end in its

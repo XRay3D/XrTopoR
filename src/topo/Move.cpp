@@ -2,6 +2,7 @@
 
 #include <cstdlib>
 #include <optional>
+#include <span>
 #include <print>
 
 #include <algorithm>
@@ -138,64 +139,183 @@ double reshapeOwner(Topology& t, int owner, Vec2 axis, const FlipGate& gate, int
   return std::min(done, 1.0);
 }
 
-double moveOwner(Topology& t, int owner, Vec2 d, const FlipGate& gate, int rounds) {
-  if (d.len2() == 0) return 1;
-  Owner& o = t.owners[owner];
-  double done = 0;
-  for (int round = 0; round < rounds && done < 1 - 1e-9; ++round) {
-    // As far as every incident triangle stays counter-clockwise: orient() is linear in the step.
-    double lam = 1 - done;
-    for (LayerMesh& m : t.layers) {
+namespace {
+
+// The owners of a group, marked for the time of a move (a thread's own table: F7 moves an owner thousands of times).
+struct GroupMarks {
+  std::span<const int> group;
+  std::vector<char>& in;
+  GroupMarks(size_t owners, std::span<const int> g) : group(g), in(table()) {
+    if (in.size() < owners) in.resize(owners, 0);
+    for (int o : group) in[size_t(o)] = 1;
+  }
+  ~GroupMarks() {
+    for (int o : group) in[size_t(o)] = 0;
+  }
+  GroupMarks(const GroupMarks&) = delete;
+  static std::vector<char>& table() {
+    thread_local std::vector<char> t;
+    return t;
+  }
+};
+
+// The mesh after the group's vertices went to their new places: the cached points, the capacities of the edges at
+// them, and Lawson's loop from their stars. Returns the flips made.
+int settleGroup(Topology& t, std::span<const int> group, const FlipGate& gate) {
+  int flips = 0;
+  for (LayerMesh& m : t.layers) {
+    std::vector<int> seed;
+    for (int owner : group) {
       if (owner >= int(m.ownerVerts.size())) continue;
-      for (int v : m.ownerVerts[owner])
-        for (int ti : m.verts[v].tris) {
-          const Tri& T = m.tris[ti];
-          Vec2 p[3], q[3];
-          for (int i = 0; i < 3; ++i) {
-            const Vertex& x = m.verts[T.v[i]];
-            p[i] = x.p;
-            q[i] = x.owner == owner ? x.p + d * (1 - done) : x.p;
-          }
-          double f0 = orient(p[0], p[1], p[2]), f1 = orient(q[0], q[1], q[2]) - f0;
-          // ... and keeps a micron of height: an owner pulled onto a vertex or a side of its own net (a branch
-          // point onto its pad — nothing of another net's rule holds it off) came nine tenths closer with
-          // every step, down to a triangle the rounding turned over.
-          const double base = std::max({(p[1] - p[0]).len(), (p[2] - p[1]).len(), (p[0] - p[2]).len()});
-          const double fmin = kMinHeight * base;
-          if (f1 < 0 && f0 > fmin) lam = std::min(lam, 0.9 * (f0 - fmin) / -f1 * (1 - done));
-          else if (f1 < 0) lam = 0;
-        }
-    }
-    const Vec2 step = d * lam;
-    if (lam > 0) {
-      o.c = o.c + step;
-      o.shape = moved(o.shape, step);
-      if (o.junction >= 0) t.junctions[o.junction].pos = t.junctions[o.junction].pos + step;
-      for (Wire& w : t.wires)
-        for (int end = 0; end < 2; ++end)
-          if (w.end[end] == owner && w.hasExit[end]) w.exit[end] = w.exit[end] + step;
-    }
-    int flips = 0;
-    for (LayerMesh& m : t.layers) {
-      if (owner >= int(m.ownerVerts.size())) continue;
-      std::vector<int> seed;
-      for (int v : m.ownerVerts[owner]) {
+      for (int v : m.ownerVerts[size_t(owner)]) {
         t.placeVertex(m, v);
         for (int e : starEdges(m, v)) seed.push_back(e);
-        for (int ti : m.verts[v].tris)
-          for (int e : m.tris[ti].e)
-            if ((m.edges[e].v[0] == v || m.edges[e].v[1] == v) && !m.edges[e].cross.empty()) refreshEdge(t, m, e);
       }
-      // (An owner with no vertex on this layer — a branch point is of one layer — has nothing to flip here; and
-      // an empty seed is the flip loop's word for every edge of the mesh: each step of each branch point ran the
-      // whole of the other layers through the circle test, most of what stepping cost.)
-      if (seed.empty()) continue;
-      flips += flipLoop(t, m, seed, gate, false);
     }
+    for (int owner : group) {
+      if (owner >= int(m.ownerVerts.size())) continue;
+      for (int v : m.ownerVerts[size_t(owner)])
+        for (int ti : m.verts[size_t(v)].tris)
+          for (int e : m.tris[size_t(ti)].e)
+            if ((m.edges[size_t(e)].v[0] == v || m.edges[size_t(e)].v[1] == v) && !m.edges[size_t(e)].cross.empty()) refreshEdge(t, m, e);
+    }
+    // (An owner with no vertex on this layer — a branch point is of one layer — has nothing to flip here; and
+    // an empty seed is the flip loop's word for every edge of the mesh: each step of each branch point ran the
+    // whole of the other layers through the circle test, most of what stepping cost.)
+    if (seed.empty()) continue;
+    flips += flipLoop(t, m, std::move(seed), gate, false);
+  }
+  return flips;
+}
+
+}  // namespace
+
+double moveOwners(Topology& t, std::span<const int> group, Vec2 d, const FlipGate& gate, int rounds) {
+  if (d.len2() == 0 || group.empty()) return 1;
+  const GroupMarks marks(t.owners.size(), group);
+  const std::vector<char>& in = marks.in;
+  double done = 0;
+  for (int round = 0; round < rounds && done < 1 - 1e-9; ++round) {
+    // As far as every triangle at the group stays counter-clockwise: orient() is linear in the step. (A triangle
+    // with all its corners in the group goes as it is.)
+    double lam = 1 - done;
+    for (const LayerMesh& m : t.layers)
+      for (int owner : group) {
+        if (owner >= int(m.ownerVerts.size())) continue;
+        for (int v : m.ownerVerts[size_t(owner)])
+          for (int ti : m.verts[size_t(v)].tris) {
+            const Tri& T = m.tris[size_t(ti)];
+            Vec2 p[3], q[3];
+            int mine = 0;
+            for (int i = 0; i < 3; ++i) {
+              const Vertex& x = m.verts[size_t(T.v[i])];
+              const bool goes = x.owner >= 0 && in[size_t(x.owner)];
+              mine += goes;
+              p[i] = x.p;
+              q[i] = goes ? x.p + d * (1 - done) : x.p;
+            }
+            if (mine == 3) continue;
+            double f0 = orient(p[0], p[1], p[2]), f1 = orient(q[0], q[1], q[2]) - f0;
+            // ... and keeps a micron of height: an owner pulled onto a vertex or a side of its own net (a branch
+            // point onto its pad — nothing of another net's rule holds it off) came nine tenths closer with
+            // every step, down to a triangle the rounding turned over.
+            const double base = std::max({(p[1] - p[0]).len(), (p[2] - p[1]).len(), (p[0] - p[2]).len()});
+            const double fmin = kMinHeight * base;
+            if (f1 < 0 && f0 > fmin) lam = std::min(lam, 0.9 * (f0 - fmin) / -f1 * (1 - done));
+            else if (f1 < 0) lam = 0;
+          }
+      }
+    const Vec2 step = d * lam;
+    if (lam > 0) {
+      for (int owner : group) {
+        Owner& o = t.owners[size_t(owner)];
+        o.c = o.c + step;
+        o.shape = moved(o.shape, step);
+        if (o.junction >= 0) t.junctions[size_t(o.junction)].pos = t.junctions[size_t(o.junction)].pos + step;
+      }
+      for (Wire& w : t.wires)
+        for (int end = 0; end < 2; ++end)
+          if (w.end[end] >= 0 && in[size_t(w.end[end])] && w.hasExit[end]) w.exit[end] = w.exit[end] + step;
+    }
+    const int flips = settleGroup(t, group, gate);
     done += lam;
     if (lam <= 1e-9 && flips == 0) break;  // blocked: a constrained or rigid edge, or copper in the way of the flip
   }
   return std::min(done, 1.0);
+}
+
+double moveOwner(Topology& t, int owner, Vec2 d, const FlipGate& gate, int rounds) { return moveOwners(t, {&owner, 1}, d, gate, rounds); }
+
+double turnOwners(Topology& t, std::span<const int> group, Vec2 pivot, double degrees, const FlipGate& gate, int rounds) {
+  if (degrees == 0 || group.empty()) return 1;
+  const GroupMarks marks(t.owners.size(), group);
+  const std::vector<char>& in = marks.in;
+  auto turned = [&](Vec2 p, double deg) { return pivot + rotateBoard(p - pivot, deg); };
+  // Whether every triangle at the group stands with the group turned by `deg`: counter-clockwise, and with its
+  // micron of height where the turn takes of it (moveOwners).
+  auto stands = [&](double deg) {
+    for (const LayerMesh& m : t.layers)
+      for (int owner : group) {
+        if (owner >= int(m.ownerVerts.size())) continue;
+        for (int v : m.ownerVerts[size_t(owner)])
+          for (int ti : m.verts[size_t(v)].tris) {
+            const Tri& T = m.tris[size_t(ti)];
+            Vec2 p[3], q[3];
+            int mine = 0;
+            for (int i = 0; i < 3; ++i) {
+              const Vertex& x = m.verts[size_t(T.v[i])];
+              const bool goes = x.owner >= 0 && in[size_t(x.owner)];
+              mine += goes;
+              p[i] = x.p;
+              q[i] = goes ? turned(x.p, deg) : x.p;
+            }
+            if (mine == 3) continue;
+            const double f0 = orient(p[0], p[1], p[2]), f1 = orient(q[0], q[1], q[2]);
+            const double base = std::max({(q[1] - q[0]).len(), (q[2] - q[1]).len(), (q[0] - q[2]).len()});
+            if (f1 < f0 && f1 <= kMinHeight * base) return false;
+          }
+      }
+    return true;
+  };
+  // In pieces of a few degrees (a triangle's area is not linear in the angle: a piece that stands at its end stood
+  // all the way only when it is short), each as far as the triangles allow, Lawson's loop between them.
+  constexpr double kPiece = 5;
+  const int pieces = std::max(1, int(std::ceil(std::abs(degrees) / kPiece)));
+  double done = 0;  // degrees
+  for (int piece = 0; piece < pieces; ++piece) {
+    const double goal = degrees * (piece + 1) / pieces;
+    bool blocked = false;
+    for (int round = 0; round < rounds && std::abs(goal - done) > 1e-9; ++round) {
+      double a = goal - done;
+      for (int halvings = 0; halvings < 8 && !stands(a); ++halvings) a *= 0.5;
+      if (!stands(a)) a = 0;
+      if (a != 0) {
+        for (int owner : group) {
+          Owner& o = t.owners[size_t(owner)];
+          o.c = turned(o.c, a);
+          o.axis = rotateBoard(o.axis, a);
+          o.shape.a = turned(o.shape.a, a);
+          o.shape.b = turned(o.shape.b, a);
+          for (Vec2& p : o.shape.poly) p = turned(p, a);
+          if (o.junction >= 0) t.junctions[size_t(o.junction)].pos = o.c;
+          for (LayerMesh& m : t.layers)
+            if (owner < int(m.ownerVerts.size()))
+              for (int v : m.ownerVerts[size_t(owner)]) m.verts[size_t(v)].off = rotateBoard(m.verts[size_t(v)].off, a);
+        }
+        for (Wire& w : t.wires)
+          for (int end = 0; end < 2; ++end)
+            if (w.end[end] >= 0 && in[size_t(w.end[end])] && w.hasExit[end]) w.exit[end] = turned(w.exit[end], a);
+      }
+      const int flips = settleGroup(t, group, gate);
+      done += a;
+      if (a == 0 && flips == 0) {
+        blocked = true;
+        break;
+      }
+    }
+    if (blocked || std::abs(goal - done) > 1e-9) break;
+  }
+  return std::clamp(done / degrees, 0.0, 1.0);
 }
 
 int insertVertex(Topology& t, LayerMesh& m, int owner, double at, Vec2 off, bool lawson) {

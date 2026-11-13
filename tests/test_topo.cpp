@@ -3847,6 +3847,101 @@ TEST(Topo, SidecarOfAPairedBoardReadsBack) {
 // The live model follows a via's going (Topology::follow): the via and the tracks of its wires taken off the board —
 // the wires leave, the via's owner leaves the meshes (beside a row of pads too: the spokes flip past the pads'
 // copper), and the model left is whole and has the wires a model built anew from that board has.
+// A component's pads are one body in the model: shifted or turned, they go together or not at all (pad by pad, the
+// first one the mesh stopped left the others ahead: Freestyle tore the wires off the pads), and the model follows a
+// board whose component was moved or turned.
+TEST(Topo, AComponentGoesAsOneBody) {
+  auto lb = io::loadBoard(data("topor/Example_04/Arcs_master.pcb"));
+  ASSERT_TRUE(lb.has_value());
+  Board& b0 = **lb;
+  topo::Topology::assignIds(b0);
+  topo::Topology t0;
+  t0.build(b0);
+  ASSERT_EQ(t0.check(), std::vector<std::string>{});
+  auto bodyOf = [&](const topo::Topology& t, int ci) {
+    std::vector<int> body;
+    for (int pi : b0.components[size_t(ci)].pads)
+      if (pi >= 0 && pi < int(t.padOwner.size()) && t.padOwner[size_t(pi)] >= 0) body.push_back(t.padOwner[size_t(pi)]);
+    return body;
+  };
+  std::mt19937 rng(11);
+  std::uniform_real_distribution<double> ang(0, 2 * std::numbers::pi), len(0.05 * kNmPerMm, 1.5 * kNmPerMm), deg(-25, 25);
+  topo::Topology t = t0;
+  int moves = 0, whole = 0, turns = 0, turnedWhole = 0;
+  for (int k = 0; k < 200; ++k) {
+    const int ci = int(rng() % b0.components.size());
+    const std::vector<int> body = bodyOf(t, ci);
+    if (body.size() < 2) continue;
+    std::vector<Vec2> was;
+    for (int oi : body) was.push_back(t.owners[size_t(oi)].c);
+    if (k % 3 == 2) {
+      const Vec2 pivot = was.front();
+      const double a = deg(rng);
+      const double f = topo::turnOwners(t, body, pivot, a);
+      ++turns;
+      turnedWhole += f > 0.999;
+      for (size_t i = 0; i < body.size(); ++i) {
+        const Vec2 want = pivot + rotateBoard(was[i] - pivot, a * f);
+        EXPECT_LT((t.owners[size_t(body[i])].c - want).len(), 1.0) << "turn " << k << ", pad " << i;
+      }
+    } else {
+      const double a = ang(rng), l = len(rng);
+      const Vec2 d{l * std::cos(a), l * std::sin(a)};
+      const double f = topo::moveOwners(t, body, d);
+      ++moves;
+      whole += f > 0.999;
+      for (size_t i = 0; i < body.size(); ++i) EXPECT_LT((t.owners[size_t(body[i])].c - (was[i] + d * f)).len(), 1e-3) << "move " << k << ", pad " << i;
+    }
+    // (Every vertex where its owner says.)
+    for (const topo::LayerMesh& m : t.layers)
+      for (int oi : body)
+        if (oi < int(m.ownerVerts.size()))
+          for (int v : m.ownerVerts[size_t(oi)]) {
+            const topo::Vertex& x = m.verts[size_t(v)];
+            EXPECT_LT((x.p - (t.owners[size_t(oi)].c + t.owners[size_t(oi)].axis * x.t + x.off)).len(), 1e-3);
+            EXPECT_TRUE(t.owners[size_t(oi)].shape.distance(x.p) < 2.0) << "a vertex off its owner's copper after step " << k;
+          }
+    if (k % 20 == 19) ASSERT_EQ(t.check(), std::vector<std::string>{}) << "after step " << k;
+  }
+  EXPECT_EQ(t.check(), std::vector<std::string>{});
+  EXPECT_EQ(staleCapacities(t), std::vector<std::string>{});
+  for (const topo::LayerMesh& m : t.layers) EXPECT_TRUE(t.findCrossings(m).empty());
+  std::println("Arcs_master: {} shifts of a component, {} whole; {} turns, {} whole", moves, whole, turns, turnedWhole);
+  EXPECT_GT(moves, 60);
+  EXPECT_GT(whole * 3, moves);
+  EXPECT_GT(turnedWhole * 4, turns);
+
+  // The model follows the board: a component shifted, and turned a quarter, by the editor (its tracks' ends dragged).
+  int tried = 0, followed = 0;
+  for (int ci = 0; ci < int(b0.components.size()) && tried < 16; ci += std::max(1, int(b0.components.size()) / 16)) {
+    if (b0.components[size_t(ci)].locked || bodyOf(t0, ci).size() < 2) continue;
+    ++tried;
+    Board b = b0;
+    edit::Fragment f;
+    f.components = {ci};
+    edit::Motion mo;
+    mo.pivot = b.components[size_t(ci)].pos.v();
+    mo.shift = {0.3 * kNmPerMm, -0.2 * kNmPerMm};
+    if (tried % 2 == 0) mo.rotate = 90;
+    if (!edit::move(b, f, mo)) continue;
+    topo::Topology m = t0;
+    if (!m.follow(b0, b)) continue;
+    ++followed;
+    EXPECT_EQ(m.check(), std::vector<std::string>{}) << "component " << ci;
+    for (int pi : b.components[size_t(ci)].pads) {
+      if (pi < 0 || m.padOwner[size_t(pi)] < 0) continue;
+      const topo::Owner& o = m.owners[size_t(m.padOwner[size_t(pi)])];
+      const BBox mine = o.shape.bbox(), theirs = b.pads[size_t(pi)].shapeGeom().bbox();
+      EXPECT_LT(std::max({std::abs(mine.minX - theirs.minX), std::abs(mine.minY - theirs.minY), std::abs(mine.maxX - theirs.maxX), std::abs(mine.maxY - theirs.maxY)}), 5.0)
+          << "component " << ci << ", pad " << pi;
+      EXPECT_LT((o.shape.center() - b.pads[size_t(pi)].shapeGeom().center()).len(), 5.0) << "component " << ci << ", pad " << pi;
+    }
+  }
+  std::println("Arcs_master: {} components moved by the editor, the model followed {}", tried, followed);
+  EXPECT_GT(tried, 8);
+  EXPECT_GE(followed * 2, tried);
+}
+
 TEST(Topo, TheModelFollowsAViaGone) {
   for (const char* name : {"topor/Example_04/Arcs_master.pcb", "topor/Example_03/arz_4L.fst"}) {
     auto lb = io::loadBoard(data(name));
