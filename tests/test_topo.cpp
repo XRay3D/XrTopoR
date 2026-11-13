@@ -2752,7 +2752,9 @@ TEST(Topo, RectPadPatternOnTheModel) {
   PinBoard p;
   p.pad("A", 10, 10, PadShapeKind::Rect, 5.6, 2);
   p.pad("A", 30, 16, PadShapeKind::Circle, 1, 1);
-  p.track("A", {{10, 10}, {14, 10.5}, {30, 16}}, 0.3);  // out of the end x = 12.8 at y = 10.35
+  // Drawn out of the end x = 12.8 at y = 10.35; F5 aims the exit where the wire goes (TopoR: «v towards where the
+  // wire goes»): the straight way from the centre to the round pad passes the end at y = 10 + 2.8 * 6 / 20 = 10.84.
+  p.track("A", {{10, 10}, {14, 10.5}, {30, 16}}, 0.3);
   auto f5 = [&] {
     topo::Topology::assignIds(p.b);
     topo::Topology t;
@@ -2764,8 +2766,8 @@ TEST(Topo, RectPadPatternOnTheModel) {
   EXPECT_EQ(s.padsAtCentre, s.pads) << s.text();
   EXPECT_EQ(s.exitsSide, 0) << s.text();
   EXPECT_TRUE(p.vertexAt(10, 10));
-  EXPECT_TRUE(p.vertexAt(12.65, 10.35)) << "the inner point: " << s.text();
-  EXPECT_TRUE(p.vertexAt(12.8, 10.35)) << "the point of the edge";
+  EXPECT_TRUE(p.vertexAt(12.65, 10.84)) << "the inner point: " << s.text();
+  EXPECT_TRUE(p.vertexAt(12.8, 10.84)) << "the point of the edge";
   EXPECT_EQ(s.inRect, 2) << "centre - inner point - edge: " << s.text();
   EXPECT_EQ(p.violations(), 0);
   const size_t tracks = p.b.tracks.size();
@@ -2773,7 +2775,33 @@ TEST(Topo, RectPadPatternOnTheModel) {
   f5();
   EXPECT_EQ(p.b.tracks.size(), tracks);
   EXPECT_NEAR(p.b.tracksLength(), length, 2000);
-  EXPECT_TRUE(p.vertexAt(12.65, 10.35));
+  EXPECT_TRUE(p.vertexAt(12.65, 10.84));
+}
+
+// A wire between two pins next to each other, drawn aslant inside both (it once went to a branch point beside them,
+// which was made one with the lower pin): F5 lays it straight from centre to centre. The exit a wire took from its
+// pad was kept as drawn — pinned —, so it never straightened: «как у металлизации запрет на изменение».
+TEST(Topo, AWireBetweenTwoPinsIsLaidStraight) {
+  PinBoard p;
+  p.pad("A", 10, 10, PadShapeKind::Rect, 1.5, 0.76);
+  p.pad("A", 10, 11.27, PadShapeKind::Rect, 1.5, 0.76);
+  p.pad("A", 14, 11.27, PadShapeKind::Circle, 1, 1);
+  p.track("A", {{10, 10}, {10.48, 10.38}, {10.12, 10.89}, {10, 11.27}}, 0.25);
+  p.track("A", {{10, 11.27}, {14, 11.27}}, 0.25);
+  const double drawn = p.b.tracksLength();
+  topo::Topology::assignIds(p.b);
+  topo::Topology t;
+  t.build(p.b);
+  ASSERT_TRUE(topo::runF5Model(p.b, t).drawn);
+  double off = 0;
+  for (const Track& tr : p.b.tracks)
+    for (Vec2 q : {tr.a.v(), tr.b.v()})
+      if (q.y < PinBoard::at(0, 11.27).y - 1000) off = std::max(off, std::abs(q.x - PinBoard::at(10, 0).x));
+  EXPECT_LT(off, 0.01 * kNmPerMm) << "the wire between the two pins runs down the line of their centres";
+  EXPECT_LT(p.b.tracksLength(), drawn - 0.15 * kNmPerMm);
+  EXPECT_NEAR(p.b.tracksLength(), (1.27 + 4.0) * kNmPerMm, 0.02 * kNmPerMm);
+  EXPECT_EQ(Connectivity::compute(p.b).ratsnest.size(), 0u);
+  EXPECT_EQ(p.violations(), 0);
 }
 
 // F5 of a selection: the tracks of a wire outside its pad are chosen, the selection grows to the wire and

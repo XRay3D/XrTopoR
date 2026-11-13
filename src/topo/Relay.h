@@ -16,6 +16,8 @@ namespace xr::topo {
 
 // The length of the wire pulled taut through the slots of its crossings (a polyline: no arcs), nm.
 double tautLength(const Topology& t, int wire);
+// ... and the polyline itself, from the wire's first end vertex to its other.
+std::vector<Vec2> tautPath(const Topology& t, int wire);
 
 struct RelayPath {
   struct Step {

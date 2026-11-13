@@ -309,6 +309,7 @@ RefineModelResult refineModel(Board& b, Topology& t, const RefineModelOptions& o
     mo.floor = 0.05 * kNmPerMm;
     mo.simplify = false;
     mo.branches = false;
+    mo.clasps = o.clasps;
     OptimizeModelResult jr = optimizeModel(b, t, mo);
     standing.reset();
     if (!jr.drawn) return;

@@ -698,6 +698,55 @@ void dropCrumbs(Board& b, size_t from, RealizeStats& stats) {
     }
 }
 
+namespace {
+
+// Where a wire leaves a polygon pad it ends at the centre of, aimed where the wire goes (TopoR's pattern at a
+// rectangle: the centre, then a point of the side «towards where the wire goes», half a width off its corners at the
+// least): the point of the pad's side the wire crosses that its taut way from the centre passes — the way through
+// the slots of its crossings (Relay.h tautPath).
+//
+// The exit was what the tracks had when the model was made of them, and the realiser pinned the wire there. Drawn
+// through it, the tracks had it again at the next conversion: the exit never moved. A wire whose other end had gone
+// elsewhere since — a branch point made one with a pad, a via moved by F7, a component dragged — kept leaving its pad
+// towards where that end had been: from the centre of pad 16 aslant to its side, and back aslant to the centre of
+// pad 15, for a straight millimetre between the two (the user: «как будто как у металлизации идёт запрет на
+// изменение»).
+void aimExits(Topology& t, const std::vector<int>& wires) {
+  static const bool off = std::getenv("XR_NO_AIM") != nullptr;
+  if (off) return;
+  for (int wi : wires) {
+    Wire& w = t.wires[size_t(wi)];
+    if (w.cross.empty() || w.end[0] < 0 || w.end[1] < 0) continue;
+    const LayerMesh& m = *t.mesh(w.layer);
+    // The side of its own pad the wire crosses first from that end, when it starts at the pad's centre.
+    auto sideOf = [&](int end) -> const Edge* {
+      const Owner& o = t.owners[size_t(w.end[end])];
+      if (o.kind != Owner::Kind::Pad || o.shape.kind != Shape::Kind::Polygon) return nullptr;
+      const Vertex& x = m.verts[size_t(w.endVertex[end])];
+      if (x.t != 0 || x.off.len2() >= 1) return nullptr;
+      const Edge& E = m.edges[size_t(t.crossings[size_t(end ? w.cross.back() : w.cross.front())].edge)];
+      return m.verts[size_t(E.v[0])].owner == w.end[end] && m.verts[size_t(E.v[1])].owner == w.end[end] ? &E : nullptr;
+    };
+    const Edge* side[2] = {sideOf(0), sideOf(1)};
+    if (!side[0] && !side[1]) continue;
+    const std::vector<Vec2> path = tautPath(t, wi);
+    if (path.size() < 2) continue;
+    for (int end = 0; end < 2; ++end) {
+      if (!side[end]) continue;
+      const Vec2 c = m.verts[size_t(w.endVertex[end])].p, to = end ? path[path.size() - 2] : path[1];
+      const Vec2 a = m.verts[size_t(side[end]->v[0])].p, d = m.verts[size_t(side[end]->v[1])].p - a, e = to - c;
+      const double den = d.cross(e), L = d.len();
+      if (std::abs(den) < 1e-9 || L < 1) continue;
+      const double margin = std::min(0.5, (w.width / 2.0 + 1000) / L);
+      const double s = std::clamp((c - a).cross(e) / den, margin, 1 - margin);
+      w.exit[end] = a + d * s;
+      w.hasExit[end] = true;
+    }
+  }
+}
+
+}  // namespace
+
 void drawModel(Board& b, Topology& t, bool direct, RealizeStats& stats, int& nWires, bool editedOnly, const std::vector<int>* only, ModelDrawing* keep,
                const ModelDrawing* from) {
   std::vector<int> chosen;
@@ -738,6 +787,7 @@ void drawModel(Board& b, Topology& t, bool direct, RealizeStats& stats, int& nWi
     }
     r::sort(chosen);
   }
+  aimExits(t, chosen);
   for (auto [owner, id] : t.ownerTracks)
     if (redrawnAt.contains(owner)) gone.insert(id);
   // The sketches here only for the drawing by the tracks (`direct` off) and the debugging output:
@@ -1105,7 +1155,9 @@ F5ModelResult runF5Model(Board& b, Topology& t, const F5ModelOptions& o) {
   static const bool noBranches = std::getenv("XR_NO_BRANCHES") != nullptr;
   if (o.branches && !o.editedOnly && o.direct && !noBranches) {
     ProfScope p("F5 model: the nets' trees");
-    const RefineModelResult br = refineModel(b, t, branchesOnly());
+    RefineModelOptions bo = branchesOnly();
+    bo.clasps = false;  // (F5 leaves the clasps where they are, as TopoR's does)
+    const RefineModelResult br = refineModel(b, t, bo);
     r.branches = br.branches;
     r.reattached = br.reattached;
     r.branchesMerged = br.branchesMerged;

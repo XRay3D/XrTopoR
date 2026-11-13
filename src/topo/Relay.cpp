@@ -103,11 +103,18 @@ Vec2 pointOn(const LayerMesh& m, const Edge& E, double along, double L) {
 }  // namespace
 
 double tautLength(const Topology& t, int wi) {
+  const std::vector<Vec2> path = tautPath(t, wi);
+  double len = 0;
+  for (size_t i = 1; i < path.size(); ++i) len += (path[i] - path[i - 1]).len();
+  return len;
+}
+
+std::vector<Vec2> tautPath(const Topology& t, int wi) {
   const Wire& w = t.wires[wi];
   const LayerMesh& m = *t.mesh(w.layer);
   const Vec2 from = m.verts[w.endVertex[0]].p, to = m.verts[w.endVertex[1]].p;
   const int n = int(w.cross.size());
-  if (n == 0) return (to - from).len();
+  if (n == 0) return {from, to};
   // The portals: every crossing's slot, its left end first (the triangle entered runs the edge from v[0] to
   // v[1] exactly when v[0] is on the wire's left).
   std::vector<std::pair<Vec2, Vec2>> portals{{from, from}};
@@ -161,10 +168,8 @@ double tautLength(const Topology& t, int wi) {
       }
     }
   }
-  path.push_back(to);
-  double len = 0;
-  for (size_t i = 1; i < path.size(); ++i) len += (path[i] - path[i - 1]).len();
-  return len;
+  if ((path.back() - to).len2() >= 1) path.push_back(to);  // (the funnel may have closed on the end itself)
+  return path;
 }
 
 std::optional<RelayPath> findRelay(const Topology& t, int wi, const std::vector<char>* avoid, const std::vector<int>* absent, bool squeeze, double limit) {
