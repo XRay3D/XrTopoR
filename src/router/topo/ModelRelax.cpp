@@ -18,6 +18,7 @@
 #include "core/Prof.h"
 #include "drc/Drc.h"
 #include "geom/Geometry.h"
+#include "router/topo/ModelRefine.h"
 #include "router/topo/ModelSimplify.h"
 #include "router/topo/ModelTools.h"
 #include "router/topo/OwnerPush.h"
@@ -230,6 +231,16 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
     r.log.insert(r.log.end(), sr.log.begin(), sr.log.end());
   }
   if (!prepareModel(t, o.flips, false, nFlips, r.violations)) return r;
+  static const bool noBranches = std::getenv("XR_NO_BRANCHES") != nullptr;
+  if (o.branches && o.owners.empty() && !noBranches) {
+    const RefineModelResult br = refineModel(b, t, branchesOnly());
+    r.branches = br.branches;
+    r.reattached = br.reattached;
+    r.branchesMerged = br.branchesMerged;
+    r.junctionMoves = br.junctionMoves;  // (the branch points it took to their balance: counted with those moved below)
+    r.log.insert(r.log.end(), br.log.begin(), br.log.end());
+    if (!prepareModel(t, false, false, nFlips, r.violations)) return r;
+  }
   const bool debug = std::getenv("XR_TOPO_DEBUG") != nullptr;
 
   // The objects: unlocked vias, and the branch points of unlocked wires. One with fewer than two wires (a

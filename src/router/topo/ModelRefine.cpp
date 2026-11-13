@@ -21,6 +21,18 @@
 
 namespace xr::topo {
 
+RefineModelOptions branchesOnly() {
+  RefineModelOptions o;
+  o.relay = false;
+  o.clinches = false;
+  o.vias = false;
+  o.zoneTracks = false;
+  o.simplify = false;
+  o.flips = false;
+  o.splitAtBareVias = false;
+  return o;
+}
+
 RefineModelResult refineModel(Board& b, Topology& t, const RefineModelOptions& o) {
   ProfScope pAll("F6 model total");
   RefineModelResult r;
@@ -191,6 +203,7 @@ RefineModelResult refineModel(Board& b, Topology& t, const RefineModelOptions& o
   // A wire re-laid leaves room where it lay and takes none where it could not pass: the passes go on while one
   // re-lays something (on Arcs_standard_routing the second finds 3 wires more, 4 mm; the third none).
   auto relayAll = [&] {
+    if (!o.relay) return false;
     const int before = r.relaid;
     for (int pass = 0; pass < 3; ++pass) {
       const int was = r.relaid;
@@ -295,6 +308,7 @@ RefineModelResult refineModel(Board& b, Topology& t, const RefineModelOptions& o
     mo.decay = 0.6;
     mo.floor = 0.05 * kNmPerMm;
     mo.simplify = false;
+    mo.branches = false;
     OptimizeModelResult jr = optimizeModel(b, t, mo);
     standing.reset();
     if (!jr.drawn) return;
@@ -317,6 +331,7 @@ RefineModelResult refineModel(Board& b, Topology& t, const RefineModelOptions& o
   };
   BranchOptions bo;
   bo.flips = o.flips;
+  bo.bareVias = o.splitAtBareVias;
   // A vertex with four wires and more gives a pair a pass.
   auto split = [&] {
     if (!o.branches) return;

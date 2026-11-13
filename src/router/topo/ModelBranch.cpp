@@ -179,6 +179,10 @@ BranchResult splitBranches(Board& b, Topology& t, const BranchOptions& o) {
     const int owner = std::get<0>(key);
     const Owner& V = t.owners[owner];
     if (V.kind == Owner::Kind::Junction && wiresAt[size_t(owner)] < 4) continue;
+    // A via with these two wires alone is a point of one wire, not a vertex of the net's tree: with a branch point
+    // made before it, it would be left at the end of a stub (the vias' tool takes such a via out, and F7 pulls it
+    // onto the wire's straight line).
+    if (!o.bareVias && V.kind == Owner::Kind::Via && wiresAt[size_t(owner)] < 3) continue;
     std::vector<Split> here;
     for (size_t i = 0; i < legs.size(); ++i)
       for (size_t j = i + 1; j < legs.size(); ++j) {

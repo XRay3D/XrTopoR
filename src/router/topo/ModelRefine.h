@@ -37,7 +37,12 @@ struct RefineModelOptions {
   double gain = 0.05 * kNmPerMm;
   double gainPart = 0.01;
   bool simplify = true;  // the nets made trees first (ModelSimplify.h)
+  bool relay = true;     // the wires led by shorter ways (off: the branch points alone, as F5 and F7 have them made)
+  bool splitAtBareVias = true;  // BranchOptions::bareVias
 };
+// The options of the branch points' part alone: a net's tree made anew where it is shorter — new branch points, a
+// branch moved to a nearer wire, branch points made one —, nothing re-laid, no via taken. F5 and F7 run F6 so.
+RefineModelOptions branchesOnly();
 
 struct RefineModelResult {
   bool drawn = false;

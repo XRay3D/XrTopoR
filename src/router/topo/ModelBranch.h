@@ -21,6 +21,9 @@ namespace xr::topo {
 struct BranchOptions {
   double gain = 0.1 * kNmPerMm;  // what a new branch point has to save at the least
   bool flips = true;
+  // A via with two wires alone is split like any vertex (F6: the via is a vertex of the tree). Off: left alone — F7
+  // pulls such a via onto its wire's straight line, and behind a branch point it would be the end of a stub.
+  bool bareVias = true;
 };
 
 struct BranchResult {

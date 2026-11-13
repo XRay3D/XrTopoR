@@ -34,6 +34,9 @@ struct F5ModelOptions {
   bool editedOnly = false;
   // The nets made trees first (ModelSimplify.h): twins and loops taken out, where a net is not flexibly fixed.
   bool simplify = true;
+  // ... and their trees made anew where that is shorter, after the drawing (F6's branch points: ModelRefine.h
+  // branchesOnly). Not with editedOnly.
+  bool branches = true;
 };
 
 struct F5ModelResult {
@@ -44,6 +47,7 @@ struct F5ModelResult {
   int junctionMoves = 0;  // branch points moved to their balance
   int untangled = 0;      // double crossings taken apart first (resolveCrossings)
   int spareLinks = 0, spareVias = 0;  // twins and loops taken out first (simplifyNets), and the vias inside them
+  int branches = 0, reattached = 0, branchesMerged = 0;  // the trees made anew: branch points made, moved, made one
   RealizeStats stats;
 };
 

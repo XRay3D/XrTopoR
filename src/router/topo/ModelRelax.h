@@ -34,6 +34,8 @@ struct OptimizeModelOptions {
   // These owners alone move (empty: all the options name), and their wires alone are drawn (the rest as they lie).
   std::vector<int> owners;
   bool simplify = true;  // the nets made trees first (ModelSimplify.h); off where F5 or F6 call this for the branch points
+  // ... and their trees made anew where that is shorter (F6's branch points: ModelRefine.h branchesOnly); off likewise.
+  bool branches = true;
 };
 
 struct OptimizeModelResult {
@@ -44,6 +46,7 @@ struct OptimizeModelResult {
   int merged = 0;             // ... and were merged with the pad or via there
   int untangled = 0;          // double crossings taken apart first (resolveCrossings)
   int spareLinks = 0, spareVias = 0;  // twins and loops taken out first (simplifyNets), and the vias inside them
+  int branches = 0, reattached = 0, branchesMerged = 0;  // the trees made anew first: branch points made, moved, made one
   int drawings = 0;    // how many times the model was drawn and judged
   int rollbacks = 0;   // iterations whose drawing was worse and stayed worse without the steps blamed
   int conflictsBefore = 0, conflictsAfter = 0;  // the DRC of the first drawing and of the result

@@ -1007,7 +1007,7 @@ TEST(Optimizer, ANetIsMadeATree) {
     t.build(s.b);
     const auto res = topo::runF5Model(s.b, t, {});
     EXPECT_EQ(res.spareLinks, 0);
-    EXPECT_NEAR(s.length(n), 27.0, 0.3);
+    EXPECT_GT(s.length(n), 24.0);
     EXPECT_EQ(topo::refineModel(s.b, t, {}).spareLinks, 0);
     EXPECT_EQ(topo::optimizeModel(s.b, t, {}).spareLinks, 0);
     EXPECT_GT(s.length(n), 24.0);  // (the stub is there; its free end may have stepped)
@@ -1028,5 +1028,60 @@ TEST(Optimizer, ANetIsMadeATree) {
       EXPECT_EQ(s.unrouted(), 0u) << "F" << tool;
       EXPECT_NEAR(s.length(n), 20.0, 0.2) << "F" << tool;
     }
+  }
+}
+
+// A chain of pads with the wires meeting at less than 120 degrees is made a tree with a branch point by each of F5,
+// F6 and F7 (the user's VCC_REG: the trunk to pad 16, pad 16 to pad 15, pad 15 to C1): it was F6's alone.
+TEST(Optimizer, AChainOfPadsGetsItsBranchPoint) {
+  const auto mm = SmallBoard::mm;
+  for (int tool : {5, 6, 7}) {
+    SmallBoard s;
+    const int n = s.b.addNet("VCC");
+    s.pad(5, 9, n);      // the far end of the trunk
+    s.pad(20, 10, n);    // 16
+    s.pad(20, 12.5, n);  // 15
+    s.pad(24, 12.5, n);  // C1
+    s.track({mm(5, 9), mm(20, 10)}, n, s.top);
+    s.track({mm(20, 10), mm(20, 12.5)}, n, s.top);
+    s.track({mm(20, 12.5), mm(24, 12.5)}, n, s.top);
+    topo::Topology::assignIds(s.b);
+    topo::Topology t;
+    t.build(s.b);
+    const double before = s.length(n);
+    int made = 0;
+    if (tool == 5) made = topo::runF5Model(s.b, t, {}).branches;
+    if (tool == 6) made = topo::refineModel(s.b, t, {}).branches;
+    if (tool == 7) made = topo::optimizeModel(s.b, t, {}).branches;
+    int junctions = 0;
+    for (const topo::Owner& o : t.owners) junctions += o.kind == topo::Owner::Kind::Junction && o.layers != 0;
+    EXPECT_GE(made, 1) << "F" << tool;
+    EXPECT_GE(junctions, 1) << "F" << tool;
+    EXPECT_LT(s.length(n), before - 0.1) << "F" << tool;
+    EXPECT_EQ(s.unrouted(), 0u) << "F" << tool;
+    EXPECT_EQ(t.check(), std::vector<std::string>{}) << "F" << tool;
+  }
+  // ... and not for a net with the flexible fixation.
+  for (int tool : {5, 6, 7}) {
+    SmallBoard s;
+    const int n = s.b.addNet("VCC");
+    s.b.nets[size_t(n)].flexFixed = true;
+    s.pad(5, 9, n);
+    s.pad(20, 10, n);
+    s.pad(20, 12.5, n);
+    s.pad(24, 12.5, n);
+    s.track({mm(5, 9), mm(20, 10)}, n, s.top);
+    s.track({mm(20, 10), mm(20, 12.5)}, n, s.top);
+    s.track({mm(20, 12.5), mm(24, 12.5)}, n, s.top);
+    topo::Topology::assignIds(s.b);
+    topo::Topology t;
+    t.build(s.b);
+    if (tool == 5) topo::runF5Model(s.b, t, {});
+    if (tool == 6) topo::refineModel(s.b, t, {});
+    if (tool == 7) topo::optimizeModel(s.b, t, {});
+    int junctions = 0;
+    for (const topo::Owner& o : t.owners) junctions += o.kind == topo::Owner::Kind::Junction && o.layers != 0;
+    EXPECT_EQ(junctions, 0) << "F" << tool;
+    EXPECT_EQ(t.wires.size(), 3u) << "F" << tool;
   }
 }

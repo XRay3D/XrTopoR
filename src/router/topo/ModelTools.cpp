@@ -12,6 +12,7 @@
 #include "core/Connectivity.h"
 #include "core/Prof.h"
 #include "core/SpatialIndex.h"
+#include "router/topo/ModelRefine.h"
 #include "router/topo/ModelRelax.h"
 #include "router/topo/ModelSimplify.h"
 #include "router/topo/RealizerInput.h"
@@ -1055,7 +1056,9 @@ bool leadWireThrough(Board& b, Topology& t, int wire, Vec2 p) {
   }
   // (All the wires drawn, as Freestyle's moves draw them: the wires the new way passes have to move over, and those
   // next to them; drawn alone with its ring, the wire left half a hundred conflicts with what lay as before.)
-  runF5Model(b, t, {});
+  F5ModelOptions o;
+  o.branches = false;  // (the wire was led by hand: the net's tree is not made anew behind the hand)
+  runF5Model(b, t, o);
   for (Track& x : b.tracks) x.edited = false;
   return true;
 }
@@ -1090,6 +1093,7 @@ F5ModelResult runF5Model(Board& b, Topology& t, const F5ModelOptions& o) {
     OptimizeModelOptions mo;
     mo.owners = balanced;
     mo.simplify = false;
+    mo.branches = false;
     mo.flips = false;
     mo.vias = false;
     mo.clasps = false;
@@ -1102,6 +1106,15 @@ F5ModelResult runF5Model(Board& b, Topology& t, const F5ModelOptions& o) {
       r.junctionMoves = jr.junctionMoves;
       r.stats = jr.stats;
     }
+  }
+  static const bool noBranches = std::getenv("XR_NO_BRANCHES") != nullptr;
+  if (o.branches && !o.editedOnly && o.direct && !noBranches) {
+    ProfScope p("F5 model: the nets' trees");
+    const RefineModelResult br = refineModel(b, t, branchesOnly());
+    r.branches = br.branches;
+    r.reattached = br.reattached;
+    r.branchesMerged = br.branchesMerged;
+    if (br.drawn && (br.branches > 0 || br.reattached > 0 || br.branchesMerged > 0)) r.stats = br.stats;
   }
   for (const Violation& v : t.violations)
     if (v.kind == Violation::Kind::Overflow || v.kind == Violation::Kind::OutsideBoard || v.kind == Violation::Kind::Blocked) r.violations.push_back(v);
