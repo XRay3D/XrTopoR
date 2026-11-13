@@ -210,13 +210,18 @@ RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int
     return it == from->slotPoints.end() ? nullptr : &it->second;
   };
   std::vector<SketchKey> sketchKeys;
+  bool sameWires = false;  // `from` is a drawing of these wires (or of the first of them)
   {
     ProfScope p("realize prep: sketches");
     // A wire whose crossed edges and slots stand as in the drawing this one comes from has that drawing's sketch.
-    const bool reuse = from && from->chosen == chosen && from->sketchKeys.size() == chosen.size() && from->wires.size() == chosen.size();
+    // (`from` is of these wires or of the first of them: wires added to a model come after the others.)
+    const size_t nWas = from ? from->chosen.size() : 0;
+    sameWires = from && from->in && nWas <= chosen.size() && std::equal(from->chosen.begin(), from->chosen.end(), chosen.begin()) &&
+                from->sketchKeys.size() == nWas && from->wires.size() == nWas;
     sketchKeys.resize(chosen.size());
     for (size_t k = 0; k < chosen.size(); ++k) {
       const LayerId layer = t.wires[size_t(chosen[k])].layer;
+      const bool reuse = sameWires && k < nWas;
       wires.push_back(sketchOf(b, t, chosen[k], &slotPoints[layer], slotsWas(layer), &sketchKeys[k], reuse ? &from->wires[k] : nullptr,
                                reuse ? &from->sketchKeys[k] : nullptr));
     }
@@ -515,7 +520,7 @@ RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int
   DrawnWires drawn;
   RealizeStats st;
   // From an earlier drawing of the same wires, when there is one: only what the model's changes reach is computed.
-  if (from && from->in && from->chosen == chosen && from->opt.nominal == opt.nominal) updateDrawn(b, wires, opt, in, drawn, st, from->wires, *from->in, from->drawn);
+  if (sameWires && from->opt.nominal == opt.nominal) updateDrawn(b, wires, opt, in, drawn, st, from->wires, *from->in, from->drawn);
   else computeDrawn(b, wires, opt, in, drawn, st);
   st = emitDrawn(b, wires, {}, opt, in, drawn, std::move(st));
   forcesByOwner(t, chosen, st);

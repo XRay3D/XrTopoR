@@ -6,11 +6,13 @@
 // those forces on an element says which way it goes and how far, and the steps shrink from iteration to
 // iteration. The forces are taken from the drawing itself (RealizeStats::ownerForce: the realiser's bends
 // and tangents are the wire of the paper's figure), so what is descended is the length that is drawn.
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
 
 #include "core/Board.h"
+#include "router/topo/ModelTools.h"
 #include "router/topo/Realizer.h"
 #include "topo/Topology.h"
 
@@ -74,6 +76,7 @@ struct Redrawn {
   Topology model;
   Board board;
   DrawingScore score;
+  std::shared_ptr<const ModelDrawing> kept;  // the drawing itself (ModelTools.h): one of the same model's wires is brought up from it
 };
 std::optional<Redrawn> redrawTracks(const Board& edited, bool flips, int& drawings);
 

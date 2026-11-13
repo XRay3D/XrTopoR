@@ -33,11 +33,16 @@ RefineModelResult refineModel(Board& b, Topology& t, const RefineModelOptions& o
     DrawingScore score;
     RealizeStats stats;
     int wires = 0;
+    std::shared_ptr<const ModelDrawing> kept;  // the drawing itself: the next one of the same wires is brought up from it
   };
-  auto draw = [&] {
+  // The drawing of the model as the tools left it (the board's): what a tool's first drawing is brought up from.
+  std::shared_ptr<const ModelDrawing> standing;
+  auto draw = [&](const std::shared_ptr<const ModelDrawing>& from) {
     ProfScope p("F6 model: drawing");
-    Drawn d{t, b, {}, {}, 0};
-    drawModel(d.board, d.owning, true, d.stats, d.wires);
+    Drawn d{t, b, {}, {}, 0, {}};
+    auto kept = std::make_shared<ModelDrawing>();
+    drawModel(d.board, d.owning, true, d.stats, d.wires, false, nullptr, kept.get(), from.get());
+    d.kept = std::move(kept);
     d.score = scoreDrawing(d.board);
     ++r.drawings;
     return d;
@@ -60,7 +65,7 @@ RefineModelResult refineModel(Board& b, Topology& t, const RefineModelOptions& o
   };
   // One pass of re-laying over the model as it stands: the board and the model are left at the best drawing.
   auto relay = [&] {
-  Drawn best = draw();
+  Drawn best = draw(standing);
   if (first) {
     r.conflictsBefore = best.score.conflicts;
     r.lengthBefore = best.score.length;
@@ -149,7 +154,7 @@ RefineModelResult refineModel(Board& b, Topology& t, const RefineModelOptions& o
                      bad.size(), bad.empty() ? "" : bad.front(), crossings, wasCrossings);
     }
     ++r.found;
-    Drawn cur = draw();
+    Drawn cur = draw(best.kept);
     const bool kept = betterDrawing(cur.score, best.score);
     r.log.push_back(std::format("wire {} of {}{}: {:.2f} -> {:.2f} mm in the model; {} conflict(s) in {} place(s), {:.3f} mm short, {:.1f} mm: {}", c.wire,
                                 b.nets[t.wires[c.wire].net].name,
@@ -169,6 +174,7 @@ RefineModelResult refineModel(Board& b, Topology& t, const RefineModelOptions& o
   }
   t = std::move(best.owning);
   b = std::move(best.board);
+  standing = best.kept;
   r.stats = best.stats;
   r.drawn = true;
   r.conflictsAfter = best.score.conflicts;
@@ -237,6 +243,7 @@ RefineModelResult refineModel(Board& b, Topology& t, const RefineModelOptions& o
     r.zoneTracksRemoved += removed;
     Topology::assignIds(b);
     t.build(b);
+    standing.reset();
     if (!prepareModel(t, o.flips, false, nFlips, r.violations)) return false;
     refused.clear();
     refusedPairs.clear();
@@ -251,7 +258,9 @@ RefineModelResult refineModel(Board& b, Topology& t, const RefineModelOptions& o
     ViaOptions vo;
     vo.flips = o.flips;
     vo.span = o.viaSpan;
+    vo.drawing = standing;
     ViaResult vr = removeVias(b, t, vo);
+    standing = vr.drawing;
     r.viasRemoved += vr.removed;
     r.drawings += vr.drawings;
     for (const std::string& l : vr.log) r.log.push_back(l);
@@ -273,6 +282,7 @@ RefineModelResult refineModel(Board& b, Topology& t, const RefineModelOptions& o
     mo.decay = 0.6;
     mo.floor = 0.05 * kNmPerMm;
     OptimizeModelResult jr = optimizeModel(b, t, mo);
+    standing.reset();
     if (!jr.drawn) return;
     r.junctionMoves = std::max(r.junctionMoves, jr.junctionMoves);
     r.drawings += jr.drawings;
@@ -286,6 +296,7 @@ RefineModelResult refineModel(Board& b, Topology& t, const RefineModelOptions& o
     if (br.made > 0) {  // the model is built anew: other wires under the numbers
       refused.clear();
       refusedPairs.clear();
+      standing.reset();
     }
     r.drawings += br.drawings;
     for (const std::string& l : br.log) r.log.push_back(l);

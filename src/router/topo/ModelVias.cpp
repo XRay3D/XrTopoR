@@ -50,6 +50,7 @@ int vertexOf(const Topology& t, const LayerMesh& m, int owner, Vec2 from) {
 ViaResult removeVias(Board& b, Topology& t, const ViaOptions& o) {
   ProfScope pAll("F6 model: vias");
   ViaResult r;
+  r.drawing = o.drawing;
   const bool debug = std::getenv("XR_TOPO_DEBUG") != nullptr;
   std::set<std::tuple<uint32_t, int, int64_t, int>> refused;
   std::vector<char> fixedNets(b.nets.size(), 0);
@@ -181,7 +182,13 @@ ViaResult removeVias(Board& b, Topology& t, const ViaOptions& o) {
     const std::vector<char> unsettled = viasTooClose(b, t);
     laid.clear();
     for (const Cand& c : list) {
-      Topology before = mt;
+      // The way back when a candidate's copies find no way. One copy and no other type for the neighbour (nearly all
+      // of them): the copy's wire is taken off again, and the wires led behind it are relayPast's to put back; a
+      // copy of the whole model only for the rest (it was made for every candidate: a hundred a pass).
+      const bool simple = c.retype < 0 && std::popcount(c.copy) == 1;
+      std::optional<Topology> before, pastSaved;
+      if (!simple) before = mt;
+      const size_t wiresBefore = mt.wires.size();
       bool ok = true;
       if (c.retype >= 0) {
         // The neighbour as a via of the wider type: copper on the new layers, a vertex in their meshes.
@@ -239,11 +246,17 @@ ViaResult removeVias(Board& b, Topology& t, const ViaOptions& o) {
         const std::vector<int> holders = wiresRound(mt, l, c.v, c.u, mt.wires[size_t(ni)].net, ni, &fixedNets);
         const std::optional<PastResult> past = relayPast(mt, ni, holders, limit, &unsettled, saved);
         ok = past && past->othersAfter <= past->othersBefore + o.worth;
+        if (past && !ok && simple) pastSaved = std::move(saved);
       }
       if (ok) {
         laid.push_back(c);
       } else {
-        mt = std::move(before);
+        if (before) {
+          mt = std::move(*before);
+        } else {
+          if (pastSaved) mt = std::move(*pastSaved);
+          mt.wires.resize(wiresBefore);
+        }
         refused.insert(c.key);
       }
     }
@@ -259,7 +272,9 @@ ViaResult removeVias(Board& b, Topology& t, const ViaOptions& o) {
     {
       RealizeStats st;
       int nWires = 0;
-      drawModel(mb, mt, true, st, nWires);
+      // (From the drawing of the model as it stands: the copies are its last wires, the rest but for the few led
+      // behind them lie as they lay.)
+      drawModel(mb, mt, true, st, nWires, false, nullptr, nullptr, r.drawing.get());
       ++r.drawings;
     }
     std::set<uint32_t> goneVias, goneTracks;
@@ -318,6 +333,7 @@ ViaResult removeVias(Board& b, Topology& t, const ViaOptions& o) {
         r.removed += was.vias - drawn->score.vias;
         b = std::move(drawn->board);
         t = std::move(drawn->model);
+        r.drawing = drawn->kept;
         taken = true;
         break;
       }

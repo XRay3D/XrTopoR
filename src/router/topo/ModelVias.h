@@ -13,6 +13,7 @@
 // The model has no way to take out an owner wires end at, so the via goes on the drawing: the model with the
 // copies is drawn, the via and the wire that joined the two are taken off the board, and the model is built
 // from the tracks anew, drawn and judged (a via is worth kViaCost of length to the judge).
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -26,6 +27,8 @@ struct ViaOptions {
   double span = 10.0 * kNmPerMm;  // the wire between the via and its neighbour is shorter than this (the paper's 10 mm)
   double worth = kViaCost;        // a copy may be this much longer than the wire it stands for, and the wires led behind in sum
   bool flips = true;
+  // The drawing of the model as it stands (ModelTools.h), when there is one: the copies' drawing is brought up from it.
+  std::shared_ptr<const ModelDrawing> drawing;
 };
 
 struct ViaResult {
@@ -33,6 +36,7 @@ struct ViaResult {
   int removed = 0;
   int drawings = 0;
   std::vector<std::string> log;
+  std::shared_ptr<const ModelDrawing> drawing;  // of the model as it is left
 };
 
 // `b` is the model's drawing (the wires of `t` own its tracks); both are replaced when vias went. The vias of

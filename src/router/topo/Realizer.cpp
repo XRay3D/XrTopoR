@@ -1937,7 +1937,9 @@ bool drawWires(const Board& b, const std::vector<RealWire>& wires, const Realize
       d.made.whole = why;
       return false;
     };
-    if (int(was.wires.size()) != NW || int(was.in.hits.size()) != NW || int(was.d.bends.size()) != NW || int(was.in.sketches.size()) != NW)
+    // (The earlier drawing's wires are these, or the first of these: wires added to a model come after the others.)
+    const int nWas = int(was.wires.size());
+    if (nWas > NW || int(was.in.hits.size()) != nWas || int(was.d.bends.size()) != nWas || int(was.in.sketches.size()) != nWas)
       return whole("another set of wires");
     // What of the input changed: the obstacle points, the wires' own crossings.
     std::vector<std::vector<char>> ptChanged(NL), shareChanged(NL);
@@ -1962,7 +1964,8 @@ bool drawWires(const Board& b, const std::vector<RealWire>& wires, const Realize
     std::vector<char> fresh(size_t(NW), 0);  // a wire of other crossings: nothing of its earlier drawing holds
     std::vector<char> endMoved(size_t(NW), 0);
     int nFresh = 0;
-    for (int wi = 0; wi < NW; ++wi) {
+    for (int wi = nWas; wi < NW; ++wi) fresh[size_t(wi)] = 1, ++nFresh;
+    for (int wi = 0; wi < nWas; ++wi) {
       const RealWire& x = wires[wi];
       const RealWire& y = was.wires[wi];
       const Polyline& sx = sketches[wi];
@@ -2122,8 +2125,10 @@ bool drawWires(const Board& b, const std::vector<RealWire>& wires, const Realize
           const RealWire& w = wires[wi];
           // What it was: against the earlier drawing for a wire begun anew, against what stands for the rest.
           const bool anew = fresh[wi] && !laid[size_t(wi)];
-          const std::vector<Bend> wasBends = anew ? was.d.bends[wi] : bendsOf[wi];
-          const std::vector<Vec2> wasIn = anew ? was.d.tin[wi] : tinOf[wi], wasOut = anew ? was.d.tout[wi] : toutOf[wi];
+          const bool added = wi >= nWas;  // (no earlier drawing of it at all)
+          const std::vector<Bend> wasBends = added ? std::vector<Bend>{} : anew ? was.d.bends[wi] : bendsOf[wi];
+          const std::vector<Vec2> wasIn = added ? std::vector<Vec2>{} : anew ? was.d.tin[wi] : tinOf[wi],
+                                  wasOut = added ? std::vector<Vec2>{} : anew ? was.d.tout[wi] : toutOf[wi];
           const std::vector<std::array<double, 2>> wasR = bendR[wi];
           // Its radii anew every time: laid before the stack under it came to rest, it would keep that round's.
           laid[size_t(wi)] = 1;

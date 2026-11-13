@@ -361,7 +361,7 @@ DrawingScore scoreDrawing(const Board& b) {
 
 std::optional<Redrawn> redrawTracks(const Board& edited, bool flips, int& drawings) {
   ProfScope p("tracks edited: redrawing");
-  Redrawn r{{}, edited, {}};
+  Redrawn r{{}, edited, {}, {}};
   Topology::assignIds(r.board);
   r.model.build(r.board);
   int nFlips = 0;
@@ -377,7 +377,9 @@ std::optional<Redrawn> redrawTracks(const Board& edited, bool flips, int& drawin
   }
   RealizeStats st;
   int wires = 0;
-  drawModel(r.board, r.model, true, st, wires);
+  auto kept = std::make_shared<ModelDrawing>();
+  drawModel(r.board, r.model, true, st, wires, false, nullptr, kept.get());
+  r.kept = std::move(kept);
   r.score = scoreDrawing(r.board);
   ++drawings;
   return r;
