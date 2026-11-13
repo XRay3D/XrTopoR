@@ -1830,6 +1830,19 @@ TEST(Gui, ClicksAtOnePlaceGoThroughWhatLiesThere) {
   EXPECT_TRUE(f.doc.selectedComponents().empty());
   ASSERT_EQ(f.doc.selectedItems().size(), 1u);
   EXPECT_EQ(f.doc.selectedItems()[0].type, ItemType::Track);
+
+  // A double click on the wire: the whole of it, as «Выделить весь проводник».
+  click(p + QPoint(40, 40));
+  click(p);
+  QTest::mouseDClick(&f.view, Qt::LeftButton, {}, p);
+  f.view.selectWire();
+  const auto whole = f.doc.selectedItems();
+  click(p + QPoint(40, 40));
+  click(p);
+  QTest::mouseDClick(&f.view, Qt::LeftButton, {}, p);
+  EXPECT_EQ(f.doc.selectedItems(), whole);
+  EXPECT_TRUE(r::contains(whole, ItemRef{ItemType::Track, track}));
+  EXPECT_GT(whole.size(), 1u);
 }
 
 // A wire dragged in Freestyle: while the mouse is down the board stands and the way the wire would take through the

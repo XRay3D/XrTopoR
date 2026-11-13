@@ -1222,6 +1222,17 @@ void BoardView::mouseReleaseEvent(QMouseEvent* e) {
 }
 
 void BoardView::mouseDoubleClickEvent(QMouseEvent* e) {
+  // On a wire: the whole of it (the first click took the segment).
+  if (mode_ == Mode::Select && e->button() == Qt::LeftButton && doc_->hasBoard() &&
+      !(e->modifiers() & (Qt::ShiftModifier | Qt::ControlModifier))) {
+    const auto items = doc_->selectedItems();
+    if (items.size() == 1 && items[0].type == ItemType::Track && doc_->selectedComponents().empty()) {
+      selectWire();
+      cycleSkipItems_.clear();
+      cycleSkipComps_.clear();
+      cyclePending_ = false;
+    }
+  }
   if (mode_ == Mode::Route && routing_ && e->button() == Qt::LeftButton) finishRoute();
   if (mode_ == Mode::Draw && e->button() == Qt::LeftButton) finishShape();
 }
