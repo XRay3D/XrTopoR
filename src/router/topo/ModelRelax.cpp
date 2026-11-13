@@ -240,14 +240,6 @@ std::optional<Vec2> blockerAt(const Board& b, const Topology& t, const OwnerGrid
   return std::nullopt;
 }
 
-// The DRC names a violation once per pair of pieces (an arc is many tracks): the places are what is judged —
-// the violations of one pair of nets within a millimetre of each other, as deep as the deepest of them.
-struct Place {
-  std::pair<int, int> nets;
-  Vec2 pos;
-  double depth = 0;
-  bool shorted = false;
-};
 std::vector<Place> placesOf(const Board& b, const std::vector<DrcViolation>& vs) {
   std::vector<Place> out;
   for (const DrcViolation& v : vs) {
@@ -271,6 +263,8 @@ std::vector<Place> placesOf(const Board& b, const std::vector<DrcViolation>& vs)
   }
   return out;
 }
+}  // namespace
+
 // The places of `now` that `was` has not, or has shallower by more than the drawing's noise: what a change added.
 std::vector<Place> addedPlaces(const std::vector<Place>& was, const std::vector<Place>& now) {
   std::vector<Place> added;
@@ -282,6 +276,8 @@ std::vector<Place> addedPlaces(const std::vector<Place>& was, const std::vector<
   }
   return added;
 }
+
+namespace {
 
 // The connections `now` has lost against `was`, as places to blame someone for: both ends of every line of a net
 // that has more lines now, that no line of `was` matches. (A drawing with a connection lost is refused whole; with
@@ -345,7 +341,8 @@ DrawingScore scoreDrawing(const Board& b) {
   const std::vector<DrcViolation> vs = runDrc(b, d);
   s.conflicts = int(vs.size());
   for (const DrcViolation& v : vs) s.shortfall += std::max(0.0, v.required - v.actual);
-  const std::vector<Place> places = placesOf(b, vs);
+  s.at = placesOf(b, vs);
+  const std::vector<Place>& places = s.at;
   s.places = int(places.size());
   for (const Place& p : places) {
     s.depth += p.depth;

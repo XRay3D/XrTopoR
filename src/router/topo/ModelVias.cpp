@@ -313,6 +313,7 @@ ViaResult removeVias(Board& b, Topology& t, const ViaOptions& o) {
     const DrawingScore was = scoreDrawing(b);
     const size_t refusedBefore = refused.size();
     bool taken = false;
+    std::vector<Cand> suspects;  // the candidates the last attempt was the worse for, left out of this one
     while (!list.empty() && attempts < kAttempts) {
       ++attempts;
       std::vector<Cand> laid;
@@ -330,6 +331,7 @@ ViaResult removeVias(Board& b, Topology& t, const ViaOptions& o) {
                        -t.owners[size_t(c.v)].c.y / 1e6, std::format(", wire of {:.2f} mm{}{}", c.length / 1e6, c.both ? ", both" : "", c.retype >= 0 ? ", its neighbour to another type" : ""),
                        better ? "gone" : "stays");
       if (better) {
+        if (suspects.size() == 1) refused.insert(suspects.front().key);  // (with it worse, without it better)
         r.removed += was.vias - drawn->score.vias;
         b = std::move(drawn->board);
         t = std::move(drawn->model);
@@ -337,8 +339,31 @@ ViaResult removeVias(Board& b, Topology& t, const ViaOptions& o) {
         taken = true;
         break;
       }
-      // Which of them it was worse for the drawing does not say: one alone is refused, of more the first half
-      // is tried (the rest come again in the next pass).
+      // Which of them it was worse for: those whose way from the via to its neighbour passes a place of violation
+      // the drawing added (within 2 mm of it, or within 8 mm when the place is of the candidate's own net). The
+      // others are tried without them at once; a single one so blamed, when the rest then goes, is refused for
+      // good. (The half of them were tried, whoever it was: of twelve attempts on RMT19M_A8SWA_V5 nine were no
+      // better, and the tool's attempts ran out with candidates left.)
+      if (drawn && laid.size() > 1) {
+        const std::vector<Place> added = addedPlaces(was.at, drawn->score.at);
+        std::vector<Cand> rest, blamed;
+        for (const Cand& c : laid) {
+          const Vec2 p = t.owners[size_t(c.v)].c, q = t.owners[size_t(c.u)].c;
+          const int net = t.owners[size_t(c.v)].net;
+          const bool hit = r::any_of(added, [&](const Place& a) {
+            const double d = distPointSegment(a.pos, p, q);
+            return d < 2 * kNmPerMm || (d < 8 * kNmPerMm && (a.nets.first == net || a.nets.second == net));
+          });
+          (hit ? blamed : rest).push_back(c);
+        }
+        if (!blamed.empty() && !rest.empty()) {
+          if (debug) std::println(stderr, "vias: {} of {} blamed for {} place(s) added", blamed.size(), laid.size(), added.size());
+          suspects = std::move(blamed);
+          list = std::move(rest);
+          continue;
+        }
+      }
+      suspects.clear();
       if (laid.size() == 1) {
         refused.insert(laid.front().key);
         std::erase_if(list, [&](const Cand& c) { return refused.contains(c.key); });

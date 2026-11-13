@@ -52,6 +52,17 @@ struct OptimizeModelResult {
   RealizeStats stats;
 };
 
+// The DRC names a violation once per pair of pieces (an arc is many tracks): the places are what is judged —
+// the violations of one pair of nets within a millimetre of each other, as deep as the deepest of them.
+struct Place {
+  std::pair<int, int> nets;
+  Vec2 pos;
+  double depth = 0;
+  bool shorted = false;
+};
+// The places of `now` that `was` has not, or has shallower by more than the drawing's noise: what a change added.
+std::vector<Place> addedPlaces(const std::vector<Place>& was, const std::vector<Place>& now);
+
 // What a drawing is worth to the judge of F6 and F7: the DRC's violations gathered into places (one pair of
 // nets within a millimetre, as deep as the deepest), nothing unrouted counted in.
 struct DrawingScore {
@@ -61,6 +72,7 @@ struct DrawingScore {
   double shortfall = 0;                // the DRC's violations' depth summed, nm
   double depth = 0, length = 0;        // the places' depth; the tracks' length, nm
   int vias = 0;
+  std::vector<Place> at;               // the places themselves
   double score() const;                // length + 100 mm per mm of depth + 1 mm per place + kViaCost per via
 };
 // What a via is worth in length to the judge (F6 takes a via away when the wires get no longer than this for
