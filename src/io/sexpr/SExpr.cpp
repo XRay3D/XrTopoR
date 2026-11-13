@@ -221,7 +221,13 @@ static void writeCompactImpl(const Node& n, int indent, std::string& out) {
     }
     return;
   }
-  bool inl = depth(n) <= 2;
+  // A flat list on one line — but not a long one: an outline of a pour's island has thousands of points, and on one
+  // line that was 118 000 characters of P-CAD ASCII (its own files have every point of an outline on a line of its
+  // own, 266 characters at the longest). P-CAD read such a file with the cutouts of its pours not cut.
+  constexpr size_t kInline = 6;
+  size_t lists = 0;
+  for (const Node& k : n.kids) lists += k.isList;
+  bool inl = depth(n) <= 2 && lists <= kInline;
   out += '(';
   for (size_t k = 0; k < n.kids.size(); ++k) {
     const Node& c = n.kids[k];
