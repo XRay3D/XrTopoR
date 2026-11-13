@@ -167,7 +167,7 @@ double tautLength(const Topology& t, int wi) {
   return len;
 }
 
-std::optional<RelayPath> findRelay(const Topology& t, int wi, const std::vector<char>* avoid, const std::vector<int>* absent, bool squeeze) {
+std::optional<RelayPath> findRelay(const Topology& t, int wi, const std::vector<char>* avoid, const std::vector<int>* absent, bool squeeze, double limit) {
   const Wire& w = t.wires[wi];
   const LayerMesh& m = *t.mesh(w.layer);
   RelayPath out;
@@ -303,6 +303,7 @@ std::optional<RelayPath> findRelay(const Topology& t, int wi, const std::vector<
   std::priority_queue<Item, std::vector<Item>, std::greater<>> open;
   std::map<std::tuple<int, int, int>, double> seen;  // (triangle, local edge or -1 - corner, gap) -> best g
   auto push = [&](Node nd) {
+    if (nd.g + (G.p - nd.p).len() > limit) return;  // (no path through here is within the limit: the straight line to the goal is the least left)
     const auto key = std::tuple(nd.tri, nd.le >= 0 ? nd.le : -1 - nd.corner, nd.gap);
     auto [it, fresh] = seen.try_emplace(key, nd.g);
     if (!fresh) {
@@ -477,7 +478,7 @@ std::optional<PastResult> relayPast(Topology& t, int wire, const std::vector<int
                                     std::optional<Topology>& saved, int most) {
   if (holders.empty()) return std::nullopt;
   auto fits = [&](const std::vector<int>& absent) {
-    const std::optional<RelayPath> p = findRelay(t, wire, avoid, &absent);
+    const std::optional<RelayPath> p = findRelay(t, wire, avoid, &absent, false, limit);
     return p && p->length <= limit;
   };
   // With all of them out there is no way either: no clinch, and none of them is tried alone.
@@ -509,7 +510,7 @@ std::optional<PastResult> relayPast(Topology& t, int wire, const std::vector<int
     return std::nullopt;
   };
   for (int h : out) takeOut(t, h);
-  const std::optional<RelayPath> own = findRelay(t, wire, avoid);
+  const std::optional<RelayPath> own = findRelay(t, wire, avoid, nullptr, false, limit);
   if (!own || own->length > limit) return back();
   applyRelay(t, wire, *own);
   for (int h : out) {

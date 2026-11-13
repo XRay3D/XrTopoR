@@ -616,7 +616,7 @@ BranchResult reattachBranches(Board& b, Topology& t, const BranchOptions& o) {
     const double limit = c.len - stub - std::max(o.gain, 0.05 * c.len);
     bool ok = false;
     double others = 0;
-    if (const std::optional<RelayPath> path = findRelay(mt, ni, &unsettled); path && path->length <= limit) {
+    if (const std::optional<RelayPath> path = findRelay(mt, ni, &unsettled, nullptr, false, limit); path && path->length <= limit) {
       applyRelay(mt, ni, *path);
       ok = true;
     } else {

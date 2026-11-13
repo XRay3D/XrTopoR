@@ -6,6 +6,7 @@
 // never across a chord of another net, an edge passable while the wires with the new one among them still
 // fit — and the path's crossings are put in. The crossings of the end pad's own sides stay where they are
 // (the wire leaves its pad as it did).
+#include <limits>
 #include <optional>
 #include <vector>
 
@@ -36,8 +37,10 @@ struct RelayPath {
 // (takeOut) before the path is applied.
 // `squeeze`: a gap short of room is taken too, at the price of its deficit many times over (a wire pushed
 // out of a keepout had better squeeze in beside the others than stay where it is); else only gaps with room.
+// `limit`: a path longer than this is of no use to the caller — the search does not go where no path within it can
+// lead (without it a search with no way to its goal walks the whole layer: the vias' tool asks for hundreds such).
 std::optional<RelayPath> findRelay(const Topology& t, int wire, const std::vector<char>* avoid = nullptr, const std::vector<int>* absent = nullptr,
-                                   bool squeeze = false);
+                                   bool squeeze = false, double limit = std::numeric_limits<double>::max());
 // Takes the wire's old crossings out and puts the path's in; the edges' capacities are refreshed.
 void applyRelay(Topology& t, int wire, const RelayPath& path);
 // Takes the wire's crossings out (all but those of its own pads' sides) and puts none in: the wire is to be

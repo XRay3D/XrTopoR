@@ -237,7 +237,7 @@ ViaResult removeVias(Board& b, Topology& t, const ViaOptions& o) {
         const int ni = int(mt.wires.size());
         mt.wires.push_back(std::move(n));
         const double limit = c.length + o.worth;
-        if (const std::optional<RelayPath> path = findRelay(mt, ni, &unsettled); path && path->length <= limit) {
+        if (const std::optional<RelayPath> path = findRelay(mt, ni, &unsettled, nullptr, false, limit); path && path->length <= limit) {
           applyRelay(mt, ni, *path);
           continue;
         }
