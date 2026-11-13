@@ -2155,6 +2155,7 @@ void BoardView::changeTrackWidth() {
   if (!w) return;
   if (routing_) {
     routeWidth_ = *w;
+    routeWidthOwn_ = true;
     refresh();
     return;
   }
@@ -2354,6 +2355,27 @@ void BoardView::cancelTool() {
 
 // ---------------------------------------------------------------- routing tool
 
+Coord BoardView::routeWidthAt(const Pick& pk, LayerId layer) const {
+  const Board& b = *doc_->board();
+  const int net = pk.item ? itemNet(b, *pk.item) : kNoNet;
+  const Coord rule = b.trackWidth(net, layer);
+  if (!pk.item) return rule;
+  if (pk.item->type == ItemType::Track) {
+    const Track& t = b.tracks[size_t(pk.item->index)];
+    return t.layer == layer && t.zip < 0 && t.width > 0 ? t.width : rule;
+  }
+  if (pk.item->type != ItemType::Pad && pk.item->type != ItemType::Via) return rule;
+  std::optional<Coord> one;
+  for (const Shape& s : itemShapes(b, *pk.item, 0, layer))
+    for (const Track& t : b.tracks) {
+      if (t.net != net || t.layer != layer || t.zip >= 0) continue;
+      if (s.distance(t.a.v()) > 0 && s.distance(t.b.v()) > 0) continue;
+      if (one && *one != t.width) return rule;  // (of several widths: none of them is the one)
+      one = t.width;
+    }
+  return one.value_or(rule);
+}
+
 void BoardView::routeStart(const Pick& pk, Vec2 at) {
   Board& b = *doc_->board();
   routing_ = true;
@@ -2368,7 +2390,8 @@ void BoardView::routeStart(const Pick& pk, Vec2 at) {
         if ((lm >> l) & 1) { routeLayer_ = l; break; }
   }
   doc_->setActiveLayer(routeLayer_);
-  routeWidth_ = b.trackWidth(routeNet_, routeLayer_);
+  routeWidth_ = routeWidthAt(pk, routeLayer_);
+  routeWidthOwn_ = routeWidth_ != b.trackWidth(routeNet_, routeLayer_);
   routeTracks_.clear();
   routeVias_.clear();
   routeLast_ = at;
@@ -2479,7 +2502,7 @@ void BoardView::routeAddVia() {
   routeVias_.push_back(v);
   routeDir_.reset();
   routeLayer_ = nextCopper(routeLayer_);
-  routeWidth_ = b.trackWidth(routeNet_, routeLayer_);
+  if (!routeWidthOwn_) routeWidth_ = b.trackWidth(routeNet_, routeLayer_);
   doc_->setActiveLayer(routeLayer_);
   updateRouteHint();
   refresh();
@@ -2895,7 +2918,7 @@ void BoardView::selectCopper(int toporIndex) {
   if (routing_ && l != routeLayer_) {
     routeAddVia();
     routeLayer_ = l;
-    routeWidth_ = b.trackWidth(routeNet_, routeLayer_);
+    if (!routeWidthOwn_) routeWidth_ = b.trackWidth(routeNet_, routeLayer_);
     updateRouteHint();
   }
   doc_->setActiveLayer(l);

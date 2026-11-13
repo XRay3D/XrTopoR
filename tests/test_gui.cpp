@@ -2119,6 +2119,45 @@ struct RouteBoard {
 
 }  // namespace
 
+// A route started at a track goes on at the track's width, one started at a via whose tracks are of one width at
+// theirs, and the width is kept on the next layer; else it is the rule's.
+TEST(Gui, ARouteGoesOnAtTheWidthOfWhereItStarts) {
+  const Coord rule = mmToNm(0.25), wide = mmToNm(0.8);
+  {  // At the end of a wide track.
+    RouteBoard f;
+    f.b->netClasses[0].trackWidth = rule;
+    f.wire(RouteBoard::mm(20, 10), RouteBoard::mm(30, 10)).width = wide;
+    f.doc.invalidate();
+    f.view.setMode(Mode::Route);
+    f.click(RouteBoard::mm(30, 10));
+    ASSERT_TRUE(f.view.isRouting());
+    EXPECT_EQ(f.view.routeWidth(), wide);
+    f.view.routeAddVia();
+    EXPECT_EQ(f.view.routeWidth(), wide) << "kept on the next layer";
+  }
+  {  // At the via, its track wide.
+    RouteBoard f;
+    f.b->netClasses[0].trackWidth = rule;
+    f.wire(RouteBoard::mm(10, 10), RouteBoard::mm(10, 20)).width = wide;
+    f.start();
+    EXPECT_EQ(f.view.routeWidth(), wide);
+  }
+  {  // At the via, its tracks of two widths: the rule's.
+    RouteBoard f;
+    f.b->netClasses[0].trackWidth = rule;
+    f.wire(RouteBoard::mm(10, 10), RouteBoard::mm(10, 20)).width = wide;
+    f.wire(RouteBoard::mm(10, 10), RouteBoard::mm(20, 10)).width = mmToNm(0.4);
+    f.start();
+    EXPECT_EQ(f.view.routeWidth(), rule);
+  }
+  {  // At the bare via: the rule's.
+    RouteBoard f;
+    f.b->netClasses[0].trackWidth = rule;
+    f.start();
+    EXPECT_EQ(f.view.routeWidth(), rule);
+  }
+}
+
 // «;» lays the wire to the nearest place of what the net has not joined, a wire's line among them: the wire gets a
 // vertex there. A via farther off stays for the next one.
 TEST(Gui, RouteToTheNearestPlaceOnAWire) {

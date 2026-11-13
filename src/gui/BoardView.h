@@ -106,6 +106,7 @@ class BoardView : public QOpenGLWidget {
   void cancelTool();
   void finishRoute();
   void routeAddVia();      // via + layer change while routing
+  Coord routeWidth() const { return routeWidth_; }  // the width of the track being laid
   void toggleLayer();      // L: while routing, a via to the next copper layer
   void viaKey();           // V: a via while routing, otherwise the via tool
   void routeUndoLast();    // Backspace: drops the last routed segment (and its via)
@@ -328,6 +329,12 @@ class BoardView : public QOpenGLWidget {
   int routeNet_ = kNoNet;
   LayerId routeLayer_ = 0;
   Coord routeWidth_ = 0;
+  // The width was not the rule's: taken from the track the routing started at, or set by hand (W). It is kept on
+  // the next layer too; the rule's width follows the layer only when it is the rule's.
+  bool routeWidthOwn_ = false;
+  // The width a route starting there continues with: the track's own; at a pad or via, that of the tracks of the net
+  // that leave it on the layer, when they are of one width; else the rule's.
+  Coord routeWidthAt(const Pick& pk, LayerId layer) const;
   std::vector<Track> routeTracks_;
   std::vector<Via> routeVias_;
   Vec2 routeLast_;
