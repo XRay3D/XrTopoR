@@ -1665,6 +1665,7 @@ TEST(Gui, FreestyleDrag) {
     EXPECT_EQ(f.doc.topology().wires.size(), fresh.wires.size()) << how;
   };
   size_t tracks = b.tracks.size();
+  const size_t wires = live->wires.size();
   int ci = -1;
   for (int c = 0; c < int(b.components.size()) && ci < 0; ++c)
     if (!b.components[c].locked && !b.components[c].pads.empty()) ci = c;
@@ -1682,7 +1683,10 @@ TEST(Gui, FreestyleDrag) {
   EXPECT_NEAR(f.b().components[ci].pos.x, pos.x + 1.5 * kNmPerMm, 0.05 * kNmPerMm);
   EXPECT_EQ(Connectivity::compute(f.b()).ratsnest.size(), unrouted);
   EXPECT_EQ(&f.doc.topology(), live) << "moved in the model, not built anew";
-  likeBuilt("after the drag");
+  // (The drag draws the whole board from the model, as F5 does: the model keeps its wires — one built anew from
+  // that drawing has a wire less on this board, two branch points 4 nm apart being one to it.)
+  EXPECT_EQ(f.doc.topology().wires.size(), wires);
+  EXPECT_EQ(f.doc.topology().check(), std::vector<std::string>{});
   f.doc.undoStack()->undo();
   EXPECT_EQ(f.b().components[ci].pos.v(), pos);
   EXPECT_EQ(f.b().tracks.size(), tracks);

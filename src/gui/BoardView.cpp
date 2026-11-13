@@ -665,10 +665,7 @@ void BoardView::mousePressEvent(QMouseEvent* e) {
                       (pk.component < 0 && pk.item && r::contains(doc_->selectedItems(), *pk.item));
       if (add || !selected) clickSelect(pk, e->modifiers());
       if (add) break;
-      fsTarget_ = {};
-      fsTarget_.fragment = selectedFragment();
-      fsTarget_.fragment.tracks.clear();
-      fsTarget_.fragment.zones.clear();
+      fsTarget_ = freestyleTarget();
       if (!fsTarget_.fragment.empty()) startDrag(Drag::Freestyle, w);
       break;
     }
@@ -1262,20 +1259,21 @@ void BoardView::rotateSelection(double deg) {
   }
   if (mode_ == Mode::Freestyle && drag_ == Drag::None) {
     // Turned in Freestyle, the wires are re-shaped as well.
-    fsTarget_ = {};
-    fsTarget_.fragment = selectedFragment();
-    fsTarget_.fragment.tracks.clear();
-    fsTarget_.fragment.zones.clear();
+    fsTarget_ = freestyleTarget();
     if (fsTarget_.fragment.empty()) return;
     if (edit::hasLocked(*doc_->board(), fsTarget_.fragment)) {
       emit status(tr("Среди выделенных объектов есть зафиксированные: перемещение запрещено"));
       return;
     }
     auto before = doc_->beginEdit();
-    auto r = topo::freestyle(*doc_->board(), fsTarget_, {}, deg, edit::pivotOf(*doc_->board(), fsTarget_.fragment), push_);
+    auto r = topo::freestyle(*doc_->board(), doc_->topology(), fsTarget_, {}, deg, edit::pivotOf(*doc_->board(), fsTarget_.fragment), push_);
     doc_->setSelection({}, doc_->selectedComponents());
-    doc_->commitEdit(before, tr("Повернуть"));
-    if (r.blocked) emit status(tr("Поворот ограничен зазорами"));
+    doc_->commitEdit(before, tr("Повернуть"), false);  // (the model turned with the board)
+    doc_->markTopologyFresh();
+    if (r.lockedWire) emit status(tr("К объекту подходит зафиксированный проводник: поворот запрещён"));
+    else if (r.blocked) emit status(push_ == topo::Push::None ? tr("Поворот остановлен: дальше объект не проходит") : tr("Поворот ограничен зазорами"));
+    doc_->invalidate();
+    refresh();
     return;
   }
   if (drag_ == Drag::Fragment && dragMoved_) {
@@ -1499,7 +1497,7 @@ std::optional<BoardView::Marker> BoardView::markerAt(QPointF screen) const {
 
 void BoardView::startDrag(Drag kind, Vec2 at, std::optional<Marker> marker) {
   drag_ = kind;
-  fsByModel_ = fsByTracks_ = fsApart_ = false;
+  fsByModel_ = false;
   dragMoved_ = false;
   dragScreen_ = lastMouse_;
   dragStart_ = at;
@@ -1906,23 +1904,26 @@ void BoardView::drawDrawing(QPainter& p) {
   for (Vec2 v : drawPts_) p.drawEllipse(toScreen(v), 2.5, 2.5);
 }
 
+topo::FreestyleTarget BoardView::freestyleTarget() const {
+  topo::FreestyleTarget tg;
+  tg.fragment = selectedFragment();
+  tg.fragment.tracks.clear();  // (wires are not moved with the objects: their shape is computed)
+  tg.fragment.zones.clear();
+  return tg;
+}
+
 void BoardView::freestyleBy(Vec2 shift, double rotate) {
   if (shift.len2() == 0 && rotate == 0) return;
   Board& b = *doc_->board();
   Vec2 pivot = fsTarget_.vertex ? *fsTarget_.vertex : edit::pivotOf(b, fsTarget_.fragment);
-  topo::FreestyleResult r;
-  if (rotate == 0 && push_ == topo::Push::None && QSettings().value("topo/model", true).toBool()) {
-    // On the live model: the target's owners move in it, the wires round them are drawn from it.
-    bool inStep = true;
-    r = topo::freestyleModel(b, doc_->topology(), fsTarget_, shift, inStep);
-    fsByModel_ = true;
-    fsApart_ |= !inStep;
-  } else {
-    r = topo::freestyle(b, fsTarget_, shift, rotate, pivot, push_);
-    fsByTracks_ = true;
-  }
+  // On the live model: the target's owners move in it (and what they push), the wires round them are drawn from it.
+  const topo::FreestyleResult r = topo::freestyle(b, doc_->topology(), fsTarget_, shift, rotate, pivot, push_);
+  fsByModel_ = true;
   fsLast_ += r.moved;
-  if (r.blocked) emit status(tr("Перемещение ограничено зазорами: объекты, которые нельзя подтолкнуть"));
+  if (r.lockedWire) emit status(tr("К объекту подходит зафиксированный проводник: перемещение запрещено"));
+  else if (r.blocked)
+    emit status(push_ == topo::Push::None ? tr("Перемещение остановлено: дальше объект не проходит")
+                                          : tr("Перемещение ограничено зазорами: объекты, которые нельзя подтолкнуть"));
   doc_->invalidate();
   refresh();
 }
@@ -1964,15 +1965,14 @@ void BoardView::finishDrag() {
                   : kind == Drag::AxisPiece || dragMarker_.zip >= 0 ? tr("Изменить форму дифф. пары")
                   : dragMarker_.item.type == ItemType::Track ? tr("Изменить форму проводника")
                                                              : tr("Изменить форму");
-  if (kind == Drag::Freestyle && fsByModel_ && !fsByTracks_ && !fsApart_) {
+  if (kind == Drag::Freestyle && fsByModel_) {
     // The model moved with the board: handed back as it is (followed again, it would move twice).
     doc_->commitEdit(*dragBefore_, title, false);
     doc_->markTopologyFresh();
   } else {
-    if (kind == Drag::Freestyle && fsByModel_) doc_->invalidateModel();  // moved in part by the tracks: built anew
     doc_->commitEdit(*dragBefore_, title);
   }
-  fsByModel_ = fsByTracks_ = fsApart_ = false;
+  fsByModel_ = false;
   dragBefore_.reset();
   doc_->setSelection(std::move(items), doc_->selectedComponents());
   refresh();
@@ -1997,7 +1997,7 @@ void BoardView::cancelDrag() {
     doc_->invalidate();
     if (fsByModel_) doc_->invalidateModel();  // the steps moved the model too
   }
-  fsByModel_ = fsByTracks_ = fsApart_ = false;
+  fsByModel_ = false;
   drag_ = Drag::None;
   dragMoved_ = false;
   dragBefore_.reset();

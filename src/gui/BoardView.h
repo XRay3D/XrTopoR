@@ -172,6 +172,7 @@ class BoardView : public QOpenGLWidget {
   void transformSelection(double rotate, bool mirror, const QString& title);
   enum class Drag { None, Fragment, Segment, Vertex, Bend, Freestyle, AxisPiece, Centre };
   void freestyleBy(Vec2 shift, double rotate);  // one Freestyle move of fsTarget_
+  topo::FreestyleTarget freestyleTarget() const;  // the selected components and vias
   void startDrag(Drag kind, Vec2 at, std::optional<Marker> marker = {});
   void applyDrag();
   void finishDrag();
@@ -299,7 +300,7 @@ class BoardView : public QOpenGLWidget {
   topo::Push push_ = topo::Push::None;
   // This Freestyle drag went on the live model (its steps moved the model and the board together), or also by the
   // tracks (a turn, pushing), or left the model and the board apart: the model is then stale after it.
-  bool fsByModel_ = false, fsByTracks_ = false, fsApart_ = false;
+  bool fsByModel_ = false;  // the drag moved the model (Freestyle works in it)
   topo::FreestyleTarget fsTarget_;
   Vec2 fsLast_;
   std::optional<EditSnapshot> pasteBefore_;
