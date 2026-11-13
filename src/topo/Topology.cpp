@@ -8,6 +8,7 @@
 #include <map>
 
 #include "core/BoxGrid.h"
+#include "core/Parallel.h"
 #include "topo/Build.h"
 #include "topo/Cdt.h"
 #include "topo/Sidecar.h"
@@ -335,24 +336,32 @@ void Topology::buildMeshes(const Board& b, BuildScratch& scratch) {
     return int(owners.size() - 1);
   };
   layers.clear();
-  // One mesh per copper layer, of the owners on it.
-  for (LayerId layer : b.copperLayers()) {
-    LayerMesh m;
+  // One mesh per copper layer, of the owners on it: the vertices and the constraints of every layer first, then
+  // the triangulations — each layer's own business, all at once — then what is made of each in turn (the points
+  // the constraints' crossings created become owners, numbered layer after layer).
+  const auto copper = b.copperLayers();
+  std::vector<LayerMesh> meshes(copper.size());
+  std::vector<CdtInput> inputs(copper.size());
+  std::vector<CdtResult> results(copper.size());
+  auto vertexIn = [&](LayerMesh& m, CdtInput& in, int owner, double t, Vec2 off) {
+    Vertex x;
+    x.owner = owner;
+    x.t = t;
+    x.off = off;
+    m.verts.push_back(x);
+    int v = int(m.verts.size() - 1);
+    placeVertex(m, v);
+    in.points.push_back(m.verts[v].p);
+    m.ownerVerts[owner].push_back(v);
+    return v;
+  };
+  for (size_t li = 0; li < copper.size(); ++li) {
+    const LayerId layer = copper[li];
+    LayerMesh& m = meshes[li];
     m.layer = layer;
     m.ownerVerts.assign(owners.size(), {});
-    CdtInput in;
-    auto vertex = [&](int owner, double t, Vec2 off) {
-      Vertex x;
-      x.owner = owner;
-      x.t = t;
-      x.off = off;
-      m.verts.push_back(x);
-      int v = int(m.verts.size() - 1);
-      placeVertex(m, v);
-      in.points.push_back(m.verts[v].p);
-      m.ownerVerts[owner].push_back(v);
-      return v;
-    };
+    CdtInput& in = inputs[li];
+    auto vertex = [&](int owner, double t, Vec2 off) { return vertexIn(m, in, owner, t, off); };
     for (int oi = 0; oi < int(owners.size()); ++oi) {
       const Owner& o = owners[oi];
       if (!((o.layers >> layer) & 1)) continue;
@@ -396,7 +405,15 @@ void Topology::buildMeshes(const Board& b, BuildScratch& scratch) {
         in.border.push_back(wl.border ? 1 : 0);
       }
     }
-    CdtResult r = triangulate(in);
+  }
+  parallelFor(copper.size(), [&](size_t li) { results[li] = triangulate(inputs[li]); });
+  for (size_t li = 0; li < copper.size(); ++li) {
+    const LayerId layer = copper[li];
+    LayerMesh& m = meshes[li];
+    m.ownerVerts.resize(owners.size());  // (the layers before made owners of their own)
+    CdtInput& in = inputs[li];
+    const CdtResult& r = results[li];
+    auto vertex = [&](int owner, double t, Vec2 off) { return vertexIn(m, in, owner, t, off); };
     // Points the constraints' intersections created: a zone's vertex where it lies on the zone's ring and
     // on no wall (a pad's corner ring across the pour's boundary), else an outline owner of this layer.
     // (The walls' pieces and the zones' rings in grids by their boxes, made when the first such point asks: every
