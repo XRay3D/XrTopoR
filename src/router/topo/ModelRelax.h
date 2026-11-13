@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "core/Board.h"
+#include "drc/Drc.h"
 #include "router/topo/ModelTools.h"
 #include "router/topo/Realizer.h"
 #include "topo/Topology.h"
@@ -60,6 +61,8 @@ struct Place {
   double depth = 0;
   bool shorted = false;
 };
+// The DRC's violations of a board gathered into places.
+std::vector<Place> placesOf(const Board& b, const std::vector<DrcViolation>& vs);
 // The places of `now` that `was` has not, or has shallower by more than the drawing's noise: what a change added.
 std::vector<Place> addedPlaces(const std::vector<Place>& was, const std::vector<Place>& now);
 
