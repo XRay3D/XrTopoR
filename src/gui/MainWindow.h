@@ -14,6 +14,12 @@
 class QDockWidget;
 class QLabel;
 
+namespace xr::gui::mcp {
+class HttpTransport;
+class Server;
+class Tools;
+}  // namespace xr::gui::mcp
+
 namespace xr::gui {
 
 class AutorouteWindow;
@@ -37,11 +43,27 @@ class MainWindow : public QMainWindow {
   BoardView* view() const { return view_; }
   Document* document() const { return doc_; }
 
+  // The MCP server for agents (gui/mcp): HTTP on 127.0.0.1 while the program's setting says so or `--mcp` asked
+  // for it; on stdin/stdout for a client that started the editor (`--mcp-stdio`).
+  mcp::Server* mcpServer();  // made on first use
+  bool startMcpHttp(quint16 port, QString* error = nullptr);
+  void keepMcpForRun() { mcpForRun_ = true; }  // `--mcp`: listening whatever the setting
+  void stopMcpHttp();
+  QString mcpUrl() const;  // empty: not listening
+  void startMcpStdio();    // stdin's end closes the program
+
+ signals:
+  // F6 or F7 is done (its result shown); `more`: another procedure of the same command follows it.
+  void procedureFinished(const QString& title, const QString& summary, bool more);
+
  protected:
   bool event(QEvent* e) override;
   void closeEvent(QCloseEvent* e) override;
 
  private:
+  friend class mcp::Tools;
+  void applyMcpSettings();
+  void warn(const QString& title, const QString& text);  // a message box, or the MCP tool's answer (quietError_)
   void bindCommands();
   void buildMenus();
   void buildToolbars();
@@ -113,6 +135,10 @@ class MainWindow : public QMainWindow {
   std::optional<Vec2> origin_;  // last left click: dx/dy reference
   QByteArray defaultState_;     // TopoR's default layout, for «Сбросить сейчас»
   std::shared_ptr<std::atomic<bool>> cancel_;
+  mcp::Server* mcp_ = nullptr;
+  mcp::HttpTransport* mcpHttp_ = nullptr;
+  bool mcpForRun_ = false;
+  QString* quietError_ = nullptr;  // set while an MCP tool opens or saves: failures go there, not to a message box
 };
 
 }  // namespace xr::gui

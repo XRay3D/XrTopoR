@@ -9,6 +9,7 @@
 #include "gui/Commands.h"
 
 class QCheckBox;
+class QSpinBox;
 class QComboBox;
 class QKeySequenceEdit;
 class QLineEdit;
@@ -35,6 +36,8 @@ class ProgramSettingsDialog : public QDialog {
   Commands* cmds_;
   QHash<QString, QList<QKeySequence>> keys_;  // working copy
   QCheckBox* openLast_;
+  QCheckBox* mcpOn_;
+  QSpinBox* mcpPort_;
   QComboBox* colorScheme_;
   QComboBox* viewScheme_;
   QLineEdit* search_;

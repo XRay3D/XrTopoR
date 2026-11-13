@@ -30,6 +30,21 @@ int main(int argc, char** argv) {
   bool opened = false, drc = false;
   for (int i = 1; i < argc; ++i) {
     QString a = QString::fromLocal8Bit(argv[i]);
+    // The MCP server for agents (gui/mcp): `--mcp [port]` on 127.0.0.1 for this run, whatever the setting;
+    // `--mcp-stdio` on stdin/stdout for a client that started the editor (stdout is then the protocol's alone).
+    if (a == "--mcp") {
+      quint16 port = quint16(xr::gui::AppSettings::mcpPort());
+      if (i + 1 < argc && QString::fromLocal8Bit(argv[i + 1]).toUShort() > 0) port = QString::fromLocal8Bit(argv[++i]).toUShort();
+      w.keepMcpForRun();
+      QString error;
+      if (w.startMcpHttp(port, &error)) std::fprintf(stderr, "MCP: %s\n", w.mcpUrl().toUtf8().constData());
+      else std::fprintf(stderr, "MCP: port %u: %s\n", unsigned(port), error.toUtf8().constData());
+      continue;
+    }
+    if (a == "--mcp-stdio") {
+      w.startMcpStdio();
+      continue;
+    }
     if (a == "--screenshot" && i + 1 < argc) shot = QString::fromLocal8Bit(argv[++i]);
     else if (a == "--drc") drc = true;
     else if (a == "--render-bench" && i + 1 < argc) bench = QString::fromLocal8Bit(argv[++i]).toInt();  // frames per series  // runs DRC after loading (for checks of the messages window)

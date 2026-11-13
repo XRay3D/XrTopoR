@@ -126,4 +126,9 @@ void setCopperTransparency(int percent) {
 bool openLastProject() { return QSettings().value("general/openLastProject", true).toBool(); }
 void setOpenLastProject(bool on) { QSettings().setValue("general/openLastProject", on); }
 
+bool mcpEnabled() { return QSettings().value("mcp/enabled", false).toBool(); }
+void setMcpEnabled(bool on) { QSettings().setValue("mcp/enabled", on); }
+int mcpPort() { return std::clamp(QSettings().value("mcp/port", kDefaultMcpPort).toInt(), 1, 65535); }
+void setMcpPort(int port) { QSettings().setValue("mcp/port", port); }
+
 }  // namespace xr::gui::AppSettings

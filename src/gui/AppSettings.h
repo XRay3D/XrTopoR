@@ -46,6 +46,13 @@ void setCopperTransparency(int percent);
 bool openLastProject();
 void setOpenLastProject(bool on);
 
+// The MCP server for agents (gui/mcp): off unless asked for — it opens, edits and saves designs; on 127.0.0.1 only.
+constexpr int kDefaultMcpPort = 7417;
+bool mcpEnabled();
+void setMcpEnabled(bool on);
+int mcpPort();
+void setMcpPort(int port);
+
 }  // namespace AppSettings
 
 }  // namespace xr::gui

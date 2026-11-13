@@ -15,6 +15,7 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QSettings>
+#include <QSpinBox>
 #include <QTabWidget>
 #include <QTreeWidget>
 #include <QVBoxLayout>
@@ -90,6 +91,30 @@ ProgramSettingsDialog::ProgramSettingsDialog(Commands* cmds, QWidget* parent) : 
     openLast_->setChecked(AppSettings::openLastProject());
     fillKeys();
   });
+  // The MCP server: an agent (an AI assistant, a script) works the open design through it.
+  auto* mcp = new QGroupBox(tr("MCP-сервер"));
+  auto* mv = new QVBoxLayout(mcp);
+  mcpOn_ = new QCheckBox(tr("Разрешить ИИ-агентам работать с открытым дизайном (MCP)"));
+  mcpOn_->setChecked(AppSettings::mcpEnabled());
+  mv->addWidget(mcpOn_);
+  auto* mrow = new QHBoxLayout;
+  mrow->addWidget(new QLabel(tr("Порт:")));
+  mcpPort_ = new QSpinBox;
+  mcpPort_->setRange(1024, 65535);
+  mcpPort_->setValue(AppSettings::mcpPort());
+  mrow->addWidget(mcpPort_);
+  auto* mcpUrl = new QLabel;
+  mcpUrl->setTextInteractionFlags(Qt::TextSelectableByMouse);
+  mrow->addWidget(mcpUrl, 1);
+  mv->addLayout(mrow);
+  auto showUrl = [mcpUrl, this] { mcpUrl->setText(QString("http://127.0.0.1:%1/mcp").arg(mcpPort_->value())); };
+  showUrl();
+  connect(mcpPort_, &QSpinBox::valueChanged, this, showUrl);
+  auto* mnote = new QLabel(tr("<i>Только с этого компьютера (127.0.0.1). Агент открывает, правит и сохраняет файлы; "
+                              "каждая его правка отменяется как обычная.</i>"));
+  mnote->setWordWrap(true);
+  mv->addWidget(mnote);
+  gv->addWidget(mcp);
   auto* reset = new QGroupBox(tr("Сброс настроек"));
   auto* rv = new QVBoxLayout(reset);
   auto* warn = new QLabel(tr("Все настройки программы (горячие клавиши, панели, схемы пользователя, история) будут "
@@ -237,6 +262,8 @@ bool ProgramSettingsDialog::applyAndClose() {
   for (auto& i : cmds_->all()) cmds_->setShortcuts(i.id, keys_[i.id]);
   AppSettings::setShortcuts(cmds_->overrides());
   AppSettings::setOpenLastProject(openLast_->isChecked());
+  AppSettings::setMcpEnabled(mcpOn_->isChecked());
+  AppSettings::setMcpPort(mcpPort_->value());
   QSettings s;
   s.setValue("schemes/defaultColor", colorScheme_->currentText());
   s.setValue("schemes/defaultView", viewScheme_->currentText());

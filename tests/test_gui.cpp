@@ -8,6 +8,8 @@
 #include <QPushButton>
 #include <QTableWidget>
 #include <QFile>
+#include <QJsonDocument>
+#include <QTcpSocket>
 #include <QSlider>
 #include <QTimer>
 #include <QListWidget>
@@ -50,6 +52,8 @@
 #include "gui/DisplayPanel.h"
 #include "gui/DrcDialog.h"
 #include "gui/MainWindow.h"
+#include "gui/mcp/McpServer.h"
+#include "gui/mcp/McpTransports.h"
 #include "gui/MessagesPanel.h"
 #include "gui/PropertiesPanel.h"
 #include "gui/TextStylesDialog.h"
@@ -3955,4 +3959,128 @@ TEST(Gui, PannedPictureAsDrawnAnew) {
     moved.save(QString(dir) + "/panned.png");
     fresh.save(QString(dir) + "/fresh.png");
   }
+}
+
+// ---------------------------------------------------------------- the MCP server (gui/mcp)
+
+namespace {
+
+// A tool called as a client calls it; the answer waited for (a procedure answers later). `error`: isError.
+QJsonObject mcpCall(mcp::Server* s, const QString& tool, const QJsonObject& args = {}, bool* error = nullptr, int ms = 300000) {
+  QJsonObject answer;
+  bool got = false;
+  s->handle({{"jsonrpc", "2.0"}, {"id", 7}, {"method", "tools/call"}, {"params", QJsonObject{{"name", tool}, {"arguments", args}}}},
+            [&](const QJsonObject& r) { answer = r, got = true; });
+  EXPECT_TRUE(QTest::qWaitFor([&] { return got; }, ms)) << tool.toStdString();
+  const QJsonObject result = answer.value("result").toObject();
+  if (error) *error = result.value("isError").toBool();
+  const QString text = result.value("content").toArray().at(0).toObject().value("text").toString();
+  QJsonObject o = QJsonDocument::fromJson(text.toUtf8()).object();
+  if (o.isEmpty()) o["text"] = text;
+  return o;
+}
+
+}  // namespace
+
+// The protocol: the version asked for answered, the tools listed with their schemas, the errors JSON-RPC names.
+TEST(Mcp, Protocol) {
+  app();
+  mcp::Server s("instructions");
+  s.add({"echo", "Echoes x.", mcp::schemaOf({{"x", "integer", "", true}}),
+         [](const QJsonObject& a, mcp::Reply r) { r(mcp::Result::json(QJsonObject{{"x", a.value("x")}})); }, true});
+  auto ask = [&](const QJsonObject& m) {
+    QJsonObject out{{"none", true}};
+    s.handle(m, [&](const QJsonObject& r) { out = r; });
+    return out;
+  };
+  QJsonObject init = ask({{"jsonrpc", "2.0"}, {"id", 1}, {"method", "initialize"}, {"params", QJsonObject{{"protocolVersion", "2025-03-26"}}}});
+  EXPECT_EQ(init["result"].toObject()["protocolVersion"].toString(), "2025-03-26");
+  EXPECT_EQ(init["result"].toObject()["instructions"].toString(), "instructions");
+  EXPECT_TRUE(ask({{"jsonrpc", "2.0"}, {"method", "notifications/initialized"}}).isEmpty());  // nothing to answer
+  QJsonArray tools = ask({{"jsonrpc", "2.0"}, {"id", 2}, {"method", "tools/list"}})["result"].toObject()["tools"].toArray();
+  ASSERT_EQ(tools.size(), 1);
+  EXPECT_EQ(tools[0].toObject()["inputSchema"].toObject()["required"].toArray()[0].toString(), "x");
+  EXPECT_TRUE(tools[0].toObject()["annotations"].toObject()["readOnlyHint"].toBool());
+  bool error = true;
+  EXPECT_EQ(mcpCall(&s, "echo", {{"x", 5}}, &error)["x"].toInt(), 5);
+  EXPECT_FALSE(error);
+  EXPECT_EQ(ask({{"jsonrpc", "2.0"}, {"id", 3}, {"method", "nope"}})["error"].toObject()["code"].toInt(), -32601);
+  EXPECT_EQ(ask({{"jsonrpc", "2.0"}, {"id", 4}, {"method", "tools/call"}, {"params", QJsonObject{{"name", "nope"}}}})["error"].toObject()["code"].toInt(), -32602);
+  QByteArray parsed;
+  s.handleText("{oops", [&](const QByteArray& b) { parsed = b; });
+  EXPECT_EQ(QJsonDocument::fromJson(parsed).object()["error"].toObject()["code"].toInt(), -32700);
+}
+
+// HTTP on 127.0.0.1: a POST answered with JSON, a notification with 202, a page of another site refused.
+TEST(Mcp, Http) {
+  app();
+  mcp::Server s("");
+  mcp::HttpTransport http(&s);
+  ASSERT_TRUE(http.listen(0)) << http.error().toStdString();
+  auto post = [&](const QByteArray& body, const QByteArray& extra = {}) {
+    QTcpSocket c;
+    c.connectToHost("127.0.0.1", http.port());
+    EXPECT_TRUE(c.waitForConnected(3000));
+    c.write("POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n" + extra +
+            "Content-Length: " + QByteArray::number(body.size()) + "\r\n\r\n" + body);
+    QByteArray got;
+    QTest::qWaitFor([&] {
+      got += c.readAll();
+      return c.state() == QAbstractSocket::UnconnectedState;
+    }, 5000);
+    return got + c.readAll();
+  };
+  QByteArray ok = post(R"({"jsonrpc":"2.0","id":1,"method":"ping"})");
+  EXPECT_TRUE(ok.startsWith("HTTP/1.1 200")) << ok.toStdString();
+  EXPECT_TRUE(ok.contains(R"("result":{})")) << ok.toStdString();
+  EXPECT_TRUE(post(R"({"jsonrpc":"2.0","method":"notifications/initialized"})").startsWith("HTTP/1.1 202"));
+  EXPECT_TRUE(post(R"({"jsonrpc":"2.0","id":1,"method":"ping"})", "Origin: http://evil.example\r\n").startsWith("HTTP/1.1 403"));
+  EXPECT_TRUE(post(R"({"jsonrpc":"2.0","id":1,"method":"ping"})", "Origin: http://localhost:5173\r\n").startsWith("HTTP/1.1 200"));
+}
+
+// The tools on the open design: a connection laid and undone, the autorouter waited for, DRC, Save As — the edits in
+// the editor's own undo history.
+TEST(Mcp, RoutingTools) {
+  app();
+  QTemporaryDir dir;
+  const QString file = dir.filePath("astable.kicad_pcb");
+  ASSERT_TRUE(QFile::copy(QString::fromStdString(data("astable.kicad_pcb")), file));
+  MainWindow w;
+  mcp::Server* s = w.mcpServer();
+  bool error = false;
+  EXPECT_EQ(mcpCall(s, "info")["open"].toBool(), false);
+  EXPECT_EQ(mcpCall(s, "open", {{"path", file}}, &error)["opened"].toString(), file);
+  ASSERT_FALSE(error);
+  mcpCall(s, "unroute");
+  const int open = mcpCall(s, "info")["unrouted_connections"].toInt();
+  ASSERT_GT(open, 0);
+  QJsonObject first = mcpCall(s, "ratsnest", {{"limit", 1}})["connections"].toArray()[0].toObject();
+  QJsonObject routed = mcpCall(s, "route", {{"from", first["from"]}, {"to", first["to"]}}, &error);
+  ASSERT_FALSE(error) << routed["text"].toString().toStdString();
+  EXPECT_GT(routed["segments"].toInt(), 0);
+  EXPECT_EQ(mcpCall(s, "info")["unrouted_connections"].toInt(), open - 1);
+  EXPECT_EQ(w.document()->undoStack()->undoText(), QObject::tr("Прокладка проводника"));
+  mcpCall(s, "undo");
+  EXPECT_EQ(mcpCall(s, "info")["unrouted_connections"].toInt(), open);
+  // Ends of two nets, a pad that is not there: said, nothing changed.
+  mcpCall(s, "route", {{"from", "R1.1"}, {"to", "C1.1"}}, &error);
+  EXPECT_TRUE(error);
+  mcpCall(s, "route", {{"from", "R1.99"}, {"to", "C1.1"}}, &error);
+  EXPECT_TRUE(error);
+  QJsonObject ar = mcpCall(s, "autoroute", {{"wait_s", 300}}, &error);
+  ASSERT_FALSE(error);
+  EXPECT_FALSE(ar["running"].toBool());
+  EXPECT_EQ(ar["opened"].toInt(-1), 0);
+  EXPECT_EQ(mcpCall(s, "info")["unrouted_connections"].toInt(), 0);
+  EXPECT_TRUE(mcpCall(s, "drc").contains("by_type"));
+  QJsonObject f6 = mcpCall(s, "refine", {{"wait_s", 300}}, &error);
+  EXPECT_FALSE(error);
+  EXPECT_FALSE(f6["running"].toBool());
+  EXPECT_TRUE(f6["summary"].toString().contains(QObject::tr("Перекладка"))) << f6["summary"].toString().toStdString();
+  const QString saved = dir.filePath("routed.kicad_pcb");
+  EXPECT_EQ(mcpCall(s, "save", {{"path", saved}})["saved"].toString(), saved);
+  EXPECT_TRUE(QFileInfo::exists(saved));
+  // A command that opens a dialog is refused: the call would wait for someone to close it.
+  mcpCall(s, "command", {{"id", "Accel_DRC"}}, &error);
+  EXPECT_TRUE(error);
 }

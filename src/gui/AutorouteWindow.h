@@ -21,6 +21,10 @@ class QSpinBox;
 class QTableWidget;
 class QTreeWidget;
 
+namespace xr::gui::mcp {
+class Tools;
+}
+
 namespace xr::gui {
 
 struct RoutingVariant {
@@ -57,6 +61,7 @@ class AutorouteWindow : public QDialog {
   void sketchChanged(std::shared_ptr<const xr::topo::RouteSketch> sketch);
 
  private:
+  friend class mcp::Tools;  // sets the options of the window as the user would, and starts it
   void resetVariants();  // the design changed: earlier variants no longer apply
   void addVariant(RoutingVariant v);
   void refreshTable();

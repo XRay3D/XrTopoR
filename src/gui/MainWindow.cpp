@@ -31,6 +31,9 @@
 #include "core/ZoneFill.h"
 #include "gui/AppSettings.h"
 #include "gui/AutorouteWindow.h"
+#include "gui/mcp/McpServer.h"
+#include "gui/mcp/McpTools.h"
+#include "gui/mcp/McpTransports.h"
 #include "gui/DesignParamsDialog.h"
 #include "gui/DisplayPanel.h"
 #include "gui/DrcDialog.h"
@@ -148,6 +151,52 @@ MainWindow::MainWindow()
   updateModeButtons();
   updateTitle();
   updateStatus();
+  applyMcpSettings();
+}
+
+// ---------------------------------------------------------------- the MCP server
+
+mcp::Server* MainWindow::mcpServer() {
+  if (!mcp_) {
+    mcp_ = new mcp::Server(mcp::Tools::instructions(), this);
+    new mcp::Tools(this, mcp_);
+    connect(mcp_, &mcp::Server::called, this, [this](const QString& tool) { showHint(tr("MCP: %1").arg(tool), 3000); });
+  }
+  return mcp_;
+}
+
+bool MainWindow::startMcpHttp(quint16 port, QString* error) {
+  if (!mcpHttp_) mcpHttp_ = new mcp::HttpTransport(mcpServer(), this);
+  if (mcpHttp_->listening() && (port == 0 || mcpHttp_->port() == port)) return true;
+  if (mcpHttp_->listen(port)) {
+    doc_->addLog({LogMessage::Kind::Info, tr("MCP-сервер"), tr("MCP-сервер слушает %1").arg(mcpHttp_->url())});
+    return true;
+  }
+  const QString text = tr("MCP-сервер не запущен: порт %1 — %2").arg(port).arg(mcpHttp_->error());
+  doc_->addLog({LogMessage::Kind::Warning, tr("MCP-сервер"), text});
+  showHint(text, 10000);
+  if (error) *error = mcpHttp_->error();
+  return false;
+}
+
+void MainWindow::stopMcpHttp() {
+  if (!mcpHttp_) return;
+  delete mcpHttp_;
+  mcpHttp_ = nullptr;
+}
+
+QString MainWindow::mcpUrl() const { return mcpHttp_ && mcpHttp_->listening() ? mcpHttp_->url() : QString(); }
+
+void MainWindow::startMcpStdio() {
+  auto* io = new mcp::StdioTransport(mcpServer(), this);
+  connect(io, &mcp::StdioTransport::closed, qApp, &QApplication::quit);
+}
+
+// The setting of «Настройки программы»: on, the server listens on its port; off, it stops (one started by `--mcp`
+// for this run stays).
+void MainWindow::applyMcpSettings() {
+  if (AppSettings::mcpEnabled()) startMcpHttp(quint16(AppSettings::mcpPort()));
+  else if (!mcpForRun_) stopMcpHttp();
 }
 
 // ---------------------------------------------------------------- commands
@@ -519,6 +568,7 @@ void MainWindow::showProgramSettings() {
   connect(&dlg, &ProgramSettingsDialog::importToporRequested, this, [this](const QString& cfg) { importToporSettings(cfg); });
   connect(&dlg, &ProgramSettingsDialog::resetRequested, this, &MainWindow::resetSettings);
   dlg.exec();
+  applyMcpSettings();
 }
 
 void MainWindow::resetSettings() {
@@ -702,12 +752,19 @@ bool MainWindow::maybeSave() {
   return r == QMessageBox::Discard || save();
 }
 
+// A failure the user is told of in a message box — or, while the MCP server's tool works (quietError_), the
+// tool's answer: a modal box would hold the call until someone closes it.
+void MainWindow::warn(const QString& title, const QString& text) {
+  if (quietError_) *quietError_ = text;
+  else QMessageBox::warning(this, title, text);
+}
+
 bool MainWindow::openFile(const QString& path) {
   QFileInfo fi(path);
   if (fi.suffix().compare("fsproj", Qt::CaseInsensitive) == 0) return openProject(fi.absoluteFilePath());
   QString file = openableFile(fi.absoluteFilePath());
   if (file.isEmpty()) {
-    QMessageBox::warning(this, tr("Открыть"),
+    warn(tr("Открыть"),
                          fi.suffix().compare("fsx", Qt::CaseInsensitive) == 0
                              ? tr("Формат TopoR .fsx не поддерживается: сохраните дизайн в TopoR как .fst "
                                   "(Файл › Экспорт › Экспорт дизайна) рядом с «%1».")
@@ -744,7 +801,7 @@ bool MainWindow::openFile(const QString& path) {
 bool MainWindow::openDesign(const QString& file) {
   auto r = io::loadBoard(file.toStdString());
   if (!r) {
-    QMessageBox::warning(this, tr("Открыть"), QString::fromStdString(r.error()));
+    warn(tr("Открыть"), QString::fromStdString(r.error()));
     return false;
   }
   // A design with no model of its own that still fits (from another system; a file whose routing was written
@@ -779,7 +836,7 @@ bool MainWindow::openProject(const QString& path) {
   QString error;
   auto p = Project::load(path, &error);
   if (!p) {
-    QMessageBox::warning(this, tr("Открыть проект"), error);
+    warn(tr("Открыть проект"), error);
     return false;
   }
   doc_->setBoard(nullptr, {});
@@ -896,7 +953,7 @@ bool MainWindow::save() {
   if (p.isEmpty() || io::detectFormat(p.toStdString()) == io::Format::Unknown) return saveAs();
   auto r = io::saveBoard(*doc_->board(), p.toStdString());
   if (!r) {
-    QMessageBox::warning(this, tr("Сохранить"), QString::fromStdString(r.error()));
+    warn(tr("Сохранить"), QString::fromStdString(r.error()));
     return false;
   }
   saveTopologyFile(p);
@@ -915,7 +972,7 @@ bool MainWindow::saveAs(const QString& f) {
   if (!doc_->hasBoard()) return false;
   auto r = io::saveBoard(*doc_->board(), f.toStdString());
   if (!r) {
-    QMessageBox::warning(this, tr("Сохранить"), QString::fromStdString(r.error()));
+    warn(tr("Сохранить"), QString::fromStdString(r.error()));
     return false;
   }
   saveTopologyFile(f);
@@ -1276,6 +1333,7 @@ void MainWindow::refineModel(bool thenLayers) {
     for (auto& l : res.log) doc_->addLog({LogMessage::Kind::Info, tr("Перекладка проводников"), QString::fromStdString(l)});
     if (!res.drawn) {
       showTopologyViolations(*work, *topo, res.violations, tr("Перекладка"));
+      emit procedureFinished(tr("Перекладка проводников"), tr("прервана: топологических нарушений %1").arg(res.violations.size()), false);
       return;
     }
     auto before = doc_->beginEdit();
@@ -1289,7 +1347,7 @@ void MainWindow::refineModel(bool thenLayers) {
     const int untangled = untangledBefore + res.untangled;
     topo->untangled = 0;
     doc_->setTopology(std::make_unique<topo::Topology>(std::move(*topo)));
-    showHint(tr("Перекладка по модели: переложено %1 из %2 (клинчей %3), переходов убрано %11, в металлизации убрано %13, ветвлений создано %4, слито %5, сдвинуто %6, пересажено %12; конфликтов %7 → %8; длина %9 → %10 мм")
+    const QString text = tr("Перекладка по модели: переложено %1 из %2 (клинчей %3), переходов убрано %11, в металлизации убрано %13, ветвлений создано %4, слито %5, сдвинуто %6, пересажено %12; конфликтов %7 → %8; длина %9 → %10 мм")
                  .arg(res.relaid)
                  .arg(res.wires)
                  .arg(res.clinches)
@@ -1304,8 +1362,9 @@ void MainWindow::refineModel(bool thenLayers) {
                  .arg(res.reattached)
                  .arg(res.zoneTracksRemoved) +
                  (untangled > 0 ? tr("; распутано двойных пересечений: %1").arg(untangled) : QString()) +
-                 (res.spareLinks > 0 ? tr("; снято лишних проводников (дубли, петли): %1, переходов %2").arg(res.spareLinks).arg(res.spareVias) : QString()),
-             10000);
+                 (res.spareLinks > 0 ? tr("; снято лишних проводников (дубли, петли): %1, переходов %2").arg(res.spareLinks).arg(res.spareVias) : QString());
+    showHint(text, 10000);
+    emit procedureFinished(tr("Перекладка проводников"), text, thenLayers);
     if (thenLayers) refineTracks(true);
   });
   watcher->setFuture(QtConcurrent::run([work, topo] { return topo::refineModel(*work, *topo); }));
@@ -1350,6 +1409,7 @@ void MainWindow::refineTracks(bool changeLayers) {
     doc_->clearLog(tr("Перекладка проводников"));
     doc_->addLog({LogMessage::Kind::Info, tr("Перекладка проводников"), text});
     showHint(text, 10000);
+    emit procedureFinished(tr("Перекладка проводников"), text, false);
   });
   QPointer<QProgressDialog> dp(dlg);
   watcher->setFuture(QtConcurrent::run([work, o, cancel, dp]() mutable {
@@ -1408,15 +1468,16 @@ void MainWindow::optimize(bool components, bool thenRefine) {
     doc_->commitEdit(before, tr("Подвижка"));
     doc_->clearLog(tr("Подвижка"));
     for (auto& l : res.log) doc_->addLog({LogMessage::Kind::Info, tr("Подвижка"), QString::fromStdString(l)});
-    showHint(tr("Подвижка: переходов %1, ветвлений %7, компонентов %2; конфликтов %3 → %4; длина %5 → %6 мм")
+    const QString text = tr("Подвижка: переходов %1, ветвлений %7, компонентов %2; конфликтов %3 → %4; длина %5 → %6 мм")
                  .arg(res.viaMoves)
                  .arg(res.componentMoves)
                  .arg(res.conflictsBefore)
                  .arg(res.conflictsAfter)
                  .arg(res.lengthBefore / 1e6, 0, 'f', 1)
                  .arg(res.lengthAfter / 1e6, 0, 'f', 1)
-                 .arg(res.junctionMoves),
-             10000);
+                 .arg(res.junctionMoves);
+    showHint(text, 10000);
+    emit procedureFinished(tr("Подвижка"), text, thenRefine);
     if (thenRefine) refine(true);
   });
   QPointer<QProgressDialog> dp(dlg);
@@ -1456,6 +1517,7 @@ void MainWindow::optimizeModel(bool thenRefine) {
     for (auto& l : res.log) doc_->addLog({LogMessage::Kind::Info, tr("Подвижка"), QString::fromStdString(l)});
     if (!res.drawn) {
       showTopologyViolations(*work, *topo, res.violations, tr("Подвижка"));
+      emit procedureFinished(tr("Подвижка"), tr("прервана: топологических нарушений %1").arg(res.violations.size()), false);
       return;
     }
     auto before = doc_->beginEdit();
@@ -1469,7 +1531,7 @@ void MainWindow::optimizeModel(bool thenRefine) {
     const int untangled = untangledBefore + res.untangled;
     topo->untangled = 0;
     doc_->setTopology(std::make_unique<topo::Topology>(std::move(*topo)));
-    showHint(tr("Подвижка по модели: переходов %1, ветвлений %2; итераций %3 (откатов %4); конфликтов %5 → %6; длина %7 → %8 мм")
+    const QString text = tr("Подвижка по модели: переходов %1, ветвлений %2; итераций %3 (откатов %4); конфликтов %5 → %6; длина %7 → %8 мм")
                      .arg(res.viaMoves)
                      .arg(res.junctionMoves)
                      .arg(res.iterations)
@@ -1480,8 +1542,9 @@ void MainWindow::optimizeModel(bool thenRefine) {
                      .arg(res.lengthAfter / 1e6, 0, 'f', 1) +
                  (res.stats.narrowedWires > 0 ? tr("; заужено проводников: %1").arg(res.stats.narrowedWires) : QString()) +
                  (untangled > 0 ? tr("; распутано двойных пересечений: %1").arg(untangled) : QString()) +
-                 (res.spareLinks > 0 ? tr("; снято лишних проводников (дубли, петли): %1, переходов %2").arg(res.spareLinks).arg(res.spareVias) : QString()),
-             10000);
+                 (res.spareLinks > 0 ? tr("; снято лишних проводников (дубли, петли): %1, переходов %2").arg(res.spareLinks).arg(res.spareVias) : QString());
+    showHint(text, 10000);
+    emit procedureFinished(tr("Подвижка"), text, thenRefine);
     if (thenRefine) refine(true);
   });
   watcher->setFuture(QtConcurrent::run([work, topo] { return topo::optimizeModel(*work, *topo); }));
