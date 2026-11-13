@@ -450,20 +450,37 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
     d.unconnected = false;
     // The connections at the same time as the DRC (both read the board).
     std::future<std::vector<RatsLine>> unrouted;
-    unrouted = std::async(std::launch::async, [&] { return Connectivity::compute(c.board).ratsnest; });
     static const bool kWholeDrc = std::getenv("XR_F7_WHOLE_DRC") != nullptr;
     std::vector<DrcViolation> found;
     bool local = false;
+    std::vector<char> netsChanged;  // (the nets whose tracks or vias changed: the connections of the others stand)
     if (from && from->violations && !kWholeDrc) {
       size_t changed = 0;
       const DrcEarlier earlier = drcEarlier(from->board, *from->violations, c.board, &changed);
       if (earlier.violations && changed * 3 < c.board.tracks.size()) {
+        netsChanged.assign(c.board.nets.size(), 0);
+        auto mark = [&](int net) {
+          if (net >= 0 && net < int(netsChanged.size())) netsChanged[size_t(net)] = 1;
+        };
+        std::vector<char> stands(from->board.tracks.size(), 0);
+        for (size_t i = 0; i < earlier.trackWas.size(); ++i) {
+          if (earlier.trackWas[i] < 0) mark(c.board.tracks[i].net);
+          else stands[size_t(earlier.trackWas[i])] = 1;
+        }
+        for (size_t i = 0; i < stands.size(); ++i)
+          if (!stands[i]) mark(from->board.tracks[i].net);
+        for (size_t i = 0; i < earlier.viaWas.size(); ++i)
+          if (earlier.viaWas[i] < 0) mark(c.board.vias[i].net), mark(from->board.vias[i].net);
+        unrouted = std::async(std::launch::async, [&] { return Connectivity::compute(c.board, netsChanged).ratsnest; });
         found = runDrc(c.board, d, earlier);
         local = true;
         ++checkedLocally;
       }
     }
-    if (!local) found = runDrc(c.board, d);
+    if (!local) {
+      unrouted = std::async(std::launch::async, [&] { return Connectivity::compute(c.board).ratsnest; });
+      found = runDrc(c.board, d);
+    }
     c.violations = std::make_shared<const std::vector<DrcViolation>>(std::move(found));
     const std::vector<DrcViolation>& vs = *c.violations;
     c.conflicts = int(vs.size());
@@ -479,6 +496,25 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
     }
     c.length = c.board.tracksLength();
     c.loose = unrouted.get();
+    if (local) {
+      // The lines of the nets that stand are the earlier drawing's; all of them by their nets, as the whole count
+      // gives them.
+      std::vector<RatsLine> all;
+      auto at = c.loose.begin();
+      for (const RatsLine& l : from->loose) {
+        if (l.net >= 0 && l.net < int(netsChanged.size()) && netsChanged[size_t(l.net)]) continue;
+        for (; at != c.loose.end() && at->net < l.net; ++at) all.push_back(*at);
+        all.push_back(l);
+      }
+      all.insert(all.end(), at, c.loose.end());
+      c.loose = std::move(all);
+      if (static const bool kCheck = std::getenv("XR_F7_CHECK_CONN") != nullptr; kCheck) {
+        const std::vector<RatsLine> whole = Connectivity::compute(c.board).ratsnest;
+        bool same = whole.size() == c.loose.size();
+        for (size_t i = 0; same && i < whole.size(); ++i) same = whole[i].net == c.loose[i].net && (whole[i].a - c.loose[i].a).len() < 1 && (whole[i].b - c.loose[i].b).len() < 1;
+        if (!same) std::println(stderr, "F7 model: the connections of the changed nets differ from the whole count: {} for {}", c.loose.size(), whole.size());
+      }
+    }
     c.unrouted = c.loose.size();
   };
   // `from`: a drawing of the model as it was before the steps taken since — this one is brought up from it, what

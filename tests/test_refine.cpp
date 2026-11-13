@@ -398,6 +398,33 @@ TEST(Realizer, ADrawingBroughtUpIsTheWholeOne) {
   }
 }
 
+// The connections of some nets alone are those nets' lines of the whole count, in its order (F7 counts only the
+// nets whose tracks a drawing changed).
+TEST(Connectivity, OfSomeNetsIsThoseNetsOfTheWhole) {
+  for (const char* name : {"topor/AMK310/AMK310_MCU_V2.fst", "topor/Example_03/arz_2L.fst"}) {
+    auto lb = io::loadBoard(data(name));
+    ASSERT_TRUE(lb.has_value()) << name;
+    Board& b = **lb;
+    // (Some tracks out, so that there is something unrouted in most nets.)
+    for (size_t i = b.tracks.size(); i-- > 0;)
+      if (i % 7 == 3) b.tracks.erase(b.tracks.begin() + long(i));
+    const Connectivity whole = Connectivity::compute(b);
+    ASSERT_GT(whole.ratsnest.size(), 10u) << name;
+    std::vector<char> nets(b.nets.size(), 0);
+    for (size_t n = 0; n < nets.size(); ++n) nets[n] = n % 3 == 1;
+    const Connectivity some = Connectivity::compute(b, nets);
+    std::vector<RatsLine> expected;
+    for (const RatsLine& l : whole.ratsnest)
+      if (nets[size_t(l.net)]) expected.push_back(l);
+    ASSERT_EQ(some.ratsnest.size(), expected.size()) << name;
+    for (size_t i = 0; i < expected.size(); ++i) {
+      EXPECT_EQ(some.ratsnest[i].net, expected[i].net) << name;
+      EXPECT_LT((some.ratsnest[i].a - expected[i].a).len() + (some.ratsnest[i].b - expected[i].b).len(), 1) << name;
+    }
+    EXPECT_GT(expected.size(), 3u) << name;
+  }
+}
+
 // The DRC of a board a few of whose tracks changed, from the check of the board before (runDrc with DrcEarlier: the
 // changed tracks and vias against everything, the rest taken over): the violations of the whole check, one for one
 // and in its order. A via of the model moved and the drawing brought up, on a board with violations to carry.

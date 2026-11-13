@@ -27,13 +27,18 @@ namespace {
 // What touches what: the items of `near(r, box, layers, fn)` that are of r's net and whose shapes come within the
 // contact tolerance of r's are joined with it.
 template <class Shapes, class Near>
-Connectivity computeWith(const Board& b, Shapes&& shapesOf, Near&& near);
+Connectivity computeWith(const Board& b, Shapes&& shapesOf, Near&& near, const std::vector<char>* nets = nullptr);
+Connectivity computeOf(const Board& b, const std::vector<char>* nets);
 }  // namespace
 
 // With no index given: the shapes of every item are made once, and the neighbours come from a grid of their
 // boxes (BoxGrid). (A tree of boxes was built first, from every item's shapes made for it alone: the shapes of
 // an arc track are tens of capsules, and F7's judge asks for the connections of every drawing.)
-Connectivity Connectivity::compute(const Board& b) {
+Connectivity Connectivity::compute(const Board& b) { return computeOf(b, nullptr); }
+Connectivity Connectivity::compute(const Board& b, const std::vector<char>& nets) { return computeOf(b, &nets); }
+
+namespace {
+Connectivity computeOf(const Board& b, const std::vector<char>* nets) {
   const int P = int(b.pads.size()), T = int(b.tracks.size()), V = int(b.vias.size()), Z = int(b.zones.size());
   const size_t N = size_t(P + T + V + Z);
   auto refOf = [&](size_t k) {
@@ -51,7 +56,9 @@ Connectivity Connectivity::compute(const Board& b) {
     ProfScope ps("conn.index");
     for (size_t k = 0; k < N; ++k) {
       const ItemRef r = refOf(k);
-      if (itemNet(b, r) == kNoNet) continue;  // (joins nothing, and nothing asks for it)
+      const int net = itemNet(b, r);
+      if (net == kNoNet) continue;  // (joins nothing, and nothing asks for it)
+      if (nets && !(net < int(nets->size()) && (*nets)[size_t(net)])) continue;  // (not a net asked for)
       made[k].shapes = itemShapesExact(b, r);
       made[k].boxes.reserve(made[k].shapes.size());
       for (const Shape& sh : made[k].shapes) {
@@ -78,8 +85,10 @@ Connectivity Connectivity::compute(const Board& b) {
         grid.query(box, hits);
         for (int j : hits)
           if (itemMask[size_t(j)] & layers) fn(refOf(size_t(j)));
-      });
+      },
+      nets);
 }
+}  // namespace
 
 Connectivity Connectivity::compute(const Board& b, const SpatialIndex& idx) {
   const int P = int(b.pads.size()), T = int(b.tracks.size()), V = int(b.vias.size()), Z = int(b.zones.size());
@@ -115,7 +124,8 @@ Connectivity Connectivity::compute(const Board& b, const SpatialIndex& idx) {
 
 namespace {
 template <class Shapes, class Near>
-Connectivity computeWith(const Board& b, Shapes&& shapesOf, Near&& near) {
+Connectivity computeWith(const Board& b, Shapes&& shapesOf, Near&& near, const std::vector<char>* only) {
+  auto asked = [&](int net) { return net != kNoNet && (!only || (net < int(only->size()) && (*only)[size_t(net)])); };
   const int P = int(b.pads.size()), T = int(b.tracks.size()), V = int(b.vias.size()), Z = int(b.zones.size());
   auto id = [&](ItemRef r) {
     switch (r.type) {
@@ -134,7 +144,7 @@ Connectivity computeWith(const Board& b, Shapes&& shapesOf, Near&& near) {
   };
   auto connect = [&](ItemRef r) {
     int net = itemNet(b, r);
-    if (net == kNoNet) return;
+    if (!asked(net)) return;
     const auto& mine = shapesOf(r);
     LayerMask lm = itemLayers(b, r);
     BBox bb;
@@ -172,19 +182,19 @@ Connectivity computeWith(const Board& b, Shapes&& shapesOf, Near&& near) {
   // Group anchors per net and cluster.
   std::map<int, std::map<int, std::vector<Anchor>>> nets;
   for (int i = 0; i < P; ++i) {
-    if (b.pads[i].net == kNoNet) continue;
+    if (!asked(b.pads[i].net)) continue;
     int cl = dsu.find(i);
     c.padCluster[i] = cl;
     nets[b.pads[i].net][cl].push_back({b.pads[i].pos.v(), {ItemType::Pad, i}});
   }
   for (int i = 0; i < V; ++i) {
-    if (b.vias[i].net == kNoNet) continue;
+    if (!asked(b.vias[i].net)) continue;
     int cl = dsu.find(P + T + i);
     c.viaCluster[i] = cl;
     nets[b.vias[i].net][cl].push_back({b.vias[i].pos.v(), {ItemType::Via, i}});
   }
   for (int i = 0; i < T; ++i) {
-    if (b.tracks[i].net == kNoNet) continue;
+    if (!asked(b.tracks[i].net)) continue;
     int cl = dsu.find(P + i);
     c.trackCluster[i] = cl;
     auto& v = nets[b.tracks[i].net][cl];

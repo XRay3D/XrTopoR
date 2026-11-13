@@ -21,6 +21,9 @@ struct Connectivity {
 
   static Connectivity compute(const Board& b);
   static Connectivity compute(const Board& b, const SpatialIndex& idx);
+  // Of the nets marked in `nets` (by net number) alone: the items of the others get no cluster and no line. The
+  // lines of a net are the same as the whole computation gives it (the nets do not meet), in the same order.
+  static Connectivity compute(const Board& b, const std::vector<char>& nets);
 };
 
 }  // namespace xr
