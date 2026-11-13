@@ -182,6 +182,9 @@ void addPlaneZones(Board& b) {
   }
 }
 
+// How far a thermal's bridge goes into the pour past the barrier.
+constexpr double kSpokeInto = 50000;
+
 ZoneFillStats fillZones(Board& b, const ZoneFillOptions& opt) {
   ZoneFillStats st;
   auto selected = [&](int zi) { return opt.only.empty() || r::contains(opt.only, zi); };
@@ -283,25 +286,15 @@ ZoneFillStats fillZones(Board& b, const ZoneFillOptions& opt) {
         else holes.push_back(toMulti(s.inflated(s.kind == Shape::Kind::Segment ? zoneClr / 2 : 0).outline(opt.arcTolerance)));
       }
     }
-    // Thermal reliefs: a ring of the barrier's width around the copper, crossed by four spokes.
+    // Thermal reliefs: the pad with its barrier is a hole of the pour — the pad's own copper is not poured over —,
+    // and the bridges are laid across it afterwards, each a rectangle from the pad's centre to the pour (below).
+    // P-CAD keeps a pour so: a cutout over the pad and its barrier, and the spokes.
+    const size_t plain = holes.size();  // (the holes before these: what a bridge must not run into)
     for (auto& [c, s, angle, th] : reliefs) {
-      const double gap = double(th->gap > 0 ? th->gap : opt.thermalGap), spoke = double(th->spoke > 0 ? th->spoke : opt.spokeWidth);
-      BMulti ring = toMulti(s.inflated(gap).outline(opt.arcTolerance));
-      BMulti core = toMulti(s.outline(opt.arcTolerance));
-      BMulti annulus;
-      bg::difference(ring, core, annulus);
-      BBox pb = s.bbox().inflated(gap * 2);
-      double hw = spoke / 2;
-      double ang = -degToRad(angle);
-      Polyline sx = {c + Vec2(-pb.width(), -hw).rotated(ang), c + Vec2(pb.width(), -hw).rotated(ang),
-                     c + Vec2(pb.width(), hw).rotated(ang), c + Vec2(-pb.width(), hw).rotated(ang)};
-      Polyline sy = {c + Vec2(-hw, -pb.height()).rotated(ang), c + Vec2(hw, -pb.height()).rotated(ang),
-                     c + Vec2(hw, pb.height()).rotated(ang), c + Vec2(-hw, pb.height()).rotated(ang)};
-      BMulti spokes = unionAll({toMulti(sx), toMulti(sy)});
-      BMulti relief;
-      bg::difference(annulus, spokes, relief);
-      holes.push_back(std::move(relief));
+      const double gap = double(th->gap > 0 ? th->gap : opt.thermalGap);
+      holes.push_back(toMulti(s.inflated(gap).outline(opt.arcTolerance)));
     }
+    BMulti foreign = unionAll(std::vector<BMulti>(holes.begin(), holes.begin() + long(plain)));
     if (std::getenv("XR_DEBUG_FILL")) {
       int invalid = 0;
       for (auto& h : holes) {
@@ -348,6 +341,31 @@ ZoneFillStats fillZones(Board& b, const ZoneFillOptions& opt) {
     }
     if (std::getenv("XR_DEBUG_FILL")) std::fprintf(stderr, "  after opening: %zu polygons, area %.1f mm2\n", fill.size(), bg::area(fill) / 1e12);
 
+    // The bridges: from the pad's centre along the thermal's four directions to a hair past the barrier. One is
+    // laid when it ends in the pour and crosses nothing that is cut out of it — a bridge to nowhere (the pour does
+    // not come up to the barrier on that side) or across another net's clearance is not.
+    struct Bridge {
+      Polyline rect;
+      Vec2 lands;  // where it meets the pour
+    };
+    std::vector<Bridge> bridges;
+    for (auto& [c, s, angle, th] : reliefs) {
+      const double gap = double(th->gap > 0 ? th->gap : opt.thermalGap), spoke = double(th->spoke > 0 ? th->spoke : opt.spokeWidth);
+      const Shape ring = s.inflated(gap);
+      const double ang = -degToRad(angle);
+      for (int k = 0; k < 4; ++k) {
+        const Vec2 u = Vec2(1, 0).rotated(ang + k * kPi / 2), n = u.perp() * (spoke / 2);
+        const double out = ring.rayExit(c, u);
+        if (out <= 0) continue;
+        const Vec2 end = c + u * (out + kSpokeInto), lands = c + u * (out + kSpokeInto / 2);
+        Polyline rect{c - n, end - n, end + n, c + n};
+        if (!bg::covered_by(BPt(lands.x, lands.y), fill)) continue;
+        BMulti hit;
+        bg::intersection(toMulti(rect), foreign, hit);
+        if (bg::area(hit) > 1e6) continue;  // (more than a square micron of it)
+        bridges.push_back({std::move(rect), lands});
+      }
+    }
     for (auto& poly : fill) {
       Polyline outer = ringToPolyline(poly.outer());
       if (outer.size() < 3) continue;
@@ -369,6 +387,8 @@ ZoneFillStats fillZones(Board& b, const ZoneFillOptions& opt) {
         bool connected = false;
         BBox pbb;
         for (auto& v : outer) pbb.add(v);
+        // (... or a bridge lands on it: the pads it is joined to by thermals do not touch it themselves.)
+        connected = r::any_of(bridges, [&](const Bridge& br) { return bg::covered_by(BPt(br.lands.x, br.lands.y), poly); });
         idx.query(pbb, LayerMask(1) << z.layer, [&](ItemRef r) {
           if (connected || r.type == ItemType::Zone || itemNet(b, r) != z.net) return;
           for (auto& s : itemShapes(b, r))
@@ -385,6 +405,9 @@ ZoneFillStats fillZones(Board& b, const ZoneFillOptions& opt) {
       z.filled.push_back(std::move(f));
       ++st.polygons;
     }
+    // The bridges of the pieces that stayed.
+    for (Bridge& br : bridges)
+      if (r::any_of(z.filled, [&](const Polyline& f) { return pointInPolygon(br.lands, f); })) z.filled.push_back(std::move(br.rect));
   }
   return st;
 }

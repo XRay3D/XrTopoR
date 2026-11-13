@@ -456,6 +456,10 @@ TEST(ZoneFill, PadsAndViasHaveTheirOwnConnection) {
   fillZones(t.b);
   EXPECT_FALSE(t.poured(5 + 0.53, 5 + 0.53)) << "the via's barrier, between the spokes";
   EXPECT_TRUE(t.poured(5 + 0.75, 5)) << "its spoke";
+  EXPECT_FALSE(t.poured(5 + 0.3, 5 + 0.3)) << "the via's own copper is not poured over: the bridges alone, from its centre";
+  EXPECT_TRUE(t.poured(5 + 0.3, 5));
+  EXPECT_FALSE(t.poured(5 + 0.75, 5 + 0.35)) << "a bridge is a rectangle of the spoke's width";
+  EXPECT_EQ(Connectivity::compute(t.b).ratsnest.size(), 0u) << "... and they reach it";
   EXPECT_TRUE(t.poured(15 + 0.53, 5 + 0.53)) << "the pad is joined solid";
   t.zone().vias.connection = PadConnection::Solid;
   t.zone().pads.connection = PadConnection::Thermal;
@@ -685,4 +689,18 @@ TEST(ZoneFill, TheOuterAreaIsPouredRoundTheOneInside) {
     fillZones(t.b, o);
     check("the outer area poured again alone");
   }
+}
+
+// A bridge is laid only where it reaches the pour: a thermal pad at the area's edge has none on the side where
+// there is no copper to reach (it hung in the air there).
+TEST(ZoneFill, NoBridgeToNowhere) {
+  PourBoard t;
+  t.zone().pads.connection = PadConnection::Thermal;
+  t.zone().outline = {t.at(0, 0), t.at(20, 0), t.at(20, 20), t.at(0, 20)};
+  t.pad(10, 1.9, t.g);  // 1.9 mm from the board's edge: the edge's clearance of 1 mm leaves no pour below its barrier
+  fillZones(t.b);
+  EXPECT_TRUE(t.poured(10, 1.9 + 0.75)) << "the bridge up, to the pour";
+  EXPECT_TRUE(t.poured(10 + 0.75, 1.9));
+  EXPECT_FALSE(t.poured(10, 1.9 - 0.75)) << "no bridge down: nothing there to reach";
+  EXPECT_EQ(Connectivity::compute(t.b).ratsnest.size(), 0u);
 }
