@@ -122,6 +122,10 @@ double reshapeOwner(Topology& t, int owner, Vec2 axis, const FlipGate& gate, int
           for (int e : m.tris[ti].e)
             if ((m.edges[e].v[0] == v || m.edges[e].v[1] == v) && !m.edges[e].cross.empty()) refreshEdge(t, m, e);
       }
+      // (An owner with no vertex on this layer — a branch point is of one layer — has nothing to flip here; and
+      // an empty seed is the flip loop's word for every edge of the mesh: each step of each branch point ran the
+      // whole of the other layers through the circle test, most of what stepping cost.)
+      if (seed.empty()) continue;
       flips += flipLoop(t, m, seed, gate, false);
     }
     done += lam;
@@ -178,6 +182,10 @@ double moveOwner(Topology& t, int owner, Vec2 d, const FlipGate& gate, int round
           for (int e : m.tris[ti].e)
             if ((m.edges[e].v[0] == v || m.edges[e].v[1] == v) && !m.edges[e].cross.empty()) refreshEdge(t, m, e);
       }
+      // (An owner with no vertex on this layer — a branch point is of one layer — has nothing to flip here; and
+      // an empty seed is the flip loop's word for every edge of the mesh: each step of each branch point ran the
+      // whole of the other layers through the circle test, most of what stepping cost.)
+      if (seed.empty()) continue;
       flips += flipLoop(t, m, seed, gate, false);
     }
     done += lam;

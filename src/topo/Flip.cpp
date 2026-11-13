@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <deque>
 #include <map>
 
@@ -299,6 +301,10 @@ int flipLoop(Topology& t, LayerMesh& m, std::vector<int> seed, const FlipGate& g
     if (!weighted) {
       // The circle first: the plan of the wires across the quad is the dear part (a sixth of F7, nearly every
       // edge planned and then left by the circle), and flip() makes it, false where planFlip would be.
+      // (... and an edge that never flips is not asked about at all: a pad's sides and spokes lie with the pad's
+      // other corners on one circle, and the predicate went to exact arithmetic for each, every time a via next
+      // to the pad stepped.)
+      if (m.edges[e].constrained || m.edges[e].rigid) continue;
       Quad Q;
       if (!quadOf(m, e, Q) || !inCircle(m.verts[Q.a].p, m.verts[Q.p].p, m.verts[Q.q].p, m.verts[Q.b].p)) continue;
       const int t1 = m.edges[e].t[0], t2 = m.edges[e].t[1];
