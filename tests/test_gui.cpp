@@ -40,6 +40,7 @@
 #include "gui/AppSettings.h"
 #include "gui/BoardView.h"
 #include "gui/Commands.h"
+#include "router/topo/ModelTools.h"
 #include "gui/Document.h"
 #include "gui/AutorouteWindow.h"
 #include "gui/DesignParamsDialog.h"
@@ -1693,6 +1694,95 @@ TEST(Gui, FreestyleDrag) {
   likeBuilt("after the undo");
   f.view.cancelTool();
   EXPECT_EQ(f.view.mode(), Mode::Select);
+}
+
+// A wire dragged in Freestyle: while the mouse is down the board stands and the way the wire would take through the
+// cursor is there to be drawn dashed; on release the wire is laid that way — on the other side of the via it was
+// dragged over —, in one step that undo takes back.
+TEST(Gui, FreestyleWireDrag) {
+  Fixture f("topor/Example_05/MinVia_standard_routing.fst");
+  // The shapes computed first (F5), as the test of the model's side has them.
+  f.view.recomputeShapes();
+  const Board& b = f.b();
+  const topo::Topology* live = &f.doc.topology();
+  const auto unrouted = Connectivity::compute(b).ratsnest.size();
+  auto nearestOf = [](const Board& board, const topo::Wire& w, Vec2 at) {
+    Vec2 best;
+    double bd = std::numeric_limits<double>::max();
+    for (const Track& tr : board.tracks) {
+      if (!r::contains(w.tracks, tr.id)) continue;
+      const Vec2 q = closestPointOnSegment(at, tr.a.v(), tr.b.v());
+      if (double d = (q - at).len(); d < bd) bd = d, best = q;
+    }
+    return std::pair(best, bd);
+  };
+  // A wire passing a via of another net, with a way round its other side.
+  int wire = -1;
+  Vec2 from, to, viaAt;
+  for (size_t vi = 0; vi < b.vias.size() && wire < 0; ++vi) {
+    const Via& via = b.vias[vi];
+    for (int wi = 0; wi < int(live->wires.size()) && wire < 0; ++wi) {
+      const topo::Wire& w = live->wires[size_t(wi)];
+      if (w.locked || w.pair >= 0 || w.net == via.net || w.end[0] < 0 || w.end[1] < 0 || !((via.layers >> w.layer) & 1)) continue;
+      const auto [q0, d0] = nearestOf(b, w, via.pos.v());
+      if (d0 > 1.2 * kNmPerMm || d0 < 0.7 * kNmPerMm) continue;
+      if ((live->owners[size_t(w.end[0])].c - via.pos.v()).len() < 2 * kNmPerMm || (live->owners[size_t(w.end[1])].c - via.pos.v()).len() < 2 * kNmPerMm) continue;
+      const Vec2 p = via.pos.v() + (via.pos.v() - q0).normalized() * (via.diameter / 2.0 + 0.7 * kNmPerMm);
+      Board trial = b;
+      topo::Topology m = *live;
+      if (!topo::leadWireThrough(trial, m, wi, p)) continue;
+      const topo::Wire* now = nullptr;
+      for (const topo::Wire& x : m.wires)
+        if (x.net == w.net && x.layer == w.layer && x.end[0] >= 0 && x.end[1] >= 0 &&
+            (m.owners[size_t(x.end[0])].c - live->owners[size_t(w.end[0])].c).len() + (m.owners[size_t(x.end[1])].c - live->owners[size_t(w.end[1])].c).len() < 20)
+          now = &x;
+      if (!now || (nearestOf(trial, *now, via.pos.v()).first - via.pos.v()).dot(q0 - via.pos.v()) >= 0) continue;
+      wire = wi;
+      from = q0;
+      to = p;
+      viaAt = via.pos.v();
+    }
+  }
+  ASSERT_GE(wire, 0) << "no wire to lead round a via";
+  const int net = live->wires[size_t(wire)].net;
+  const LayerId layer = live->wires[size_t(wire)].layer;
+  const std::vector<Track> before = b.tracks;
+  f.look((from + to) * 0.5, 8);
+  f.view.startFreestyle(topo::Push::None);
+  const int stack = f.doc.undoStack()->count();
+  QTest::mousePress(&f.view, Qt::LeftButton, {}, f.at(from));
+  moveTo(f.view, f.at(from) + QPoint(8, 0), Qt::LeftButton);
+  moveTo(f.view, f.at(to), Qt::LeftButton);
+  EXPECT_FALSE(f.view.freestyleWay().empty()) << "the way through the cursor is shown";
+  EXPECT_EQ(f.b().tracks.size(), before.size()) << "the board stands while the wire is dragged";
+  for (const Track& tr : f.view.freestyleWay()) {
+    EXPECT_EQ(tr.net, net);
+    EXPECT_EQ(tr.layer, layer);
+  }
+  QTest::mouseRelease(&f.view, Qt::LeftButton, {}, f.at(to));
+  EXPECT_TRUE(f.view.freestyleWay().empty());
+  EXPECT_EQ(f.doc.undoStack()->count(), stack + 1);
+  EXPECT_EQ(Connectivity::compute(f.b()).ratsnest.size(), unrouted);
+  EXPECT_EQ(f.doc.topology().check(), std::vector<std::string>{});
+  // The net's copper nearest the via is now on its other side.
+  auto nearestOfNet = [&](const Board& board) {
+    Vec2 best;
+    double bd = std::numeric_limits<double>::max();
+    for (const Track& tr : board.tracks) {
+      if (tr.net != net || tr.layer != layer) continue;
+      const Vec2 q = closestPointOnSegment(viaAt, tr.a.v(), tr.b.v());
+      if (double d = (q - viaAt).len(); d < bd) bd = d, best = q;
+    }
+    return best;
+  };
+  EXPECT_LT((nearestOfNet(f.b()) - viaAt).dot(from - viaAt), 0) << "the wire passes the via on the other side";
+  f.doc.undoStack()->undo();
+  ASSERT_EQ(f.b().tracks.size(), before.size());
+  EXPECT_GT((nearestOfNet(f.b()) - viaAt).dot(from - viaAt), 0) << "undo puts it back";
+  // A click on a wire without a drag selects it, as before.
+  f.doc.clearSelection();
+  QTest::mouseClick(&f.view, Qt::LeftButton, {}, f.at(from));
+  EXPECT_FALSE(f.doc.selectedItems().empty());
 }
 
 // The whole board moved (every part with every track, as the user dragged SingleLayer by 0.3 and 1.1 mm),

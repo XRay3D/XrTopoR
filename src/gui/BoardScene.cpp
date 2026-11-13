@@ -394,6 +394,12 @@ void BoardView::buildOverlayScene(gl::SceneData& out) const {
     if (!(drawShape_ == DrawShape::ArcC && pts.size() == 2))
       for (auto& g : fig) sb.graphic(g, {0, 0.5f, 0, 4}, {0xff, 0xff, 0x60, 255}, false);
   }
+  // A wire dragged in Freestyle: the way it would be laid, dashed (red where it would be squeezed in).
+  if (drag_ == Drag::FreestyleWire && !fsWay_.empty()) {
+    const QColor way = fsWaySqueezed_ ? QColor(0xff, 0x30, 0x30) : brighter(doc_->layerColor(fsWay_.front().layer), 60);
+    for (const Track& t : fsWay_) sb.track(t, {0, 0.75f, 0, 5}, col(way));
+    sb.flush();
+  }
   if (!routing_) return;
   const QColor c = doc_->layerColor(routeLayer_);
   const gl::Color via = col(doc_->color("clrThroughVias", 0x949494));

@@ -658,7 +658,15 @@ void BoardView::mousePressEvent(QMouseEvent* e) {
           startDrag(Drag::Freestyle, w);
           break;
         }
-        clickSelect(pk, e->modifiers());  // wires are not moved in Freestyle: their shape is computed
+        // A wire is not moved, its shape is computed — but it is led another way: dragged, the way it would take
+        // through the cursor is shown dashed, and laid on release. A click without a drag selects.
+        if (add) {
+          clickSelect(pk, e->modifiers());
+          break;
+        }
+        pendingClick_ = pk;
+        fsWireTrack_ = pk.item->index;
+        startDrag(Drag::FreestyleWire, w);
         break;
       }
       bool selected = (pk.component >= 0 && r::contains(doc_->selectedComponents(), pk.component)) ||
@@ -1058,7 +1066,30 @@ void BoardView::mouseMoveEvent(QMouseEvent* e) {
       if ((pos - dragScreen_).manhattanLength() < 4) return;
       // TopoR: nothing moves while fixed objects are among the moved ones.
       const Board& b = *doc_->board();
-      bool locked = drag_ == Drag::Freestyle ? edit::hasLocked(b, fsTarget_.fragment)
+      if (drag_ == Drag::FreestyleWire) {
+        // The wire of the model the pressed track is drawn of; a fixed one, a pair's, one of a flexibly fixed net
+        // keeps its way.
+        const Pick click = *pendingClick_;
+        dragBefore_ = doc_->beginEdit();  // (gives the tracks their ids)
+        const topo::Topology& t = doc_->topology();
+        fsWire_ = -1;
+        if (fsWireTrack_ >= 0 && fsWireTrack_ < int(b.tracks.size()))
+          for (int wi = 0; wi < int(t.wires.size()) && fsWire_ < 0; ++wi)
+            if (r::contains(t.wires[size_t(wi)].tracks, b.tracks[size_t(fsWireTrack_)].id)) fsWire_ = wi;
+        const bool leads = fsWire_ >= 0 && !t.wires[size_t(fsWire_)].locked && t.wires[size_t(fsWire_)].pair < 0 && !b.flexFixed(t.wires[size_t(fsWire_)].net);
+        if (!leads) {
+          emit status(fsWire_ < 0 ? tr("Проводник не найден в модели: перекладка невозможна")
+                      : b.flexFixed(t.wires[size_t(fsWire_)].net) ? tr("Цепь с гибкой фиксацией: путь проводника не меняется")
+                                                                  : tr("Зафиксированный проводник или дифф. пара: перекладка запрещена"));
+          cancelDrag();
+          clickSelect(click, {});
+          return;
+        }
+        dragMoved_ = true;
+        pendingClick_.reset();
+      }
+      bool locked = drag_ == Drag::FreestyleWire ? false
+                    : drag_ == Drag::Freestyle ? edit::hasLocked(b, fsTarget_.fragment)
                     : drag_ == Drag::Fragment || drag_ == Drag::Segment ? edit::hasLocked(b, dragFragment_)
                     : drag_ == Drag::AxisPiece                          ? b.zips[size_t(dragZip_)].fixed
                     : dragMarker_.zip >= 0                              ? b.zips[size_t(dragMarker_.zip)].fixed
@@ -1076,7 +1107,7 @@ void BoardView::mouseMoveEvent(QMouseEvent* e) {
       }
       dragMoved_ = true;
       pendingClick_.reset();
-      dragBefore_ = doc_->beginEdit();
+      if (drag_ != Drag::FreestyleWire) dragBefore_ = doc_->beginEdit();
       if (drag_ == Drag::Freestyle) {
         // Re-shaping renumbers the wires: only components and vias stay selected.
         auto items = doc_->selectedItems();
@@ -1086,6 +1117,7 @@ void BoardView::mouseMoveEvent(QMouseEvent* e) {
       }
     }
     if (drag_ == Drag::Freestyle) freestyleBy(snapped(cursor_) - fsLast_, 0);
+    else if (drag_ == Drag::FreestyleWire) freestyleWireBy();
     else applyDrag();
     return;
   }
@@ -1928,9 +1960,37 @@ void BoardView::freestyleBy(Vec2 shift, double rotate) {
   refresh();
 }
 
+void BoardView::freestyleWireBy() {
+  const std::optional<topo::WireThrough> way = topo::wireThrough(*doc_->board(), doc_->topology(), fsWire_, snapped(cursor_));
+  fsWay_ = way ? way->tracks : std::vector<Track>{};
+  fsWaySqueezed_ = way && way->squeezed;
+  emit status(!way ? tr("Через эту точку проводник не проходит") : fsWaySqueezed_ ? tr("Путь проводника: места не хватает, проводник будет втиснут") : tr("Путь проводника после отпускания мыши"));
+  update();  // (the board is as it was: the way is drawn over its picture)
+}
+
 void BoardView::finishDrag() {
   Drag kind = drag_;
   drag_ = Drag::None;
+  if (kind == Drag::FreestyleWire && dragMoved_) {
+    // The wire laid the way shown: its tracks give way to it, the model follows, the shapes are computed.
+    const bool shown = !fsWay_.empty();
+    fsWay_.clear();
+    dragMoved_ = false;
+    if (shown && topo::leadWireThrough(*doc_->board(), doc_->topology(), fsWire_, snapped(cursor_))) {
+      auto items = doc_->selectedItems();
+      std::erase_if(items, [](ItemRef r) { return r.type == ItemType::Track; });  // (drawn anew: other tracks)
+      doc_->setSelection(std::move(items), doc_->selectedComponents());
+      doc_->commitEdit(*dragBefore_, tr("Переложить проводник"), false);
+      doc_->markTopologyFresh();
+      emit status(tr("Проводник переложен"));
+    } else {
+      emit status(tr("Через эту точку проводник не проходит: оставлен как был"));
+    }
+    dragBefore_.reset();
+    doc_->invalidate();
+    refresh();
+    return;
+  }
   if (placing_) {
     placing_ = false;
     if (dragFragment_.touchesOutline(*doc_->board())) syncOutline();
@@ -1998,6 +2058,7 @@ void BoardView::cancelDrag() {
     if (fsByModel_) doc_->invalidateModel();  // the steps moved the model too
   }
   fsByModel_ = false;
+  fsWay_.clear();
   drag_ = Drag::None;
   dragMoved_ = false;
   dragBefore_.reset();

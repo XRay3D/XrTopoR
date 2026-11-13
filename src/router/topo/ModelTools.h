@@ -109,6 +109,22 @@ struct DrawnConnection {
 };
 DrawnConnection drawConnection(const Board& b, ModelConnection c);
 
+// A wire led another way by hand (Freestyle: a wire dragged by the mouse): from its one end to the point and from the
+// point to its other end, each the cheapest way over the triangles among the wires as they run (connectionOnModel's
+// search), the wire itself out of the way. On a copy of the model; the two legs drawn as drawConnection draws —
+// what is shown dashed while the mouse is down. Nothing: no way through the point, or the point is on copper of the
+// net, or the wire is not one to lead (fixed, a pair's, of a flexibly fixed net).
+struct WireThrough {
+  std::vector<Track> tracks;  // from the wire's first end through the point to its other end
+  bool squeezed = false;      // a leg found no way with room
+  double length = 0;          // over the triangles, nm
+};
+std::optional<WireThrough> wireThrough(const Board& b, const Topology& live, int wire, Vec2 p);
+// ... and laid so for good: the wire's tracks give way to the two legs, the model follows the board (built anew if
+// it cannot), and the wire's shape is computed as F5 computes the edited wires' — the bend at the point goes where
+// nothing holds it, the wire lies on the other side of what it was led round. False: nothing changed.
+bool leadWireThrough(Board& b, Topology& t, int wire, Vec2 p);
+
 // The model's violations as DRC violations (Type::Topology) for the message list and the selection: `a`
 // and `b` are tracks of the wires concerned (or the pad a wire runs through).
 std::vector<DrcViolation> topologyViolations(const Board& b, const Topology& t, const std::vector<Violation>& vs);

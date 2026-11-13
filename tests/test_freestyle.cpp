@@ -2,6 +2,7 @@
 
 #include <chrono>
 #include <cstdlib>
+#include <format>
 #include <print>
 
 #include "core/Connectivity.h"
@@ -327,5 +328,124 @@ TEST(Freestyle, OnABoardOfOnesOwn) {
     if (const char* out = std::getenv("XR_FS_OUT")) {
       EXPECT_TRUE(io::saveBoard(b, std::string(out) + "_push" + std::to_string(int(push)) + ".fst"));
     }
+  }
+}
+
+// A wire dragged to the other side of a via: led through the point by the model and laid there for good — it passes
+// the via on the other side, the routing whole, the model the board's.
+TEST(Freestyle, AWireLedRoundAVia) {
+  auto lb = io::loadBoard(data("topor/Example_05/MinVia_standard_routing.fst"));
+  ASSERT_TRUE(lb);
+  Board& b0 = **lb;
+  const topo::Topology m0 = modelOf(b0);
+  const auto unrouted = unroutedNets(b0);
+  const int c0 = conflicts(b0);
+  // The nearest point of a wire's tracks to a point.
+  auto nearestOf = [](const Board& b, const topo::Wire& w, Vec2 at) {
+    Vec2 best;
+    double bd = std::numeric_limits<double>::max();
+    for (const Track& tr : b.tracks) {
+      if (!r::contains(w.tracks, tr.id)) continue;
+      const Vec2 q = closestPointOnSegment(at, tr.a.v(), tr.b.v());
+      if (double d = (q - at).len(); d < bd) bd = d, best = q;
+    }
+    return std::pair(best, bd);
+  };
+  int tried = 0, led = 0, back = 0, previews = 0;
+  for (size_t vi = 0; vi < b0.vias.size() && tried < 12; ++vi) {
+    const Via& via = b0.vias[vi];
+    for (int wi = 0; wi < int(m0.wires.size()); ++wi) {
+      const topo::Wire& w = m0.wires[size_t(wi)];
+      if (w.locked || w.pair >= 0 || w.net == via.net || w.end[0] < 0 || w.end[1] < 0 || !((via.layers >> w.layer) & 1)) continue;
+      const auto [q0, d0] = nearestOf(b0, w, via.pos.v());
+      if (d0 > 1.2 * kNmPerMm || d0 < via.diameter / 2.0) continue;
+      const Vec2 ends[2] = {m0.owners[size_t(w.end[0])].c, m0.owners[size_t(w.end[1])].c};
+      if ((ends[0] - via.pos.v()).len() < 2 * kNmPerMm || (ends[1] - via.pos.v()).len() < 2 * kNmPerMm) continue;
+      ++tried;
+      const Vec2 p = via.pos.v() + (via.pos.v() - q0).normalized() * (via.diameter / 2.0 + 0.7 * kNmPerMm);
+      const auto way = topo::wireThrough(b0, m0, wi, p);
+      if (!way) break;
+      ++previews;
+      EXPECT_FALSE(way->tracks.empty());
+      // (The preview is one chain from the wire's one end to its other.)
+      for (size_t k = 0; k + 1 < way->tracks.size(); ++k) EXPECT_LT((way->tracks[k].b.v() - way->tracks[k + 1].a.v()).len(), 2.0) << "via " << vi << ", piece " << k;
+      Board b = b0;
+      topo::Topology m = m0;
+      ASSERT_TRUE(topo::leadWireThrough(b, m, wi, p));
+      EXPECT_EQ(unroutedNets(b), unrouted) << "via " << vi << ", wire " << wi;
+      expectModelOfBoard(b, m);
+      // The wire as it is now: of the net and layer, between the same two ends.
+      for (const topo::Wire& x : m.wires) {
+        if (x.net != w.net || x.layer != w.layer || x.end[0] < 0 || x.end[1] < 0) continue;
+        const Vec2 a = m.owners[size_t(x.end[0])].c, c = m.owners[size_t(x.end[1])].c;
+        if (!(((a - ends[0]).len() < 10 && (c - ends[1]).len() < 10) || ((a - ends[1]).len() < 10 && (c - ends[0]).len() < 10))) continue;
+        const auto [q, d] = nearestOf(b, x, via.pos.v());
+        if ((q - via.pos.v()).dot(q0 - via.pos.v()) < 0) ++led;
+        else if ((q - q0).len() < 1000) ++back;  // (no way to the other side but round the via and back: it lies as it lay)
+        if (std::getenv("XR_FS_DEBUG"))
+          std::println("  via ({:.3f}, {:.3f}): the wire was nearest at ({:.3f}, {:.3f}), led through ({:.3f}, {:.3f}), is nearest at ({:.3f}, {:.3f}); ends ({:.3f}, {:.3f}) ({:.3f}, {:.3f})", via.pos.x / 1e6,
+                       via.pos.y / 1e6, q0.x / 1e6, q0.y / 1e6, p.x / 1e6, p.y / 1e6, q.x / 1e6, q.y / 1e6, ends[0].x / 1e6, ends[0].y / 1e6, ends[1].x / 1e6, ends[1].y / 1e6);
+        break;
+      }
+      if (std::getenv("XR_FS_DEBUG")) std::println("via {} wire {}: conflicts {} -> {}, preview {} tracks{}", vi, wi, c0, conflicts(b), way->tracks.size(), way->squeezed ? ", squeezed" : "");
+      break;
+    }
+  }
+  std::println("MinVia: {} wires dragged over a via, {} previews, {} now pass it on the other side, {} lie as they lay", tried, previews, led, back);
+  EXPECT_GT(tried, 5);
+  EXPECT_GE(previews * 3, tried * 2);
+  EXPECT_GE(led, 3);
+  EXPECT_GE(led + back + 2, previews);
+}
+
+// By hand: XR_FS_BOARD=file XR_FS_NET=name [XR_FS_PX=mm XR_FS_PY=mm] — the wires of the net are listed; with a point,
+// the one nearest it is led through it (a wire dragged there by the mouse).
+TEST(Freestyle, AWireOfOnesOwnLed) {
+  const char* file = std::getenv("XR_FS_BOARD");
+  const char* name = std::getenv("XR_FS_NET");
+  if (!file || !name) GTEST_SKIP() << "XR_FS_BOARD, XR_FS_NET are not set";
+  auto lb = io::loadBoard(file);
+  ASSERT_TRUE(lb);
+  Board& b = **lb;
+  topo::Topology m = modelOf(b);
+  int net = -1;
+  for (int n = 0; n < int(b.nets.size()); ++n)
+    if (b.nets[size_t(n)].name == name) net = n;
+  ASSERT_GE(net, 0) << "no net " << name;
+  const bool led = std::getenv("XR_FS_PX") && std::getenv("XR_FS_PY");
+  const Vec2 p = led ? Vec2{std::atof(std::getenv("XR_FS_PX")) * kNmPerMm, std::atof(std::getenv("XR_FS_PY")) * kNmPerMm} : Vec2{};
+  int wire = -1;
+  double bd = std::numeric_limits<double>::max();
+  for (int wi = 0; wi < int(m.wires.size()); ++wi) {
+    const topo::Wire& w = m.wires[size_t(wi)];
+    if (w.net != net || w.end[0] < 0 || w.end[1] < 0) continue;
+    double d = std::numeric_limits<double>::max();
+    for (const Track& tr : b.tracks)
+      if (r::contains(w.tracks, tr.id)) d = std::min(d, distPointSegment(p, tr.a.v(), tr.b.v()));
+    std::println("wire {} L{}: kind {} at ({:.3f}, {:.3f}) - kind {} at ({:.3f}, {:.3f}), {} tracks{}", wi, int(w.layer), int(m.owners[size_t(w.end[0])].kind), m.owners[size_t(w.end[0])].c.x / 1e6,
+                 m.owners[size_t(w.end[0])].c.y / 1e6, int(m.owners[size_t(w.end[1])].kind), m.owners[size_t(w.end[1])].c.x / 1e6, m.owners[size_t(w.end[1])].c.y / 1e6, w.tracks.size(),
+                 w.locked ? ", fixed" : "");
+    if (d < bd) bd = d, wire = wi;
+  }
+  if (!led) return;
+  ASSERT_GE(wire, 0);
+  const auto unrouted = unroutedNets(b);
+  const int c0 = conflicts(b);
+  const auto t0 = std::chrono::steady_clock::now();
+  const auto way = topo::wireThrough(b, m, wire, p);
+  const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+  std::println("wire {} through ({:.3f}, {:.3f}): {}, {:.1f} ms", wire, p.x / 1e6, p.y / 1e6, way ? std::format("{} tracks, {:.3f} mm{}", way->tracks.size(), way->length / 1e6, way->squeezed ? ", squeezed" : "") : "no way", ms);
+  if (!way) return;
+  for (const Track& tr : way->tracks) std::println("  dashed ({:.3f}, {:.3f}) - ({:.3f}, {:.3f})", tr.a.x / 1e6, tr.a.y / 1e6, tr.b.x / 1e6, tr.b.y / 1e6);
+  ASSERT_TRUE(topo::leadWireThrough(b, m, wire, p));
+  for (const topo::Wire& w : m.wires)
+    if (w.net == net)
+      for (const Track& tr : b.tracks)
+        if (r::contains(w.tracks, tr.id)) std::println("  laid L{} ({:.3f}, {:.3f}) - ({:.3f}, {:.3f})", int(tr.layer), tr.a.x / 1e6, tr.a.y / 1e6, tr.b.x / 1e6, tr.b.y / 1e6);
+  std::println("unrouted {} -> {}, conflicts {} -> {}", unrouted.size(), unroutedNets(b).size(), c0, conflicts(b));
+  EXPECT_EQ(unroutedNets(b), unrouted);
+  expectModelOfBoard(b, m);
+  if (const char* out = std::getenv("XR_FS_OUT")) {
+    EXPECT_TRUE(io::saveBoard(b, std::string(out) + "_wire.fst"));
   }
 }

@@ -923,6 +923,142 @@ DrawnConnection drawConnection(const Board& b, ModelConnection c) {
   return out;
 }
 
+std::optional<WireThrough> wireThrough(const Board& b, const Topology& live, int wire, Vec2 p) {
+  if (wire < 0 || wire >= int(live.wires.size())) return std::nullopt;
+  const Wire was = live.wires[size_t(wire)];
+  if (was.locked || was.pair >= 0 || was.net < 0 || was.end[0] < 0 || was.end[1] < 0 || b.flexFixed(was.net)) return std::nullopt;
+  Topology t = live;
+  LayerMesh* m = t.mesh(was.layer);
+  if (!m) return std::nullopt;
+  // The wire out of the model: its crossings, those of its own pads' sides too, and its tracks out of the board.
+  {
+    Wire& w = t.wires[size_t(wire)];
+    std::vector<int> edges;
+    for (int cid : w.cross) {
+      const int e = t.crossings[size_t(cid)].edge;
+      std::erase(m->edges[size_t(e)].cross, cid);
+      t.crossings[size_t(cid)] = Crossing{};
+      edges.push_back(e);
+    }
+    for (Edge& E : m->edges)
+      if (E.along == wire) E.along = -1;
+    w.cross.clear();
+    w.end[0] = w.end[1] = -1;
+    w.locked = true;
+    w.tracks.clear();
+    for (int e : edges) refreshEdge(t, *m, e);
+  }
+  bool isFree = false;
+  const int j = connectionEnd(t, *m, p, t.owners[size_t(was.end[1])].c, was.net, was.width, isFree);
+  if (j < 0 || !isFree) return std::nullopt;
+  auto vertexOf = [&](int owner, Vec2 towards) {  // a polygon pad's centre, or the vertex of the axis nearest the other end
+    if (t.owners[size_t(owner)].shape.kind == Shape::Kind::Polygon)
+      for (int v : m->ownerVerts[size_t(owner)])
+        if (m->verts[size_t(v)].t == 0 && m->verts[size_t(v)].off.len2() < 1) return v;
+    return t.nearestVertex(*m, owner, towards);
+  };
+  WireThrough out;
+  int legs[2];
+  for (int k = 0; k < 2; ++k) {
+    Wire w;
+    w.net = was.net;
+    w.layer = was.layer;
+    w.width = was.width;
+    w.widthMin = was.widthMin;
+    w.clr = was.clr;
+    w.end[0] = k == 0 ? was.end[0] : j;
+    w.end[1] = k == 0 ? j : was.end[1];
+    w.endVertex[0] = vertexOf(w.end[0], t.owners[size_t(w.end[1])].c);
+    w.endVertex[1] = vertexOf(w.end[1], t.owners[size_t(w.end[0])].c);
+    legs[k] = int(t.wires.size());
+    t.wires.push_back(std::move(w));
+    std::optional<RelayPath> path = findRelay(t, legs[k]);
+    const double line = (t.owners[size_t(t.wires[size_t(legs[k])].end[0])].c - t.owners[size_t(t.wires[size_t(legs[k])].end[1])].c).len();
+    if (!path || path->length > 3 * line + 5 * kNmPerMm)
+      if (std::optional<RelayPath> tight = findRelay(t, legs[k], nullptr, nullptr, true); tight && (!path || tight->length < path->length)) {
+        path = tight;
+        out.squeezed = true;
+      }
+    if (!path) return std::nullopt;
+    applyRelay(t, legs[k], *path);
+    out.length += path->length;
+    if (static const bool debug = std::getenv("XR_FS_DEBUG") != nullptr; debug) {
+      std::println(stderr, "  wireThrough: leg {} of {} crossings, {:.3f} mm{}", k, t.wires[size_t(legs[k])].cross.size(), path->length / 1e6, path->along ? ", along an edge" : "");
+      for (int cid : t.wires[size_t(legs[k])].cross) {
+        const Edge& E = m->edges[size_t(t.crossings[size_t(cid)].edge)];
+        const Vertex& u = m->verts[size_t(E.v[0])];
+        const Vertex& v = m->verts[size_t(E.v[1])];
+        std::println(stderr, "    across [owner {} kind {} ({:.3f}, {:.3f})] - [owner {} kind {} ({:.3f}, {:.3f})], {} of {}", u.owner, int(t.owners[size_t(u.owner)].kind), u.p.x / 1e6, u.p.y / 1e6, v.owner,
+                     int(t.owners[size_t(v.owner)].kind), v.p.x / 1e6, v.p.y / 1e6, int(r::find(E.cross, cid) - E.cross.begin()), E.cross.size());
+      }
+    }
+  }
+  // Drawn: the two legs and the wires of other nets they share an edge with, the rest of the net standing.
+  Board trial = b;
+  {
+    const std::set<uint32_t> old(was.tracks.begin(), was.tracks.end());
+    std::erase_if(trial.tracks, [&](const Track& x) { return old.contains(x.id); });
+  }
+  for (int wi = 0; wi < int(t.wires.size()); ++wi)
+    if (t.wires[size_t(wi)].net == was.net && wi != legs[0] && wi != legs[1]) t.wires[size_t(wi)].locked = true;
+  RealizeStats stats;
+  int drawn = 0;
+  const std::vector<int> only{legs[0], legs[1]};
+  drawModel(trial, t, true, stats, drawn, false, &only);
+  const Vec2 at = t.owners[size_t(j)].c;
+  for (int k = 0; k < 2; ++k) {
+    const std::set<uint32_t> own(t.wires[size_t(legs[k])].tracks.begin(), t.wires[size_t(legs[k])].tracks.end());
+    std::vector<Track> leg;
+    for (const Track& x : trial.tracks)
+      if (own.contains(x.id)) leg.push_back(x);
+    if (leg.empty()) return std::nullopt;
+    // The first leg ends at the point, the second starts there, whichever way the realiser went.
+    const bool endsThere = (leg.back().b.v() - at).len() < (leg.front().a.v() - at).len();
+    if (endsThere != (k == 0)) {
+      r::reverse(leg);
+      for (Track& x : leg) std::swap(x.a, x.b);
+    }
+    for (Track& x : leg) {
+      x.id = 0;
+      out.tracks.push_back(x);
+    }
+  }
+  // The net as whole as it was: a wire that lay over a pad of its net on its way (and was that pad's connection)
+  // is not led off it.
+  {
+    std::vector<char> nets(b.nets.size(), 0);
+    nets[size_t(was.net)] = 1;
+    Board led = b;
+    const std::set<uint32_t> old(was.tracks.begin(), was.tracks.end());
+    std::erase_if(led.tracks, [&](const Track& x) { return old.contains(x.id); });
+    led.tracks.insert(led.tracks.end(), out.tracks.begin(), out.tracks.end());
+    if (Connectivity::compute(led, nets).ratsnest.size() > Connectivity::compute(b, nets).ratsnest.size()) return std::nullopt;
+  }
+  return out;
+}
+
+bool leadWireThrough(Board& b, Topology& t, int wire, Vec2 p) {
+  std::optional<WireThrough> way = wireThrough(b, t, wire, p);
+  if (!way) return false;
+  const Board old = b;
+  const std::set<uint32_t> gone(t.wires[size_t(wire)].tracks.begin(), t.wires[size_t(wire)].tracks.end());
+  std::erase_if(b.tracks, [&](const Track& x) { return gone.contains(x.id); });
+  for (Track x : way->tracks) {
+    x.edited = true;
+    b.tracks.push_back(x);
+  }
+  Topology::assignIds(b);
+  if (!t.follow(old, b)) {
+    t = Topology();
+    t.build(b);
+  }
+  // (All the wires drawn, as Freestyle's moves draw them: the wires the new way passes have to move over, and those
+  // next to them; drawn alone with its ring, the wire left half a hundred conflicts with what lay as before.)
+  runF5Model(b, t, {});
+  for (Track& x : b.tracks) x.edited = false;
+  return true;
+}
+
 F5ModelResult runF5Model(Board& b, Topology& t, const F5ModelOptions& o) {
   ProfScope pAll("F5 model total");
   F5ModelResult r;

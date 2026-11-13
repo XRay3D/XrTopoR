@@ -48,6 +48,8 @@ class BoardView : public QOpenGLWidget {
   bool onlyActiveLayer() const;
   bool isRouting() const { return routing_; }
   topo::Push freestylePush() const { return push_; }
+  // The way of the wire being dragged in Freestyle, as it is drawn dashed (empty: no drag, or no way).
+  const std::vector<Track>& freestyleWay() const { return fsWay_; }
   // Frame times of the rendering (xrtopor --render-bench): the whole board and zoomed in (drawn anew), panned (the
   // picture moved), the cursor moved with the ruler (the tools only); `frames` of each, painted at once.
   QString benchmark(int frames);
@@ -170,7 +172,7 @@ class BoardView : public QOpenGLWidget {
   edit::Fragment selectedFragment() const;
   // Moves the selection by an edit::Motion built around its pivot (rotations and flips).
   void transformSelection(double rotate, bool mirror, const QString& title);
-  enum class Drag { None, Fragment, Segment, Vertex, Bend, Freestyle, AxisPiece, Centre };
+  enum class Drag { None, Fragment, Segment, Vertex, Bend, Freestyle, FreestyleWire, AxisPiece, Centre };
   void freestyleBy(Vec2 shift, double rotate);  // one Freestyle move of fsTarget_
   topo::FreestyleTarget freestyleTarget() const;  // the selected components and vias
   void startDrag(Drag kind, Vec2 at, std::optional<Marker> marker = {});
@@ -301,6 +303,12 @@ class BoardView : public QOpenGLWidget {
   // This Freestyle drag went on the live model (its steps moved the model and the board together), or also by the
   // tracks (a turn, pushing), or left the model and the board apart: the model is then stale after it.
   bool fsByModel_ = false;  // the drag moved the model (Freestyle works in it)
+  // A wire dragged in Freestyle: the track pressed, the model's wire it is of, and the way through the cursor as it
+  // would be laid on release — drawn dashed (empty: there is none).
+  int fsWireTrack_ = -1, fsWire_ = -1;
+  std::vector<Track> fsWay_;
+  bool fsWaySqueezed_ = false;
+  void freestyleWireBy();  // the way through the cursor, found anew
   topo::FreestyleTarget fsTarget_;
   Vec2 fsLast_;
   std::optional<EditSnapshot> pasteBefore_;
