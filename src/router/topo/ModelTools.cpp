@@ -858,6 +858,13 @@ int connectionEnd(Topology& t, LayerMesh& m, Vec2 p, Vec2 other, int net, Coord 
 
 }  // namespace
 
+int wireEndVertex(const Topology& t, const LayerMesh& m, int owner, Vec2 from) {
+  if (t.owners[size_t(owner)].shape.kind == Shape::Kind::Polygon)
+    for (int v : m.ownerVerts[size_t(owner)])
+      if (m.verts[size_t(v)].t == 0 && m.verts[size_t(v)].off.len2() < 1) return v;
+  return t.nearestVertex(m, owner, from);
+}
+
 std::optional<ModelConnection> connectionOnModel(const Topology& live, Vec2 from, Vec2 to, LayerId layer, int net, Coord width, Coord widthMin, Coord clearance) {
   std::optional<ModelConnection> out(std::in_place);
   ModelConnection& c = *out;
@@ -870,12 +877,6 @@ std::optional<ModelConnection> connectionOnModel(const Topology& live, Vec2 from
   const int a = connectionEnd(t, *m, from, to, net, width, c.freeFrom);
   const int z = a < 0 ? -1 : connectionEnd(t, *m, to, from, net, width, c.freeTo);
   if (a < 0 || z < 0 || a == z) return std::nullopt;
-  auto vertexOf = [&](int owner, Vec2 towards) {  // a polygon pad's centre, or the vertex of the axis nearest the other end
-    if (t.owners[size_t(owner)].shape.kind == Shape::Kind::Polygon)
-      for (int v : m->ownerVerts[size_t(owner)])
-        if (m->verts[size_t(v)].t == 0 && m->verts[size_t(v)].off.len2() < 1) return v;
-    return t.nearestVertex(*m, owner, towards);
-  };
   Wire w;
   w.net = net;
   w.layer = layer;
@@ -884,8 +885,8 @@ std::optional<ModelConnection> connectionOnModel(const Topology& live, Vec2 from
   w.clr = clearance;
   w.end[0] = a;
   w.end[1] = z;
-  w.endVertex[0] = vertexOf(a, to);
-  w.endVertex[1] = vertexOf(z, from);
+  w.endVertex[0] = wireEndVertex(t, *m, a, to);
+  w.endVertex[1] = wireEndVertex(t, *m, z, from);
   c.wire = int(t.wires.size());
   t.wires.push_back(std::move(w));
   std::optional<RelayPath> path = findRelay(t, c.wire);
@@ -953,12 +954,6 @@ std::optional<WireThrough> wireThrough(const Board& b, const Topology& live, int
   bool isFree = false;
   const int j = connectionEnd(t, *m, p, t.owners[size_t(was.end[1])].c, was.net, was.width, isFree);
   if (j < 0 || !isFree) return std::nullopt;
-  auto vertexOf = [&](int owner, Vec2 towards) {  // a polygon pad's centre, or the vertex of the axis nearest the other end
-    if (t.owners[size_t(owner)].shape.kind == Shape::Kind::Polygon)
-      for (int v : m->ownerVerts[size_t(owner)])
-        if (m->verts[size_t(v)].t == 0 && m->verts[size_t(v)].off.len2() < 1) return v;
-    return t.nearestVertex(*m, owner, towards);
-  };
   WireThrough out;
   int legs[2];
   for (int k = 0; k < 2; ++k) {
@@ -970,8 +965,8 @@ std::optional<WireThrough> wireThrough(const Board& b, const Topology& live, int
     w.clr = was.clr;
     w.end[0] = k == 0 ? was.end[0] : j;
     w.end[1] = k == 0 ? j : was.end[1];
-    w.endVertex[0] = vertexOf(w.end[0], t.owners[size_t(w.end[1])].c);
-    w.endVertex[1] = vertexOf(w.end[1], t.owners[size_t(w.end[0])].c);
+    w.endVertex[0] = wireEndVertex(t, *m, w.end[0], t.owners[size_t(w.end[1])].c);
+    w.endVertex[1] = wireEndVertex(t, *m, w.end[1], t.owners[size_t(w.end[0])].c);
     legs[k] = int(t.wires.size());
     t.wires.push_back(std::move(w));
     std::optional<RelayPath> path = findRelay(t, legs[k]);

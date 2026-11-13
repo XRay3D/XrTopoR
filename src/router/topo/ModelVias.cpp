@@ -37,14 +37,6 @@ struct Cand {
 
 LayerMask bit(LayerId l) { return LayerMask(1) << l; }
 
-// The vertex of an owner on a layer a wire coming from `from` ends at: a polygon pad's centre, else the nearest.
-int vertexOf(const Topology& t, const LayerMesh& m, int owner, Vec2 from) {
-  if (t.owners[size_t(owner)].shape.kind == Shape::Kind::Polygon)
-    for (int v : m.ownerVerts[size_t(owner)])
-      if (m.verts[size_t(v)].t == 0 && m.verts[size_t(v)].off.len2() < 1) return v;
-  return t.nearestVertex(m, owner, from);
-}
-
 }  // namespace
 
 ViaResult removeVias(Board& b, Topology& t, const ViaOptions& o) {
@@ -228,7 +220,7 @@ ViaResult removeVias(Board& b, Topology& t, const ViaOptions& o) {
         n.end[0] = c.v;
         n.end[1] = c.u;
         n.endVertex[0] = m->ownerVerts[size_t(c.v)].front();
-        n.endVertex[1] = vertexOf(mt, *m, c.u, mt.owners[size_t(c.v)].c);
+        n.endVertex[1] = wireEndVertex(mt, *m, c.u, mt.owners[size_t(c.v)].c);
         n.hasExit[0] = n.hasExit[1] = false;
         n.cross.clear();
         n.tracks.clear();

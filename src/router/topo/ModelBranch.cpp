@@ -601,14 +601,8 @@ BranchResult reattachBranches(Board& b, Topology& t, const BranchOptions& o) {
     Wire n = A;
     n.end[0] = free;
     n.end[1] = term;
-    auto vertexOf = [&](int owner, Vec2 from) {
-      if (mt.owners[size_t(owner)].shape.kind == Shape::Kind::Polygon)
-        for (int v : m->ownerVerts[size_t(owner)])
-          if (m->verts[size_t(v)].t == 0 && m->verts[size_t(v)].off.len2() < 1) return v;
-      return mt.nearestVertex(*m, owner, from);
-    };
-    n.endVertex[0] = vertexOf(free, T.c);
-    n.endVertex[1] = vertexOf(term, f);
+    n.endVertex[0] = wireEndVertex(mt, *m, free, T.c);
+    n.endVertex[1] = wireEndVertex(mt, *m, term, f);
     n.hasExit[0] = n.hasExit[1] = false;
     n.cross.clear();
     n.tracks.clear();

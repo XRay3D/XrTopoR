@@ -95,6 +95,10 @@ int resolveCrossings(const Board& b, Topology& t);
 void drawModel(Board& b, Topology& t, bool direct, RealizeStats& stats, int& nWires, bool editedOnly = false,
                const std::vector<int>* only = nullptr, ModelDrawing* keep = nullptr, const ModelDrawing* from = nullptr);
 
+// The vertex of an owner on a layer that a new wire coming from `from` ends at: a polygon pad's centre, else the
+// vertex of its axis nearest.
+int wireEndVertex(const Topology& t, const LayerMesh& m, int owner, Vec2 from);
+
 // A connection for manual routing, on the model: a copy of it with the new wire laid over the triangles from `from` to
 // `to` on the layer (findRelay, as F6 re-lays a wire: among the wires as they run, each edge with room for it; squeezed
 // in when there is no way with room, or only a very long one). An end on a pad, a via or a branch point of the net is that owner, one anywhere
