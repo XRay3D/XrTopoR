@@ -1,5 +1,7 @@
 #include "router/topo/ModelRefine.h"
 
+#include "router/topo/ModelSimplify.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -24,6 +26,12 @@ RefineModelResult refineModel(Board& b, Topology& t, const RefineModelOptions& o
   RefineModelResult r;
   int nFlips = 0;
   r.untangled = resolveCrossings(b, t);
+  if (o.simplify) {
+    const SimplifyResult sr = simplifyNets(b, t);
+    r.spareLinks = sr.links;
+    r.spareVias = sr.vias;
+    r.log.insert(r.log.end(), sr.log.begin(), sr.log.end());
+  }
   if (!prepareModel(t, o.flips, false, nFlips, r.violations)) return r;
 
   // The model drawn on a copy of the board (the model's own wires keep the tracks of the board they came with).
@@ -286,6 +294,7 @@ RefineModelResult refineModel(Board& b, Topology& t, const RefineModelOptions& o
     mo.hold = 3;
     mo.decay = 0.6;
     mo.floor = 0.05 * kNmPerMm;
+    mo.simplify = false;
     OptimizeModelResult jr = optimizeModel(b, t, mo);
     standing.reset();
     if (!jr.drawn) return;

@@ -2242,6 +2242,7 @@ bool BoardView::recomputeShapesModel(bool editedOnly) {
                     .arg(res.stats.arcs)
                     .arg(res.stats.overflowEdges);
   if (res.junctionMoves > 0) msg += tr("; ветвлений сдвинуто: %1").arg(res.junctionMoves);
+  if (res.spareLinks > 0) msg += tr("; снято лишних проводников (дубли, петли): %1, переходов %2").arg(res.spareLinks).arg(res.spareVias);
   if (res.stats.narrowedWires > 0) msg += tr("; заужено проводников: %1").arg(res.stats.narrowedWires);
   // (Taken apart when the model was built, here or before: said once.)
   if (topo::Topology& live = doc_->topology(); live.untangled > 0) {

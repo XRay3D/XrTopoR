@@ -70,6 +70,7 @@ add_library(xrrouter STATIC
   router/topo/Wires.cpp
   router/topo/ModelTools.cpp
   router/topo/ModelRelax.cpp
+  router/topo/ModelSimplify.cpp
   router/topo/OwnerPush.cpp
   router/topo/ModelRefine.cpp
   router/topo/ModelBranch.cpp

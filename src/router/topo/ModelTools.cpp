@@ -13,6 +13,7 @@
 #include "core/Prof.h"
 #include "core/SpatialIndex.h"
 #include "router/topo/ModelRelax.h"
+#include "router/topo/ModelSimplify.h"
 #include "router/topo/RealizerInput.h"
 #include "topo/Capacity.h"
 #include "topo/Flip.h"
@@ -1063,6 +1064,11 @@ F5ModelResult runF5Model(Board& b, Topology& t, const F5ModelOptions& o) {
   ProfScope pAll("F5 model total");
   F5ModelResult r;
   r.untangled = resolveCrossings(b, t);
+  if (o.simplify) {
+    const SimplifyResult sr = simplifyNets(b, t);
+    r.spareLinks = sr.links;
+    r.spareVias = sr.vias;
+  }
   if (!prepareModel(t, o.flips, o.weighted, r.flips, r.violations)) return r;
   // Edited only: the branch points at the edited wires' ends balance, their wires alone drawn (the rest of the
   // board stays as it lies).
@@ -1083,6 +1089,7 @@ F5ModelResult runF5Model(Board& b, Topology& t, const F5ModelOptions& o) {
     ProfScope p("F5 model: branch points");
     OptimizeModelOptions mo;
     mo.owners = balanced;
+    mo.simplify = false;
     mo.flips = false;
     mo.vias = false;
     mo.clasps = false;

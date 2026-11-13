@@ -18,6 +18,7 @@
 #include "core/Prof.h"
 #include "drc/Drc.h"
 #include "geom/Geometry.h"
+#include "router/topo/ModelSimplify.h"
 #include "router/topo/ModelTools.h"
 #include "router/topo/OwnerPush.h"
 #include "topo/Capacity.h"
@@ -222,6 +223,12 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
   OptimizeModelResult r;
   int nFlips = 0;
   r.untangled = resolveCrossings(b, t);
+  if (o.simplify && o.owners.empty()) {
+    const SimplifyResult sr = simplifyNets(b, t);
+    r.spareLinks = sr.links;
+    r.spareVias = sr.vias;
+    r.log.insert(r.log.end(), sr.log.begin(), sr.log.end());
+  }
   if (!prepareModel(t, o.flips, false, nFlips, r.violations)) return r;
   const bool debug = std::getenv("XR_TOPO_DEBUG") != nullptr;
 

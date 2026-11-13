@@ -255,6 +255,7 @@ int main(int argc, char** argv) {
                  res.wires, res.found, res.relaid, res.clinches, res.viasRemoved, res.zoneTracksRemoved, res.branches, res.branchesMerged, res.junctionMoves, res.reattached, res.drawings,
                  res.conflictsBefore, res.conflictsAfter, res.lengthBefore / 1e6, res.lengthAfter / 1e6);
     if (res.untangled > 0) std::println("model: {} double crossing(s) taken apart first", res.untangled);
+    if (res.spareLinks > 0) std::println("model: {} spare link(s) of the nets taken out first (twins, loops), {} via(s) with them", res.spareLinks, res.spareVias);
     xr::Prof::get().report("refine --model");
     if (auto r = io::saveBoard(b, std::string(a.opt("-o"))); !r) return fail(r.error());
     if (auto r = topo::saveTopology(t, b, topo::sidecarPath(std::string(a.opt("-o")))); !r) return fail(r.error());
@@ -282,6 +283,7 @@ int main(int argc, char** argv) {
                  res.iterations, res.viaMoves, res.junctionMoves, res.drawings, res.rollbacks, res.conflictsBefore, res.conflictsAfter, res.depthBefore / 1e6,
                  res.depthAfter / 1e6, res.lengthBefore / 1e6, res.lengthAfter / 1e6, res.forceBefore, res.forceAfter);
     if (res.untangled > 0) std::println("model: {} double crossing(s) taken apart first", res.untangled);
+    if (res.spareLinks > 0) std::println("model: {} spare link(s) of the nets taken out first (twins, loops), {} via(s) with them", res.spareLinks, res.spareVias);
     xr::Prof::get().report("optimize --model");
     if (auto r = io::saveBoard(b, std::string(a.opt("-o"))); !r) return fail(r.error());
     if (auto r = topo::saveTopology(t, b, topo::sidecarPath(std::string(a.opt("-o")))); !r) return fail(r.error());
@@ -328,6 +330,7 @@ int main(int argc, char** argv) {
                  t.wires.size(), res.flips, res.stats.wires, res.stats.arcs, res.stats.droppedApexes, res.stats.overflowEdges,
                  res.stats.sketchCrossings);
     if (res.untangled > 0) std::println("model: {} double crossing(s) taken apart first", res.untangled);
+    if (res.spareLinks > 0) std::println("model: {} spare link(s) of the nets taken out first (twins, loops), {} via(s) with them", res.spareLinks, res.spareVias);
     // --again N: N more times, the model built from the tracks just drawn each time (the fixed point of
     // the conversion and the drawing together).
     if (auto p = a.opt("--again"); !p.empty()) {

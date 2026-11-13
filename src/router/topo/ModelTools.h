@@ -32,6 +32,8 @@ struct F5ModelOptions {
   // Only the wires with a track edited by hand since the last computation (Track::edited) are drawn, the
   // rest stay as they lie (F5 without a selection in the editor).
   bool editedOnly = false;
+  // The nets made trees first (ModelSimplify.h): twins and loops taken out, where a net is not flexibly fixed.
+  bool simplify = true;
 };
 
 struct F5ModelResult {
@@ -41,6 +43,7 @@ struct F5ModelResult {
   int wires = 0;
   int junctionMoves = 0;  // branch points moved to their balance
   int untangled = 0;      // double crossings taken apart first (resolveCrossings)
+  int spareLinks = 0, spareVias = 0;  // twins and loops taken out first (simplifyNets), and the vias inside them
   RealizeStats stats;
 };
 

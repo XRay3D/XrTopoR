@@ -144,7 +144,10 @@ TEST(Realizer, ModelReshapeIsAFixedPoint) {
     EXPECT_EQ(conflictsAt[1], conflictsAt[0]) << name;
     EXPECT_EQ(conflictsAt[2], conflictsAt[1]) << name;
     EXPECT_NEAR(lengthAt[2], lengthAt[1], 0.5 * kNmPerMm) << name;
-    EXPECT_NEAR(lengthAt[1], lengthAt[0], 0.5 * kNmPerMm) << name;
+    // (A model built anew from the first drawing may find a loop the drawing closed — two wires of a net drawn into
+    // each other: arz_2L has one of 1.7 mm in +5B — and the second pass takes it out; the third finds nothing.)
+    EXPECT_LE(lengthAt[1], lengthAt[0] + 0.5 * kNmPerMm) << name;
+    EXPECT_GE(lengthAt[1], lengthAt[0] - 3 * kNmPerMm) << name;
   }
 }
 
@@ -848,4 +851,182 @@ TEST(Realizer, WidenedWiresAreLaidTight) {
     }
   }
   EXPECT_EQ(loops, 0);
+}
+
+namespace {
+
+// A two-layer board 40 x 30 mm with round through pads, vias and tracks put where a test says (mm).
+struct SmallBoard {
+  Board b;
+  LayerId top = 0, bot = 0;
+  SmallBoard() {
+    top = b.addLayer("Top", LayerKind::Copper, Side::Top);
+    bot = b.addLayer("Bottom", LayerKind::Copper, Side::Bottom);
+    b.layers[top].copperIndex = 0;
+    b.layers[bot].copperIndex = 1;
+    b.outline.push_back({mm(0, 0), mm(40, 0), mm(40, 30), mm(0, 30)});
+  }
+  static Vec2 mm(double x, double y) { return {x * kNmPerMm, y * kNmPerMm}; }
+  void pad(double x, double y, int net) {
+    Component c;
+    c.ref = "P" + std::to_string(b.components.size());
+    c.pos = Point(mm(x, y));
+    Pad p;
+    p.component = int(b.components.size());
+    p.net = net;
+    p.shape.kind = PadShapeKind::Circle;
+    p.shape.w = p.shape.h = mmToNm(1.0);
+    p.copper = b.allCopperMask();
+    p.drill = mmToNm(0.5);
+    c.pads.push_back(int(b.pads.size()));
+    b.pads.push_back(p);
+    b.components.push_back(c);
+    b.updatePadPositions(int(b.components.size()) - 1);
+  }
+  void via(double x, double y, int net) {
+    Via v;
+    v.pos = Point(mm(x, y));
+    v.net = net;
+    v.diameter = mmToNm(0.6);
+    v.drill = mmToNm(0.3);
+    v.layers = b.allCopperMask();
+    b.vias.push_back(v);
+  }
+  void track(std::initializer_list<Vec2> pts, int net, LayerId layer) {
+    for (auto p = pts.begin(); p + 1 != pts.end(); ++p) {
+      Track t;
+      t.a = Point(*p);
+      t.b = Point(*(p + 1));
+      t.width = mmToNm(0.25);
+      t.net = net;
+      t.layer = layer;
+      b.tracks.push_back(t);
+    }
+  }
+  double length(int net) const {
+    double sum = 0;
+    for (const Track& t : b.tracks)
+      if (t.net == net) sum += (t.b.v() - t.a.v()).len();
+    return sum / kNmPerMm;
+  }
+  size_t unrouted() const { return Connectivity::compute(b).ratsnest.size(); }
+};
+
+}  // namespace
+
+// F5 makes a net a tree: a second way between two of its points goes — the longer one —, with the vias it went
+// through; a branch point left with two wires is a bend of one wire. A flexibly fixed net keeps all it has, and a
+// free end (routing not finished) is nobody's loop.
+TEST(Optimizer, ANetIsMadeATree) {
+  const auto mm = SmallBoard::mm;
+  {  // Two ways from A to B on a layer: the straight one stays.
+    SmallBoard s;
+    const int n = s.b.addNet("A");
+    s.pad(5, 15, n);
+    s.pad(25, 15, n);
+    s.track({mm(5, 15), mm(25, 15)}, n, s.top);
+    s.track({mm(5, 15), mm(10, 20), mm(20, 20), mm(25, 15)}, n, s.top);
+    topo::Topology::assignIds(s.b);
+    topo::Topology t;
+    t.build(s.b);
+    const auto res = topo::runF5Model(s.b, t, {});
+    EXPECT_TRUE(res.drawn);
+    EXPECT_EQ(res.spareLinks, 1);
+    EXPECT_EQ(s.unrouted(), 0u);
+    EXPECT_NEAR(s.length(n), 20.0, 0.2);
+    EXPECT_EQ(t.wires.size(), 1u);
+    EXPECT_EQ(t.check(), std::vector<std::string>{});
+  }
+  {  // ... the same net flexibly fixed: both ways stay.
+    SmallBoard s;
+    const int n = s.b.addNet("A");
+    s.b.nets[size_t(n)].flexFixed = true;
+    s.pad(5, 15, n);
+    s.pad(25, 15, n);
+    s.track({mm(5, 15), mm(25, 15)}, n, s.top);
+    s.track({mm(5, 15), mm(10, 20), mm(20, 20), mm(25, 15)}, n, s.top);
+    topo::Topology::assignIds(s.b);
+    topo::Topology t;
+    t.build(s.b);
+    const auto res = topo::runF5Model(s.b, t, {});
+    EXPECT_EQ(res.spareLinks, 0);
+    EXPECT_GT(s.length(n), 39.0);
+    EXPECT_EQ(t.wires.size(), 2u);
+  }
+  {  // A way through two vias beside the straight one: it goes, and its vias.
+    SmallBoard s;
+    const int n = s.b.addNet("A");
+    s.pad(5, 15, n);
+    s.pad(25, 15, n);
+    s.via(10, 20, n);
+    s.via(20, 20, n);
+    s.track({mm(5, 15), mm(25, 15)}, n, s.top);
+    s.track({mm(5, 15), mm(10, 20)}, n, s.top);
+    s.track({mm(10, 20), mm(20, 20)}, n, s.bot);
+    s.track({mm(20, 20), mm(25, 15)}, n, s.top);
+    topo::Topology::assignIds(s.b);
+    topo::Topology t;
+    t.build(s.b);
+    const auto res = topo::runF5Model(s.b, t, {});
+    EXPECT_EQ(res.spareLinks, 1);
+    EXPECT_EQ(res.spareVias, 2);
+    EXPECT_TRUE(s.b.vias.empty());
+    EXPECT_EQ(s.unrouted(), 0u);
+    EXPECT_NEAR(s.length(n), 20.0, 0.2);
+    EXPECT_EQ(t.check(), std::vector<std::string>{});
+  }
+  {  // A branch point with a wire laid twice from it: one of the two goes, the branch point stays with its three.
+    SmallBoard s;
+    const int n = s.b.addNet("A");
+    s.pad(5, 15, n);
+    s.pad(25, 10, n);
+    s.pad(25, 20, n);
+    s.track({mm(5, 15), mm(15, 15)}, n, s.top);
+    s.track({mm(15, 15), mm(25, 10)}, n, s.top);
+    s.track({mm(15, 15), mm(25, 20)}, n, s.top);
+    s.track({mm(15, 15), mm(18, 22), mm(25, 20)}, n, s.top);
+    topo::Topology::assignIds(s.b);
+    topo::Topology t;
+    t.build(s.b);
+    const auto res = topo::runF5Model(s.b, t, {});
+    EXPECT_EQ(res.spareLinks, 1);
+    EXPECT_EQ(s.unrouted(), 0u);
+    EXPECT_EQ(t.wires.size(), 3u);
+    EXPECT_LT(s.length(n), 33.0);
+    EXPECT_EQ(t.check(), std::vector<std::string>{});
+  }
+  {  // A free end is not a loop: the stub stays, and F6 and F7 leave it too.
+    SmallBoard s;
+    const int n = s.b.addNet("A");
+    s.pad(5, 15, n);
+    s.pad(25, 15, n);
+    s.track({mm(5, 15), mm(25, 15)}, n, s.top);
+    s.track({mm(5, 15), mm(5, 22)}, n, s.top);
+    topo::Topology::assignIds(s.b);
+    topo::Topology t;
+    t.build(s.b);
+    const auto res = topo::runF5Model(s.b, t, {});
+    EXPECT_EQ(res.spareLinks, 0);
+    EXPECT_NEAR(s.length(n), 27.0, 0.3);
+    EXPECT_EQ(topo::refineModel(s.b, t, {}).spareLinks, 0);
+    EXPECT_EQ(topo::optimizeModel(s.b, t, {}).spareLinks, 0);
+    EXPECT_GT(s.length(n), 24.0);  // (the stub is there; its free end may have stepped)
+  }
+  {  // F6 and F7 make the tree as F5 does.
+    for (int tool : {6, 7}) {
+      SmallBoard s;
+      const int n = s.b.addNet("A");
+      s.pad(5, 15, n);
+      s.pad(25, 15, n);
+      s.track({mm(5, 15), mm(25, 15)}, n, s.top);
+      s.track({mm(5, 15), mm(10, 20), mm(20, 20), mm(25, 15)}, n, s.top);
+      topo::Topology::assignIds(s.b);
+      topo::Topology t;
+      t.build(s.b);
+      const int spare = tool == 6 ? topo::refineModel(s.b, t, {}).spareLinks : topo::optimizeModel(s.b, t, {}).spareLinks;
+      EXPECT_EQ(spare, 1) << "F" << tool;
+      EXPECT_EQ(s.unrouted(), 0u) << "F" << tool;
+      EXPECT_NEAR(s.length(n), 20.0, 0.2) << "F" << tool;
+    }
+  }
 }

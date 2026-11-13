@@ -1285,7 +1285,8 @@ void MainWindow::refineModel(bool thenLayers) {
                  .arg(res.viasRemoved)
                  .arg(res.reattached)
                  .arg(res.zoneTracksRemoved) +
-                 (untangled > 0 ? tr("; распутано двойных пересечений: %1").arg(untangled) : QString()),
+                 (untangled > 0 ? tr("; распутано двойных пересечений: %1").arg(untangled) : QString()) +
+                 (res.spareLinks > 0 ? tr("; снято лишних проводников (дубли, петли): %1, переходов %2").arg(res.spareLinks).arg(res.spareVias) : QString()),
              10000);
     if (thenLayers) refineTracks(true);
   });
@@ -1460,7 +1461,8 @@ void MainWindow::optimizeModel(bool thenRefine) {
                      .arg(res.lengthBefore / 1e6, 0, 'f', 1)
                      .arg(res.lengthAfter / 1e6, 0, 'f', 1) +
                  (res.stats.narrowedWires > 0 ? tr("; заужено проводников: %1").arg(res.stats.narrowedWires) : QString()) +
-                 (untangled > 0 ? tr("; распутано двойных пересечений: %1").arg(untangled) : QString()),
+                 (untangled > 0 ? tr("; распутано двойных пересечений: %1").arg(untangled) : QString()) +
+                 (res.spareLinks > 0 ? tr("; снято лишних проводников (дубли, петли): %1, переходов %2").arg(res.spareLinks).arg(res.spareVias) : QString()),
              10000);
     if (thenRefine) refine(true);
   });

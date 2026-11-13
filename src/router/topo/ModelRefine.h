@@ -36,10 +36,12 @@ struct RefineModelOptions {
   double detour = 0.3 * kNmPerMm;
   double gain = 0.05 * kNmPerMm;
   double gainPart = 0.01;
+  bool simplify = true;  // the nets made trees first (ModelSimplify.h)
 };
 
 struct RefineModelResult {
   bool drawn = false;
+  int spareLinks = 0, spareVias = 0;  // twins and loops taken out first (simplifyNets), and the vias inside them
   std::vector<Violation> violations;  // what stopped it
   int wires = 0;      // wires looked at
   int found = 0;      // ... with a shorter path found
