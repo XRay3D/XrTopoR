@@ -720,7 +720,31 @@ QWidget* PropertiesPanel::componentPage(const std::vector<int>& comps) {
   f->addRow(title(comps.size() == 1 ? tr("Компонент %1").arg(QString::fromStdString(b.components[comps[0]].ref))
                                     : tr("Компоненты (%1)").arg(comps.size())));
   auto side = common<Side>(comps, [&](int c) { return b.components[c].side; });
-  f->addRow(tr("Сторона:"), new QLabel(!side ? QString() : *side == Side::Bottom ? "Bottom" : "Top"));
+  // The side: the outer copper layer the component stands on; another one flips it there about its origin, as
+  // «Отразить» does (its wires follow, its labels go to the other side with it).
+  auto* sideBox = new QComboBox;
+  sideBox->setObjectName("side");
+  for (LayerId l : {b.topCopper(), b.bottomCopper()})
+    sideBox->addItem(l >= 0 ? QString::fromStdString(b.layers[size_t(l)].name) : QString());
+  sideBox->setCurrentIndex(!side ? -1 : *side == Side::Bottom ? 1 : 0);
+  connect(sideBox, &QComboBox::activated, this, [this, comps](int i) {
+    const Side want = i == 1 ? Side::Bottom : Side::Top;
+    edit(tr("Сторона компонента"), [&](Board& bd) {
+      for (int c : comps) {
+        if (bd.components[size_t(c)].side == want) continue;
+        edit::Fragment one;
+        one.components = {c};
+        edit::Motion m;
+        m.pivot = bd.components[size_t(c)].pos.v();
+        m.mirror = true;
+        edit::move(bd, one, m);
+      }
+      edit::removeDegenerate(bd);
+    });
+    // The angle changed with the side (a locked one stayed): the page anew, after the box's signal.
+    QMetaObject::invokeMethod(this, &PropertiesPanel::rebuild, Qt::QueuedConnection);
+  });
+  f->addRow(tr("Сторона:"), sideBox);
   auto x = common<double>(comps, [&](int c) { return double(b.components[c].pos.x); });
   auto y = common<double>(comps, [&](int c) { return -double(b.components[c].pos.y); });
   f->addRow("x:", length(x, [this, comps](double v) {

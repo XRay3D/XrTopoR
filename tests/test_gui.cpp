@@ -1022,6 +1022,40 @@ TEST(Gui, AttributeLabelsAreFlagged) {
   EXPECT_EQ(f.b().texts.size(), texts);
 }
 
+// «Сторона» of a component: the other outer layer flips it there about its origin, its labels with it.
+TEST(Gui, AComponentIsPutOnTheOtherSide) {
+  Fixture f("topor/Example_02/Placement_master.pcb");
+  PropertiesPanel props(&f.doc);
+  const int ci = f.b().findComponent("R51");
+  ASSERT_GE(ci, 0);
+  f.doc.board()->components[size_t(ci)].locked = false;
+  f.doc.setSelection({}, {ci});
+  auto* side = props.findChild<QComboBox*>("side");
+  ASSERT_TRUE(side);
+  EXPECT_EQ(side->currentIndex(), 0);
+  const Point at = f.b().components[size_t(ci)].pos;
+  const LayerId silk = f.b().texts[size_t(f.b().labelOf(ci, "RefDes"))].layer;
+  std::vector<Vec2> pads;
+  for (int pi : f.b().components[size_t(ci)].pads) pads.push_back(f.b().pads[size_t(pi)].pos.v() - at.v());
+  side->setCurrentIndex(1);
+  emit side->activated(1);
+  QCoreApplication::processEvents();
+  const Component& c = f.b().components[size_t(ci)];
+  EXPECT_EQ(c.side, Side::Bottom);
+  EXPECT_EQ(c.pos, at);
+  EXPECT_NE(f.b().texts[size_t(f.b().labelOf(ci, "RefDes"))].layer, silk);
+  // Mirrored about the vertical through its origin.
+  for (auto [k, pi] : v::enumerate(c.pads)) {
+    const Vec2 d = f.b().pads[size_t(pi)].pos.v() - at.v();
+    EXPECT_NEAR(d.x, -pads[k].x, 2);
+    EXPECT_NEAR(d.y, pads[k].y, 2);
+  }
+  ASSERT_TRUE(props.findChild<QComboBox*>("side"));
+  EXPECT_EQ(props.findChild<QComboBox*>("side")->currentIndex(), 1);
+  f.doc.undoStack()->undo();
+  EXPECT_EQ(f.b().components[size_t(ci)].side, Side::Top);
+}
+
 // «Форма (Многоугольник)» of the board outline in «Свойства»: the vertices in the unit, y up, the arcs' angles; a
 // value edited moves the vertex and the outline with it, an angle makes the side an arc, «Добавить» / «Удалить» a
 // vertex; each an undoable step. A circle's page has its centre and radius.
