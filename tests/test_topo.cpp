@@ -3942,6 +3942,64 @@ TEST(Topo, AComponentGoesAsOneBody) {
   EXPECT_GE(followed * 2, tried);
 }
 
+// The pads of a component with no room for any wire between them are joined by rigid edges: a row of an IC's pads is
+// a wall of the mesh, and stays one when the component is moved.
+TEST(Topo, PadsNoWirePassesBetweenAreAWall) {
+  auto lb = io::loadBoard(data("topor/AMK310/AMK310_MCU_V2.fst"));
+  ASSERT_TRUE(lb.has_value());
+  Board& b = **lb;
+  topo::Topology t;
+  t.build(b);
+  ASSERT_EQ(t.check(), std::vector<std::string>{});
+  double widest = 0;
+  for (int n = 0; n < int(b.nets.size()); ++n) widest = std::max(widest, double(b.trackWidth(n, -1)));
+  struct Wall {
+    size_t layer;
+    int edge;
+    double len;
+  };
+  std::vector<Wall> walls;
+  std::vector<int> comps;
+  for (size_t li = 0; li < t.layers.size(); ++li) {
+    const topo::LayerMesh& m = t.layers[li];
+    for (int e = 0; e < int(m.edges.size()); ++e) {
+      const topo::Edge& E = m.edges[size_t(e)];
+      if (E.v[0] < 0 || !E.rigid) continue;
+      const int oa = m.verts[size_t(E.v[0])].owner, ob = m.verts[size_t(E.v[1])].owner;
+      if (oa == ob) continue;
+      const topo::Owner& A = t.owners[size_t(oa)];
+      const topo::Owner& B = t.owners[size_t(ob)];
+      // (A branch point standing on a pad's side has the side's two pieces: rigid edges to another owner too.)
+      if (A.kind != topo::Owner::Kind::Pad || B.kind != topo::Owner::Kind::Pad) continue;
+      ASSERT_GE(A.pad, 0);
+      ASSERT_GE(B.pad, 0);
+      EXPECT_EQ(b.pads[size_t(A.pad)].component, b.pads[size_t(B.pad)].component);
+      EXPECT_LT(A.shape.distance(B.shape), widest + 2 * double(b.maxClearance()));
+      EXPECT_FALSE(E.constrained);
+      walls.push_back({li, e, (m.verts[size_t(E.v[0])].p - m.verts[size_t(E.v[1])].p).len()});
+      if (!r::contains(comps, b.pads[size_t(A.pad)].component)) comps.push_back(b.pads[size_t(A.pad)].component);
+    }
+  }
+  std::println("AMK310: {} rigid edges between the pads of {} components", walls.size(), comps.size());
+  EXPECT_GT(walls.size(), 100u);
+  // Moved, the components keep their walls: the same edges, as long as they were.
+  int moved = 0;
+  for (int ci : comps) {
+    std::vector<int> body;
+    for (int pi : b.components[size_t(ci)].pads)
+      if (pi >= 0 && t.padOwner[size_t(pi)] >= 0) body.push_back(t.padOwner[size_t(pi)]);
+    moved += topo::moveOwners(t, body, Vec2{0.15 * kNmPerMm, -0.1 * kNmPerMm}) > 0;
+  }
+  EXPECT_GT(moved, 0);
+  EXPECT_EQ(t.check(), std::vector<std::string>{});
+  for (const Wall& w : walls) {
+    const topo::LayerMesh& m = t.layers[w.layer];
+    const topo::Edge& E = m.edges[size_t(w.edge)];
+    EXPECT_TRUE(E.rigid);
+    EXPECT_NEAR((m.verts[size_t(E.v[0])].p - m.verts[size_t(E.v[1])].p).len(), w.len, 1e-3);
+  }
+}
+
 TEST(Topo, TheModelFollowsAViaGone) {
   for (const char* name : {"topor/Example_04/Arcs_master.pcb", "topor/Example_03/arz_4L.fst"}) {
     auto lb = io::loadBoard(data(name));

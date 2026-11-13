@@ -104,7 +104,9 @@ std::string hex(uint64_t h) {
   return buf;
 }
 
-constexpr int kVersion = 3;  // 2: the zones (owners, wires and triangles name theirs); 3: the differential pairs (clasps, pair wires)
+// 2: the zones (owners, wires and triangles name theirs); 3: the differential pairs (clasps, pair wires); 4: the rigid
+// edges between the pads of a component no wire passes between
+constexpr int kVersion = 4;
 
 }  // namespace
 

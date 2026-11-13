@@ -3,12 +3,16 @@
 #include <algorithm>
 #include <unordered_set>
 #include <cmath>
+#include <cstdlib>
 #include <format>
 #include <limits>
 #include <map>
+#include <print>
+#include <span>
 
 #include "core/BoxGrid.h"
 #include "core/Parallel.h"
+#include "core/SpatialIndex.h"
 #include "topo/Build.h"
 #include "topo/Cdt.h"
 #include "topo/Sidecar.h"
@@ -65,6 +69,139 @@ void padGeometry(const Shape& s, Owner& o, std::vector<Vec2>& corners) {
       for (Vec2 p : s.poly) corners.push_back(p - o.c);
       break;
     }
+  }
+}
+
+// The least room a wire of any net takes between copper of two nets on a layer: its least width and its clearance
+// to each of the two (none to its own net).
+struct Passage {
+  const Board& b;
+  LayerId layer;
+  std::vector<std::pair<Coord, Coord>> kinds;  // the nets' (own clearance, least width), the distinct clearances
+  Coord most = 0;                              // no passage is wider than this
+
+  Passage(const Board& board, LayerId l) : b(board), layer(l) {
+    std::map<Coord, Coord> byClr;
+    auto take = [&](int n) {
+      const Coord own = b.clearance(n, layer), w = std::min(b.trackWidth(n, layer), b.minTrackWidth(n, layer));
+      auto [it, isNew] = byClr.emplace(own, w);
+      if (!isNew) it->second = std::min(it->second, w);
+    };
+    for (int n = 0; n < int(b.nets.size()); ++n) take(n);
+    if (b.nets.empty()) take(kNoNet);
+    kinds.assign(byClr.begin(), byClr.end());
+    for (auto [own, w] : kinds) most = std::max(most, w);
+    most += 2 * b.maxClearance();
+  }
+  Coord leastWidth(int n) const { return std::min(b.trackWidth(n, layer), b.minTrackWidth(n, layer)); }
+  double least(int netA, int netB) const {
+    double best = std::numeric_limits<double>::max();
+    if (!b.pairRules.empty()) {  // (a rule for two nets may ask for less than either's own)
+      for (int n = 0; n < int(b.nets.size()); ++n)
+        best = std::min(best, double(leastWidth(n) + (n == netA ? 0 : b.clearance(n, netA, layer)) + (n == netB ? 0 : b.clearance(n, netB, layer))));
+      return best;
+    }
+    const Coord ownA = b.clearance(netA, layer), ownB = b.clearance(netB, layer);
+    for (auto [own, w] : kinds) best = std::min(best, double(w + std::max(own, ownA) + std::max(own, ownB)));
+    if (netA >= 0) best = std::min(best, double(leastWidth(netA) + (netA == netB ? 0 : std::max(ownA, ownB))));
+    if (netB >= 0) best = std::min(best, double(leastWidth(netB) + (netA == netB ? 0 : std::max(ownA, ownB))));
+    return best;
+  }
+};
+
+// Whether two segments cross at a point inside both (ends touching do not count).
+bool crossInside(Vec2 a, Vec2 b, Vec2 c, Vec2 d) {
+  const double o1 = orient(a, b, c), o2 = orient(a, b, d), o3 = orient(c, d, a), o4 = orient(c, d, b);
+  return ((o1 > 0) != (o2 > 0)) && ((o3 > 0) != (o4 > 0)) && o1 != 0 && o2 != 0 && o3 != 0 && o4 != 0;
+}
+
+// A component's pads with no room for any wire between them are one body: the mesh gets rigid edges from one to
+// the other (the user's thought: «объединение рядных контактов в один многоугольник» — the pads stay owners each
+// of its net, the wires end at their vertices; what they share is the edges between them, which no flip takes and
+// no vertex passes). A row of an IC's pads is then a wall: a via or another component's pad dragged at it stops at
+// the row instead of sinking in between two pads, where no wire could follow it; and the flips have nothing to do
+// inside a component that is moved. The pads move together (moveOwners), so the edges stay as long as they were.
+// The rule alone decides, not what is drawn: a wire that does lie there crosses the edges as it crosses any
+// (they are rigid, not walls), and is short of room as it was.
+void padWalls(const Board& b, LayerId layer, const std::vector<Owner>& owners, const std::vector<int>& padOwner, const LayerMesh& m, const SpatialIndex& idx,
+              CdtInput& in, int& made) {
+  const Passage passage(b, layer);
+  const LayerMask mask = LayerMask(1) << layer;
+  struct P {
+    int pad, owner;
+    Shape shape;
+    BBox box;
+  };
+  std::vector<P> ps;
+  for (const Component& comp : b.components) {
+    ps.clear();
+    for (int pi : comp.pads) {
+      if (pi < 0 || pi >= int(padOwner.size()) || padOwner[size_t(pi)] < 0 || !b.pads[size_t(pi)].onLayer(layer)) continue;
+      const int oi = padOwner[size_t(pi)];
+      if (oi >= int(m.ownerVerts.size()) || m.ownerVerts[size_t(oi)].empty()) continue;
+      ps.push_back({pi, oi, owners[size_t(oi)].shape, owners[size_t(oi)].shape.bbox()});
+    }
+    if (ps.size() < 2) continue;
+    std::vector<std::pair<Vec2, Vec2>> walls;  // of this component, so far
+    // (The vertices a wall may start at: a polygon's corners — its centre lies behind its own sides —, an oval's two
+    // ends, a round pad's centre.)
+    auto vertsOf = [&](const P& x) {
+      std::span<const int> vs(m.ownerVerts[size_t(x.owner)]);
+      return vs.size() > 2 ? vs.subspan(1) : vs;
+    };
+    auto ringCrossed = [&](const P& x, Vec2 p, Vec2 q) {
+      const std::span<const int> vs(m.ownerVerts[size_t(x.owner)]);
+      if (vs.size() <= 2) return false;
+      const std::span<const int> ring = vs.subspan(1);
+      for (size_t k = 0; k < ring.size(); ++k)
+        if (crossInside(p, q, m.verts[size_t(ring[k])].p, m.verts[size_t(ring[(k + 1) % ring.size()])].p)) return true;
+      return false;
+    };
+    for (size_t i = 0; i < ps.size(); ++i)
+      for (size_t j = i + 1; j < ps.size(); ++j) {
+        const P& A = ps[i];
+        const P& B = ps[j];
+        if (!A.box.inflated(double(passage.most)).intersects(B.box)) continue;
+        const double gap = A.shape.distance(B.shape);
+        if (gap >= passage.least(b.pads[size_t(A.pad)].net, b.pads[size_t(B.pad)].net)) continue;
+        struct Cand {
+          double len;
+          int va, vb;
+        };
+        std::vector<Cand> cands;
+        for (int va : vertsOf(A))
+          for (int vb : vertsOf(B)) cands.push_back({(m.verts[size_t(va)].p - m.verts[size_t(vb)].p).len(), va, vb});
+        r::sort(cands, {}, &Cand::len);
+        // The two sides of the gap: the nearest pair of vertices, and the next one of other vertices not much
+        // longer (two pads face to face have two; a pad cornerwise to another has the one).
+        std::vector<Cand> taken;
+        for (const Cand& c : cands) {
+          if (!taken.empty() && (c.va == taken.front().va || c.vb == taken.front().vb || c.len > 1.5 * taken.front().len + 1000)) continue;
+          const Vec2 p = m.verts[size_t(c.va)].p, q = m.verts[size_t(c.vb)].p;
+          if (c.len < 1 || ringCrossed(A, p, q) || ringCrossed(B, p, q)) continue;
+          if (r::any_of(walls, [&](const auto& w) { return crossInside(p, q, w.first, w.second); })) continue;
+          // Nothing else's copper on the line: a via or a third pad standing in the gap would be a vertex of the wall.
+          bool clear = true;
+          BBox box;
+          box.add(p);
+          box.add(q);
+          idx.query(box.inflated(1000), mask, [&](ItemRef ref) {
+            if (!clear || ref.type == ItemType::Track || ref.type == ItemType::Zone) return;
+            if (ref.type == ItemType::Pad && (ref.index == A.pad || ref.index == B.pad)) return;
+            for (const Shape& sh : itemShapes(b, ref))
+              if (sh.distanceToSegment(p, q) <= 0) clear = false;
+          });
+          if (!clear) continue;
+          taken.push_back(c);
+          if (taken.size() == 2) break;
+        }
+        for (const Cand& c : taken) {
+          in.constraints.push_back({c.va, c.vb});
+          in.border.push_back(2);
+          walls.push_back({m.verts[size_t(c.va)].p, m.verts[size_t(c.vb)].p});
+          ++made;
+        }
+      }
   }
 }
 
@@ -355,6 +492,9 @@ void Topology::buildMeshes(const Board& b, BuildScratch& scratch) {
     m.ownerVerts[owner].push_back(v);
     return v;
   };
+  SpatialIndex copperIdx;  // the pads and the vias: what may stand between two pads of a component
+  copperIdx.build(b, false, false);
+  int padWallsMade = 0;
   for (size_t li = 0; li < copper.size(); ++li) {
     const LayerId layer = copper[li];
     LayerMesh& m = meshes[li];
@@ -393,6 +533,7 @@ void Topology::buildMeshes(const Board& b, BuildScratch& scratch) {
         }
       }
     }
+    if (static const bool off = std::getenv("XR_NO_PAD_WALLS") != nullptr; !off) padWalls(b, layer, owners, padOwner, m, copperIdx, in, padWallsMade);
     auto only = [&](int owner) { return m.ownerVerts[owner].front(); };
     for (const WallLoop& wl : walls) {
       if (!((wl.layers >> layer) & 1)) continue;
@@ -406,6 +547,7 @@ void Topology::buildMeshes(const Board& b, BuildScratch& scratch) {
       }
     }
   }
+  if (static const bool debug = std::getenv("XR_TOPO_DEBUG") != nullptr; debug) std::println(stderr, "{} rigid edges between pads of one component", padWallsMade);
   parallelFor(copper.size(), [&](size_t li) { results[li] = triangulate(inputs[li]); });
   for (size_t li = 0; li < copper.size(); ++li) {
     const LayerId layer = copper[li];
