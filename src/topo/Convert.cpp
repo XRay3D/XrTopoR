@@ -922,7 +922,111 @@ void Topology::relayDisplaced(const Board& b, BuildScratch& scratch) {
 }
 
 
-bool Topology::relayTracks(const Board& b, const std::vector<uint32_t>& changedIds) {
+namespace {
+// (Where the live model gave up following an edit: XR_TOPO_DEBUG says the place by its number in this file.)
+bool followRefused(int where) {
+  static const bool debug = std::getenv("XR_TOPO_DEBUG") != nullptr;
+  if (debug) std::println(stderr, "the model does not follow the edit: refusal {}", where);
+  return false;
+}
+}  // namespace
+
+bool Topology::follow(const Board& old, const Board& now, std::vector<int>* wireMap, const std::vector<uint32_t>& touched) {
+  auto refused = [](int where) { return followRefused(where); };
+  if (old.pads.size() != now.pads.size()) return refused(1);
+  // The vias by their ids: moved with their owners, gone with theirs; a new one, or one of another size, layers
+  // or net, is not followed.
+  std::unordered_map<uint32_t, int> nowVia;
+  for (int i = 0; i < int(now.vias.size()); ++i) {
+    if (!now.vias[size_t(i)].id || !nowVia.emplace(now.vias[size_t(i)].id, i).second) return refused(2);
+  }
+  auto moved = [&](int owner, Vec2 d) { return owner < 0 || d.len2() < 1 || moveOwner(*this, owner, d) >= 1 - 1e-9; };
+  std::vector<int> gone, viaOwnerNow(now.vias.size(), -1);
+  size_t met = 0;
+  for (size_t i = 0; i < old.vias.size(); ++i) {
+    const int oi = i < viaOwner.size() ? viaOwner[i] : -1;
+    const auto it = nowVia.find(old.vias[i].id);
+    if (it == nowVia.end()) {
+      if (oi >= 0) gone.push_back(oi);
+      continue;
+    }
+    ++met;
+    const Via& a = old.vias[i];
+    const Via& c = now.vias[size_t(it->second)];
+    if (a.diameter != c.diameter || a.layers != c.layers || a.net != c.net || a.locked != c.locked) return refused(3);
+    if (!moved(oi, c.pos.v() - a.pos.v())) return refused(4);
+    viaOwnerNow[size_t(it->second)] = oi;
+    if (oi >= 0) owners[size_t(oi)].via = it->second;
+  }
+  for (size_t i = 0; i < now.pads.size(); ++i)
+    if (!moved(i < padOwner.size() ? padOwner[i] : -1, now.pads[i].pos.v() - old.pads[i].pos.v())) return refused(6);
+  // A via that is new: an owner with a vertex in the mesh of every layer it is copper on. The wires crossing the
+  // edges round the new vertex are laid again by their tracks (the insertion passes them round it on the side the
+  // split triangle says, the tracks say where they are drawn), and so are the tracks of its net that end in its
+  // copper: their chains end at it now.
+  std::vector<uint32_t> around;
+  if (met != now.vias.size()) {
+    std::unordered_set<uint32_t> was;
+    for (const Via& v : old.vias) was.insert(v.id);
+    std::unordered_map<uint32_t, const Track*> trackById;
+    for (const Track& tr : now.tracks) trackById[tr.id] = &tr;
+    for (int i = 0; i < int(now.vias.size()); ++i) {
+      const Via& v = now.vias[size_t(i)];
+      if (was.contains(v.id)) continue;
+      Owner o;
+      o.kind = Owner::Kind::Via;
+      o.via = i;
+      o.viaId = v.id;
+      o.net = v.net;
+      o.c = v.pos.v();
+      o.halfWidth = v.diameter / 2.0;
+      o.shape = Shape::circle(o.c, o.halfWidth);
+      o.layers = v.layers & now.allCopperMask();
+      o.locked = v.locked;
+      const LayerMask on = o.layers;
+      const int oi = insertOwner(*this, std::move(o));
+      if (oi < 0) return refused(5);
+      viaOwnerNow[size_t(i)] = oi;
+      for (const LayerMesh& m : layers) {
+        if (oi >= int(m.ownerVerts.size())) continue;
+        for (int vx : m.ownerVerts[size_t(oi)])
+          for (int e : starEdges(m, vx))
+            for (int cid : m.edges[size_t(e)].cross)
+              if (const int wi = crossings[size_t(cid)].wire; wi >= 0) around.insert(around.end(), wires[size_t(wi)].tracks.begin(), wires[size_t(wi)].tracks.end());
+      }
+      for (const Track& tr : now.tracks)
+        if (tr.net == v.net && ((on >> tr.layer) & 1) && ((tr.a.v() - v.pos.v()).len() <= v.diameter / 2.0 || (tr.b.v() - v.pos.v()).len() <= v.diameter / 2.0))
+          around.push_back(tr.id);
+    }
+    std::erase_if(around, [&](uint32_t id) { return !trackById.contains(id); });
+  }
+  viaOwner = std::move(viaOwnerNow);
+  for (int oi : gone) owners[size_t(oi)].via = -1;
+  // The tracks changed, added or gone.
+  std::unordered_map<uint32_t, const Track*> before;
+  for (const Track& tr : old.tracks) before[tr.id] = &tr;
+  std::vector<uint32_t> changed;
+  std::unordered_set<uint32_t> ids;
+  for (const Track& tr : now.tracks) {
+    ids.insert(tr.id);
+    const auto it = before.find(tr.id);
+    const Track* o = it == before.end() ? nullptr : it->second;
+    if (!o || o->a != tr.a || o->b != tr.b || o->mid != tr.mid || o->width != tr.width || o->layer != tr.layer || o->net != tr.net || o->locked != tr.locked ||
+        o->zip != tr.zip || o->serp != tr.serp)
+      changed.push_back(tr.id);
+  }
+  for (const Track& tr : old.tracks)
+    if (!ids.contains(tr.id)) changed.push_back(tr.id);
+  changed.insert(changed.end(), touched.begin(), touched.end());
+  changed.insert(changed.end(), around.begin(), around.end());
+  const size_t wiresWere = wires.size();
+  if (!relayTracks(now, changed, gone, wireMap)) return refused(18);
+  if (wireMap) wireMap->resize(wiresWere);  // (the wires it laid were numbered after them for a while)
+  return true;
+}
+
+bool Topology::relayTracks(const Board& b, const std::vector<uint32_t>& changedIds, const std::vector<int>& goneOwners, std::vector<int>* wireMap) {
+  auto refused = [](int where) { return followRefused(where); };
   const std::unordered_set<uint32_t> changed(changedIds.begin(), changedIds.end());
   std::unordered_map<uint32_t, int> trackOf, wireOf;
   for (int i = 0; i < int(b.tracks.size()); ++i)
@@ -933,19 +1037,25 @@ bool Topology::relayTracks(const Board& b, const std::vector<uint32_t>& changedI
   std::set<int> nets;
   for (uint32_t id : changed) {
     if (auto it = trackOf.find(id); it != trackOf.end()) {
-      if (b.tracks[size_t(it->second)].zip >= 0) return false;
+      if (b.tracks[size_t(it->second)].zip >= 0) return refused(7);
       nets.insert(b.tracks[size_t(it->second)].net);
     }
     if (auto it = wireOf.find(id); it != wireOf.end()) {
-      if (wires[size_t(it->second)].pair >= 0) return false;
+      if (wires[size_t(it->second)].pair >= 0) return refused(8);
       nets.insert(wires[size_t(it->second)].net);
     }
   }
-  if (nets.empty()) return true;
+  if (nets.empty() && goneOwners.empty()) {
+    if (wireMap) {
+      wireMap->resize(wires.size());
+      r::iota(*wireMap, 0);
+    }
+    return true;
+  }
   std::unordered_set<uint32_t> ids = changed;
   std::set<int> out;
   auto takeOut = [&](int wi) {
-    if (wires[size_t(wi)].pair >= 0) return false;
+    if (wires[size_t(wi)].pair >= 0) return refused(9);
     if (out.insert(wi).second) {
       nets.insert(wires[size_t(wi)].net);
       for (uint32_t id : wires[size_t(wi)].tracks) ids.insert(id);
@@ -953,13 +1063,43 @@ bool Topology::relayTracks(const Board& b, const std::vector<uint32_t>& changedI
     return true;
   };
   for (uint32_t id : changed)
-    if (auto it = wireOf.find(id); it != wireOf.end() && !takeOut(it->second)) return false;
+    if (auto it = wireOf.find(id); it != wireOf.end() && !takeOut(it->second)) return refused(10);
+  // An owner that is gone from the board (a via taken away): the wires that ended at it are laid again by their
+  // tracks — two that met there on a layer are one chain now, three and more meet at a branch point — and the
+  // owner leaves the meshes before anything is put where it stood.
+  for (int oi : goneOwners) {
+    for (int wi = 0; wi < int(wires.size()); ++wi)
+      if ((wires[size_t(wi)].end[0] == oi || wires[size_t(wi)].end[1] == oi) && !takeOut(wi)) return refused(11);
+    for (int wi : out) {
+      Wire& w = wires[size_t(wi)];
+      if (w.end[0] != oi && w.end[1] != oi) continue;
+      LayerMesh& m = *mesh(w.layer);
+      for (int cid : w.cross) {
+        std::erase(m.edges[size_t(crossings[size_t(cid)].edge)].cross, cid);
+        crossings[size_t(cid)] = Crossing{};
+      }
+      w.cross.clear();
+      for (Edge& E : m.edges)
+        if (E.along == wi) E.along = -1;
+      for (int end = 0; end < 2; ++end)
+        if (w.end[end] == oi) w.end[end] = w.endVertex[end] = -1;
+    }
+    if (!removeOwner(*this, oi)) return refused(12);
+    // The tracks that lay in its copper were its own: copper of nobody now, they are laid as wires.
+    for (const auto& [owner, id] : ownerTracks)
+      if (owner == oi)
+        if (auto it = trackOf.find(id); it != trackOf.end()) {
+          ids.insert(id);
+          nets.insert(b.tracks[size_t(it->second)].net);
+        }
+    std::erase_if(ownerTracks, [&](const std::pair<int, uint32_t>& ot) { return ot.first == oi; });
+  }
   // ... and with a wire taken out the wires at its branch points (a branch taken away joins the two through it).
   for (int w : std::set<int>(out))
     for (int o : wires[size_t(w)].end)
       if (o >= 0 && owners[size_t(o)].kind == Owner::Kind::Junction)
         for (int wj = 0; wj < int(wires.size()); ++wj)
-          if ((wires[size_t(wj)].end[0] == o || wires[size_t(wj)].end[1] == o) && !takeOut(wj)) return false;
+          if ((wires[size_t(wj)].end[0] == o || wires[size_t(wj)].end[1] == o) && !takeOut(wj)) return refused(13);
   OwnCopper copper(b);
   WireGraph g;
   std::vector<WireChain> chains;
@@ -995,7 +1135,7 @@ bool Topology::relayTracks(const Board& b, const std::vector<uint32_t>& changedI
   // wires crossing the edges round a new branch point taken too, laid again by their tracks (the insertion would
   // pass them round it on the side the split triangle says, the build by where they are drawn).
   for (int pass = 0;; ++pass) {
-    if (pass > 8) return false;
+    if (pass > 8) return refused(14);
     std::vector<char> chosen(b.tracks.size(), 0);
     for (size_t i = 0; i < b.tracks.size(); ++i) chosen[i] = nets.contains(b.tracks[i].net);
     g = wireGraph(b, chosen);
@@ -1016,7 +1156,7 @@ bool Topology::relayTracks(const Board& b, const std::vector<uint32_t>& changedI
           for (int ti : chains[ci].tracks) ids.insert(b.tracks[size_t(ti)].id);
         }
       for (int wi = 0; wi < int(wires.size()); ++wi)
-        if (!out.contains(wi) && r::any_of(wires[size_t(wi)].tracks, [&](uint32_t id) { return ids.contains(id); }) && !takeOut(wi)) return false;
+        if (!out.contains(wi) && r::any_of(wires[size_t(wi)].tracks, [&](uint32_t id) { return ids.contains(id); }) && !takeOut(wi)) return refused(15);
     }
     // A chain taken across a track of another net: that net's wires come too (a double crossing is
     // taken apart by the two together: untangleChains).
@@ -1067,8 +1207,6 @@ bool Topology::relayTracks(const Board& b, const std::vector<uint32_t>& changedI
       }
     }
     std::map<std::tuple<int, LayerId, int>, int> junctionAt;
-  // ... and the pad or via a chain ends on, by the same vertex (for the tiny tracks glued into it, below).
-  std::map<std::tuple<int, LayerId, int>, int> copperAt;
     std::vector<int> made;  // the branch points put in on this pass
     for (size_t ci = 0; ci < chains.size(); ++ci) {
       if (!take[ci]) continue;
@@ -1091,7 +1229,7 @@ bool Topology::relayTracks(const Board& b, const std::vector<uint32_t>& changedI
             o.layers = LayerMask(1) << c.layer;
             o.junction = int(junctions.size());
             oi = insertOwner(*this, o);
-            if (oi < 0) return false;
+            if (oi < 0) return refused(16);
             junctions.push_back({p, c.net, c.layer, oi, 0});
             made.push_back(oi);
           }
@@ -1108,7 +1246,7 @@ bool Topology::relayTracks(const Board& b, const std::vector<uint32_t>& changedI
           for (int e : starEdges(m, v))
             for (int cid : m.edges[size_t(e)].cross)
               if (const int wi = crossings[size_t(cid)].wire; wi >= 0 && !out.contains(wi)) {
-                if (!takeOut(wi)) return false;
+                if (!takeOut(wi)) return refused(17);
                 more = true;
               }
       }
@@ -1292,6 +1430,7 @@ bool Topology::relayTracks(const Board& b, const std::vector<uint32_t>& changedI
       }
     wires = std::move(kept);
   }
+  if (wireMap) *wireMap = map;
   for (Crossing& c : crossings)
     if (c.wire >= 0) c.wire = map[size_t(c.wire)];
   for (LayerMesh& m : layers)

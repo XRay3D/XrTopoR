@@ -171,8 +171,9 @@ uint64_t boardHashOf(const Board& b, bool places) {
     });
   report("pads");
   for (const Via& v : b.vias)
+    if (places)  // (without the places: the vias are the live model's to follow, one by one — Topology::follow)
     item([&](Fnv& f) {
-      if (places) f.pt(v.pos);
+      f.pt(v.pos);
       f.i(q(double(v.diameter)));
       for (const std::string& l : maskNames(b, v.layers)) f.s(l);
       f.s(netName(b, v.net));

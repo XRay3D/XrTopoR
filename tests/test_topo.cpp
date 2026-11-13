@@ -3843,3 +3843,74 @@ TEST(Topo, SidecarOfAPairedBoardReadsBack) {
   EXPECT_TRUE(loaded.has_value()) << (loaded ? "" : loaded.error());
   std::filesystem::remove_all(dir);
 }
+
+// The live model follows a via's going (Topology::follow): the via and the tracks of its wires taken off the board —
+// the wires leave, the via's owner leaves the meshes (beside a row of pads too: the spokes flip past the pads'
+// copper), and the model left is whole and has the wires a model built anew from that board has.
+TEST(Topo, TheModelFollowsAViaGone) {
+  for (const char* name : {"topor/Example_04/Arcs_master.pcb", "topor/Example_03/arz_4L.fst"}) {
+    auto lb = io::loadBoard(data(name));
+    ASSERT_TRUE(lb.has_value()) << name;
+    Board& b0 = **lb;
+    topo::Topology::assignIds(b0);
+    topo::Topology t0;
+    t0.build(b0);
+    ASSERT_EQ(t0.check(), std::vector<std::string>{}) << name;
+    int tried = 0, followed = 0, returned = 0;
+    for (size_t vi = 0; vi < b0.vias.size() && tried < 12; vi += std::max<size_t>(1, b0.vias.size() / 12)) {
+      const int oi = vi < t0.viaOwner.size() ? t0.viaOwner[vi] : -1;
+      if (oi < 0) continue;
+      std::set<uint32_t> gone;
+      bool plain = true;
+      for (const topo::Wire& w : t0.wires)
+        if (w.end[0] == oi || w.end[1] == oi) {
+          plain &= !w.locked && w.pair < 0;
+          gone.insert(w.tracks.begin(), w.tracks.end());
+        }
+      if (!plain || gone.empty()) continue;
+      ++tried;
+      Board b = b0;
+      b.vias.erase(b.vias.begin() + long(vi));
+      std::erase_if(b.tracks, [&](const Track& tr) { return gone.contains(tr.id); });
+      topo::Topology t = t0;
+      std::vector<int> map;
+      if (!t.follow(b0, b, &map)) continue;
+      ++followed;
+      EXPECT_EQ(t.check(), std::vector<std::string>{}) << name << ", via " << vi;
+      EXPECT_EQ(t.owners[size_t(oi)].layers, LayerMask(0)) << name;
+      for (const topo::Wire& w : t.wires) EXPECT_TRUE(w.end[0] != oi && w.end[1] != oi) << name;
+      EXPECT_EQ(map.size(), t0.wires.size()) << name;
+      topo::Topology fresh;
+      fresh.build(b);
+      auto wiresOf = [&](const topo::Topology& m) {
+        std::multiset<std::tuple<int, int, long, long, long, long>> out;
+        for (const topo::Wire& w : m.wires) {
+          if (w.end[0] < 0 || w.end[1] < 0) continue;
+          const topo::LayerMesh& lm = *m.mesh(w.layer);
+          Vec2 p = lm.verts[size_t(w.endVertex[0])].p, q = lm.verts[size_t(w.endVertex[1])].p;
+          if (std::pair{q.x, q.y} < std::pair{p.x, p.y}) std::swap(p, q);
+          out.insert({w.net, int(w.layer), std::lround(p.x / 1000), std::lround(p.y / 1000), std::lround(q.x / 1000), std::lround(q.y / 1000)});
+        }
+        return out;
+      };
+      const auto mine = wiresOf(t), theirs = wiresOf(fresh);
+      std::vector<std::tuple<int, int, long, long, long, long>> onlyMine, onlyTheirs;
+      r::set_difference(mine, theirs, std::back_inserter(onlyMine));
+      r::set_difference(theirs, mine, std::back_inserter(onlyTheirs));
+      EXPECT_TRUE(onlyMine.empty() && onlyTheirs.empty()) << name << ", via " << vi << ": " << onlyMine.size() << " wire(s) only in the model that followed, " << onlyTheirs.size()
+                                                           << " only in the one built anew";
+      for (auto& [net, layer, x0, y0, x1, y1] : onlyMine) std::println("  followed only: net {} L{} ({}, {}) - ({}, {})", net, layer, x0, y0, x1, y1);
+      for (auto& [net, layer, x0, y0, x1, y1] : onlyTheirs) std::println("  built only:    net {} L{} ({}, {}) - ({}, {})", net, layer, x0, y0, x1, y1);
+      // ... and the via's coming back with its tracks: an owner again, its wires laid.
+      if (t.follow(b, b0)) {
+        ++returned;
+        EXPECT_EQ(t.check(), std::vector<std::string>{}) << name << ", via " << vi << " back";
+        EXPECT_EQ(wiresOf(t), wiresOf(t0)) << name << ", via " << vi << " back";
+      }
+    }
+    std::println("{}: {} vias taken off with their wires, the model followed {}; put back, it followed {}", name, tried, followed, returned);
+    EXPECT_GT(tried, 3) << name;
+    EXPECT_EQ(followed, tried) << name;
+    EXPECT_GE(returned * 4, tried * 3) << name;
+  }
+}

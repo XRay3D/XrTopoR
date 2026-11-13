@@ -277,6 +277,7 @@ ViaResult removeVias(Board& b, Topology& t, const ViaOptions& o) {
       drawModel(mb, mt, true, st, nWires, false, nullptr, nullptr, r.drawing.get());
       ++r.drawings;
     }
+    const Board drawn = mb;  // (the board `mt` is the model of: it follows the vias' going from here)
     std::set<uint32_t> goneVias, goneTracks;
     std::vector<uint32_t> maybe;  // the neighbours: they go when the tracks left on them are of one layer
     for (const Cand& c : laid) {
@@ -290,7 +291,7 @@ ViaResult removeVias(Board& b, Topology& t, const ViaOptions& o) {
     std::erase_if(mb.vias, [&](const Via& v) {
       return v.id && r::find(maybe, v.id) != maybe.end() && std::popcount(edit::viaTrackLayers(mb, v) | edit::viaHeldBy(mb, v)) <= 1;
     });
-    return redrawTracks(mb, o.flips, r.drawings);
+    return redrawTracks(mb, o.flips, r.drawings, {&mt, &drawn, {}});
   };
 
   const int kAttempts = 12;
@@ -301,10 +302,8 @@ ViaResult removeVias(Board& b, Topology& t, const ViaOptions& o) {
     if (list.empty()) break;
     if (pass == 0) {
       // A drawing whose own tracks cross (a short the realiser drew) gives no model: nothing can be judged.
-      Board c = b;
-      Topology::assignIds(c);
-      Topology m;
-      m.build(c);
+      // (The model as it stands says so: it is the model of this drawing.)
+      const Topology& m = t;
       if (r::any_of(m.violations, [](const Violation& v) { return v.kind == Violation::Kind::Crossing || v.kind == Violation::Kind::ThroughPad; })) {
         r.log.push_back(std::format("vias: {} candidate(s), none tried: the drawing's own tracks cross, no model can be built from it", list.size()));
         break;

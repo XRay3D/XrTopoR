@@ -210,7 +210,18 @@ struct Topology {
   // of them, and every wire sharing a chain with one, taken out and laid in (Convert.cpp: the same chains, ends,
   // walks and edge order as the build; branch points made and taken out as the ends need them). False when the
   // model cannot be kept (a zipped pair among them, a branch point the mesh refuses): build it anew.
-  bool relayTracks(const Board& b, const std::vector<uint32_t>& changed);
+  // `gone`: owners that are no more on the board (vias taken away) — the wires that ended at them are laid again
+  // with the rest and the owners leave the meshes. `wireMap` receives, per wire as it was numbered, its number now
+  // (-1: laid again, a wire of another number).
+  bool relayTracks(const Board& b, const std::vector<uint32_t>& changed, const std::vector<int>& gone = {}, std::vector<int>* wireMap = nullptr);
+  // The model brought from the board it is the model of (`old`) to that board edited (`now`): the vias and pads
+  // moved go with their owners, the vias gone leave, the tracks changed, added or gone are laid again
+  // (relayTracks), a via added gets its owner and a vertex in the meshes. False when it cannot follow (a via of
+  // another size, a mesh that refuses a vertex, relayTracks's refusals): the model is then half way and of no use —
+  // the caller builds one anew.
+  // `touched`: tracks to lay again though they stand as they were (two wires a tool left meeting at a branch point
+  // of their own are one chain when laid again).
+  bool follow(const Board& old, const Board& now, std::vector<int>* wireMap = nullptr, const std::vector<uint32_t>& touched = {});
   // Everything moved by d (the board moved whole): the owners, their copper, the meshes' points, the wires' exits.
   void translate(Vec2 d);
   // Checks the invariants: the meshes (orientation, neighbours, edges, vertex lists) and the wires (every

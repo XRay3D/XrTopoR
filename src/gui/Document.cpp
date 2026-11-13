@@ -133,7 +133,7 @@ bool Document::syncModelFrom(const EditSnapshot& was) {
   topo::Topology::assignIds(b);
   Board old = b;  // the board as the model has it: this one with the snapshot's items (the rest is the same)
   was.apply(old);
-  if (old.vias.size() != b.vias.size() || old.pads.size() != b.pads.size()) return false;
+  if (old.pads.size() != b.pads.size()) return false;
   topo::Topology& t = *topo_;
   if (topo::boardHashOf(old, false) != topo::boardHashOf(b, false)) {  // zones, keepouts, the outline, nets, pairs...
     // ... unless the board moved whole: the model moves with it (built anew from the moved tracks, it walked them
@@ -156,30 +156,10 @@ bool Document::syncModelFrom(const EditSnapshot& was) {
     if (topo::boardHashOf(old, false) != topo::boardHashOf(b, false)) return false;
     t.translate(d);
   }
-  // The vias and pads moved: their owners with them (the pads turned are no move: the hash has their angle).
-  auto moved = [&](int owner, Vec2 d) { return owner < 0 || d.len2() < 1 || topo::moveOwner(t, owner, d) >= 1 - 1e-9; };
-  for (size_t i = 0; i < b.vias.size(); ++i) {
-    if (old.vias[i].id != b.vias[i].id) return false;
-    if (!moved(i < t.viaOwner.size() ? t.viaOwner[i] : -1, b.vias[i].pos.v() - old.vias[i].pos.v())) return false;
-  }
-  for (size_t i = 0; i < b.pads.size(); ++i)
-    if (!moved(i < t.padOwner.size() ? t.padOwner[i] : -1, b.pads[i].pos.v() - old.pads[i].pos.v())) return false;
-  // The tracks changed, added or gone: their wires laid again.
-  std::unordered_map<uint32_t, const Track*> before;
-  for (const Track& tr : old.tracks) before[tr.id] = &tr;
-  std::vector<uint32_t> changed;
-  std::unordered_set<uint32_t> now;
-  for (const Track& tr : b.tracks) {
-    now.insert(tr.id);
-    auto it = before.find(tr.id);
-    const Track* o = it == before.end() ? nullptr : it->second;
-    if (!o || o->a != tr.a || o->b != tr.b || o->mid != tr.mid || o->width != tr.width || o->layer != tr.layer || o->net != tr.net ||
-        o->locked != tr.locked || o->zip != tr.zip || o->serp != tr.serp)
-      changed.push_back(tr.id);
-  }
-  for (const Track& tr : old.tracks)
-    if (!now.contains(tr.id)) changed.push_back(tr.id);
-  return changed.empty() || t.relayTracks(b, changed);
+  // The vias and pads moved: their owners with them (the pads turned are no move: the hash has their angle); a via
+  // taken away leaves the meshes, and the tracks changed, added or gone have their wires laid again
+  // (Topology::follow — the tools of F6 keep their models by it too).
+  return t.follow(old, b);
 }
 
 topo::Topology& Document::topology() {

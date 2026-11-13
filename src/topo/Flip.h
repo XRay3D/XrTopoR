@@ -16,6 +16,10 @@ using FlipGate = std::function<bool(int e, int a, int b)>;
 // Whether edge e may be flipped: not constrained or rigid, two inside triangles that are not blocked, a
 // strictly convex quad, and the new diagonal clear of the copper of the two old end owners.
 bool flippable(const Topology& t, const LayerMesh& m, int e, const FlipGate& gate = {});
+// While true (a thread's own), a flip may leave its new diagonal through the copper of the old one's ends: a vertex
+// being taken out of the mesh has to lose its spokes, and beside a row of pads every way to do it runs a diagonal
+// past a pad nearer than the pad is wide (the triangulation of a board built anew has such edges too).
+bool& flipsThroughCopper();
 
 // What a flip of e would do to the wires: the crossings of the new diagonal in order.
 struct FlipPlan {

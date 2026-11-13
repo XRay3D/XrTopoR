@@ -1,5 +1,9 @@
 #include "topo/Move.h"
 
+#include <cstdlib>
+#include <optional>
+#include <print>
+
 #include <algorithm>
 #include <map>
 #include <set>
@@ -393,6 +397,11 @@ bool removeVertex(Topology& t, LayerMesh& m, int v, bool lawson) {
   Owner& o = t.owners[m.verts[v].owner];
   const double halfWidth = o.halfWidth;
   o.halfWidth = 0;
+  struct ThroughCopper {  // (... nor is a neighbour's: see flipsThroughCopper)
+    ThroughCopper() { flipsThroughCopper() = true; }
+    ~ThroughCopper() { flipsThroughCopper() = false; }
+  };
+  std::optional<ThroughCopper> any(std::in_place);
   while (m.verts[v].tris.size() > 3) {
     bool flipped = false;
     for (int ti : std::vector<int>(m.verts[v].tris)) {
@@ -481,6 +490,7 @@ bool removeVertex(Topology& t, LayerMesh& m, int v, bool lawson) {
   r::sort(touched);
   touched.erase(r::unique(touched).begin(), touched.end());
   for (int wi : touched) tighten(t, m, wi);
+  any.reset();
   if (lawson) flipLoop(t, m, {far[0], far[1], far[2]}, {}, false);
   return true;
 }

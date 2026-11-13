@@ -89,8 +89,20 @@ struct Redrawn {
   Board board;
   DrawingScore score;
   std::shared_ptr<const ModelDrawing> kept;  // the drawing itself (ModelTools.h): one of the same model's wires is brought up from it
+  bool followed = false;     // the model is the live one brought to the edit, not one built anew
+  std::vector<int> wireMap;  // ... and, per wire of the live model, its number in this one (-1: laid again)
 };
-std::optional<Redrawn> redrawTracks(const Board& edited, bool flips, int& drawings);
+// The model the edited board was drawn from, and that board as it was before the edit (its wires own that board's
+// tracks): with them the model follows the edit instead of being built anew.
+struct LiveModel {
+  const Topology* model = nullptr;
+  const Board* board = nullptr;
+  std::vector<uint32_t> touched;  // tracks to lay again though they stand (Topology::follow)
+};
+// The model of an edited board: the live one brought to the edit, or — where it cannot follow — one built anew.
+// True: it followed. (`edited` has its ids.)
+bool modelOfEdited(Topology& model, const Board& edited, const LiveModel& live, std::vector<int>* wireMap = nullptr);
+std::optional<Redrawn> redrawTracks(const Board& edited, bool flips, int& drawings, const LiveModel& live = {});
 
 // The vias that stand closer to copper of other nets than the rule (per owner; F7's first steps take them off
 // it). F6 leaves the edges at them alone: a wire led past such a via takes the room it has to step into

@@ -357,11 +357,28 @@ DrawingScore scoreDrawing(const Board& b) {
   return s;
 }
 
-std::optional<Redrawn> redrawTracks(const Board& edited, bool flips, int& drawings) {
+bool modelOfEdited(Topology& model, const Board& edited, const LiveModel& live, std::vector<int>* wireMap) {
+  static const bool kRebuild = std::getenv("XR_MODEL_REBUILD") != nullptr;
+  if (live.model && live.board && !kRebuild) {
+    ProfScope pf("tracks edited: the model follows");
+    model = *live.model;
+    if (model.follow(*live.board, edited, wireMap, live.touched)) return true;
+    if (std::getenv("XR_TOPO_DEBUG")) std::println(stderr, "tracks edited: the model does not follow, built anew");
+  }
+  ProfScope pb("tracks edited: the model built anew");
+  if (wireMap) wireMap->clear();
+  model = Topology{};
+  model.build(edited);
+  return false;
+}
+
+std::optional<Redrawn> redrawTracks(const Board& edited, bool flips, int& drawings, const LiveModel& live) {
   ProfScope p("tracks edited: redrawing");
   Redrawn r{{}, edited, {}, {}};
   Topology::assignIds(r.board);
-  r.model.build(r.board);
+  // The live model follows the edit (Topology::follow: the wires of the changed tracks laid again, a via gone
+  // leaves the meshes); built anew from the tracks only where it cannot.
+  r.followed = modelOfEdited(r.model, r.board, live, &r.wireMap);
   int nFlips = 0;
   std::vector<Violation> stop;
   if (!prepareModel(r.model, flips, false, nFlips, stop)) {
@@ -932,11 +949,12 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
       constexpr double kAt = 3;  // nm: a track's end is the branch point's
       // One at a time: the wires' ends moved to the pad's centre may cross what lay between (the model of the
       // tracks then says so: wires crossing, a wire through another net's pad), and that branch point stays.
-      auto stopping = [](const Board& x) {
-        Board c = x;
-        Topology::assignIds(c);
-        Topology m;
-        m.build(c);
+      // (The model follows every merge from the one before: `lm` is the model of the board `lb`.)
+      Topology lm = bt;
+      Board lb = mb;
+      Topology::assignIds(mb);
+      auto stopping = [&](const Board& x, Topology& m) {
+        modelOfEdited(m, x, {&lm, &lb, {}});
         int n = 0;
         for (const Violation& v : m.violations) n += v.kind == Violation::Kind::Crossing || v.kind == Violation::Kind::ThroughPad;
         return n;
@@ -967,17 +985,18 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
           if ((tr.b.v() - j.c).len() <= kAt) tr.b = to;
         }
         std::erase_if(mb.tracks, [&](const Track& tr) { return (tr.id && gone.contains(tr.id)) || (!tr.isArc() && tr.a == tr.b); });
-        if (stopping(mb) > 0) {
+        Topology merged;
+        if (stopping(mb, merged) > 0) {
           if (debug) std::println(stderr, "merge: branch point of {} at ({:.3f}, {:.3f}) stays: its wires would cross what lies between", b.nets[j.net].name, j.c.x / 1e6, -j.c.y / 1e6);
           mb.tracks = std::move(was);
           continue;
         }
+        lm = std::move(merged);
+        lb = mb;
         ++done;
       }
       if (done > 0) {
-        Topology::assignIds(mb);
-        Topology mt;
-        mt.build(mb);
+        Topology mt = std::move(lm);
         int flips = 0;
         std::vector<Violation> stop;
         if (!prepareModel(mt, o.flips, false, flips, stop)) {

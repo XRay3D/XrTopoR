@@ -2579,6 +2579,39 @@ TEST(Gui, UndoKeepsTopologyInSync) {
   EXPECT_EQ(&doc.topology(), before) << "the model follows the drag";
   likeBuilt("after the drag");
   doc.undoStack()->undo();
+  // A via deleted with the tracks of its wires: the model follows that too — the via leaves the meshes, the model is
+  // the one it was (not built anew), and has the wires a model built from the board has.
+  {
+    const topo::Topology& t = doc.topology();
+    Board& bd = *doc.board();
+    int via = -1;
+    std::set<uint32_t> gone;
+    for (size_t i = 0; i < bd.vias.size() && via < 0; ++i) {
+      const int oi = i < t.viaOwner.size() ? t.viaOwner[i] : -1;
+      if (oi < 0) continue;
+      gone.clear();
+      bool plain = true;
+      for (const topo::Wire& w : t.wires)
+        if (w.end[0] == oi || w.end[1] == oi) {
+          plain &= !w.locked && w.pair < 0;
+          gone.insert(w.tracks.begin(), w.tracks.end());
+        }
+      if (plain && !gone.empty()) via = int(i);
+    }
+    ASSERT_GE(via, 0);
+    const size_t owners = t.owners.size();
+    auto snap = doc.beginEdit();
+    bd.vias.erase(bd.vias.begin() + via);
+    std::erase_if(bd.tracks, [&](const Track& tr) { return gone.contains(tr.id); });
+    doc.commitEdit(snap, "delete a via");
+    EXPECT_EQ(&doc.topology(), before) << "the model follows the via's going";
+    EXPECT_EQ(doc.topology().owners.size(), owners) << "... the same model, the via's owner out of its meshes";
+    EXPECT_EQ(doc.topology().check(), std::vector<std::string>{});
+    likeBuilt("after a via was deleted");
+    doc.undoStack()->undo();
+    EXPECT_EQ(&doc.topology(), before) << "... and its coming back";
+    likeBuilt("after the via came back");
+  }
   ASSERT_TRUE(io::saveBoard(*doc.board(), path.toStdString()).has_value());
   ASSERT_TRUE(doc.saveTopologyFile(path).has_value());
   auto again = io::loadBoard(path.toStdString());

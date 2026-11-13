@@ -404,7 +404,7 @@ BranchResult splitBranches(Board& b, Topology& t, const BranchOptions& o) {
         gain += splits[k].gain;
       }
     if (n == 0) break;
-    auto drawn = redrawTracks(eb, o.flips, r.drawings);
+    auto drawn = redrawTracks(eb, o.flips, r.drawings, {&t, &b, {}});
     const bool better = drawn && betterDrawing(drawn->score, was);
     r.log.push_back(std::format("new branch points: {} of {} pair(s) under 120 degrees, {:.2f} mm to gain: {}", n, splits.size(), gain / 1e6,
                                 !drawn ? "the model of the tracks does not stand"
@@ -428,7 +428,7 @@ BranchResult splitBranches(Board& b, Topology& t, const BranchOptions& o) {
         apply(one, splits[k]);
         Topology::assignIds(one);
         Topology m;
-        m.build(one);
+        modelOfEdited(m, one, {&t, &b, {}});
         if (r::any_of(m.violations, [](const Violation& v) { return v.kind == Violation::Kind::Crossing || v.kind == Violation::Kind::ThroughPad; })) {
           out[k] = 1;
           any = true;
@@ -574,7 +574,7 @@ BranchResult reattachBranches(Board& b, Topology& t, const BranchOptions& o) {
     }
     Topology::assignIds(eb);
     Topology mt;
-    mt.build(eb);
+    modelOfEdited(mt, eb, {&t, &b, {}});
     int nFlips = 0;
     std::vector<Violation> stop;
     if (!prepareModel(mt, o.flips, false, nFlips, stop)) {
@@ -636,7 +636,11 @@ BranchResult reattachBranches(Board& b, Topology& t, const BranchOptions& o) {
       drawModel(eb, mt, true, st, nWires);
       ++r.drawings;
     }
-    std::optional<Redrawn> drawn = redrawTracks(eb, o.flips, r.drawings);
+    // (The stub and the wire laid from its end are one chain: laid again, they are one wire and the end is gone.)
+    LiveModel live{&mt, &eb, {}};
+    for (const Wire& w : mt.wires)
+      if (!toOwner && (w.end[0] == free || w.end[1] == free)) live.touched.insert(live.touched.end(), w.tracks.begin(), w.tracks.end());
+    std::optional<Redrawn> drawn = redrawTracks(eb, o.flips, r.drawings, live);
     const bool better = drawn && betterDrawing(drawn->score, was);
     r.log.push_back(std::format("branch of {} at ({:.3f}, {:.3f}) re-attached: {:.2f} mm to the branch point, the near {} {:.2f} mm away, {:.2f} mm in the model{}: {}",
                                 b.nets[size_t(A.net)].name, T.c.x / 1e6, -T.c.y / 1e6, c.len / 1e6, toOwner ? "pad or via" : "wire", c.near / 1e6,
@@ -697,7 +701,7 @@ BranchResult mergeBranchPoints(Board& b, Topology& t, const BranchOptions& o) {
     }
   }
   std::erase_if(eb.tracks, [&](const Track& tr) { return (tr.id && gone.contains(tr.id)) || (!tr.isArc() && tr.a == tr.b); });
-  auto drawn = redrawTracks(eb, o.flips, r.drawings);
+  auto drawn = redrawTracks(eb, o.flips, r.drawings, {&t, &b, {}});
   // Not by the length (nothing is gained yet: the four wires are paired anew afterwards): no real place of
   // violation more.
   const bool taken2 = drawn && std::tuple(drawn->score.unrouted, drawn->score.shorts, drawn->score.deep, drawn->score.real) <=

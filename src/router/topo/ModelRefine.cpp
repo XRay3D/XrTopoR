@@ -229,6 +229,7 @@ RefineModelResult refineModel(Board& b, Topology& t, const RefineModelOptions& o
       for (const RatsLine& l : Connectivity::compute(board).ratsnest) n += l.net == net;
       return n;
     };
+    const Board before = b;  // (the board `t` is the model of: it follows the tracks' going from here)
     for (int wi : candidates) {
       const Wire& w = t.wires[size_t(wi)];
       const size_t was = linesOf(b, w.net);
@@ -242,7 +243,11 @@ RefineModelResult refineModel(Board& b, Topology& t, const RefineModelOptions& o
     if (removed == 0) return false;
     r.zoneTracksRemoved += removed;
     Topology::assignIds(b);
-    t.build(b);
+    {
+      Topology followed;
+      modelOfEdited(followed, b, {&t, &before, {}});
+      t = std::move(followed);
+    }
     standing.reset();
     if (!prepareModel(t, o.flips, false, nFlips, r.violations)) return false;
     refused.clear();

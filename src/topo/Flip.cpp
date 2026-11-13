@@ -67,6 +67,11 @@ bool inCircle(Vec2 a, Vec2 p, Vec2 q, Vec2 b) {
   return side(K::Point_2(a.x, a.y), K::Point_2(p.x, p.y), K::Point_2(q.x, q.y), K::Point_2(b.x, b.y)) == CGAL::ON_POSITIVE_SIDE;
 }
 
+bool& flipsThroughCopper() {
+  thread_local bool v = false;
+  return v;
+}
+
 bool flippable(const Topology& t, const LayerMesh& m, int e, const FlipGate& gate) {
   const Edge& E = m.edges[e];
   if (E.constrained || E.rigid) return false;
@@ -77,6 +82,7 @@ bool flippable(const Topology& t, const LayerMesh& m, int e, const FlipGate& gat
   if (!T1.inside || !T2.inside || T1.blocked || T2.blocked) return false;
   Vec2 A = m.verts[Q.a].p, P = m.verts[Q.p].p, Qp = m.verts[Q.q].p, B = m.verts[Q.b].p;
   if (orient(A, P, B) <= 0 || orient(A, B, Qp) <= 0) return false;  // the quad is not strictly convex
+  if (flipsThroughCopper()) return !gate || gate(e, Q.a, Q.b);
   // The new diagonal must not run through the copper of the old ends (then it could carry nothing).
   for (int v : {Q.p, Q.q}) {
     const Vertex& X = m.verts[v];
