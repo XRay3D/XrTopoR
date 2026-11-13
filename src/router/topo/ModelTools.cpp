@@ -19,6 +19,7 @@
 #include "topo/Move.h"
 #include "topo/Relay.h"
 #include "core/Edit.h"
+#include "core/Parallel.h"
 #include "drc/Drc.h"
 #include "geom/Geometry.h"
 
@@ -220,12 +221,22 @@ RealizeStats realizeFromModel(Board& b, const Topology& t, const std::vector<int
     sameWires = from && from->in && nWas <= chosen.size() && std::equal(from->chosen.begin(), from->chosen.end(), chosen.begin()) &&
                 from->sketchKeys.size() == nWas && from->wires.size() == nWas;
     sketchKeys.resize(chosen.size());
-    for (size_t k = 0; k < chosen.size(); ++k) {
+    // The slot points of every edge the wires cross first (found as asked for, one after another), then the
+    // sketches on all the threads: each reads the model and the points, and writes its own wire.
+    for (int wi : chosen) {
+      const Wire& w = t.wires[size_t(wi)];
+      const LayerMesh& m = *t.mesh(w.layer);
+      SlotPoints& sp = slotPoints[w.layer];
+      const SlotPoints* was = slotsWas(w.layer);
+      for (int cid : w.cross) sp.of(t, m, t.crossings[size_t(cid)].edge, was);
+    }
+    wires.resize(chosen.size());
+    parallelFor(chosen.size(), [&](size_t k) {
       const LayerId layer = t.wires[size_t(chosen[k])].layer;
       const bool reuse = sameWires && k < nWas;
-      wires.push_back(sketchOf(b, t, chosen[k], &slotPoints[layer], slotsWas(layer), &sketchKeys[k], reuse ? &from->wires[k] : nullptr,
-                               reuse ? &from->sketchKeys[k] : nullptr));
-    }
+      wires[k] = sketchOf(b, t, chosen[k], &slotPoints.at(layer), slotsWas(layer), &sketchKeys[k], reuse ? &from->wires[k] : nullptr,
+                          reuse ? &from->sketchKeys[k] : nullptr);
+    });
   }
   if (wiresOut) *wiresOut = wires;
   auto inOwned = std::make_unique<RealizeInput>();

@@ -14,6 +14,7 @@
 #include <set>
 
 #include "core/Connectivity.h"
+#include "core/Parallel.h"
 #include "core/Prof.h"
 #include "drc/Drc.h"
 #include "geom/Geometry.h"
@@ -523,7 +524,12 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
   auto draw = [&](const Drawn* from) {
     ProfScope p("F7 model: drawing");
     std::optional<ProfScope> pc(std::in_place, "F7 model: copies");
-    Drawn c{t, t, b, {}, {}, {}, {}};
+    Drawn c;
+    parallelFor(3, [&](size_t i) {  // (the three copies at once)
+      if (i == 0) c.model = t;
+      else if (i == 1) c.owning = t;
+      else c.board = b;
+    });
     pc.reset();
     for (const Obj& ob : objs) c.pos.push_back(t.owners[ob.owner].c);
     // The vias on the 0.1 um grid the board's files keep (a position between two of its points would be
