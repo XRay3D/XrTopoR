@@ -119,34 +119,94 @@ void buildOutline(Board& b, LayerId edgeLayer) {
     for (auto& g : c.graphics) collect(g);
 
   const double tol = 20000;  // 20 um
+  // What of a piece may stick out past the place where another meets it: a line drawn a little over the end of the
+  // arc it runs into is the same corner (P-CAD draws the board's edge of loose lines and arcs, and nothing makes
+  // their ends meet: RMT19M_A68U's left side has two lines 0.25 mm over the ends of their arcs — its contour did
+  // not close, the slot inside the board was taken for the board, and no copper area could be poured).
+  const double kStub = 1.0 * kNmPerMm;
   auto near = [&](Vec2 a, Vec2 c) { return (a - c).len() <= tol; };
+  auto lengthOf = [](const Polyline& c, size_t from, size_t to) {
+    double sum = 0;
+    for (size_t k = from; k + 1 <= to; ++k) sum += (c[k + 1] - c[k]).len();
+    return sum;
+  };
   std::vector<Polyline> loops;
   std::vector<bool> used(chains.size(), false);
   // Closed figures (polygons, rectangles, circles) are loops of their own; only open pieces chain up,
   // and a chain stops growing as soon as it closes.
   auto closed = [&](const Polyline& c) { return c.size() >= 4 && near(c.front(), c.back()); };
+  // The loop grown at its end by one piece: end to end; or the loop's end lies on the piece (the piece goes on from
+  // there by its longer part, the short one being what stuck out); or the piece's end lies on the loop's last
+  // stretch, a little before its end (the loop is cut back to it).
+  auto extend = [&](Polyline& loop) {
+    const Vec2 end = loop.back();
+    for (size_t j = 0; j < chains.size(); ++j) {
+      if (used[j] || chains[j].size() < 2 || closed(chains[j])) continue;
+      const Polyline& c = chains[j];
+      if (near(end, c.front())) loop.insert(loop.end(), c.begin() + 1, c.end());
+      else if (near(end, c.back())) loop.insert(loop.end(), c.rbegin() + 1, c.rend());
+      else continue;
+      used[j] = true;
+      return true;
+    }
+    for (size_t j = 0; j < chains.size(); ++j) {
+      if (used[j] || chains[j].size() < 2 || closed(chains[j])) continue;
+      const Polyline& c = chains[j];
+      for (size_t k = 0; k + 1 < c.size(); ++k) {
+        if (distPointSegment(end, c[k], c[k + 1]) > tol) continue;
+        const Vec2 at = closestPointOnSegment(end, c[k], c[k + 1]);
+        const double before = lengthOf(c, 0, k) + (at - c[k]).len(), after = (c[k + 1] - at).len() + lengthOf(c, k + 1, c.size() - 1);
+        if (std::min(before, after) > kStub) continue;  // (a real tee: not this corner)
+        if (after >= before) loop.insert(loop.end(), c.begin() + long(k) + 1, c.end());
+        else loop.insert(loop.end(), c.rbegin() + long(c.size() - 1 - k), c.rend());
+        used[j] = true;
+        return true;
+      }
+    }
+    if (loop.size() >= 2) {
+      const Vec2 a = loop[loop.size() - 2];
+      for (size_t j = 0; j < chains.size(); ++j) {
+        if (used[j] || chains[j].size() < 2 || closed(chains[j])) continue;
+        const Polyline& c = chains[j];
+        for (bool front : {true, false}) {
+          const Vec2 e = front ? c.front() : c.back();
+          if (distPointSegment(e, a, end) > tol || (e - end).len() > kStub || (e - a).len() <= tol) continue;
+          loop.back() = e;
+          if (front) loop.insert(loop.end(), c.begin() + 1, c.end());
+          else loop.insert(loop.end(), c.rbegin() + 1, c.rend());
+          used[j] = true;
+          return true;
+        }
+      }
+    }
+    return false;
+  };
+  // The loop closed on itself the same three ways: its ends met, or one of them lies on the stretch at the other.
+  auto close = [&](Polyline& loop) {
+    if (loop.size() < 4) return false;
+    if (near(loop.front(), loop.back())) return true;
+    if (distPointSegment(loop.back(), loop[0], loop[1]) <= tol && (loop.back() - loop[0]).len() <= kStub) {
+      loop.front() = loop.back();
+      return true;
+    }
+    if (distPointSegment(loop.front(), loop[loop.size() - 2], loop.back()) <= tol && (loop.front() - loop.back()).len() <= kStub) {
+      loop.back() = loop.front();
+      return true;
+    }
+    return false;
+  };
   for (size_t i = 0; i < chains.size(); ++i) {
     if (used[i] || chains[i].size() < 2) continue;
     used[i] = true;
     Polyline loop = chains[i];
-    bool grew = true;
-    while (grew && !near(loop.front(), loop.back())) {
-      grew = false;
-      for (size_t j = 0; j < chains.size() && !near(loop.front(), loop.back()); ++j) {
-        if (used[j] || chains[j].size() < 2 || closed(chains[j])) continue;
-        auto& c = chains[j];
-        if (near(loop.back(), c.front())) loop.insert(loop.end(), c.begin() + 1, c.end());
-        else if (near(loop.back(), c.back())) loop.insert(loop.end(), c.rbegin() + 1, c.rend());
-        else if (near(loop.front(), c.back())) loop.insert(loop.begin(), c.begin(), c.end() - 1);
-        else if (near(loop.front(), c.front())) loop.insert(loop.begin(), c.rbegin(), c.rend() - 1);
-        else continue;
-        used[j] = true;
-        grew = true;
-      }
+    while (!close(loop)) {
+      if (extend(loop)) continue;
+      r::reverse(loop);  // (at its other end)
+      if (!extend(loop)) break;
     }
-    if (loop.size() >= 4 && near(loop.front(), loop.back())) {
+    if (close(loop)) {
       loop.pop_back();
-      loops.push_back(loop);
+      if (loop.size() >= 3) loops.push_back(loop);
     }
   }
   r::sort(loops, std::greater{}, [](const Polyline& p) { return std::abs(polygonArea(p)); });

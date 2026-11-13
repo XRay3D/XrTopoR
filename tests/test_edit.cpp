@@ -3,6 +3,7 @@
 #include "core/Connectivity.h"
 #include "core/Edit.h"
 #include "core/ZoneFill.h"
+#include "drc/Drc.h"
 #include "io/BoardIO.h"
 
 using namespace xr;
@@ -580,4 +581,108 @@ TEST(Edit, JunkTracksAreRemoved) {
   EXPECT_EQ((*loaded)->junkRemoved.crumbs, 0);
   EXPECT_EQ((*loaded)->tracks.size(), (*raw)->tracks.size());
   EXPECT_EQ(Connectivity::compute(**loaded).ratsnest.size(), Connectivity::compute(**raw).ratsnest.size());
+}
+
+// An area poured after another one with holes in it keeps off that one and off everything else: the first one's fill
+// is one contour with its holes on seams, and grown as it is it crossed itself — the obstacles of the second area
+// were an invalid polygon and a track of another net was poured over (RMT19M_A68U: 59 shorts under its pours).
+TEST(ZoneFill, AnAreaPouredAfterOneWithHolesKeepsOffTheRest) {
+  PourBoard t;
+  t.b.netClasses[0].clearance = mmToNm(0.3);
+  t.b.edgeClearance = mmToNm(0.3);
+  // G over the left half with three pads of O in it (holes of its fill), O's own area over the right half, and a
+  // track of a third net through the right half.
+  const int third = t.b.addNet("T");
+  t.zone().outline = {t.at(0, 0), t.at(9.5, 0), t.at(9.5, 20), t.at(0, 20)};
+  t.zone().priority = 1;
+  t.pad(4, 5, t.o);
+  t.pad(4, 10, t.o);
+  t.pad(4, 15, t.o);
+  Zone right = t.zone();
+  right.net = t.o;
+  right.priority = 0;
+  right.outline = {t.at(9.6, 0), t.at(20, 0), t.at(20, 20), t.at(9.6, 20)};
+  t.b.zones.push_back(right);
+  Track tr;
+  tr.a = Point(t.at(15, 2));
+  tr.b = Point(t.at(15, 18));
+  tr.width = mmToNm(0.4);
+  tr.layer = t.top;
+  tr.net = third;
+  t.b.tracks.push_back(tr);
+  fillZones(t.b);
+  ASSERT_FALSE(t.b.zones[0].filled.empty());
+  ASSERT_FALSE(t.b.zones[1].filled.empty());
+  auto pouredBy = [&](int zone, double x, double y) { return r::any_of(t.b.zones[size_t(zone)].filled, [&](const Polyline& f) { return pointInPolygon(t.at(x, y), f); }); };
+  EXPECT_FALSE(pouredBy(1, 15, 10)) << "the track of the third net is poured over";
+  EXPECT_FALSE(pouredBy(1, 15.4, 10)) << "... or its clearance";
+  EXPECT_TRUE(pouredBy(1, 17, 10));
+  EXPECT_TRUE(pouredBy(1, 12, 10));
+  EXPECT_FALSE(pouredBy(0, 4, 10)) << "the pad of O in G's area";
+  DrcOptions o;
+  o.unconnected = false;
+  o.widths = false;
+  EXPECT_EQ(runDrc(t.b, o).size(), 0u);
+}
+
+// The board's edge drawn of loose lines whose ends do not meet: a side that runs a quarter of a millimetre past its
+// corners is the same side. The contour did not close, the slot inside the board — the one closed figure — was
+// taken for the board, and nothing could be poured or drawn outside it (RMT19M_A68U).
+TEST(Outline, ASideDrawnPastItsCornersClosesTheContour) {
+  Board b;
+  const LayerId top = b.addLayer("Top", LayerKind::Copper, Side::Top);
+  b.layers[top].copperIndex = 0;
+  const LayerId edge = b.addLayer("Board", LayerKind::Edge, Side::None);
+  auto at = [](double x, double y) { return Vec2{x * kNmPerMm, y * kNmPerMm}; };
+  auto line = [&](Vec2 a, Vec2 c) {
+    Graphic g;
+    g.kind = GraphicKind::Line;
+    g.layer = edge;
+    g.a = a;
+    g.b = c;
+    b.graphics.push_back(g);
+  };
+  line(at(0, 0), at(30, 0));
+  line(at(30, 0), at(30, 20));
+  line(at(30, 20), at(0, 20));
+  line(at(0, 20.25), at(0, -0.25));  // the left side, over both its corners
+  // A slot inside, drawn end to end.
+  line(at(10, 5), at(12, 5));
+  line(at(12, 5), at(12, 15));
+  line(at(12, 15), at(10, 15));
+  line(at(10, 15), at(10, 5));
+  io::buildOutline(b, edge);
+  ASSERT_EQ(b.outline.size(), 2u);
+  EXPECT_NEAR(std::abs(polygonArea(b.outline[0])) / 1e12, 600.0, 0.01) << "the board";
+  EXPECT_NEAR(std::abs(polygonArea(b.outline[1])) / 1e12, 20.0, 0.01) << "its slot";
+}
+
+// An area inside another of the same priority: the outer one is poured round it, whichever comes first in the file,
+// and also when the outer one alone is poured again.
+TEST(ZoneFill, TheOuterAreaIsPouredRoundTheOneInside) {
+  for (bool innerFirst : {false, true}) {
+    PourBoard t;
+    t.b.netClasses[0].clearance = mmToNm(0.3);
+    t.b.edgeClearance = mmToNm(0.3);
+    Zone inner = t.zone();
+    inner.net = t.o;
+    inner.outline = {t.at(6, 6), t.at(12, 6), t.at(12, 12), t.at(6, 12)};
+    if (innerFirst) t.b.zones.insert(t.b.zones.begin(), inner);
+    else t.b.zones.push_back(inner);
+    const int in = innerFirst ? 0 : 1, out = 1 - in;
+    auto pouredBy = [&](int zone, double x, double y) { return r::any_of(t.b.zones[size_t(zone)].filled, [&](const Polyline& f) { return pointInPolygon(t.at(x, y), f); }); };
+    auto check = [&](const char* when) {
+      EXPECT_TRUE(pouredBy(in, 9, 9)) << when;
+      EXPECT_FALSE(pouredBy(out, 9, 9)) << when << ": the outer area over the inner one";
+      EXPECT_FALSE(pouredBy(out, 5.85, 9)) << when << ": ... or nearer to it than the clearance";
+      EXPECT_TRUE(pouredBy(out, 5, 9)) << when;
+      EXPECT_TRUE(pouredBy(out, 15, 15)) << when;
+    };
+    fillZones(t.b);
+    check(innerFirst ? "the inner area first in the file" : "the outer area first in the file");
+    ZoneFillOptions o;
+    o.only = {out};
+    fillZones(t.b, o);
+    check("the outer area poured again alone");
+  }
 }

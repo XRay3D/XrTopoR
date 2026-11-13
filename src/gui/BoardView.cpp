@@ -363,8 +363,19 @@ BoardView::Pick BoardView::pick(QPointF screen) const {
     int best = -1;
     for (int zi = 0; zi < int(b.zones.size()); ++zi) {
       const Zone& z = b.zones[zi];
-      if (!layerVisible(z.layer) || z.outline.size() < 3 || !pointInPolygon(w, z.outline)) continue;
-      if (best < 0 || z.layer == doc_->activeLayer()) best = zi;
+      if (!layerVisible(z.layer) || z.outline.size() < 3) continue;
+      // A poured area is taken by its copper, an unpoured one by its contour alone: its inside is empty board, and a
+      // click there meant what lies there (the areas of a board with its pours taken off covered everything).
+      bool hit = false;
+      if (!z.filled.empty()) {
+        hit = r::any_of(z.filled, [&](const Polyline& f) { return pointInPolygon(w, f); });
+      } else {
+        for (size_t k = 0; k < z.outline.size() && !hit; ++k) hit = distPointSegment(w, z.outline[k], z.outline[(k + 1) % z.outline.size()]) <= tol;
+      }
+      if (!hit) continue;
+      // The active layer's first; of two there the smaller (the one inside the other).
+      auto rank = [&](int i) { return std::pair(b.zones[size_t(i)].layer != doc_->activeLayer(), std::abs(polygonArea(b.zones[size_t(i)].outline))); };
+      if (best < 0 || rank(zi) < rank(best)) best = zi;
     }
     if (best >= 0) pk.item = ItemRef{ItemType::Zone, best};
   }

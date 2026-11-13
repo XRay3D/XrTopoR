@@ -1229,7 +1229,26 @@ std::vector<DrcViolation> topologyViolations(const Board& b, const Topology& t, 
         d.message = std::format("wires crossing: {} / {}", netOf(v.wireA), netOf(v.wireB));
         if (auto p = nearest(v.wireA, v.wireB, v.layer)) d.pos = *p;
         break;
-      case K::ThroughPad: d.message = std::format("wire {} through another net's copper", netOf(v.wireA)); break;
+      case K::ThroughPad: {
+        // ... and whose: the pad by its component and number, a via, a pour, with its net.
+        std::string whose = "another net's copper";
+        if (v.owner >= 0 && v.owner < int(t.owners.size())) {
+          const Owner& o = t.owners[size_t(v.owner)];
+          const std::string net = o.net >= 0 && o.net < int(b.nets.size()) ? b.nets[size_t(o.net)].name : std::string("no net");
+          if (o.kind == Owner::Kind::Pad && o.pad >= 0 && o.pad < int(b.pads.size())) {
+            const Pad& pd = b.pads[size_t(o.pad)];
+            whose = std::format("the pad {}.{} ({})", pd.component >= 0 ? b.components[size_t(pd.component)].ref : std::string("?"), pd.number, net);
+          } else if (o.kind == Owner::Kind::Via) {
+            whose = std::format("a via ({})", net);
+          } else if (o.kind == Owner::Kind::Zone) {
+            whose = std::format("a copper area ({})", net);
+          } else {
+            whose = std::format("copper of {}", net);
+          }
+        }
+        d.message = std::format("wire {} through {}", netOf(v.wireA), whose);
+        break;
+      }
       case K::OutsideBoard: d.message = std::format("wire {} the mesh does not hold", netOf(v.wireA)); break;
       case K::Blocked: d.message = std::format("wire {} through a keepout, no way round", netOf(v.wireA)); break;
       case K::Overflow: d.message = std::format("edge overflowing by {:.3f} mm", v.deficit / 1e6); break;

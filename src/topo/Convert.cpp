@@ -350,7 +350,24 @@ std::optional<Laid> layChain(Topology& self, LayContext& x, const WireChain& c, 
   // Through another net's copper: the sketch is bent out of it, at the point nearest that copper's
   // centre, unless the wire is locked where it lies.
   std::optional<ItemRef> through;
-  for (int round = 0; round < 60 && !through; ++round) {
+  // (A locked wire is asked by its tracks as they lie, not by the sketch: one that ends in a pour of its net has the
+  // nearest point of the pour's ring for its end vertex — millimetres from where its track stops inside the pour —
+  // and the sketch from there ran through whatever stood between: four 1 mm stubs into the pours of RMT19M_A68U
+  // were «through another net's pad», and F5, F6 and F7 stopped on a board with no short in it.)
+  if (w.locked) {
+    for (size_t k = 1; k < c.path.size() && !through; ++k) {
+      const Vec2 p = c.path[k - 1], q = c.path[k];
+      BBox box;
+      box.add(p);
+      box.add(q);
+      x.idx.query(box.inflated(w.width), LayerMask(1) << c.layer, [&](ItemRef r) {
+        if (through || (r.type != ItemType::Pad && r.type != ItemType::Via) || itemNet(b, r) == c.net) return;
+        for (const Shape& s : itemShapes(b, r, 0, c.layer))
+          if (s.distanceToSegment(p, q) < 0) through = r;
+      });
+    }
+  }
+  for (int round = 0; round < 60 && !through && !w.locked; ++round) {
     bool bent = false;
     for (size_t k = 1; k < sk.size() && !bent && !through; ++k) {
       Vec2 p = sk[k - 1], q = sk[k];

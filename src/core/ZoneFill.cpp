@@ -127,9 +127,8 @@ std::vector<Polyline> unfracture(const Polyline& pl) {
   return rings;
 }
 
-}  // namespace
-
-std::vector<Island> zoneIslands(const Zone& z) {
+// A zone's pour as polygons with holes (its fill is kept fractured: one contour a piece, the holes on seams).
+BMulti copperOf(const Zone& z) {
   std::vector<BMulti> pieces;
   for (const Polyline& f : z.filled) {
     std::vector<Polyline> rings = unfracture(f);
@@ -146,8 +145,14 @@ std::vector<Island> zoneIslands(const Zone& z) {
     }
     pieces.push_back(std::move(piece));
   }
+  return unionAll(std::move(pieces));
+}
+
+}  // namespace
+
+std::vector<Island> zoneIslands(const Zone& z) {
   std::vector<Island> out;
-  for (const BPoly& p : unionAll(std::move(pieces))) {
+  for (const BPoly& p : copperOf(z)) {
     Island isl{ringToPolyline(p.outer()), {}};
     if (isl.outer.size() < 3) continue;
     for (auto& h : p.inners())
@@ -203,7 +208,12 @@ ZoneFillStats fillZones(Board& b, const ZoneFillOptions& opt) {
   // Higher priority first: its fill is an obstacle for lower-priority zones of other nets.
   std::vector<int> order(b.zones.size());
   r::iota(order, 0);
-  r::stable_sort(order, std::greater{}, [&](int i) { return b.zones[i].priority; });
+  // ... and of equal priority the smaller first: an area inside another is poured before the one around it, which
+  // then keeps off it (in the file's order the outer one could come first and was poured over the inner ones).
+  r::stable_sort(order, [&](int i, int j) {
+    if (b.zones[i].priority != b.zones[j].priority) return b.zones[i].priority > b.zones[j].priority;
+    return std::abs(polygonArea(b.zones[i].outline)) < std::abs(polygonArea(b.zones[j].outline));
+  });
   for (int zi : order) {
     Zone& z = b.zones[zi];
     if (z.outline.size() < 3 || !selected(zi)) continue;
@@ -253,7 +263,10 @@ ZoneFillStats fillZones(Board& b, const ZoneFillOptions& opt) {
       const Zone& o = b.zones[oz];
       if (o.layer != z.layer || o.net == z.net) continue;
       double clr = double(b.zoneClearance(z, o.net)) + opt.arcTolerance;
-      for (auto& f : o.filled) holes.push_back(toMulti(Shape::polygon(f, clr).outline(opt.arcTolerance)));
+      // (The pour as polygons, grown: a fill is kept as one contour with its holes on seams, and that contour
+      // inflated as a shape crossed itself at every seam — the union of the obstacles came out invalid and the
+      // difference cut nothing where it counted: 59 tracks and pads of other nets under the pours of RMT19M_A68U.)
+      if (BMulti other = copperOf(o); !other.empty()) holes.push_back(grow(other, clr));
     }
     // Non-plated holes without copper are keep-outs on every layer.
     for (auto& p : b.pads)

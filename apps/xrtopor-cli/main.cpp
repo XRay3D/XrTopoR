@@ -47,6 +47,7 @@ void usage() {
       "  refine     <board> -o <out> [--same-layer]   shorter wire paths around the copper as it lies (F6)\n"
       "                     [--model [--no-flips] [--no-junctions] [--no-branches] [--no-clinches] [--no-vias] [--no-zone-tracks] [--verbose]]  F6 on the topological model\n"
       "  fill       <board> -o <out> [--no-thermals]  pour copper zones\n"
+      "  unfill     <board> -o <out>                take the pours off the copper zones\n"
       "  report     <board> [--bom out.csv]          routing statistics per layer and net, BOM\n"
       "  padstats   <board>                         how the wires meet the pads: widths, exits, runs inside copper, joints\n"
       "  flexfix    <board> -o <out> --nets a,b [--off]  set (or take off) the flexible fixation of nets\n"
@@ -225,6 +226,12 @@ int main(int argc, char** argv) {
   }
   if (cmd == "padstats") {
     std::print("{}", topo::relayStats(b).text());
+    return 0;
+  }
+  if (cmd == "unfill" && !a.opt("-o").empty()) {
+    clearZoneFills(b);
+    std::println("the pours of {} zone(s) taken off", b.zones.size());
+    if (auto r = io::saveBoard(b, std::string(a.opt("-o"))); !r) return fail(r.error());
     return 0;
   }
   if (cmd == "fill" && !a.opt("-o").empty()) {
