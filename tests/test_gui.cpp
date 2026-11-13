@@ -1169,6 +1169,28 @@ TEST(Gui, TopoRProject) {
   EXPECT_EQ(p->openedDocument(), w.document()->path());
 }
 
+// A design opened alone has a project of its own next to it, as every design in TopoR has: written only
+// when first edited — here by «Сохранить как», whose file joins it. The project file is never its own entry.
+TEST(Gui, DesignOwnProject) {
+  app();
+  QTemporaryDir dir;
+  ASSERT_TRUE(QFile::copy(QString::fromStdString(data("topor/Example_05/MinVia.fst")), dir.filePath("MinVia.fst")));
+  MainWindow w;
+  ASSERT_TRUE(w.openFile(dir.filePath("MinVia.fst")));
+  ASSERT_TRUE(w.project());
+  QString own = QFileInfo(dir.filePath("MinVia.fsproj")).absoluteFilePath();
+  EXPECT_EQ(w.project()->path(), own);
+  EXPECT_FALSE(QFileInfo::exists(own));
+  ASSERT_TRUE(w.saveAs(dir.filePath("MinVia_2.fst")));
+  auto p = Project::load(own, nullptr);
+  ASSERT_TRUE(p);
+  EXPECT_TRUE(p->contains(QFileInfo(dir.filePath("MinVia.fst")).absoluteFilePath()));
+  EXPECT_TRUE(p->contains(QFileInfo(dir.filePath("MinVia_2.fst")).absoluteFilePath()));
+  EXPECT_EQ(p->openedDocument(), w.document()->path());
+  p->add(own);
+  EXPECT_FALSE(p->contains(own));
+}
+
 // «Редактор параметров дизайна»: a rule edited and applied changes the design's classes; as in TopoR
 // the undo history is cleared and the design is marked modified.
 TEST(Gui, DesignParametersEditor) {

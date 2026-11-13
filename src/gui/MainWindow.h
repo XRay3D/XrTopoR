@@ -27,6 +27,7 @@ class MainWindow : public QMainWindow {
   MainWindow();
   // A project (.fsproj) or a design file; a design inside a project opens with its project.
   bool openFile(const QString& path);
+  bool saveAs(const QString& file);  // «Сохранить как» without the dialog; the file joins the project
   bool openLastFile();  // the project or design opened in the previous session, if any
   Project* project() { return project_ ? &*project_ : nullptr; }
   AutorouteWindow* autorouteWindow();  // F11, created on first use

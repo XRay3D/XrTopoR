@@ -72,6 +72,8 @@ bool Project::save(QString* error) const {
   return bool(r);
 }
 
+bool Project::onDisk() const { return QFileInfo::exists(path_); }
+
 QString Project::dir() const { return QFileInfo(path_).absolutePath(); }
 QString Project::name() const { return QFileInfo(path_).completeBaseName(); }
 
@@ -90,7 +92,7 @@ bool Project::contains(const QString& absPath) const {
 }
 
 void Project::add(const QString& absPath, bool variant, io::FsProjFolder* folder) {
-  if (contains(absPath)) return;
+  if (absPath == path_ || contains(absPath)) return;
   io::FsProjFolder& target = folder ? *folder : variant ? data_.autorouting : data_.documents;
   io::FsProjFile f;
   f.path = io::projectEntry(dir().toStdString(), absPath.toStdString());

@@ -16,6 +16,8 @@ class Project {
   bool save(QString* error = nullptr) const;
 
   const QString& path() const { return path_; }
+  // A design opened alone gets a project of its own next to it, written at its first edit.
+  bool onDisk() const;
   QString dir() const;
   QString name() const;  // file name without extension
   io::FsProject& data() { return data_; }
@@ -23,7 +25,7 @@ class Project {
 
   QString resolve(const io::FsProjFile& f) const;
   bool contains(const QString& absPath) const;
-  // Adds a file (if not listed yet) to the documents or to the autorouting variants.
+  // Adds a file (if not listed yet, and not the project file itself) to the documents or to the autorouting variants.
   void add(const QString& absPath, bool variant = false, io::FsProjFolder* folder = nullptr);
   void remove(const QString& absPath);
   void rename(const QString& oldPath, const QString& newPath);

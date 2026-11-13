@@ -185,29 +185,7 @@ void ProjectPanel::refresh() {
     it->setFont(0, f);
   };
   QIcon folderIcon(":/icons/open.svg"), fileIcon(":/icons/design_params.svg"), rootIcon(":/icons/new_project.svg");
-  if (!project_) {
-    if (current.isEmpty()) return;
-    auto* root = new QTreeWidgetItem(tree_, {QFileInfo(current).completeBaseName()});
-    root->setIcon(0, rootIcon);
-    root->setData(0, KindRole, KRoot);
-    auto section = [&](const QString& name, int index) {
-      auto* s = new QTreeWidgetItem(root, {name});
-      s->setIcon(0, folderIcon);
-      s->setData(0, KindRole, KSection);
-      s->setData(0, FolderRole, index);
-      return s;
-    };
-    auto* docs = section(tr("Документы"), 0);
-    auto* file = new QTreeWidgetItem(docs, {QFileInfo(current).fileName()});
-    file->setIcon(0, fileIcon);
-    file->setData(0, PathRole, current);
-    file->setData(0, KindRole, KFile);
-    boldIfCurrent(file, current);
-    section(tr("Варианты автотрассировки"), 1);
-    tree_->expandAll();
-    updateFileInfo();
-    return;
-  }
+  if (!project_) return;
   auto* root = new QTreeWidgetItem(tree_, {project_->name()});
   root->setIcon(0, rootIcon);
   root->setData(0, KindRole, KRoot);
@@ -290,17 +268,9 @@ void ProjectPanel::showProperties(const QString& path) {
 }
 
 io::FsProjFolder* ProjectPanel::targetFolder(QTreeWidgetItem* at) {
-  if (project_) {
-    io::FsProjFolder* f = folderOf(at);
-    return f ? f : &project_->data().documents;
-  }
-  // A design opened alone: its tree has the two sections only; the project is made first.
-  bool variants = false;
-  for (QTreeWidgetItem* cur = at; cur; cur = cur->parent())
-    if (cur->data(0, KindRole).toInt() == KSection) variants = cur->data(0, FolderRole).toInt() == 1;
-  emit projectNeeded();
   if (!project_) return nullptr;
-  return variants ? &project_->data().autorouting : &project_->data().documents;
+  io::FsProjFolder* f = folderOf(at);
+  return f ? f : &project_->data().documents;
 }
 
 void ProjectPanel::createFolder(QTreeWidgetItem* at) {
@@ -319,7 +289,7 @@ void ProjectPanel::addFiles(QTreeWidgetItem* at) {
   if (!target) return;
   QStringList files = QFileDialog::getOpenFileNames(
       this, tr("Добавить файл в проект"), project_->dir(),
-      tr("Дизайны (*.fst *.fsx *.kicad_pcb *.dsn *.pcb *.PCB);;Все файлы (*)"));
+      tr("Все файлы (*);;Дизайны (*.fst *.fsx *.kicad_pcb *.dsn *.pcb *.PCB)"));
   if (files.isEmpty()) return;
   for (auto& f : files) project_->add(QFileInfo(f).absoluteFilePath(), false, target);
   emit projectEdited();

@@ -459,7 +459,6 @@ void MainWindow::buildDocks() {
   });
   connect(projectPanel_, &ProjectPanel::projectEdited, this, &MainWindow::saveProject);
   connect(projectPanel_, &ProjectPanel::copyProjectRequested, this, &MainWindow::copyProject);
-  connect(projectPanel_, &ProjectPanel::projectNeeded, this, &MainWindow::newProject);
   auto* projectDock = addDock("Project_View", tr("Проект"), projectPanel_, Qt::LeftDockWidgetArea, "Accel_ViewProject");
   auto* search = new SearchPanel(doc_, view_, this);
   auto* searchDock = addDock("Search_View", tr("Поиск"), search, Qt::LeftDockWidgetArea, "Accel_ViewSearch");
@@ -726,10 +725,18 @@ bool MainWindow::openFile(const QString& path) {
         break;
       }
     }
+    // None lists it: the design's own project, «<name>.fsproj» next to it — the one there, else a new one,
+    // written when it is first edited (a file added, a folder made, «Сохранить как»).
+    if (!project_) {
+      QString own = fi.absolutePath() + "/" + fi.completeBaseName() + ".fsproj";
+      if (!QFileInfo::exists(own)) project_ = Project::create(own);
+      else if (auto p = Project::load(own, nullptr)) project_ = std::move(*p);
+      if (project_) project_->add(fi.absoluteFilePath());
+    }
     projectPanel_->setProject(project());
   }
   if (!openDesign(file)) return false;
-  AppSettings::addRecentFile(project_ ? project_->path() : file);
+  AppSettings::addRecentFile(project_ && project_->onDisk() ? project_->path() : file);
   projectPanel_->refreshHistory();
   return true;
 }
@@ -761,7 +768,7 @@ bool MainWindow::openDesign(const QString& file) {
                       .arg(b.junkRemoved.crumbs)});
   if (project_) {
     project_->setOpened(doc_->path());
-    saveProject();
+    if (project_->onDisk()) saveProject();
   }
   projectPanel_->refresh();
   updateTitle();
@@ -835,7 +842,7 @@ void MainWindow::importDesign() {
                                            tr("Дизайны (*.kicad_pcb *.dsn *.pcb *.PCB *.fst);;Все файлы (*)"));
   if (f.isEmpty()) return;
   f = QFileInfo(f).absoluteFilePath();
-  if (project_) {
+  if (project_ && project_->onDisk()) {
     project_->add(f);
     saveProject();
     if (openDesign(f)) AppSettings::addRecentFile(project_->path());
@@ -901,7 +908,11 @@ bool MainWindow::save() {
 bool MainWindow::saveAs() {
   if (!doc_->hasBoard()) return false;
   QString f = QFileDialog::getSaveFileName(this, tr("Сохранить как"), doc_->path(), kSaveFilter);
-  if (f.isEmpty()) return false;
+  return !f.isEmpty() && saveAs(f);
+}
+
+bool MainWindow::saveAs(const QString& f) {
+  if (!doc_->hasBoard()) return false;
   auto r = io::saveBoard(*doc_->board(), f.toStdString());
   if (!r) {
     QMessageBox::warning(this, tr("Сохранить"), QString::fromStdString(r.error()));

@@ -25,7 +25,6 @@ class ProjectPanel : public QWidget {
   void openRequested(const QString& path);
   void projectEdited();  // the project changed and should be saved
   void copyProjectRequested();
-  void projectNeeded();  // a design without a project: make one (synchronously) to add folders/files to
 
  private:
   void contextMenu(QPoint pos);
@@ -33,7 +32,7 @@ class ProjectPanel : public QWidget {
   void showProperties(const QString& path);
   void createFolder(QTreeWidgetItem* at);
   void addFiles(QTreeWidgetItem* at);
-  io::FsProjFolder* targetFolder(QTreeWidgetItem* at);  // where new folders/files go; makes the project
+  io::FsProjFolder* targetFolder(QTreeWidgetItem* at);  // where new folders/files go
   void deleteFromDisk(const QString& path);
   void renameFile(const QString& path);
   io::FsProjFolder* folderOf(QTreeWidgetItem* it);  // section/folder an item belongs to
