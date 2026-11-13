@@ -209,6 +209,8 @@ class BoardView : public QOpenGLWidget {
   void drawLabels(QPainter& p);
   std::optional<QColor> netColor(int net, bool enabledForKind) const;
   bool componentVisible(int ci) const;
+  // A text is shown with «Тексты», a component's label with its component and «Ярлыки» of its kind.
+  bool textShown(const Text& t) const;
   static BBox graphicBBox(const Graphic& g);
   Vec2 snapped(Vec2 w) const;  // «Привязка к сетке»
   void pushView();             // records the view for Alt+← / Alt+→

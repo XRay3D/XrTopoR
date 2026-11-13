@@ -164,10 +164,10 @@ void BoardView::sceneLayer(gl::SceneBuilder& sb, LayerId l) const {
       }
       sb.flush();
     }
-    if (d.flag("showTexts") && showDetails) {
+    if (showDetails) {
       ProfScope ps("scene.texts");
       for (auto& t : b.texts)
-        if (t.layer == l) sceneText(sb, t, details);
+        if (t.layer == l && textShown(t)) sceneText(sb, t, details);
       sb.flush();
     }
     return;
@@ -195,9 +195,9 @@ void BoardView::sceneLayer(gl::SceneBuilder& sb, LayerId l) const {
   for (auto& g : b.graphics)
     if (g.layer == l) sceneGraphic(sb, g, details);
   sb.flush();
-  if (d.flag("showTexts")) {
+  {
     for (auto& t : b.texts)
-      if (t.layer == l) sceneText(sb, t, details);
+      if (t.layer == l && textShown(t)) sceneText(sb, t, details);
     sb.flush();
   }
 }

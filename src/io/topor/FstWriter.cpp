@@ -731,7 +731,7 @@ struct Writer {
     static const char* aligns[] = {"LT", "CT", "RT", "LM", "CM", "RM", "LB", "CB", "RB"};
     bool any = false;
     for (auto& t : b.texts) {
-      if (t.layer < 0 || t.layer >= LayerId(b.layers.size()) || layerName[t.layer].empty()) continue;
+      if (t.isLabel() || t.layer < 0 || t.layer >= LayerId(b.layers.size()) || layerName[t.layer].empty()) continue;
       if (!any) x.open("Texts");
       any = true;
       std::vector<std::pair<std::string, std::string>> a{{"text", t.text}, {"align", aligns[int(t.align)]}};
@@ -775,6 +775,42 @@ struct Writer {
     return s;
   }
 
+  // The attributes of a component on the board with their labels: a label's point in the footprint's frame, its
+  // angle from the component's.
+  void writeAttributes(int ci) {
+    static const char* aligns[] = {"LT", "CT", "RT", "LM", "CM", "RM", "LB", "CB", "RB"};
+    const Component& c = b.components[size_t(ci)];
+    const bool bottom = c.side == Side::Bottom;
+    x.open("Attributes");
+    for (const Attribute& a : b.attributesOf(ci)) {
+      const bool typed = a.name == "RefDes" || a.name == "PartName";
+      const int li = b.labelOf(ci, a.name);
+      const Text* t = li >= 0 ? &b.texts[size_t(li)] : nullptr;
+      if (t && (t->layer < 0 || t->layer >= LayerId(b.layers.size()) || layerName[t->layer].empty())) t = nullptr;
+      std::vector<std::pair<std::string, std::string>> at;
+      if (typed) at = {{"type", a.name}};
+      else at = {{"name", a.name}, {"value", a.value}};
+      if (!t) {
+        if (a.name != "PartName") x.emptyList("Attribute", at);
+        continue;
+      }
+      x.openList("Attribute", at);
+      std::vector<std::pair<std::string, std::string>> la;
+      const double angle = std::fmod((bottom ? c.angle - t->angle : t->angle - c.angle) + 720.0, 360.0);
+      if (std::abs(angle) > 1e-9 && std::abs(angle - 360.0) > 1e-9) la.push_back({"angle", num(angle)});
+      if (t->mirror != bottom) la.push_back({"mirror", "on"});
+      la.push_back({"align", aligns[int(t->align)]});
+      la.push_back({"visible", "on"});
+      x.openList("Label", la);
+      x.empty("LayerRef", {{"name", layerName[t->layer]}});
+      x.empty("TextStyleRef", {{"name", b.styleOf(*t).name}});
+      xy("Org", absToFp(t->pos, c));
+      x.close();
+      x.close();
+    }
+    x.close();
+  }
+
   void writeComponents() {
     x.open("ComponentsOnBoard", {{"version", "1.3"}});
     x.open("Components");
@@ -793,11 +829,7 @@ struct Writer {
       x.empty("ComponentRef", {{"name", compFootprint[i]}});
       x.empty("FootprintRef", {{"name", compFootprint[i]}});
       xy("Org", toFst(c.pos));
-      if (!c.value.empty()) {
-        x.open("Attributes");
-        x.empty("Attribute", {{"name", "Value"}, {"value", c.value}});
-        x.close();
-      }
+      writeAttributes(int(i));
       x.close();
     }
     x.close();

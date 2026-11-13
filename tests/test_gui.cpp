@@ -995,6 +995,33 @@ TEST(Gui, PropertiesEditWireWidth) {
   EXPECT_EQ(f.b().tracks[0].width, w0);
 }
 
+// «Атрибуты» of a component: a flag puts the attribute's label on the board and takes it away, each an undoable
+// step; the label goes with its component.
+TEST(Gui, AttributeLabelsAreFlagged) {
+  Fixture f("topor/Example_02/Placement_master.pcb");
+  PropertiesPanel props(&f.doc);
+  const int ci = f.b().findComponent("R51");
+  ASSERT_GE(ci, 0);
+  f.doc.setSelection({}, {ci});
+  auto flag = [&](const char* attr) { return props.findChild<QCheckBox*>(QString("label:%1").arg(attr)); };
+  ASSERT_TRUE(flag("RefDes") && flag("Type"));
+  EXPECT_TRUE(flag("RefDes")->isChecked());
+  EXPECT_FALSE(flag("Type")->isChecked());
+  const size_t texts = f.b().texts.size();
+  flag("Type")->click();
+  ASSERT_EQ(f.b().texts.size(), texts + 1);
+  EXPECT_GE(f.b().labelOf(ci, "Type"), 0);
+  EXPECT_TRUE(flag("Type")->isChecked());
+  flag("RefDes")->click();
+  EXPECT_EQ(f.b().labelOf(ci, "RefDes"), -1);
+  EXPECT_FALSE(flag("RefDes")->isChecked());
+  f.doc.undoStack()->undo();
+  EXPECT_GE(f.b().labelOf(ci, "RefDes"), 0);
+  f.doc.undoStack()->undo();
+  EXPECT_EQ(f.b().labelOf(ci, "Type"), -1);
+  EXPECT_EQ(f.b().texts.size(), texts);
+}
+
 // «Форма (Многоугольник)» of the board outline in «Свойства»: the vertices in the unit, y up, the arcs' angles; a
 // value edited moves the vertex and the outline with it, an angle makes the side an arc, «Добавить» / «Удалить» a
 // vertex; each an undoable step. A circle's page has its centre and radius.

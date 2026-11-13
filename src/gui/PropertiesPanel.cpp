@@ -297,7 +297,14 @@ QWidget* PropertiesPanel::textPage(const std::vector<int>& texts) {
   // «Общие».
   auto* general = new QWidget;
   auto* f = new QFormLayout(general);
-  f->addRow(title(texts.size() == 1 ? tr("Надпись") : tr("Надписи (%1)").arg(texts.size())));
+  // A label: the attribute of its component, whose value is its text.
+  const bool labels = r::any_of(texts, [&](int i) { return b.texts[size_t(i)].isLabel(); });
+  if (texts.size() == 1 && labels) {
+    const Text& t = b.texts[size_t(texts[0])];
+    f->addRow(title(tr("Ярлык %1 компонента %2").arg(QString::fromStdString(t.attr), QString::fromStdString(b.components[size_t(t.component)].ref))));
+  } else {
+    f->addRow(title(texts.size() == 1 ? tr("Надпись") : tr("Надписи (%1)").arg(texts.size())));
+  }
   // The lines as they are shown (TopoR keeps "\r\n" between them: so are the edited ones written).
   auto shown = [](const std::string& s) {
     QStringList lines;
@@ -312,6 +319,7 @@ QWidget* PropertiesPanel::textPage(const std::vector<int>& texts) {
   text->setObjectName("text");
   if (auto t = common<std::string>(texts, [&](int i) { return b.texts[i].text; })) text->setPlainText(shown(*t));
   text->setFixedHeight(text->fontMetrics().lineSpacing() * 4 + 10);
+  text->setReadOnly(labels);
   text->enter = [this, text, texts] {
     QString t = text->toPlainText();
     if (t.trimmed().isEmpty()) return;
@@ -768,15 +776,38 @@ QWidget* PropertiesPanel::componentPage(const std::vector<int>& comps) {
       pins->setItem(i, 2, new QTableWidgetItem(p.net >= 0 ? QString::fromStdString(b.nets[p.net].name) : QString()));
     }
     tabs->addTab(pins, tr("Контакты"));
-    auto* attrs = new QTableWidget(2, 2);
-    attrs->setHorizontalHeaderLabels({tr("Имя"), tr("Значение")});
+    // The attributes; the flag puts the attribute's label on the board or takes it away.
+    const int ci = comps[0];
+    const auto list = b.attributesOf(ci);
+    auto* attrs = new QTableWidget(int(list.size()), 3);
+    attrs->setHorizontalHeaderLabels({tr("Имя"), tr("Значение"), tr("На плате")});
     attrs->verticalHeader()->hide();
     attrs->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    attrs->horizontalHeader()->setStretchLastSection(true);
-    attrs->setItem(0, 0, new QTableWidgetItem("RefDes"));
-    attrs->setItem(0, 1, new QTableWidgetItem(QString::fromStdString(c.ref)));
-    attrs->setItem(1, 0, new QTableWidgetItem("PartName"));
-    attrs->setItem(1, 1, new QTableWidgetItem(QString::fromStdString(c.value)));
+    attrs->setSelectionMode(QAbstractItemView::NoSelection);
+    attrs->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+    attrs->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    for (auto [i, a] : v::enumerate(list)) {
+      const int row = int(i);
+      attrs->setItem(row, 0, new QTableWidgetItem(QString::fromStdString(a.name)));
+      attrs->setItem(row, 1, new QTableWidgetItem(QString::fromStdString(a.value)));
+      auto* shown = new QCheckBox;
+      shown->setObjectName(QString("label:%1").arg(QString::fromStdString(a.name)));
+      shown->setChecked(b.labelOf(ci, a.name) >= 0);
+      shown->setToolTip(tr("Ярлык атрибута на плате"));
+      auto* cell = new QWidget;
+      auto* h = new QHBoxLayout(cell);
+      h->setContentsMargins(0, 0, 0, 0);
+      h->addWidget(shown, 0, Qt::AlignCenter);
+      attrs->setCellWidget(row, 2, cell);
+      connect(shown, &QCheckBox::clicked, this, [this, ci, name = a.name](bool on) {
+        edit(on ? tr("Ярлык %1").arg(QString::fromStdString(name)) : tr("Убрать ярлык %1").arg(QString::fromStdString(name)),
+             [&](Board& bd) {
+               if (on) bd.addLabel(ci, name);
+               else if (int t = bd.labelOf(ci, name); t >= 0) bd.texts.erase(bd.texts.begin() + t);
+             });
+      });
+    }
+    attrs->resizeColumnToContents(0);
     tabs->addTab(attrs, tr("Атрибуты"));
   }
   return tabs;

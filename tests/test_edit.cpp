@@ -142,6 +142,46 @@ TEST(Edit, FlipLeavesSmdWiresBehind) {
   EXPECT_EQ(fx.unrouted(), 0u);
 }
 
+// A component's labels go with it, turned and flipped with it; a label copied is a text of its own.
+TEST(Edit, LabelsGoWithTheirComponent) {
+  Fixture fx;
+  fx.b.components[0].attrs.push_back({"Type", "R0"});
+  const int ref = fx.b.addLabel(0, "RefDes");
+  const int type = fx.b.addLabel(0, "Type");
+  ASSERT_GE(ref, 0);
+  ASSERT_GE(type, 0);
+  EXPECT_EQ(fx.b.texts[size_t(type)].text, "R0");
+  EXPECT_EQ(fx.b.texts[size_t(ref)].layer, fx.silkTop);
+  EXPECT_GT((fx.b.texts[size_t(type)].pos - fx.b.texts[size_t(ref)].pos).len(), 0);  // not one over the other
+  const Vec2 was = fx.b.texts[size_t(type)].pos - fx.b.components[0].pos.v();
+  edit::Motion m;
+  m.shift = mm(-3, 2).v();
+  ASSERT_TRUE(edit::move(fx.b, components({0}), m));
+  EXPECT_LT((fx.b.texts[size_t(type)].pos - fx.b.components[0].pos.v() - was).len(), 1);
+  // Flipped: on the bottom silk, mirrored.
+  edit::Fragment f = components({0});
+  m = {};
+  m.pivot = edit::pivotOf(fx.b, f);
+  m.mirror = true;
+  ASSERT_TRUE(edit::move(fx.b, f, m));
+  EXPECT_EQ(fx.b.texts[size_t(ref)].layer, fx.silkBot);
+  EXPECT_TRUE(fx.b.texts[size_t(ref)].mirror);
+  // Selected with the component, a label moves once.
+  f.texts = {ref};
+  m = {};
+  m.shift = mm(1, 0).v();
+  const Vec2 at = fx.b.texts[size_t(ref)].pos;
+  ASSERT_TRUE(edit::move(fx.b, f, m));
+  EXPECT_LT((fx.b.texts[size_t(ref)].pos - at - mm(1, 0).v()).len(), 1);
+  // Pasted: no label.
+  edit::Fragment one;
+  one.texts = {ref};
+  auto pasted = edit::paste(fx.b, edit::copy(fx.b, one), mm(30, 30).v());
+  ASSERT_EQ(pasted.texts.size(), 1u);
+  EXPECT_FALSE(fx.b.texts[size_t(pasted.texts[0])].isLabel());
+  EXPECT_EQ(fx.b.labelOf(0, "RefDes"), ref);
+}
+
 TEST(Edit, LockedWireGetsConnector) {
   Fixture fx;
   fx.b.tracks[0].locked = true;

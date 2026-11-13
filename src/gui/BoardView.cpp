@@ -309,11 +309,11 @@ BoardView::Pick BoardView::pick(QPointF screen) const {
     return pk;
   }
   // Texts in their box; keepouts and board drawings (outline, details) near their lines.
-  if ((filter & SelTexts) && d.flag("showTexts"))
+  if (filter & SelTexts)
     for (int i = int(b.texts.size()) - 1; i >= 0; --i) {
       const Text& t = b.texts[i];
       auto c = b.textBox(t);
-      if (layerVisible(t.layer) && pointInPolygon(w, {c.begin(), c.end()}) && !passed({ItemType::Text, i})) {
+      if (layerVisible(t.layer) && textShown(t) && pointInPolygon(w, {c.begin(), c.end()}) && !passed({ItemType::Text, i})) {
         pk.item = ItemRef{ItemType::Text, i};
         return pk;
       }
@@ -392,6 +392,13 @@ bool BoardView::componentVisible(int ci) const {
   const DisplayControl& d = doc_->display();
   if (!d.flag("showComponents")) return false;
   return doc_->board()->components[ci].side == Side::Bottom ? d.flag("showCompBot") : d.flag("showCompTop");
+}
+
+bool BoardView::textShown(const Text& t) const {
+  const DisplayControl& d = doc_->display();
+  if (!t.isLabel()) return d.flag("showTexts");
+  if (t.component >= int(doc_->board()->components.size()) || !componentVisible(t.component)) return false;
+  return d.flag(t.attr == "RefDes" ? "showLabelRefDes" : t.attr == "PartName" ? "showLabelPartName" : "showLabelOther");
 }
 
 // ---------------------------------------------------------------- painting
@@ -866,9 +873,9 @@ void BoardView::selectInFrame(QRectF screenRect, bool crossing, bool add) {
       for (int pi : b.components[ci].pads) bb.add(b.pads[pi].shapeGeom().bbox());
       if (hit(bb) && !r::contains(comps, ci)) comps.push_back(ci);
     }
-  if ((filter & SelTexts) && d.flag("showTexts"))
+  if (filter & SelTexts)
     for (int i = 0; i < int(b.texts.size()); ++i)
-      if (layerVisible(b.texts[i].layer) && hit(itemBBox(b, {ItemType::Text, i}))) addItem({ItemType::Text, i});
+      if (layerVisible(b.texts[i].layer) && textShown(b.texts[i]) && hit(itemBBox(b, {ItemType::Text, i}))) addItem({ItemType::Text, i});
   if (filter & SelKeepouts)
     for (int i = 0; i < int(b.keepouts.size()); ++i)
       if (keepoutVisible(b.keepouts[i]) && hit(itemBBox(b, {ItemType::Keepout, i}))) addItem({ItemType::Keepout, i});

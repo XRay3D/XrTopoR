@@ -272,3 +272,70 @@ TEST(PcadIO, WriterRoundTripAndRouting) {
   EXPECT_NEAR(double(it->mid->x), double(arc.mid->x), 1000);
   EXPECT_NEAR(double(it->mid->y), double(arc.mid->y), 1000);
 }
+
+// The labels of the components' attributes: P-CAD keeps a label's point from the pattern's origin on the board,
+// TopoR in the footprint's frame; both are read to the same place, written back and go with their component.
+TEST(PcadIO, AttributeLabels) {
+  auto pc = io::loadBoard(data("topor/Example_02/Placement_master.pcb"));
+  auto fs = io::loadBoard(data("topor/Example_02/Placement.fst"));
+  ASSERT_TRUE(pc && fs);
+  // R51 turned by 270°: «RefDes» 6.25 mm below its origin, read along the component.
+  auto rel = [](const Board& b, int ci, const char* attr) {
+    int t = b.labelOf(ci, attr);
+    EXPECT_GE(t, 0) << attr;
+    return t < 0 ? std::pair{Vec2{}, 0.0} : std::pair{b.texts[size_t(t)].pos - b.components[size_t(ci)].pos.v(), b.texts[size_t(t)].angle};
+  };
+  for (const Board* b : {pc->get(), fs->get()}) {
+    const int ci = b->findComponent("R51");
+    ASSERT_GE(ci, 0);
+    auto [d, angle] = rel(*b, ci, "RefDes");
+    EXPECT_NEAR(d.x, 0, 1000);
+    EXPECT_NEAR(d.y, mmToNm(6.25), 1000);
+    EXPECT_NEAR(angle, 270, 1e-6);
+    EXPECT_EQ(b->texts[size_t(b->labelOf(ci, "RefDes"))].text, "R51");
+    EXPECT_EQ(b->labelOf(ci, "Type"), -1);  // not shown
+    EXPECT_EQ(b->attributeValue(ci, "Type"), "R025");
+  }
+
+  Board& b = **pc;
+  const int ci = b.findComponent("R51");
+  const int type = b.addLabel(ci, "Type");
+  ASSERT_GE(type, 0);
+  EXPECT_EQ(b.texts[size_t(type)].text, "R025");
+  // With the component: moved, turned.
+  b.moveComponent(ci, b.components[size_t(ci)].pos + Point(mmToNm(2), 0));
+  b.rotateComponent(ci, 90);
+  {
+    auto [d, angle] = rel(b, ci, "RefDes");
+    EXPECT_NEAR(d.x, mmToNm(6.25), 1000);
+    EXPECT_NEAR(d.y, 0, 1000);
+    EXPECT_NEAR(angle, 0, 1e-6);
+  }
+  const auto refAt = rel(b, ci, "RefDes"), typeAt = rel(b, ci, "Type");
+
+  // Written and read again: P-CAD and TopoR.
+  auto pcad = io::writePcad(b);
+  ASSERT_TRUE(pcad) << pcad.error();
+  auto b2 = io::readPcad(*pcad, "x.pcb");
+  ASSERT_TRUE(b2);
+  auto b3 = io::readFst(io::writeFst(b), "x.fst");
+  ASSERT_TRUE(b3);
+  for (const Board* o : {b2->get(), b3->get()}) {
+    const int c2 = o->findComponent("R51");
+    for (auto [attr, want] : {std::pair{"RefDes", refAt}, std::pair{"Type", typeAt}}) {
+      auto [d, angle] = rel(*o, c2, attr);
+      EXPECT_NEAR(d.x, want.first.x, 1000) << attr;
+      EXPECT_NEAR(d.y, want.first.y, 1000) << attr;
+      EXPECT_NEAR(std::remainder(angle - want.second, 360.0), 0, 1e-3) << attr;
+    }
+  }
+
+  // A label taken away stays away; the attribute stays.
+  b.texts.erase(b.texts.begin() + b.labelOf(ci, "Type"));
+  auto b4 = io::readPcad(*io::writePcad(b), "y.pcb");
+  ASSERT_TRUE(b4);
+  const int c4 = (*b4)->findComponent("R51");
+  EXPECT_EQ((*b4)->labelOf(c4, "Type"), -1);
+  EXPECT_GE((*b4)->labelOf(c4, "RefDes"), 0);
+  EXPECT_EQ((*b4)->attributeValue(c4, "Type"), "R025");
+}

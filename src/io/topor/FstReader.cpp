@@ -631,6 +631,7 @@ struct Reader {
     c.locked = ci.flag("fixed");
     int idx = int(b.components.size());
     b.components.push_back(c);
+    readAttributes(idx, ci.find("Attributes"), compRef, org, rot, bottom);
     auto fpIt = footprints.find(c.footprint);
     if (fpIt == footprints.end()) return;
     const FootprintDef& fp = fpIt->second;
@@ -677,6 +678,44 @@ struct Reader {
       g.arcs = fg.arcs;
       if (bottom) g.mirrorArcs();
       b.components[idx].graphics.push_back(std::move(g));
+    }
+  }
+
+  // The attributes of a component on the board and their labels: a label's point is in the footprint's frame and
+  // its angle from the component's.
+  void readAttributes(int ci, const Element* attrs, const std::string& partName, Vec2 org, double rot, bool bottom) {
+    if (!attrs) return;
+    static const char* aligns[] = {"LT", "CT", "RT", "LM", "CM", "RM", "LB", "CB", "RB"};
+    for (auto* a : attrs->findAll("Attribute")) {
+      std::string name(a->attr("type"));
+      if (name.empty()) {
+        name = std::string(a->attr("name"));
+        if (name.empty()) continue;
+        b.components[size_t(ci)].attrs.push_back({name, std::string(a->attr("value"))});
+      } else if (name == "PartName" && !partName.empty()) {
+        b.components[size_t(ci)].attrs.push_back({name, partName});
+      }
+      for (auto* l : a->findAll("Label")) {
+        if (!l->flag("visible")) continue;
+        Text t;
+        if (auto* lr = l->find("LayerRef")) t.layer = b.findLayer(std::string(lr->attr("name")));
+        if (t.layer < 0) continue;
+        if (auto* sr = l->find("TextStyleRef"))
+          if (auto it = styleIndex.find(sr->attr("name")); it != styleIndex.end()) t.style = it->second;
+        std::string_view al = l->attr("align", "CM");
+        for (int i = 0; i < 9; ++i)
+          if (al == aligns[i]) t.align = TextAlign(i);
+        Vec2 local = pt(l->find("Org"));
+        if (bottom) local.x = -local.x;
+        t.pos = toBoard(org + local.rotated(degToRad(rot)));
+        const double a0 = l->num("angle");
+        t.angle = std::fmod((bottom ? rot - a0 : rot + a0) + 720.0, 360.0);
+        t.mirror = l->flag("mirror") != bottom;
+        t.component = ci;
+        t.attr = name;
+        b.texts.push_back(std::move(t));
+        break;  // one label an attribute
+      }
     }
   }
 
@@ -1513,6 +1552,7 @@ Result<BoardPtr> readFst(const std::string& text, const std::string& path) {
   }
   if (b->name.empty()) b->name = std::filesystem::path(path).stem().string();
   b->rebuildNetIndex();
+  b->updateLabels();
   return b;
 }
 

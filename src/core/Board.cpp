@@ -327,6 +327,79 @@ int Board::findComponent(const std::string& ref) const {
   return -1;
 }
 
+std::vector<Attribute> Board::attributesOf(int comp) const {
+  const Component& c = components[size_t(comp)];
+  std::vector<Attribute> out{{"RefDes", c.ref}};
+  for (const Attribute& a : c.attrs)
+    if (a.name != "RefDes") out.push_back(a);
+  // (A value the file gave as another attribute, «Type» or «PartName», is that one.)
+  if (!c.value.empty() && r::none_of(c.attrs, [&](const Attribute& a) { return a.name == "Value" || a.value == c.value; }))
+    out.push_back({"Value", c.value});
+  return out;
+}
+
+std::string Board::attributeValue(int comp, std::string_view name) const {
+  for (Attribute& a : attributesOf(comp))
+    if (a.name == name) return std::move(a.value);
+  return {};
+}
+
+int Board::labelOf(int comp, std::string_view attr) const {
+  for (int i = 0; i < int(texts.size()); ++i)
+    if (texts[size_t(i)].component == comp && texts[size_t(i)].attr == attr) return i;
+  return -1;
+}
+
+int Board::addLabel(int comp, const std::string& attr) {
+  if (int was = labelOf(comp, attr); was >= 0) return was;
+  const Component& c = components[size_t(comp)];
+  Text t;
+  if (int ref = labelOf(comp, "RefDes"); ref >= 0) {
+    const Text& like = texts[size_t(ref)];
+    t.layer = like.layer;
+    t.style = like.style;
+    t.angle = like.angle;
+    t.mirror = like.mirror;
+  } else {
+    for (LayerId l = 0; l < LayerId(layers.size()); ++l) {
+      if (layers[size_t(l)].kind != LayerKind::Silk) continue;
+      if (t.layer < 0) t.layer = l;
+      if (layers[size_t(l)].side == c.side) {
+        t.layer = l;
+        break;
+      }
+    }
+    if (t.layer < 0) return -1;
+    // Along the component, read from below or from the right.
+    t.angle = std::fmod(c.angle + 360.0, 180.0);
+    if (t.angle > 90.0 + 1e-9) t.angle -= 180.0;
+    t.angle = std::fmod(t.angle + 360.0, 360.0);
+    t.mirror = c.side == Side::Bottom;
+  }
+  t.align = TextAlign::CM;
+  t.component = comp;
+  t.attr = attr;
+  t.text = attributeValue(comp, attr);
+  BBox local = componentBounds(*this, comp);
+  t.pos = local.valid() ? c.toBoard(local.center()) : c.pos.v();
+  // Below the labels already standing there, a line apart.
+  const double line = double(styleOf(t).height) * 1.5;
+  const Vec2 down = rotateBoard({0, line}, t.angle);
+  for (bool taken = true; taken;) {
+    taken = false;
+    for (const Text& o : texts)
+      if (o.component == comp && (o.pos - t.pos).len() < line / 2) taken = true;
+    if (taken) t.pos += down;
+  }
+  texts.push_back(std::move(t));
+  return int(texts.size()) - 1;
+}
+
+void Board::updateLabels() {
+  for (Text& t : texts)
+    if (t.component >= 0 && t.component < int(components.size())) t.text = attributeValue(t.component, t.attr);
+}
+
 void Board::updatePadPositions(int comp) {
   auto& c = components[comp];
   for (int pi : c.pads) {
@@ -426,6 +499,8 @@ void Board::moveComponent(int comp, Point newPos) {
     g.a += dv; g.b += dv; g.m += dv;
     for (auto& p : g.pts) p += dv;
   }
+  for (Text& t : texts)
+    if (t.component == comp) t.pos += dv;
   updatePadPositions(comp);
 }
 
@@ -443,6 +518,11 @@ void Board::rotateComponent(int comp, double deltaDeg) {
     g.m = rotAround(g.m, o, deltaDeg);
     for (auto& p : g.pts) p = rotAround(p, o, deltaDeg);
   }
+  for (Text& t : texts)
+    if (t.component == comp) {
+      t.pos = rotAround(t.pos, o, deltaDeg);
+      t.angle = std::fmod(t.angle + deltaDeg + 720.0, 360.0);
+    }
   updatePadPositions(comp);
 }
 

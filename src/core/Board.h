@@ -218,10 +218,17 @@ double arcAngleForRadius(Vec2 a, Vec2 b, double r, double deg);
 // turning the way `deg` does.
 double arcAngleAbout(Vec2 a, Vec2 b, Vec2 c, double deg);
 
+// A component's attribute: «Type», «Value», «Unique Id» and the like (the designator is Component::ref).
+struct Attribute {
+  std::string name, value;
+  bool operator==(const Attribute&) const = default;
+};
+
 struct Component {
   std::string ref;
   std::string value;
   std::string footprint;
+  std::vector<Attribute> attrs;  // as the file names them, besides the designator
   Point pos;
   double angle = 0;
   Side side = Side::Top;
@@ -325,6 +332,11 @@ struct Text {
   LayerId layer = -1;
   int style = 0;     // into Board::textStyles
   TextAlign align = TextAlign::LB;
+  // A label (TopoR's «ярлык»): the attribute `attr` of the component, shown where the text stands; it goes with
+  // the component when that moves, turns or goes to the other side, and its text is the attribute's value.
+  int component = -1;
+  std::string attr;
+  bool isLabel() const { return component >= 0; }
 };
 
 // A text laid out as TopoR draws it, in its own frame (about Text::pos, unturned, Y down): the lines one character
@@ -448,6 +460,17 @@ struct Board {
   int findNetClass(const std::string& name) const;
 
   int findComponent(const std::string& ref) const;
+  // The component's attributes as they are shown: the designator («RefDes») first, then those of the file, the
+  // value («Value») among them when the file gave it apart.
+  std::vector<Attribute> attributesOf(int comp) const;
+  std::string attributeValue(int comp, std::string_view name) const;
+  // The label of the component's attribute (an index into texts), -1: none.
+  int labelOf(int comp, std::string_view attr) const;
+  // Puts the attribute's label on the board: as the designator's label is (its layer, style and turn), at the
+  // middle of the component, on the silk screen of its side. Returns its index.
+  int addLabel(int comp, const std::string& attr);
+  // Sets the labels' texts to their attributes' values.
+  void updateLabels();
   // Recompute absolute pad positions/angles from component placement and local data.
   void updatePadPositions(int comp);
   void moveComponent(int comp, Point newPos);

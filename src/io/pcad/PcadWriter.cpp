@@ -220,6 +220,52 @@ std::string viaStyle(Node& library, double unit, Coord dia, Coord drill, std::ma
   return name;
 }
 
+// The attributes of a pattern instance as the component has them, the labels shown: the point from the pattern's
+// origin on the board, the angle on the board (P-CAD turns a text before mirroring it), the style, the alignment.
+void writeAttributes(const Board& b, int ci, Node& inst) {
+  static const char* justify[] = {"UpperLeft", "UpperCenter", "UpperRight", "Left", "Center", "Right", "LowerLeft", "LowerCenter", "LowerRight"};
+  const Component& c = b.components[size_t(ci)];
+  Node* ref = findChild(inst, "patternGraphicsRef");
+  if (!ref) {
+    Node n = Node::list("patternGraphicsRef");
+    if (const Node* name = inst.find("patternGraphicsNameRef")) n.add(*name);
+    ref = &inst.add(std::move(n));
+  }
+  const auto attrs = b.attributesOf(ci);
+  // Attributes taken out of the component go from the instance (those of the pattern stay as they are).
+  std::erase_if(ref->kids, [&](const Node& k) {
+    return k.is("attr") && r::none_of(attrs, [&](const Attribute& a) { return utf8ToCp1251(a.name) == k.arg(0); });
+  });
+  for (const Attribute& a : attrs) {
+    const std::string name = utf8ToCp1251(a.name);
+    auto it = r::find_if(ref->kids, [&](const Node& k) { return k.is("attr") && k.arg(0) == name; });
+    const int li = b.labelOf(ci, a.name);
+    if (it == ref->kids.end() && li < 0 && a.name != "RefDes" && a.name != "Value") continue;
+    Node n = Node::list("attr");
+    n.addAtom(name, true);
+    n.addAtom(utf8ToCp1251(a.value), true);
+    const Node* was = it != ref->kids.end() ? &*it : nullptr;
+    if (li >= 0) {
+      const Text& t = b.texts[size_t(li)];
+      Node p = pt(t.pos - c.pos.v());
+      n.add(std::move(p));
+      const double rot = std::fmod(t.mirror ? 720.0 - t.angle : t.angle + 360.0, 360.0);
+      if (std::abs(rot) > 1e-9) n.add(numNode("rotation", rot));
+      n.add(atomNode("isVisible", "True"));
+      if (t.align != TextAlign::LB) n.add(atomNode("justify", justify[int(t.align)]));
+      n.add(strNode("textStyleRef", b.styleOf(t).name));
+    } else if (was) {
+      // Hidden: where it was, without being shown.
+      for (const Node& k : was->kids)
+        if (k.isList && !k.is("isVisible")) n.add(k);
+    } else if (!b.textStyles.empty()) {
+      n.add(strNode("textStyleRef", b.textStyles.front().name));
+    }
+    if (was) *it = std::move(n);
+    else ref->add(std::move(n));
+  }
+}
+
 }  // namespace
 
 Result<std::string> writePcad(const Board& b) {
@@ -262,6 +308,7 @@ Result<std::string> writePcad(const Board& b) {
     // P-CAD expects rotation right after pt.
     if (Node* r = findChild(inst, "rotation")) *r = numNode("rotation", rot);
     else if (std::abs(rot) > 1e-9) afterPt(numNode("rotation", rot));
+    writeAttributes(b, int(ci), inst);
   }
 
   // The pours of the file in the order the reader counted them: an area read from one keeps what the model has not.

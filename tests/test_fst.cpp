@@ -244,7 +244,8 @@ TEST(FstIO, TextsOfSeveralLines) {
   auto r = io::readFst(text, "texts.fst");
   ASSERT_TRUE(r) << r.error();
   const Board& b = **r;
-  ASSERT_EQ(b.texts.size(), 2u);
+  auto free = [](const Board& o) { return r::count_if(o.texts, [](const Text& t) { return !t.isLabel(); }); };
+  ASSERT_EQ(free(b), 2);  // and the components' labels after them
   const Text& t = b.texts[0];
   EXPECT_EQ(t.align, TextAlign::CT);
   EXPECT_EQ(b.texts[1].align, TextAlign::CM);
@@ -267,7 +268,7 @@ TEST(FstIO, TextsOfSeveralLines) {
   // Written and read again: the same lines.
   auto again = io::readFst(io::writeFst(b), "rt.fst");
   ASSERT_TRUE(again) << again.error();
-  ASSERT_EQ((*again)->texts.size(), 2u);
+  ASSERT_EQ(free(**again), 2);
   EXPECT_EQ((*again)->textLayout((*again)->texts[0]).lines, l.lines);
   EXPECT_EQ((*again)->texts[1].align, TextAlign::CM);
 }
@@ -762,7 +763,8 @@ TEST(FstIO, KeepoutsTextsCutouts) {
   auto m = io::loadBoard(data("topor/Example_05/MinVia.fst"));
   ASSERT_TRUE(m) << m.error();
   Board& b = **m;
-  EXPECT_EQ(b.texts.size(), 34u);
+  EXPECT_EQ(r::count_if(b.texts, [](const Text& t) { return !t.isLabel(); }), 34);
+  EXPECT_EQ(r::count_if(b.texts, &Text::isLabel), 36);  // the designators of the components
   EXPECT_GT(b.textStyles.size(), 1u);
   ASSERT_FALSE(b.zones.empty() && b.copperCount() == 0);
   // A cutout in a copper area of our own.
@@ -781,6 +783,11 @@ TEST(FstIO, KeepoutsTextsCutouts) {
     EXPECT_EQ(c.styleOf(c.texts[i]).name, b.styleOf(b.texts[i]).name);
     EXPECT_NEAR(c.texts[i].pos.x, b.texts[i].pos.x, 100);
     EXPECT_NEAR(c.texts[i].pos.y, b.texts[i].pos.y, 100);
+    EXPECT_NEAR(c.texts[i].angle, b.texts[i].angle, 1e-6);
+    EXPECT_EQ(c.texts[i].mirror, b.texts[i].mirror);
+    EXPECT_EQ(c.texts[i].align, b.texts[i].align);
+    EXPECT_EQ(c.texts[i].component, b.texts[i].component);
+    EXPECT_EQ(c.texts[i].attr, b.texts[i].attr);
   }
   ASSERT_FALSE(c.zones.empty());
   EXPECT_EQ(c.zones.back().cutouts.size(), 1u);

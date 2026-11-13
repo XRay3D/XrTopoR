@@ -363,7 +363,12 @@ bool move(Board& b, const Fragment& f, const Motion& m) {
       if (k.side != Side::None) k.side = k.side == Side::Top ? Side::Bottom : Side::Top;
     }
   }
-  for (int ti : f.texts) {
+  // The labels of the components go with them.
+  std::vector<int> texts = f.texts;
+  for (int ti = 0; ti < int(b.texts.size()); ++ti)
+    if (b.texts[size_t(ti)].isLabel() && r::contains(f.components, b.texts[size_t(ti)].component) && !r::contains(texts, ti))
+      texts.push_back(ti);
+  for (int ti : texts) {
     Text& t = b.texts[ti];
     t.pos = m.apply(t.pos);
     if (m.mirror) {
@@ -941,6 +946,8 @@ Fragment paste(Board& b, const Clip& c, Vec2 at) {
     if (t.layer < 0) continue;
     if (t.style >= int(b.textStyles.size())) t.style = 0;
     t.pos = m.apply(t.pos);
+    t.component = -1;  // a copied label is a text of its own
+    t.attr.clear();
     f.texts.push_back(int(b.texts.size()));
     b.texts.push_back(std::move(t));
   }

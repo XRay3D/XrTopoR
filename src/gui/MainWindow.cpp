@@ -1196,7 +1196,14 @@ void MainWindow::describeSelection() {
       case ItemType::Keepout:
         text = b.keepouts[r.index].role == Keepout::Role::Route ? tr("Запрет трассировки") : tr("Запрет размещения");
         break;
-      case ItemType::Text: text = tr("Надпись «%1»").arg(QString::fromStdString(b.texts[r.index].text)); break;
+      case ItemType::Text: {
+        const Text& t = b.texts[size_t(r.index)];
+        text = t.isLabel() ? tr("Ярлык %1 компонента %2 «%3»")
+                                 .arg(QString::fromStdString(t.attr), QString::fromStdString(b.components[size_t(t.component)].ref),
+                                      QString::fromStdString(t.text))
+                           : tr("Надпись «%1»").arg(QString::fromStdString(t.text));
+        break;
+      }
       case ItemType::Detail: {
         LayerId l = b.graphics[r.index].layer;
         text = l >= 0 && b.layers[l].kind == LayerKind::Edge ? tr("Контур платы")

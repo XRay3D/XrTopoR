@@ -31,7 +31,12 @@ struct PatPad {
 struct Pattern {
   std::vector<PatPad> pads;
   std::vector<std::pair<int, Graphic>> graphics;  // (P-CAD layer number, graphic in P-CAD frame)
+  std::map<std::string, int> attrLayers;          // the layer number each attribute of the pattern is on
 };
+
+const std::map<std::string, TextAlign> kAligns{{"UpperLeft", TextAlign::LT}, {"UpperCenter", TextAlign::CT}, {"UpperRight", TextAlign::RT},
+                                               {"Left", TextAlign::LM},      {"Center", TextAlign::CM},      {"Right", TextAlign::RM},
+                                               {"LowerLeft", TextAlign::LB}, {"LowerCenter", TextAlign::CB}, {"LowerRight", TextAlign::RB}};
 
 struct Reader {
   Board& b;
@@ -154,7 +159,10 @@ struct Reader {
           }
         for (auto* lc : gd->findAll("layerContents")) {
           int ln = lc->find("layerNumRef") ? int(lc->find("layerNumRef")->num(0)) : 0;
-          for (auto& k : lc->kids) readGraphic(k, ln, pat.graphics);
+          for (auto& k : lc->kids) {
+            if (k.is("attr")) pat.attrLayers.emplace(toUtf8(k.arg(0)), ln);
+            readGraphic(k, ln, pat.graphics);
+          }
         }
         const std::string name = str(gd->find("patternGraphicsNameDef"));
         if (def.preferred.empty()) def.preferred = name;
@@ -311,6 +319,29 @@ struct Reader {
     int ci = int(b.components.size());
     b.components.push_back(c);
     compNode.push_back(currentNode);
+    // The attributes of the instance; the shown ones are its labels: the point from the pattern's origin on the
+    // board and the angle on the board, on the layer the pattern has the attribute on.
+    const Node* attrs = inst.find("patternGraphicsRef");
+    if (!attrs) attrs = &inst;
+    for (auto* at : attrs->findAll("attr")) {
+      const std::string name = toUtf8(at->arg(0)), value = toUtf8(at->arg(1));
+      if (name != "RefDes") b.components[size_t(ci)].attrs.push_back({name, value});
+      if (!at->find("isVisible") || at->find("isVisible")->arg(0) != "True") continue;
+      auto ln = pat.attrLayers.find(name);
+      Text t;
+      t.layer = mapLayer(ln != pat.attrLayers.end() ? ln->second : 6, flipped);
+      if (t.layer < 0) continue;
+      t.pos = toBoard(o + ptOf(at->find("pt")));
+      t.mirror = flipped;
+      const double r = at->find("rotation") ? at->find("rotation")->num(0) : 0;
+      t.angle = std::fmod((t.mirror ? 720.0 - r : r + 360.0), 360.0);
+      if (auto st = textStyleIndex.find(str(at->find("textStyleRef"))); st != textStyleIndex.end()) t.style = st->second;
+      if (const Node* j = at->find("justify"))
+        if (auto a = kAligns.find(j->arg(0)); a != kAligns.end()) t.align = a->second;
+      t.component = ci;
+      t.attr = name;
+      b.texts.push_back(std::move(t));
+    }
     auto cu = b.copperLayers();
     for (auto& pp : pat.pads) {
       auto st = padStyles.find(pp.style);
@@ -348,7 +379,11 @@ struct Reader {
   }
 
   void readNetlist(const Node& nl) {
-    for (auto* ci : nl.findAll("compInst")) instToCompDef[toUtf8(ci->arg(0))] = str(ci->find("compRef"));
+    for (auto* ci : nl.findAll("compInst")) {
+      instToCompDef[toUtf8(ci->arg(0))] = str(ci->find("compRef"));
+      if (int c = b.findComponent(toUtf8(ci->arg(0))); c >= 0 && b.components[size_t(c)].value.empty())
+        b.components[size_t(c)].value = str(ci->find("compValue"));
+    }
     for (auto* n : nl.findAll("net")) {
       int net = b.addNet(toUtf8(n->arg(0)));
       for (auto* node : n->findAll("node")) {
@@ -407,11 +442,8 @@ struct Reader {
     // P-CAD turns a text and then mirrors it, the model mirrors first: a flipped text is turned the other way.
     t.angle = std::fmod((t.mirror ? 720.0 - rot : rot + 360.0), 360.0);
     if (auto st = textStyleIndex.find(str(k.find("textStyleRef"))); st != textStyleIndex.end()) t.style = st->second;
-    static const std::map<std::string, TextAlign> aligns{{"UpperLeft", TextAlign::LT}, {"UpperCenter", TextAlign::CT}, {"UpperRight", TextAlign::RT},
-                                                         {"Left", TextAlign::LM},      {"Center", TextAlign::CM},      {"Right", TextAlign::RM},
-                                                         {"LowerLeft", TextAlign::LB}, {"LowerCenter", TextAlign::CB}, {"LowerRight", TextAlign::RB}};
     if (const Node* j = k.find("justify"))
-      if (auto a = aligns.find(j->arg(0)); a != aligns.end()) t.align = a->second;
+      if (auto a = kAligns.find(j->arg(0)); a != kAligns.end()) t.align = a->second;
     b.texts.push_back(std::move(t));
   }
 
@@ -578,6 +610,7 @@ Result<BoardPtr> readPcad(const std::string& text, const std::string& path) {
   b->designUnitNm = r.unit;
   b->source = src;
   b->rebuildNetIndex();
+  b->updateLabels();
   return b;
 }
 
