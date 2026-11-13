@@ -7,6 +7,7 @@
 #include <limits>
 #include <map>
 
+#include "core/BoxGrid.h"
 #include "topo/Build.h"
 #include "topo/Cdt.h"
 #include "topo/Sidecar.h"
@@ -398,25 +399,62 @@ void Topology::buildMeshes(const Board& b, BuildScratch& scratch) {
     CdtResult r = triangulate(in);
     // Points the constraints' intersections created: a zone's vertex where it lies on the zone's ring and
     // on no wall (a pad's corner ring across the pour's boundary), else an outline owner of this layer.
-    auto onWall = [&](Vec2 p) {
-      for (const WallLoop& wl : walls) {
-        if (!((wl.layers >> layer) & 1)) continue;
-        for (size_t i = 0; i < wl.owners.size(); ++i) {
-          if (i + 1 == wl.owners.size() && !wl.area) break;
-          if (distPointSegment(p, owners[wl.owners[i]].c, owners[wl.owners[(i + 1) % wl.owners.size()]].c) < 10) return true;
+    // (The walls' pieces and the zones' rings in grids by their boxes, made when the first such point asks: every
+    // point against every piece of every wall and ring was a sixteenth of F6 on a board with pours.)
+    struct Pieces {
+      std::vector<std::pair<Vec2, Vec2>> segs;
+      std::vector<int> owner;  // (of a ring's piece)
+      BoxGrid grid;
+      std::vector<int> near;
+      bool made = false;
+      void index() {
+        made = true;
+        std::vector<BBox> boxes(segs.size());
+        for (size_t i = 0; i < segs.size(); ++i) {
+          boxes[i].add(segs[i].first);
+          boxes[i].add(segs[i].second);
+          boxes[i] = boxes[i].inflated(10);
         }
+        grid.build(std::move(boxes));
       }
-      return false;
+      // The first piece within 10 nm of the point, -1: none.
+      int at(Vec2 p) {
+        BBox q;
+        q.add(p);
+        grid.query(q, near);
+        for (int i : near)
+          if (distPointSegment(p, segs[size_t(i)].first, segs[size_t(i)].second) < 10) return i;
+        return -1;
+      }
+    } wallPieces, ringPieces;
+    auto onWall = [&](Vec2 p) {
+      if (!wallPieces.made) {
+        for (const WallLoop& wl : walls) {
+          if (!((wl.layers >> layer) & 1)) continue;
+          for (size_t i = 0; i < wl.owners.size(); ++i) {
+            if (i + 1 == wl.owners.size() && !wl.area) break;
+            wallPieces.segs.push_back({owners[wl.owners[i]].c, owners[wl.owners[(i + 1) % wl.owners.size()]].c});
+          }
+        }
+        wallPieces.index();
+      }
+      return wallPieces.at(p) >= 0;
     };
-    auto zoneRingAt = [&](Vec2 p) {
-      for (int oi = 0; oi < int(owners.size()); ++oi) {
-        const Owner& o = owners[oi];
-        if (o.kind != Owner::Kind::Zone || !((o.layers >> layer) & 1) || oi >= int(corners.size())) continue;
-        const std::vector<Vec2>& ring = corners[oi];
-        for (size_t i = 0; i < ring.size(); ++i)
-          if (distPointSegment(p, o.c + ring[i], o.c + ring[(i + 1) % ring.size()]) < 10) return oi;
+    auto zoneRingAt = [&](Vec2 p) {  // (the first zone, by its number, with a piece there)
+      if (!ringPieces.made) {
+        for (int oi = 0; oi < int(owners.size()); ++oi) {
+          const Owner& o = owners[oi];
+          if (o.kind != Owner::Kind::Zone || !((o.layers >> layer) & 1) || oi >= int(corners.size())) continue;
+          const std::vector<Vec2>& ring = corners[oi];
+          for (size_t i = 0; i < ring.size(); ++i) {
+            ringPieces.segs.push_back({o.c + ring[i], o.c + ring[(i + 1) % ring.size()]});
+            ringPieces.owner.push_back(oi);
+          }
+        }
+        ringPieces.index();
       }
-      return -1;
+      const int i = ringPieces.at(p);
+      return i < 0 ? -1 : ringPieces.owner[size_t(i)];
     };
     for (Vec2 p : r.extra) {
       if (int zo = onWall(p) ? -1 : zoneRingAt(p); zo >= 0) {

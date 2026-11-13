@@ -1,5 +1,7 @@
 #include "topo/Cdt.h"
 
+#include "core/BoxGrid.h"
+
 #include <CGAL/Constrained_Delaunay_triangulation_2.h>
 #include <CGAL/Exact_predicates_inexact_constructions_kernel.h>
 #include <CGAL/Triangulation_face_base_with_info_2.h>
@@ -96,13 +98,37 @@ CdtResult triangulate(const CdtInput& in) {
     else if (kind == 2) rigidLines.push_back(seg);
   }
   const bool allBorder = contour.size() == in.constraints.size();
-  auto onLines = [&](const std::vector<std::pair<Vec2, Vec2>>& lines, Vec2 p, Vec2 q) {
+  // The lines in a grid by their boxes: an edge asks the few its middle lies in the box of (every constrained edge
+  // against every line of the contour was a fortieth of F6 — a pour's ring is thousands of both).
+  struct Lines {
+    const std::vector<std::pair<Vec2, Vec2>>& lines;
+    BoxGrid grid;
+    bool made = false;
+    std::vector<int> near;
+  };
+  Lines contourLines{contour, {}, false, {}}, rigidOnes{rigidLines, {}, false, {}};
+  auto onLines = [&](Lines& of, Vec2 p, Vec2 q) {
+    if (!of.made) {
+      of.made = true;
+      std::vector<BBox> boxes(of.lines.size());
+      for (size_t i = 0; i < of.lines.size(); ++i) {
+        boxes[i].add(of.lines[i].first);
+        boxes[i].add(of.lines[i].second);
+        boxes[i] = boxes[i].inflated(10);
+      }
+      of.grid.build(std::move(boxes));
+    }
     Vec2 m = (p + q) * 0.5;
-    for (auto& [a, c] : lines)
+    BBox at;
+    at.add(m);
+    of.grid.query(at, of.near);
+    for (int i : of.near) {
+      const auto& [a, c] = of.lines[size_t(i)];
       if (distPointSegment(m, a, c) < 10 && distPointSegment(p, a, c) < 10 && distPointSegment(q, a, c) < 10) return true;
+    }
     return false;
   };
-  auto onBorder = [&](Vec2 p, Vec2 q) { return allBorder || onLines(contour, p, q); };
+  auto onBorder = [&](Vec2 p, Vec2 q) { return allBorder || onLines(contourLines, p, q); };
   auto edgePts = [&](const CDT::Edge& e) {
     auto pa = e.first->vertex(CDT::cw(e.second))->point(), pc = e.first->vertex(CDT::ccw(e.second))->point();
     return std::pair{Vec2{pa.x(), pa.y()}, Vec2{pc.x(), pc.y()}};
@@ -136,7 +162,7 @@ CdtResult triangulate(const CdtInput& in) {
         bool rigid = false;
         if (constrained && !rigidLines.empty()) {
           auto [p, q] = edgePts(CDT::Edge(f, i));
-          if (!onBorder(p, q) && onLines(rigidLines, p, q)) {
+          if (!onBorder(p, q) && onLines(rigidOnes, p, q)) {
             rigid = true;
             constrained = false;
           }
