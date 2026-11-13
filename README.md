@@ -35,6 +35,26 @@ xrtopor-cli gerber  board.kicad_pcb outdir/
 xrtopor-cli svg     board.kicad_pcb out.svg
 ```
 
+## MCP-сервер (для ИИ-агентов)
+
+Редактор может работать как MCP-сервер (Model Context Protocol): агент читает, правит и разводит открытую плату
+теми же процедурами, что и пользователь, каждая его правка — шаг «Отменить». По умолчанию выключен.
+
+```sh
+xrtopor --mcp board.fst          # HTTP на http://127.0.0.1:7417/mcp на этот запуск (--mcp 7420 — другой порт)
+xrtopor --mcp-stdio board.fst    # JSON-RPC построчно на stdin/stdout (клиент сам запускает процесс)
+```
+
+Постоянно — «Настройки программы › Общие › MCP-сервер». Слушает только 127.0.0.1; запросы со страниц других
+сайтов (заголовок `Origin`) отклоняются. Claude Code подключается через `.mcp.json` в корне репозитория, описание
+работы для агента — `.claude/skills/xrtopor/SKILL.md`.
+
+Инструменты: `info`, `open`, `save`; `nets`, `net`, `components`, `component`, `ratsnest`, `region`, `rules`, `log`;
+`route` (связь по топологической модели, как инструмент «Прокладка»), `add_track`, `add_via`, `delete`, `unroute`,
+`move_component`, `fix`, `flex_fix`, `undo`, `redo`; `autoroute` (F11), `autoroute_variants`, `autoroute_open`,
+`reshape` (F5), `refine` (F6), `optimize` (F7), `drc`, `fill`, `job`; `screenshot`, `view`, `select`, `set_layer`,
+`commands`, `command`. Координаты в мм.
+
 ## GUI: горячие клавиши (как в TopoR)
 
 | Клавиша | Действие |
