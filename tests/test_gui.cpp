@@ -4174,3 +4174,35 @@ TEST(Gui, WireEndsOnItsOwnWire) {
   EXPECT_TRUE(onAxis) << "the segment did not end on the wire's axis";
   EXPECT_TRUE(f.doc.topologyFresh()) << "the model was dropped: it did not follow the loop";
 }
+
+// L with wires selected on a board of two routing layers: they go to the other one at once, no menu of the layers
+// (TopoR asks only when there are more). The model follows.
+TEST(Gui, LayerKeyOnTwoLayersAsksNothing) {
+  Fixture f("astable.kicad_pcb");
+  const Board& b = f.b();
+  auto cu = b.copperLayers();
+  ASSERT_EQ(cu.size(), 2u);
+  int ti = -1;
+  for (int i = 0; i < int(b.tracks.size()) && ti < 0; ++i)
+    if (b.tracks[size_t(i)].layer == cu[0] && !b.tracks[size_t(i)].locked) ti = i;
+  ASSERT_GE(ti, 0);
+  const uint32_t id = (f.doc.topology(), b.tracks[size_t(ti)].id);
+  ASSERT_TRUE(f.doc.topologyFresh());
+  bool menu = false;
+  QTimer::singleShot(500, [&] {  // a menu would wait for a click: closed, and said
+    if (QWidget* p = QApplication::activePopupWidget()) menu = true, p->close();
+  });
+  f.doc.setSelection({{ItemType::Track, ti}}, {});
+  f.view.changeLayer();
+  EXPECT_FALSE(menu) << "asked for the layer";
+  auto it = r::find(b.tracks, id, &Track::id);
+  ASSERT_NE(it, b.tracks.end());
+  EXPECT_EQ(it->layer, cu[1]);
+  EXPECT_TRUE(f.doc.topologyFresh()) << "the model was dropped";
+  // And back.
+  f.doc.setSelection({{ItemType::Track, int(it - b.tracks.begin())}}, {});
+  f.view.changeLayer();
+  it = r::find(b.tracks, id, &Track::id);
+  ASSERT_NE(it, b.tracks.end());
+  EXPECT_EQ(it->layer, cu[0]);
+}

@@ -2566,18 +2566,33 @@ void BoardView::changeLayer() {
     emit status(tr("Выделите участки проводников"));
     return;
   }
-  // TopoR: the layers are offered in a menu at the cursor.
-  QMenu menu(this);
-  for (LayerId l : b.copperLayers()) {
-    if (b.layers[l].plane) continue;
-    QAction* a = menu.addAction(QString::fromStdString(b.layers[l].name));
-    a->setData(l);
-    a->setCheckable(true);
-    a->setChecked(r::all_of(tracks, [&](int ti) { return b.tracks[ti].layer == l; }));
+  std::vector<LayerId> layers;  // the routing layers (no plane)
+  for (LayerId l : b.copperLayers())
+    if (!b.layers[l].plane) layers.push_back(l);
+  LayerId layer = -1;
+  if (layers.size() < 3) {
+    // Two layers (or one): nothing to ask — the wires go to the other one (a selection on both: the other one of the
+    // first wire's).
+    const LayerId from = b.tracks[size_t(tracks.front())].layer;
+    for (LayerId l : layers)
+      if (l != from) layer = l;
+    if (layer < 0) {
+      emit status(tr("Другого слоя для проводников нет"));
+      return;
+    }
+  } else {
+    // TopoR: the layers are offered in a menu at the cursor.
+    QMenu menu(this);
+    for (LayerId l : layers) {
+      QAction* a = menu.addAction(QString::fromStdString(b.layers[l].name));
+      a->setData(l);
+      a->setCheckable(true);
+      a->setChecked(r::all_of(tracks, [&](int ti) { return b.tracks[ti].layer == l; }));
+    }
+    QAction* chosen = menu.exec(QCursor::pos());
+    if (!chosen) return;
+    layer = chosen->data().toInt();
   }
-  QAction* chosen = menu.exec(QCursor::pos());
-  if (!chosen) return;
-  LayerId layer = chosen->data().toInt();
   if (r::any_of(tracks, &Track::locked, of(b.tracks)))
     emit status(tr("Зафиксированные участки проводников остались на своём слое"));
   auto before = doc_->beginEdit();
