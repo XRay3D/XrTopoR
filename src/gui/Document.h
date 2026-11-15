@@ -113,7 +113,8 @@ class Document : public QObject {
   const SpatialIndex& index();
   const Connectivity& connectivity();
   void invalidate();  // call after any board edit (the index and the connections; the model follows commitEdit)
-  void invalidateModel() { topoStale_ = true; }  // a change the model cannot follow (the rules, the stack)
+  void invalidateModel() { topoStale_ = true; }
+  bool topologyFresh() const { return topo_ && !topoStale_; }  // the model followed the edits (not to be built anew)  // a change the model cannot follow (the rules, the stack)
   // The model brought to the board as it is now from `was`, the board it matched (an edit, an undo): the vias and
   // pads moved, the wires of the changed tracks laid again; else, or when `follow` is false, stale (built anew
   // when asked for).

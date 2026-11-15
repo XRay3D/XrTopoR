@@ -602,6 +602,10 @@ void BoardView::mousePressEvent(QMouseEvent* e) {
     return;
   }
   if (e->button() != Qt::LeftButton || !doc_->hasBoard()) return;
+  // TopoR: the first click of «Прокладка» turns «Проводники» on in the selection filter — a wire is begun from
+  // a wire, and ended on one, as often as from a pad.
+  if (mode_ == Mode::Route && !std::exchange(routeFilterSet_, true) && !(doc_->selectionFilter() & SelWires))
+    doc_->setSelectionFilter(doc_->selectionFilter() | SelWires);
   // One more plain click where the last one was goes on to the next thing lying there (on release, if it was no
   // drag); any other press starts from the top.
   const bool plain = !(e->modifiers() & (Qt::ShiftModifier | Qt::ControlModifier));
@@ -1196,7 +1200,12 @@ void BoardView::mouseReleaseEvent(QMouseEvent* e) {
       finishShape();  // a polygon or line ends with the right button
       return;
     }
-    if (routing_ || mode_ == Mode::Measure || mode_ == Mode::Draw || mode_ == Mode::Text) {
+    if (mode_ == Mode::Route && routing_) {
+      // TopoR: the wire ends where it is (what was entered stays), the tool stays for the next one.
+      finishRoute();
+      return;
+    }
+    if (routing_ || mode_ == Mode::Route || mode_ == Mode::Measure || mode_ == Mode::Draw || mode_ == Mode::Text) {
       // In a tool the right button ends it, as TopoR's «Вернуться в основной режим».
       emit contextMenuRequested(e->globalPosition().toPoint());
       return;
@@ -1268,6 +1277,7 @@ void BoardView::setMode(Mode m) {
   if (routing_) cancelTool();
   if (drag_ != Drag::None) cancelDrag();
   mode_ = m;
+  if (m == Mode::Route) routeFilterSet_ = false;
   setCursor(m == Mode::Select || m == Mode::Freestyle ? Qt::ArrowCursor : Qt::CrossCursor);
   drawPts_.clear();
   frameStart_.reset();
@@ -2416,7 +2426,7 @@ void BoardView::routeStart(const Pick& pk, Vec2 at) {
   routeDir_.reset();
   updateRouteHint();
   emit status(tr("Прокладка цепи %1 на слое %2: «;» — проложить до ближайшего соединения, Q — другая цель, V — переход, "
-                 "Backspace — отменить, Enter — завершить; щелчок у соединения завершает")
+                 "Backspace — отменить, Enter или правая кнопка — завершить; щелчок у проводника, контакта или перехода цепи завершает")
                   .arg(routeNet_ >= 0 ? QString::fromStdString(b.nets[routeNet_].name) : tr("(без цепи)"))
                   .arg(QString::fromStdString(b.layers[routeLayer_].name)));
 }
@@ -2826,12 +2836,17 @@ std::optional<BoardView::RouteLanding> BoardView::routeMagnet(Vec2 w) const {
           (v.pos.v() - w).len() <= v.diameter / 2.0 + reach)
         offer(0, v.pos.v(), -1);
     } else if (r.type == ItemType::Track) {
+      // Any wire of the net on the layer, the one the wire began from among them (TopoR closes a loop on it): the
+      // segment ends on its axis — but not where the segment begins.
       const Track& t = b.tracks[size_t(r.index)];
-      if (t.net != routeNet_ || t.layer != routeLayer_ || conn.trackCluster[size_t(r.index)] == from) return;
+      if (t.net != routeNet_ || t.layer != routeLayer_) return;
       const double near = t.width / 2.0 + reach;
-      if ((t.a.v() - w).len() <= near) offer(1, t.a.v(), -1);
-      else if ((t.b.v() - w).len() <= near) offer(1, t.b.v(), -1);
-      else if (Vec2 q = nearestOnTrack(t, w); (q - w).len() <= near) offer(2, q, r.index);
+      auto land = [&](int rank, Vec2 at, int track) {
+        if ((at - routeLast_).len() > near) offer(rank, at, track);
+      };
+      if ((t.a.v() - w).len() <= near) land(1, t.a.v(), -1);
+      else if ((t.b.v() - w).len() <= near) land(1, t.b.v(), -1);
+      else if (Vec2 q = nearestOnTrack(t, w); (q - w).len() <= near) land(2, q, r.index);
     }
   });
   return best;

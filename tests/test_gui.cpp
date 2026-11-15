@@ -2269,7 +2269,8 @@ TEST(Gui, RouteTargetIsNearestByTheWayThere) {
 }
 
 // By hand the end sticks to a connection within a few pixels and a click there finishes the route: a via's centre,
-// a wire's end, a place on a line, on an arc. What the route began from does not attract it, nor another net.
+// a wire's end, a place on a line, on an arc. The pad or via the route began from does not attract it, nor another
+// net; a wire of its own net does, the one it began from too (a loop, as in TopoR).
 TEST(Gui, RouteEndSticksToConnections) {
   const double px = 60.0 / 800;  // mm a pixel
   {
@@ -2311,7 +2312,7 @@ TEST(Gui, RouteEndSticksToConnections) {
     EXPECT_TRUE(f.joins(RouteBoard::mm(40, 15)));
     EXPECT_EQ(f.unrouted(), 0u);
   }
-  {  // another net's wire is no connection; nor the wire the route began from
+  {  // another net's wire is no connection; the wire the route began from is one — a loop closed, as in TopoR
     RouteBoard f;
     f.wire(RouteBoard::mm(30, 2), RouteBoard::mm(30, 28), f.other);
     f.wire(RouteBoard::mm(10, 10), RouteBoard::mm(10, 20));
@@ -2319,7 +2320,8 @@ TEST(Gui, RouteEndSticksToConnections) {
     f.click(RouteBoard::mm(30 + 3 * px, 14));
     EXPECT_TRUE(f.view.isRouting());
     f.click(RouteBoard::mm(10 + 3 * px, 15));
-    EXPECT_TRUE(f.view.isRouting());
+    EXPECT_FALSE(f.view.isRouting());
+    EXPECT_TRUE(f.joins(RouteBoard::mm(10, 15)));
   }
 }
 
@@ -4083,4 +4085,92 @@ TEST(Mcp, RoutingTools) {
   // A command that opens a dialog is refused: the call would wait for someone to close it.
   mcpCall(s, "command", {{"id", "Accel_DRC"}}, &error);
   EXPECT_TRUE(error);
+}
+
+// ---------------------------------------------------------------- «Прокладка» (R) as in TopoR
+
+// The tool's first click turns «Проводники» on in the selection filter (a wire is begun and ended on wires).
+TEST(Gui, RouteToolTurnsWiresOnInFilter) {
+  Fixture f("astable.kicad_pcb");
+  const Board& b = f.b();
+  f.doc.setSelectionFilter(SelAll & ~SelWires);
+  const Vec2 p = b.pads[0].pos.v();
+  f.look(p, 20);
+  f.view.setMode(Mode::Route);
+  QTest::mouseClick(&f.view, Qt::LeftButton, {}, f.at(p));
+  EXPECT_TRUE(f.doc.selectionFilter() & SelWires);
+  EXPECT_EQ(f.doc.selectionFilter(), uint32_t(SelAll));
+}
+
+// The right button ends the wire where it is — what was entered stays, with its via — and the tool stays for the next
+// one. The model follows the new wire and via (it is not built anew).
+TEST(Gui, RightButtonEndsWireToolStays) {
+  Fixture f("astable.kicad_pcb");
+  f.doc.board()->clearRouting(false);
+  f.doc.invalidate();
+  f.doc.invalidateModel();
+  const Board& b = f.b();
+  int pa = -1;
+  for (int i = 0; i < int(b.pads.size()) && pa < 0; ++i)
+    if (b.pads[size_t(i)].net >= 0 && b.pads[size_t(i)].drill > 0) pa = i;
+  ASSERT_GE(pa, 0);
+  f.doc.topology();  // the model there is, before the wire
+  ASSERT_TRUE(f.doc.topologyFresh());
+  const Vec2 a = b.pads[size_t(pa)].pos.v();
+  // Off the board's copper: below the pad a little, then aside.
+  const Vec2 p1 = a + Vec2{0, -1.2 * kNmPerMm}, p2 = p1 + Vec2{-1.5 * kNmPerMm, 0};
+  f.look(a, 20);
+  f.view.setMode(Mode::Route);
+  QTest::mouseClick(&f.view, Qt::LeftButton, {}, f.at(a));
+  ASSERT_TRUE(f.view.isRouting());
+  QTest::mouseClick(&f.view, Qt::LeftButton, {}, f.at(p1));
+  f.view.routeAddVia();
+  QTest::mouseClick(&f.view, Qt::LeftButton, {}, f.at(p2));
+  const size_t tracks = b.tracks.size(), vias = b.vias.size();
+  QTest::mouseClick(&f.view, Qt::RightButton, {}, f.at(p2 + Vec2{-kNmPerMm, kNmPerMm}));
+  EXPECT_FALSE(f.view.isRouting());
+  EXPECT_EQ(f.view.mode(), Mode::Route);
+  EXPECT_EQ(b.tracks.size(), tracks + 2);
+  EXPECT_EQ(b.vias.size(), vias + 1);
+  EXPECT_TRUE(f.doc.topologyFresh()) << "the model was dropped: it did not follow the new wire and via";
+  // The next click begins the next wire.
+  QTest::mouseClick(&f.view, Qt::LeftButton, {}, f.at(a));
+  EXPECT_TRUE(f.view.isRouting());
+}
+
+// A segment ended on a wire of its own net — the very wire it began from too — ends the wire there, a loop closed
+// (TopoR); the segment being entered is drawn to that wire's axis already. The model follows.
+TEST(Gui, WireEndsOnItsOwnWire) {
+  Fixture f("astable.kicad_pcb");
+  f.doc.invalidate();
+  f.doc.invalidateModel();
+  const Board& b = f.b();
+  int ti = -1;
+  for (int i = 0; i < int(b.tracks.size()) && ti < 0; ++i)
+    if (!b.tracks[size_t(i)].isArc() && b.tracks[size_t(i)].length() > 8 * kNmPerMm) ti = i;
+  ASSERT_GE(ti, 0);
+  f.doc.topology();
+  ASSERT_TRUE(f.doc.topologyFresh());
+  const Track t = b.tracks[size_t(ti)];
+  const Vec2 A = t.a.v(), B = t.b.v(), d = (B - A).normalized(), n = d.perp();
+  const Vec2 start = A + d * (2 * kNmPerMm), side = A + (B - A) * 0.5 + n * (3 * kNmPerMm), back = A + (B - A) * 0.8;
+  f.look(A + (B - A) * 0.5, 2.5 * (B - A).len() / kNmPerMm);
+  f.view.setMode(Mode::Route);
+  QTest::mouseClick(&f.view, Qt::LeftButton, {}, f.at(start));
+  ASSERT_TRUE(f.view.isRouting());
+  QTest::mouseClick(&f.view, Qt::LeftButton, {}, f.at(side));
+  ASSERT_TRUE(f.view.isRouting());
+  const size_t tracks = b.tracks.size();
+  // Near the wire's axis, a little off it: the end goes onto the axis, and the click ends the wire.
+  const Vec2 near = back + n * (0.1 * kNmPerMm);
+  QTest::mouseClick(&f.view, Qt::LeftButton, {}, f.at(near));
+  EXPECT_FALSE(f.view.isRouting());
+  EXPECT_EQ(f.view.mode(), Mode::Route);
+  // Two segments laid; the wire landed on is split there.
+  EXPECT_EQ(b.tracks.size(), tracks + 2 + 1);
+  bool onAxis = false;
+  for (const Track& s : b.tracks)
+    if (s.net == t.net && distPointSegment(s.b.v(), A, B) < 2000 && (s.b.v() - back).len() < 0.3 * kNmPerMm) onAxis = true;
+  EXPECT_TRUE(onAxis) << "the segment did not end on the wire's axis";
+  EXPECT_TRUE(f.doc.topologyFresh()) << "the model was dropped: it did not follow the loop";
 }

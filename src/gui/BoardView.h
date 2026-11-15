@@ -325,6 +325,7 @@ class BoardView : public QOpenGLWidget {
   std::optional<EditSnapshot> pasteBefore_;
   // routing
   bool routing_ = false;
+  bool routeFilterSet_ = false;  // the first click of the tool turned «Проводники» on in the selection filter
   std::shared_ptr<const topo::RouteSketch> sketch_;
   const std::vector<Track>& shownTracks() const { return sketch_ ? sketch_->tracks : doc_->board()->tracks; }
   const std::vector<Via>& shownVias() const { return sketch_ ? sketch_->vias : doc_->board()->vias; }
