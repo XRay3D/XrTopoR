@@ -963,6 +963,11 @@ bool drawWires(const Board& b, const std::vector<RealWire>& wires, const Realize
   // alone; an edge that the bends of a later round overfill takes its ends' shares back and the rounds begin
   // again.
   static const bool kNoNominal = std::getenv("XR_NO_NOMINAL") != nullptr;
+  // The slack an edge keeps at the nominal (XR_DRAW_ROOM, um): 20 um — the nominal wherever it fits (the user's
+  // rule; SingleLayer has a wire between a pad and the outline with 26 um to spare at the nominal, and TopoR
+  // lays it so). At kNominalRoom (0.2 mm, as it was) the dense boards end F7 with a few shallow violations
+  // fewer: Arcs 0 against 3 (17 um each, at square pads), arz_2L 7 against 10, arz_4L 8 against 9.
+  static const double kDrawRoom = std::getenv("XR_DRAW_ROOM") ? std::atof(std::getenv("XR_DRAW_ROOM")) * 1000 : 20000.0;
   // The debugging switches, read once (a getenv per wire and round was 0.4 % of F5).
   static const bool kOvf = std::getenv("XR_OVF") != nullptr, kNoCorner = std::getenv("XR_NOCORNER") != nullptr,
                     kDebug2 = std::getenv("XR_DEBUG2") != nullptr, kDebug2Sk = std::getenv("XR_DEBUG2SK") != nullptr,
@@ -989,12 +994,12 @@ bool drawWires(const Board& b, const std::vector<RealWire>& wires, const Realize
     for (auto&& [layer, ob] : obstacles) {
       nominalShare[layer].assign(ob.pts.size(), 1.0);
       stackReach[layer].assign(ob.pts.size(), {0.0, 0.0});
-      // Round copper only: vias, round pads, branch points. The corners and ends of a pad at the nominal sent
-      // the chords of the wires past them into bends that were not there before, and the realiser dropped the
-      // bend next to them (arz_2L: three shorts, net 9 through the arc of +5B).
+      // All copper has it, the corners and ends of the pads too (they had not: at the nominal they sent the
+      // chords of the wires past them into bends that were not there before, and the realiser dropped the bend
+      // next to them — arz_2L: three shorts then, none now; XR_NO_NOMINAL_PADS takes it from them again).
       for (size_t i = 0; i < ob.pts.size(); ++i) {
-        static const bool kPads = std::getenv("XR_NOMINAL_PADS") != nullptr;
-        if (!ob.pts[i].round && !kPads) nominalShare[layer][i] = 0;
+        static const bool kNoPads = std::getenv("XR_NO_NOMINAL_PADS") != nullptr;
+        if (!ob.pts[i].round && kNoPads) nominalShare[layer][i] = 0;
       }
     }
   // >= 0: every obstacle's share for now (the two trial packings of the first round); a thread's own (the
@@ -1083,7 +1088,7 @@ bool drawWires(const Board& b, const std::vector<RealWire>& wires, const Realize
         if (stacked.empty()) break;
         const OPt& P = ob.pts[size_t(p)];
         const OPt& Q = ob.pts[size_t(q)];
-        const double keep = std::max(P.clr, Q.clr) + kNominalRoom;
+        const double keep = std::max(P.clr, Q.clr) + kDrawRoom;
         BBox box;
         box.add(P.p);
         box.add(Q.p);
@@ -1237,7 +1242,7 @@ bool drawWires(const Board& b, const std::vector<RealWire>& wires, const Realize
         shareOfAll = 1;
         const double s1 = pack();
         shareOfAll = -1;
-        const double share = s1 >= kNominalRoom ? 1.0 : s0 <= kNominalRoom ? 0.0 : (s0 - kNominalRoom) / (s0 - s1);
+        const double share = s1 >= kDrawRoom ? 1.0 : s0 <= kDrawRoom ? 0.0 : (s0 - kDrawRoom) / (s0 - s1);
         std::vector<double>& of = nominalShare[layer];
         auto least = [&](int pt, double x) { of[size_t(pt)] = std::min(of[size_t(pt)], std::clamp(x, 0.0, 1.0)); };
         least(uv.first, share);

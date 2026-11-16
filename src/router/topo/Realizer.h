@@ -3,6 +3,7 @@
 // taut around the obstacles of other nets (funnel algorithm in a constrained Delaunay
 // triangulation of obstacle points), then thickened into tangent segments + arcs whose
 // radii nest wires that wrap the same obstacle.
+#include <cstdlib>
 #include <array>
 #include <optional>
 #include <map>
