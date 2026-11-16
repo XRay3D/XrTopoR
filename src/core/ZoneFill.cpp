@@ -251,8 +251,14 @@ ZoneFillStats fillZones(Board& b, const ZoneFillOptions& opt) {
         const bool pad = r.type == ItemType::Pad;
         const ZoneThermal& th = pad ? z.pads : z.vias;
         if (opt.thermals && th.connection == PadConnection::Thermal) {
-          if (pad) reliefs.push_back({b.pads[r.index].pos.v(), b.pads[r.index].shapeGeom(), b.pads[r.index].angle + th.angle, &th});
-          else reliefs.push_back({b.vias[r.index].pos.v(), Shape::circle(b.vias[r.index].pos.v(), b.vias[r.index].diameter / 2.0), th.angle, &th});
+          // A pad of a notched outline is relieved round its hull: the barrier of the outline as it is left a slit in
+          // the notch, the pour ran into it in a sliver, and the bridge that way ended there (SOD-80 of
+          // RMT19M_A68U: a notch 0.5 mm wide, the gap 0.2).
+          if (pad) {
+            Shape copper = b.pads[r.index].shapeGeom();
+            if (copper.kind == Shape::Kind::Polygon && copper.poly.size() > 3) copper = Shape::polygon(convexHull(copper.poly), copper.r);
+            reliefs.push_back({b.pads[r.index].pos.v(), copper, b.pads[r.index].angle + th.angle, &th});
+          } else reliefs.push_back({b.vias[r.index].pos.v(), Shape::circle(b.vias[r.index].pos.v(), b.vias[r.index].diameter / 2.0), th.angle, &th});
         }
         if (th.connection != PadConnection::None) return;
       }

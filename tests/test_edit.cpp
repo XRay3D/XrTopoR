@@ -748,6 +748,34 @@ TEST(ZoneFill, NoBridgeToNowhere) {
   EXPECT_EQ(Connectivity::compute(t.b).ratsnest.size(), 0u);
 }
 
+// A pad with a notch, SOD-80 of RMT19M_A68U (P-CAD): 1.829 x 1.422 mm, a notch 0.508 wide and as deep in its upper
+// side; the gap 0.203, the bridges 0.508. The barrier of the outline as it is left a slit 0.1 mm wide in the notch,
+// the pour came into it, and the bridge that way ended there, the barrier above it whole. The barrier goes round
+// the pad's hull now, and the bridge runs across the notch and the barrier to the pour, as the other three do.
+TEST(ZoneFill, ABridgeCrossesTheNotchOfAPad) {
+  PourBoard t;
+  t.zone().pads.connection = PadConnection::Thermal;
+  t.zone().pads.gap = mmToNm(0.203);
+  t.zone().pads.spoke = mmToNm(0.508);
+  t.zone().minWidth = mmToNm(0.2);
+  t.pad(10, 10, t.g);
+  Pad& p = t.b.pads.back();
+  p.shape.kind = PadShapeKind::Polygon;
+  // (Its point is not its middle: P-CAD's pad of a pattern stands 0.127 mm below it, the notch on the far side.)
+  const double w = 914500, up = 838000, down = 584000, n = 254000, d = 330000;
+  p.shape.poly = {{-w, -up}, {-n, -up}, {-n, -d}, {n, -d}, {n, -up}, {w, -up}, {w, down}, {-w, down}};
+  p.shape.w = Coord(2 * w);
+  p.shape.h = Coord(up + down);
+  fillZones(t.b);
+  const double top = 10 - up / 1e6, gap = 0.203;
+  EXPECT_TRUE(t.poured(10.2, top - gap / 2)) << "the bridge up, across the barrier above the notch (beside the slit)";
+  EXPECT_TRUE(t.poured(10, 10 + down / 1e6 + gap / 2)) << "the bridge down";
+  EXPECT_TRUE(t.poured(10 + w / 1e6 + gap / 2, 10)) << "the bridge right";
+  EXPECT_TRUE(t.poured(10 - w / 1e6 - gap / 2, 10)) << "the bridge left";
+  EXPECT_FALSE(t.poured(10 - 0.6, top - gap / 2)) << "the barrier beside the bridge";
+  EXPECT_EQ(Connectivity::compute(t.b).ratsnest.size(), 0u);
+}
+
 // A net taken out of a design: its objects are of no net, the nets after it keep their objects and their rules; a
 // net named anew keeps what the rules give it, or is not renamed.
 TEST(Edit, ANetIsTakenOutAndNamedAnew) {

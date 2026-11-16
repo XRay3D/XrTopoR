@@ -94,6 +94,8 @@ double polygonArea(const Polyline& poly);  // signed
 Polyline fracture(const Polyline& outer, std::vector<Polyline> holes);
 // Distance between a point and a polygon boundary/interior (0 if inside).
 double distPointPolygon(Vec2 p, const Polyline& poly);
+// The convex hull, counter-clockwise in the usual (Y up) sense, without collinear points.
+Polyline convexHull(Polyline pts);
 double distSegmentPolygon(Vec2 a, Vec2 b, const Polyline& poly);
 double distPolygonPolygon(const Polyline& a, const Polyline& b);
 

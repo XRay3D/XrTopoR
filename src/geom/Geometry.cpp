@@ -133,6 +133,24 @@ Polyline fracture(const Polyline& outer, std::vector<Polyline> holes) {
   return res;
 }
 
+Polyline convexHull(Polyline pts) {
+  r::sort(pts, [](Vec2 a, Vec2 b) { return a.x != b.x ? a.x < b.x : a.y < b.y; });
+  pts.erase(std::unique(pts.begin(), pts.end(), [](Vec2 a, Vec2 b) { return a.x == b.x && a.y == b.y; }), pts.end());
+  if (pts.size() < 3) return pts;
+  Polyline h(2 * pts.size());
+  size_t k = 0;
+  for (size_t i = 0; i < pts.size(); ++i) {  // the lower chain, then the upper (Andrew's monotone chain)
+    while (k >= 2 && (h[k - 1] - h[k - 2]).cross(pts[i] - h[k - 2]) <= 0) --k;
+    h[k++] = pts[i];
+  }
+  for (size_t i = pts.size() - 1, lower = k + 1; i-- > 0;) {
+    while (k >= lower && (h[k - 1] - h[k - 2]).cross(pts[i] - h[k - 2]) <= 0) --k;
+    h[k++] = pts[i];
+  }
+  h.resize(k - 1);
+  return h;
+}
+
 double distPointPolygon(Vec2 p, const Polyline& poly) {
   if (poly.empty()) return std::numeric_limits<double>::max();
   if (poly.size() >= 3 && pointInPolygon(p, poly)) return 0;
