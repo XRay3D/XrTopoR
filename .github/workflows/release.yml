@@ -59,7 +59,18 @@ jobs:
             -DGIT_SHA=${{ github.sha }}
 
       - name: Build
-        run: cmake --build build --config Release -j"$(nproc)"
+        run: |
+          # An error is copied into an annotation as well: those of a public repository are read without a login,
+          # the log is not.
+          set +e
+          cmake --build build --config Release -j"$(nproc)" -- -k 0 > build.log 2>&1
+          status=$?
+          cat build.log
+          if [ "$status" != 0 ]; then
+            msg="$(grep -E 'error|Error|undefined reference' build.log | head -n 60 | sed -e 's/%/%25/g' | awk '{printf "%s%%0A", $0}')"
+            echo "::error title=Build failed::${msg}"
+          fi
+          exit $status
 
       - name: Package
         run: |
@@ -158,7 +169,18 @@ jobs:
             -DGIT_SHA=${{ github.sha }}
 
       - name: Build
-        run: cmake --build build --config Release -j"$(nproc)"
+        run: |
+          # An error is copied into an annotation as well: those of a public repository are read without a login,
+          # the log is not.
+          set +e
+          cmake --build build --config Release -j"$(nproc)" -- -k 0 > build.log 2>&1
+          status=$?
+          cat build.log
+          if [ "$status" != 0 ]; then
+            msg="$(grep -E 'error|Error|undefined reference' build.log | head -n 60 | sed -e 's/%/%25/g' | awk '{printf "%s%%0A", $0}')"
+            echo "::error title=Build failed::${msg}"
+          fi
+          exit $status
 
       - name: Package
         run: |
