@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=XrTopoR
+GenericName=PCB topological editor and router
+GenericName[ru]=Топологический редактор и трассировщик печатных плат
+Comment=Topological PCB editor and autorouter (TopoR-like)
+Exec=xrtopor %f
+Terminal=false
+Categories=Development;Engineering;Electronics;
+MimeType=application/x-topor-project;application/x-topor-pcb;

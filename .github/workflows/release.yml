@@ -1,0 +1,296 @@
+name: Build & Release
+
+# Собирает XrTopoR (xrtopor — редактор, xrtopor-cli — пакетная обработка) для Linux и Windows при пуше в main и
+# при пуше тега версии, затем публикует архивы в GitHub Releases: тег — выпуск этой версии, main — пред-выпуск
+# «continuous». Устроено как в GERBER_X3 (.github/workflows/release.yml).
+#
+# Проект на C++26 (std::inplace_vector, std::print, std::expected …), поэтому нужен GCC 16: в Linux — из Debian
+# sid, в Windows — из MSYS2 UCRT64. Зависимости: Qt 6 (Widgets, Concurrent, Network, OpenGL, OpenGLWidgets),
+# Boost.JSON, CGAL. Тесты здесь не гоняются: только сборка и упаковка.
+#
+# Архивы самодостаточны: рядом с программами кладутся Qt-плагины и весь рантайм (Qt, libstdc++, Boost, gmp/mpfr …).
+# Значки программы — SVG: без плагина qsvgicon (пакеты qt6-svg) кнопки остались бы пустыми, поэтому он
+# проверяется явно. Вид платы рисуется через OpenGL 3.3: в Windows-архив кладётся программный OpenGL (Mesa)
+# для машин без драйвера.
+
+on:
+  push:
+    branches: [main]
+    tags: ["[0-9]+.[0-9]+*"]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0  # git describe: версия от тега
+
+      - name: Setup MSYS2 (UCRT64, GCC 16)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-boost
+            mingw-w64-ucrt-x86_64-cgal
+            mingw-w64-ucrt-x86_64-qt6-base
+            mingw-w64-ucrt-x86_64-qt6-svg
+            mingw-w64-ucrt-x86_64-qt6-imageformats
+            mingw-w64-ucrt-x86_64-qt6-tools
+            mingw-w64-ucrt-x86_64-mesa
+            git
+            zip
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DXR_BUILD_TESTS=OFF \
+            -DGIT_REF_NAME=${{ github.ref_name }} \
+            -DGIT_SHA=${{ github.sha }}
+
+      - name: Build
+        run: cmake --build build --config Release -j"$(nproc)"
+
+      - name: Package
+        run: |
+          set -eu
+          VERSION="$(echo '${{ github.ref_name }}' | tr '/' '-')"
+          OUT="XrTopoR-${VERSION}-windows-x64"
+          mkdir -p "$OUT"
+          cp build/apps/xrtopor.exe build/apps/xrtopor-cli.exe "$OUT"/
+
+          # Qt-плагины и Qt6*.dll.
+          windeployqt6 --release --no-translations --no-system-d3d-compiler "$OUT/xrtopor.exe"
+
+          # Значки (SVG): программа не ссылается на Qt6Svg, и windeployqt может не положить его плагины.
+          QT_PLUGINS=/ucrt64/share/qt6/plugins
+          for p in iconengines/qsvgicon.dll imageformats/qsvg.dll; do
+            mkdir -p "$OUT/$(dirname "$p")"
+            [ -f "$OUT/$p" ] || cp -v "$QT_PLUGINS/$p" "$OUT/$p"
+          done
+
+          # Программный OpenGL (Mesa llvmpipe) под именем, которое ищет Qt.
+          if [ -f /ucrt64/bin/opengl32.dll ]; then
+            cp -v /ucrt64/bin/opengl32.dll "$OUT/opengl32sw.dll"
+          else
+            echo "::warning::Mesa opengl32.dll не найдена -- программный OpenGL в архив не попадёт"
+          fi
+
+          # Рантайм MSYS2/UCRT64 (libgcc, libstdc++, libwinpthread, Boost, gmp, mpfr, ICU, zlib …): обход
+          # зависимостей до неподвижной точки — у скопированных DLL есть свои.
+          while :; do
+            BEFORE="$(find "$OUT" -name '*.dll' | wc -l)"
+            find "$OUT" \( -name '*.exe' -o -name '*.dll' \) -print0 \
+              | xargs -0 -r -n1 ldd 2>/dev/null \
+              | awk '{for (i = 1; i < NF; i++) if ($i == "=>") print $(i + 1)}' \
+              | grep -Ei 'ucrt64[/\\]bin' \
+              | sort -u \
+              | while read -r dll; do
+                  src="$(cygpath -u "$dll" 2>/dev/null || echo "$dll")"
+                  [ -f "$src" ] || continue
+                  [ -f "$OUT/$(basename "$src")" ] || cp -v "$src" "$OUT"/
+                done
+            AFTER="$(find "$OUT" -name '*.dll' | wc -l)"
+            if [ "$BEFORE" = "$AFTER" ]; then break; fi
+          done
+
+          # Страховка: без них программа не стартует на машине без MSYS2.
+          for f in libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll Qt6Core.dll platforms/qwindows.dll \
+                   iconengines/qsvgicon.dll; do
+            if [ ! -f "$OUT/$f" ]; then
+              echo "::error::не попал в архив: $f"
+              exit 1
+            fi
+          done
+
+          "$OUT/xrtopor-cli.exe" --version
+          echo "Файлов в архиве: $(find "$OUT" -type f | wc -l), размер: $(du -sh "$OUT" | cut -f1)"
+          zip -r "${OUT}.zip" "$OUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: XrTopoR-windows-zip
+          path: XrTopoR-*-windows-x64.zip
+          if-no-files-found: error
+
+  # Linux (amd64) в контейнере Debian sid: там GCC 16 и свежие Qt 6, CGAL, Boost. Побочный эффект — свежий glibc:
+  # архиву нужна система не старее Debian sid на день сборки (Ubuntu 26.04+, Debian trixie+); libstdc++ кладётся
+  # в архив своя.
+  build-linux:
+    runs-on: ubuntu-latest
+    container:
+      image: debian:sid
+    steps:
+      - name: Install toolchain
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            gcc-16 g++-16 \
+            cmake ninja-build \
+            qt6-base-dev qt6-qpa-plugins qt6-svg-dev qt6-svg-plugins qt6-image-formats-plugins qt6-wayland \
+            libcgal-dev libboost-dev libboost-json-dev \
+            patchelf file tar git ca-certificates
+
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0  # git describe: версия от тега
+
+      - name: Configure
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER=g++-16 \
+            -DXR_BUILD_TESTS=OFF \
+            -DGIT_REF_NAME=${{ github.ref_name }} \
+            -DGIT_SHA=${{ github.sha }}
+
+      - name: Build
+        run: cmake --build build --config Release -j"$(nproc)"
+
+      - name: Package
+        run: |
+          set -eu
+          # В имени ветки могут быть слэши: в имени архива их быть не должно. Шаг идёт в sh (dash): без башизмов.
+          VERSION="$(echo '${{ github.ref_name }}' | tr '/' '-')"
+          OUT="XrTopoR-${VERSION}-linux-x64"
+          QT_PLUGINS=/usr/lib/x86_64-linux-gnu/qt6/plugins
+
+          mkdir -p "$OUT/plugins" "$OUT/lib"
+          cp build/apps/xrtopor build/apps/xrtopor-cli "$OUT"/
+
+          # Qt-плагины: платформы (xcb и его OpenGL, wayland), стили, форматы картинок, значки SVG; Qt ищет их
+          # по qt.conf рядом с программой.
+          for d in platforms xcbglintegrations platformthemes platforminputcontexts styles imageformats iconengines \
+                   wayland-shell-integration wayland-graphics-integration-client wayland-decoration-client; do
+            [ -d "$QT_PLUGINS/$d" ] && cp -r "$QT_PLUGINS/$d" "$OUT/plugins/"
+          done
+          printf '[Paths]\nPlugins = plugins\n' > "$OUT/qt.conf"
+
+          # Рантайм: ldd-обход до неподвижной точки. Ядро glibc и его модули не копируются: подменённый libc рядом
+          # с программой ломает системные библиотеки пользователя.
+          is_bundleable() {
+            case "$1" in
+              ld-linux*|libc\.so*|libm\.so*|libdl*|libpthread*|librt*|libresolv*|\
+              libnss_*|libnsl*|libanl*|libutil*|libBrokenLocale*|libSegFault*|\
+              libgcc_s*|libGL\.so*|libGLX*|libEGL\.so*|libGLdispatch*|libOpenGL*) return 1 ;;
+              *) return 0 ;;
+            esac
+          }
+          while :; do
+            BEFORE="$(find "$OUT" -name '*.so*' | wc -l)"
+            find "$OUT" \( -type f -o -type l \) \( -name 'xrtopor' -o -name 'xrtopor-cli' -o -name '*.so*' \) -print0 \
+              | xargs -0 -r -n1 file \
+              | awk -F: '/ELF/{print $1}' \
+              | while read -r elf; do
+                  ldd "$elf" 2>/dev/null \
+                  | awk '{for (i = 1; i < NF; i++) if ($i == "=>") print $(i + 1)}' \
+                  | while read -r lib; do
+                      [ -f "$lib" ] || continue
+                      case "$lib" in /usr/lib/*|/lib/*) ;; *) continue ;; esac
+                      base="$(basename "$lib")"
+                      is_bundleable "$base" || continue
+                      [ -e "$OUT/lib/$base" ] || cp -L "$lib" "$OUT/lib/"
+                    done
+                done
+            AFTER="$(find "$OUT" -name '*.so*' | wc -l)"
+            if [ "$BEFORE" = "$AFTER" ]; then break; fi
+          done
+
+          # Страховка: Qt, рантайм C++, платформа xcb и значки SVG обязаны попасть в архив.
+          ls "$OUT"/lib/libQt6Core.so.6 "$OUT"/lib/libstdc++.so.6 >/dev/null
+          ls "$OUT"/plugins/platforms/libqxcb.so "$OUT"/plugins/iconengines/libqsvgicon.so >/dev/null
+
+          # RPATH: программы ищут библиотеки в lib/, плагины — в ../../lib, всё в lib/ — в самом lib/.
+          patchelf --set-rpath '$ORIGIN/lib' "$OUT/xrtopor" "$OUT/xrtopor-cli"
+          find "$OUT/plugins" -name '*.so' -exec patchelf --set-rpath '$ORIGIN/../../lib' {} +
+          find "$OUT/lib" -name '*.so*' -type f -exec patchelf --set-rpath '$ORIGIN' {} +
+
+          mkdir -p "$OUT/share"
+          cp packaging/linux/xrtopor.desktop "$OUT/share/"
+
+          "$OUT/xrtopor-cli" --version
+          QT_QPA_PLATFORM=offscreen "$OUT/xrtopor" --version
+          echo "Файлов в архиве: $(find "$OUT" -type f | wc -l), размер: $(du -sh "$OUT" | cut -f1)"
+          tar -czf "${OUT}.tar.gz" "$OUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: XrTopoR-linux-targz
+          path: XrTopoR-*-linux-x64.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: [build-windows, build-linux]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Build changelog
+        id: changelog
+        run: |
+          set -eu
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            PREV_TAG="$(git tag --sort=-creatordate | grep -v "^${{ github.ref_name }}$" | grep -v '^continuous$' | head -n1 || true)"
+          else
+            PREV_TAG="$(git tag --sort=-creatordate | grep -v '^continuous$' | head -n1 || true)"
+          fi
+          {
+            echo "log<<EOF"
+            if [[ -n "$PREV_TAG" ]]; then
+              echo "Изменения с $PREV_TAG:"
+              echo
+              git log --no-merges --pretty="- %s (%h)" "$PREV_TAG"..HEAD
+            else
+              echo "Изменения:"
+              echo
+              git log --no-merges --pretty="- %s (%h)" -n 50
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Publish tagged release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: XrTopoR ${{ github.ref_name }}
+          body: ${{ steps.changelog.outputs.log }}
+          prerelease: false
+          files: dist/**
+
+      - name: Publish rolling main build
+        if: github.ref_type == 'branch'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: continuous
+          name: "XrTopoR (main, continuous build)"
+          body: ${{ steps.changelog.outputs.log }}
+          prerelease: true
+          target_commitish: ${{ github.sha }}
+          files: dist/**

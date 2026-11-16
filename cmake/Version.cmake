@@ -28,6 +28,8 @@ if(describe MATCHES "^[0-9]+\\.[0-9]+")
   set(full "${describe}")
 elseif(describe)
   set(full "${VERSION}+${describe}")
+elseif(ref MATCHES "^[0-9]+\\.[0-9]+")  # a tag built where git could not be asked
+  set(full "${ref}")
 elseif(sha)
   string(SUBSTRING "${sha}" 0 7 short)
   set(full "${VERSION}+${short}")

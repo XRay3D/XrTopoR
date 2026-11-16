@@ -35,6 +35,17 @@ xrtopor-cli gerber  board.kicad_pcb outdir/
 xrtopor-cli svg     board.kicad_pcb out.svg
 ```
 
+## Сборки и выпуски
+
+GitHub Actions (`.github/workflows/release.yml`, как в GERBER_X3) собирает XrTopoR для Linux (Debian sid, GCC 16) и
+Windows (MSYS2 UCRT64) и выкладывает самодостаточные архивы в Releases:
+
+- каждый push в `main` — пред-выпуск `continuous`;
+- тег версии — выпуск этой версии: `git tag 0.2 && git push origin 0.2`.
+
+Версия, ветка или тег, коммит и дата сборки — в «Справка › О программе» (кнопка «Скопировать сведения») и в
+`xrtopor --version`, `xrtopor-cli --version`; номер версии — `project(... VERSION)` в `CMakeLists.txt`.
+
 ## MCP-сервер (для ИИ-агентов)
 
 Редактор может работать как MCP-сервер (Model Context Protocol): агент читает, правит и разводит открытую плату
