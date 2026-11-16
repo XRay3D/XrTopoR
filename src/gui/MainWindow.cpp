@@ -29,6 +29,7 @@
 #include "core/Edit.h"
 #include "topo/Sidecar.h"
 #include "core/ZoneFill.h"
+#include "gui/AboutDialog.h"
 #include "gui/AppSettings.h"
 #include "gui/AutorouteWindow.h"
 #include "gui/mcp/McpServer.h"
@@ -347,11 +348,7 @@ void MainWindow::bindCommands() {
   // Справка
   c.bind("Cmd_HotkeysHelp", [this] { showHotkeys(); }, false);
   c.bind("Cmd_Settings", [this] { showProgramSettings(); }, false);
-  c.bind("Cmd_About", [this] {
-    QMessageBox::about(this, tr("О программе"),
-                       tr("<b>XrTopoR</b><br>Топологический редактор и трассировщик печатных плат.<br>"
-                          "Интерфейс повторяет TopoR 7.0."));
-  }, false);
+  c.bind("Cmd_About", [this] { AboutDialog(this).exec(); }, false);
 
   // Режимы редактора и автопроцедуры
   c.bind("Cmd_ModeSelect", [this] { view_->setMode(Mode::Select); });

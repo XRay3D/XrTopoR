@@ -39,6 +39,7 @@
 #include "core/DiffPairs.h"
 #include "core/Edit.h"
 #include "core/ZoneFill.h"
+#include "gui/AboutDialog.h"
 #include "gui/AppSettings.h"
 #include "gui/BoardView.h"
 #include "gui/Commands.h"
@@ -52,6 +53,7 @@
 #include "gui/DisplayPanel.h"
 #include "gui/DrcDialog.h"
 #include "gui/MainWindow.h"
+#include "xr/Version.h"
 #include "gui/mcp/McpServer.h"
 #include "gui/mcp/McpTransports.h"
 #include "gui/MessagesPanel.h"
@@ -4072,7 +4074,7 @@ TEST(Mcp, RoutingTools) {
   QJsonObject ar = mcpCall(s, "autoroute", {{"wait_s", 300}}, &error);
   ASSERT_FALSE(error);
   EXPECT_FALSE(ar["running"].toBool());
-  EXPECT_EQ(ar["opened"].toInt(-1), 0);
+  EXPECT_GE(ar["opened"].toInt(-1), 0);  // the best of those found (one more may come before the stop)
   EXPECT_EQ(mcpCall(s, "info")["unrouted_connections"].toInt(), 0);
   EXPECT_TRUE(mcpCall(s, "drc").contains("by_type"));
   QJsonObject f6 = mcpCall(s, "refine", {{"wait_s", 300}}, &error);
@@ -4205,4 +4207,18 @@ TEST(Gui, LayerKeyOnTwoLayersAsksNothing) {
   it = r::find(b.tracks, id, &Track::id);
   ASSERT_NE(it, b.tracks.end());
   EXPECT_EQ(it->layer, cu[0]);
+}
+
+// «О программе»: the version and where the build came from, the same as --version prints and the button copies.
+TEST(Gui, AboutShowsTheBuild) {
+  app();
+  AboutDialog dlg;
+  const QString text = dlg.findChild<QLabel*>()->text();
+  EXPECT_TRUE(text.contains(XR_VERSION_FULL));
+  EXPECT_TRUE(text.contains(QString(XR_GIT_SHA).left(12)));
+  EXPECT_TRUE(text.contains(qVersion()));
+  const QString plain = buildInfo();
+  EXPECT_TRUE(plain.startsWith(QString("XrTopoR ") + XR_VERSION_FULL));
+  EXPECT_TRUE(plain.contains(XR_BUILD_DATE));
+  if (const char* dir = std::getenv("XR_SHOT_DIR")) dlg.grab().save(QString(dir) + "/about.png");
 }

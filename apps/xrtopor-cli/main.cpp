@@ -22,6 +22,9 @@
 #include "topo/RelayStats.h"
 #include "core/Edit.h"
 #include "topo/Sidecar.h"
+#include "xr/Version.h"
+#include <boost/version.hpp>
+#include <CGAL/version.h>
 #include "router/topo/Optimizer.h"
 #include "router/topo/Refine.h"
 #include "router/topo/Wires.h"
@@ -33,7 +36,7 @@ namespace {
 
 void usage() {
   std::println(
-      "usage: xrtopor-cli <command> <board> [args]\n"
+      "usage: xrtopor-cli <command> <board> [args]   (xrtopor-cli --version: the build)\n"
       "  info       <board>                        summary of a board\n"
       "  convert    <board> <out.kicad_pcb|.dsn|.ses>\n"
       "  drc        <board> [--max N] [--nominal]   design rule check (--nominal: against the nominal clearances)\n"
@@ -181,6 +184,12 @@ static xr::topo::Topology loadModel(xr::Board& b, const std::string& boardPath) 
 }
 
 int main(int argc, char** argv) {
+  if (argc >= 2 && std::string_view(argv[1]) == "--version") {
+    std::println("xrtopor-cli {}\nbranch or tag: {}\ncommit: {}\nbuilt: {}\ncompiler: {}\nBoost {}.{}.{}, CGAL {}", XR_VERSION_FULL,
+                 XR_GIT_REF, XR_GIT_SHA, XR_BUILD_DATE, XR_COMPILER, BOOST_VERSION / 100000, BOOST_VERSION / 100 % 1000,
+                 BOOST_VERSION % 100, CGAL_VERSION_STR);
+    return 0;
+  }
   if (argc < 3) {
     usage();
     return 1;

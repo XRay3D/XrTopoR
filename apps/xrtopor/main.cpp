@@ -6,13 +6,21 @@
 
 #include <cstdio>
 
+#include "gui/AboutDialog.h"
 #include "gui/AppSettings.h"
 #include "gui/BoardView.h"
 #include "gui/MainWindow.h"
 #include "gui/ToporConfig.h"
+#include "xr/Version.h"
 
 int main(int argc, char** argv) {
+  for (int i = 1; i < argc; ++i)
+    if (QString::fromLocal8Bit(argv[i]) == "--version") {  // before any window: no display needed
+      std::fputs(xr::gui::buildInfo().toUtf8().constData(), stdout);
+      return 0;
+    }
   QApplication app(argc, argv);
+  QApplication::setApplicationVersion(XR_VERSION_FULL);
   QApplication::setStyle(QStyleFactory::create("Fusion"));
   QApplication::setApplicationName("XrTopoR");
   QApplication::setOrganizationName("XrTopoR");
@@ -42,7 +50,11 @@ int main(int argc, char** argv) {
       continue;
     }
     if (a == "--mcp-stdio") {
+#ifdef Q_OS_UNIX
       w.startMcpStdio();
+#else
+      std::fprintf(stderr, "MCP: --mcp-stdio is not available on this system; use --mcp (HTTP)\n");
+#endif
       continue;
     }
     if (a == "--screenshot" && i + 1 < argc) shot = QString::fromLocal8Bit(argv[++i]);

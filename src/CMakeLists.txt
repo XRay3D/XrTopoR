@@ -85,6 +85,7 @@ if(XR_BUILD_GUI)
   find_package(Qt6 REQUIRED COMPONENTS Widgets Concurrent Network OpenGL OpenGLWidgets)
   set(CMAKE_AUTOMOC ON)
   add_library(xrgui STATIC
+    gui/AboutDialog.cpp
     gui/AppSettings.cpp
     gui/AutorouteWindow.cpp
     gui/BoardScene.cpp
@@ -120,5 +121,6 @@ if(XR_BUILD_GUI)
     gui/shaders.qrc
   )
   set_target_properties(xrgui PROPERTIES AUTORCC ON)
-  target_link_libraries(xrgui PUBLIC xrio xrdrc xrrouter Qt6::Widgets Qt6::Concurrent Qt6::Network Qt6::OpenGL Qt6::OpenGLWidgets)
+  add_dependencies(xrgui xr_version)
+  target_link_libraries(xrgui PUBLIC xrversion xrio xrdrc xrrouter Qt6::Widgets Qt6::Concurrent Qt6::Network Qt6::OpenGL Qt6::OpenGLWidgets)
 endif()

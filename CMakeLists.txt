@@ -25,6 +25,23 @@ if(XR_LIBSTDCXX AND IS_ABSOLUTE "${XR_LIBSTDCXX}")
   set(CMAKE_INSTALL_RPATH "${XR_LIBSTDCXX_DIR}")
 endif()
 
+# The version header (cmake/Version.cmake), written at every build: the commit is always the one built. CI passes
+# the branch or tag and the commit (git in its container may not be asked).
+set(GIT_REF_NAME "" CACHE STRING "The branch or tag built (CI)")
+set(GIT_SHA "" CACHE STRING "The commit built (CI)")
+string(TIMESTAMP XR_BUILD_DATE "%Y-%m-%d %H:%M:%S")
+set(XR_VERSION_H "${CMAKE_BINARY_DIR}/generated/xr/Version.h")
+add_custom_target(xr_version ALL
+  COMMAND "${CMAKE_COMMAND}" "-DSRC_DIR=${CMAKE_SOURCE_DIR}" "-DOUT=${XR_VERSION_H}" "-DVERSION=${PROJECT_VERSION}"
+          "-DGIT_REF_NAME=${GIT_REF_NAME}" "-DGIT_SHA=${GIT_SHA}" "-DBUILD_DATE=${XR_BUILD_DATE}"
+          -P "${CMAKE_SOURCE_DIR}/cmake/Version.cmake"
+  BYPRODUCTS "${XR_VERSION_H}"
+  COMMENT "Version header"
+  VERBATIM)
+add_library(xrversion INTERFACE)
+target_include_directories(xrversion INTERFACE "${CMAKE_BINARY_DIR}/generated")
+add_dependencies(xrversion xr_version)
+
 find_package(Boost 1.80 REQUIRED COMPONENTS json)
 find_package(CGAL REQUIRED)
 
