@@ -27,6 +27,7 @@ struct RefineModelOptions {
   // A via next to another via or a through pad goes when its wires reach that one on their own layers
   // (ModelVias.h: the local via minimisation of Luzin, Popov, Popov, NTV ITMO 2013 no. 6).
   bool vias = true;
+  bool viaHopsOnly = false;  // ... only the hops that jump nothing (ViaOptions::hopsOnly)
   double viaSpan = 10.0 * kNmPerMm;  // ... the wire between the two being shorter than this
   // A wire of a zone's net lying wholly in its pour goes: the copper connects what it did (checked by the
   // connectivity: it goes only if no connection of its net comes undone).

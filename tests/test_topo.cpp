@@ -3397,6 +3397,38 @@ TEST(Topo, ViaPairWithNothingToJumpIsRemoved) {
   EXPECT_EQ(p.violations(), 0);
 }
 
+// A hop that jumps nothing, as the user drew it: a Bottom wire comes down to a via, 3 mm on Top to the next via,
+// and Bottom again; wires of other nets pass on Top above and below the two, none between them. The hop and
+// both vias go — in F6, and in F5 and F7 as well (the tools that simplify a net's topology).
+TEST(Topo, AHopOverNothingGoesWithItsVias) {
+  for (int tool = 0; tool < 3; ++tool) {
+    TwoLayerBoard p;
+    p.bottomPad("S", 20, 4, 1.0);
+    p.bottomPad("S", 18, 17, 1.0);
+    p.throughVia("S", 20, 10, 1.0);
+    p.throughVia("S", 23, 10.8, 1.0);
+    p.trackOn(p.bottom, "S", {{20, 4}, {20, 10}}, 0.3);
+    p.trackOn(p.top, "S", {{20, 10}, {23, 10.8}}, 0.3);
+    p.trackOn(p.bottom, "S", {{23, 10.8}, {18, 17}}, 0.3);
+    p.pad("X", 8, 7, PadShapeKind::Circle, 1, 1);
+    p.pad("X", 34, 9.5, PadShapeKind::Circle, 1, 1);
+    p.trackOn(p.top, "X", {{8, 7}, {34, 9.5}}, 0.3);
+    p.pad("Y", 8, 13, PadShapeKind::Circle, 1, 1);
+    p.pad("Y", 34, 12.5, PadShapeKind::Circle, 1, 1);
+    p.trackOn(p.top, "Y", {{8, 13}, {34, 12.5}}, 0.3);
+    topo::Topology::assignIds(p.b);
+    p.model = {};
+    p.model.build(p.b);
+    if (tool == 0) ASSERT_TRUE(topo::runF5Model(p.b, p.model).drawn);
+    if (tool == 1) ASSERT_TRUE(topo::refineModel(p.b, p.model).drawn);
+    if (tool == 2) ASSERT_TRUE(topo::optimizeModel(p.b, p.model).drawn);
+    EXPECT_TRUE(p.b.vias.empty()) << "tool " << tool << ": " << p.b.vias.size() << " via(s) left";
+    EXPECT_NEAR(p.lengthOn(p.top, "S"), 0.0, 0.001) << "tool " << tool;
+    EXPECT_EQ(Connectivity::compute(p.b).ratsnest.size(), 0u) << "tool " << tool;
+    EXPECT_EQ(p.violations(), 0) << "tool " << tool;
+  }
+}
+
 // The paper's fig. 1 and its step 3. A wire of another net crosses on Top between the via and its neighbour.
 // Where it has a short way round the neighbour (a through pin the net ends at) it is led behind it and the via
 // goes; where the net runs on both ways on Top (the pair of the test above) it has none, and the vias stay.

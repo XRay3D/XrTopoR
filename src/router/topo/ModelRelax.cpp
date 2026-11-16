@@ -237,6 +237,7 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
     r.branches = br.branches;
     r.reattached = br.reattached;
     r.branchesMerged = br.branchesMerged;
+    r.spareVias += br.viasRemoved;  // (the hops that jumped nothing, with their vias)
     r.junctionMoves = br.junctionMoves;  // (the branch points it took to their balance: counted with those moved below)
     r.log.insert(r.log.end(), br.log.begin(), br.log.end());
     if (!prepareModel(t, false, false, nFlips, r.violations)) return r;

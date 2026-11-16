@@ -1161,7 +1161,8 @@ F5ModelResult runF5Model(Board& b, Topology& t, const F5ModelOptions& o) {
     r.branches = br.branches;
     r.reattached = br.reattached;
     r.branchesMerged = br.branchesMerged;
-    if (br.drawn && (br.branches > 0 || br.reattached > 0 || br.branchesMerged > 0)) r.stats = br.stats;
+    r.spareVias += br.viasRemoved;  // (the hops that jumped nothing, with their vias)
+    if (br.drawn && (br.branches > 0 || br.reattached > 0 || br.branchesMerged > 0 || br.viasRemoved > 0)) r.stats = br.stats;
   }
   for (const Violation& v : t.violations)
     if (v.kind == Violation::Kind::Overflow || v.kind == Violation::Kind::OutsideBoard || v.kind == Violation::Kind::Blocked) r.violations.push_back(v);

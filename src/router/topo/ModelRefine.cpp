@@ -25,7 +25,7 @@ RefineModelOptions branchesOnly() {
   RefineModelOptions o;
   o.relay = false;
   o.clinches = false;
-  o.vias = false;
+  o.viaHopsOnly = true;  // (a hop over nothing goes with its two vias: the net is simpler without it)
   o.zoneTracks = false;
   o.simplify = false;
   o.flips = false;
@@ -284,6 +284,7 @@ RefineModelResult refineModel(Board& b, Topology& t, const RefineModelOptions& o
     ViaOptions vo;
     vo.flips = o.flips;
     vo.span = o.viaSpan;
+    vo.hopsOnly = o.viaHopsOnly;
     vo.drawing = standing;
     ViaResult vr = removeVias(b, t, vo);
     standing = vr.drawing;

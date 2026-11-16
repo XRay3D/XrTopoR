@@ -27,6 +27,10 @@ struct ViaOptions {
   double span = 10.0 * kNmPerMm;  // the wire between the via and its neighbour is shorter than this (the paper's 10 mm)
   double worth = kViaCost;        // a copy may be this much longer than the wire it stands for, and the wires led behind in sum
   bool flips = true;
+  // Only a hop that jumps nothing: the wire between two vias whose other wires are all of one other layer, laid on
+  // that layer with no wire of another net in its way — the wire and both vias go (what F5 and F7 take away;
+  // the rest is F6's).
+  bool hopsOnly = false;
   // The drawing of the model as it stands (ModelTools.h), when there is one: the copies' drawing is brought up from it.
   std::shared_ptr<const ModelDrawing> drawing;
 };

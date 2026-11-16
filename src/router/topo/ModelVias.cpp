@@ -147,6 +147,7 @@ ViaResult removeVias(Board& b, Topology& t, const ViaOptions& o) {
             if (xi != wi) its |= bit(t.wires[size_t(xi)].layer);
           c.both = (its & ~c.copy) == 0;
         }
+        if (o.hopsOnly && !c.both) continue;
         c.key = {V.viaId, U.kind == Owner::Kind::Via ? 1 : 0, U.kind == Owner::Kind::Via ? int64_t(U.viaId) : int64_t(U.pad), int(w.layer)};
         out.push_back(c);
       }
@@ -232,6 +233,10 @@ ViaResult removeVias(Board& b, Topology& t, const ViaOptions& o) {
         if (const std::optional<RelayPath> path = findRelay(mt, ni, &unsettled, nullptr, false, limit); path && path->length <= limit) {
           applyRelay(mt, ni, *path);
           continue;
+        }
+        if (o.hopsOnly) {
+          ok = false;
+          break;
         }
         // Wires of other nets cross the way: they are led behind (the paper's step 8.1).
         std::optional<Topology> saved;
