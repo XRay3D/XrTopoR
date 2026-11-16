@@ -971,6 +971,15 @@ bool drawWires(const Board& b, const std::vector<RealWire>& wires, const Realize
   const bool nominal = opt.nominal && !kNoNominal && b.hasNominal();
   std::map<LayerId, std::vector<double>>& nominalShare = d.share;
   std::map<LayerId, std::vector<std::array<double, 2>>>& stackReach = d.reach;  // per obstacle: the outermost wire's far side, at the minimum and at the nominal
+  // The gaps between the wires have it too, by the pair: the share of two wires side by side is the least over the
+  // edges they cross side by side of what the edge can give (as an obstacle's) — one distance for the two all the
+  // way along, so the nesting stands; two wires that are nowhere side by side keep the minimum.
+  static const bool kNoWireNominal = std::getenv("XR_NO_WIRE_NOMINAL") != nullptr;
+  const bool wireNominal = nominal && !kNoWireNominal;
+  std::map<LayerId, std::unordered_map<std::uint64_t, double>>& pairShare = d.pairShare;
+  pairShare.clear();
+  for (const auto& [layer, ob] : obstacles) pairShare[layer];  // (made here, not by the threads)
+  auto pairKey = [](int x, int y) { return (std::uint64_t(std::uint32_t(std::min(x, y))) << 32) | std::uint32_t(std::max(x, y)); };
   nominalShare.clear();
   stackReach.clear();
   d.tookBack.clear();
@@ -984,7 +993,8 @@ bool drawWires(const Board& b, const std::vector<RealWire>& wires, const Realize
       // the chords of the wires past them into bends that were not there before, and the realiser dropped the
       // bend next to them (arz_2L: three shorts, net 9 through the arc of +5B).
       for (size_t i = 0; i < ob.pts.size(); ++i) {
-        if (!ob.pts[i].round) nominalShare[layer][i] = 0;
+        static const bool kPads = std::getenv("XR_NOMINAL_PADS") != nullptr;
+        if (!ob.pts[i].round && !kPads) nominalShare[layer][i] = 0;
       }
     }
   // >= 0: every obstacle's share for now (the two trial packings of the first round); a thread's own (the
@@ -1008,9 +1018,17 @@ bool drawWires(const Board& b, const std::vector<RealWire>& wires, const Realize
     return share <= 0 ? c : c + share * std::max(0.0, double(b.clearanceNom(o.net, w.net, w.layer)) - c);
   };
   auto clrBetween = [&](const RealWire& x, const RealWire& y) {
+    double c = std::max(double(x.clearance), double(y.clearance));
     if (x.net >= 0 && y.net >= 0 && !b.pairRules.empty())
-      if (Coord c = pairClearance(b.pairRules, x.net, y.net, x.layer); c > 0) return double(c);
-    return std::max(double(x.clearance), double(y.clearance));
+      if (Coord p = pairClearance(b.pairRules, x.net, y.net, x.layer); p > 0) c = double(p);
+    if (!wireNominal || x.net < 0 || y.net < 0 || x.net == y.net) return c;
+    double share = shareOfAll;
+    if (share < 0) {
+      const auto& of = pairShare.at(x.layer);
+      const auto it = of.find(pairKey(int(&x - wires.data()), int(&y - wires.data())));
+      share = it == of.end() ? 0.0 : it->second;
+    }
+    return share <= 0 ? c : c + share * std::max(0.0, double(b.clearanceNom(x.net, y.net, x.layer)) - c);
   };
   // Width of every wire at every crossing: nominal, or the minimum where an edge cannot take the
   // nominal widths of the wires crossing it (TopoR's «подрезка»).
@@ -1198,6 +1216,9 @@ bool drawWires(const Board& b, const std::vector<RealWire>& wires, const Realize
           double x = need(o, w, width);
           return x > 0 ? x - margin : 0.0;
         };
+        // (At the minimum clearance: a wire is not narrowed for the nominal's sake.)
+        const double shareWas = shareOfAll;
+        shareOfAll = 0;
         double a0 = 0;
         for (int k = 0; k < n; ++k) {
           const RealWire& w = wires[list[k].first];
@@ -1205,6 +1226,7 @@ bool drawWires(const Board& b, const std::vector<RealWire>& wires, const Realize
           a0 = k == 0 ? own : std::max(a0 + nominal[k - 1] / 2.0 + clrBetween(wires[list[k - 1].first], w) + nominal[k] / 2.0, own);
         }
         const double deficit = a0 + bare(V, wires[list[n - 1].first], nominal[n - 1]) - L;
+        shareOfAll = shareWas;
         if (deficit > kNarrowDeficitLimit && chooseNarrowing(nominal, mins, deficit, chosen))
           for (int k = 0; k < n; ++k) hw[list[k].first][list[k].second] = chosen[k];
       }
@@ -1220,6 +1242,14 @@ bool drawWires(const Board& b, const std::vector<RealWire>& wires, const Realize
         auto least = [&](int pt, double x) { of[size_t(pt)] = std::min(of[size_t(pt)], std::clamp(x, 0.0, 1.0)); };
         least(uv.first, share);
         least(uv.second, share);
+        if (wireNominal) {
+          auto& pairs = pairShare[layer];
+          for (int k = 0; k + 1 < n; ++k) {
+            if (list[k].first == list[k + 1].first) continue;
+            auto [it, fresh] = pairs.try_emplace(pairKey(list[k].first, list[k + 1].first), 1.0);
+            it->second = std::min(it->second, std::clamp(share, 0.0, 1.0));
+          }
+        }
         // How far the stacks at the two ends reach, at the minimum and at the nominal (for the walls below).
         std::vector<std::array<double, 2>>& reach = stackReach[layer];
         auto further = [&](int pt, double r0, double r1) {
@@ -1250,7 +1280,14 @@ bool drawWires(const Board& b, const std::vector<RealWire>& wires, const Realize
       double slack = pack();
       if (slack < 0 && nominal) {
         std::vector<double>& of = nominalShare[layer];
-        if (of[size_t(uv.first)] > 0 || of[size_t(uv.second)] > 0) {
+        auto& pairs = pairShare[layer];
+        bool wiresHave = false;
+        for (int k = 0; k + 1 < n; ++k)
+          if (auto it = pairs.find(pairKey(list[k].first, list[k + 1].first)); it != pairs.end() && it->second > 0) {
+            it->second = 0;
+            wiresHave = true;
+          }
+        if (of[size_t(uv.first)] > 0 || of[size_t(uv.second)] > 0 || wiresHave) {
           of[size_t(uv.first)] = of[size_t(uv.second)] = 0;
           d.tookBack[layer].insert(uv);
           again = true;
@@ -2019,6 +2056,8 @@ bool drawWires(const Board& b, const std::vector<RealWire>& wires, const Realize
           const auto it = edgeLists[L].find(uv);
           if (it == edgeLists[L].end() || !clean(li, uv, it->second)) continue;
           nominalShare[L][size_t(uv.first)] = nominalShare[L][size_t(uv.second)] = 0;
+          for (size_t k = 0; k + 1 < it->second.size(); ++k)
+            if (auto ps = pairShare[L].find(pairKey(it->second[k].first, it->second[k + 1].first)); ps != pairShare[L].end()) ps->second = 0;
           d.tookBack[L].insert(uv);
           carried = true;
         }
@@ -2055,7 +2094,22 @@ bool drawWires(const Board& b, const std::vector<RealWire>& wires, const Realize
       const LayerObstacles& old = was.in.obstacles.at(L);
       for (const auto& [uv, list] : edgeLists[L]) {
         const bool moved = ptChanged[li][size_t(uv.first)] || ptChanged[li][size_t(uv.second)];
-        if (moved || shareChanged[li][size_t(uv.first)] || shareChanged[li][size_t(uv.second)] || !clean(li, uv, list)) dirtyE[li].insert(uv);
+        // (A gap between two of its wires that has another share of the nominal clearance now.)
+        bool gaps = false;
+        if (wireNominal) {
+          const auto& nowOf = pairShare[L];
+          const auto wasOf = was.d.pairShare.find(L);
+          for (size_t k = 0; k + 1 < list.size() && !gaps; ++k) {
+            const std::uint64_t key = pairKey(list[k].first, list[k + 1].first);
+            const auto x = nowOf.find(key);
+            const double sNow = x == nowOf.end() ? 0.0 : x->second;
+            double sWas = 0;
+            if (wasOf != was.d.pairShare.end())
+              if (const auto y = wasOf->second.find(key); y != wasOf->second.end()) sWas = y->second;
+            gaps = std::abs(sNow - sWas) > 1e-9;
+          }
+        }
+        if (moved || gaps || shareChanged[li][size_t(uv.first)] || shareChanged[li][size_t(uv.second)] || !clean(li, uv, list)) dirtyE[li].insert(uv);
         if (moved)
           for (const auto& [wi, hi] : list) dirtyW[size_t(wi)] = 1;  // (the same room along an edge that lies elsewhere)
       }

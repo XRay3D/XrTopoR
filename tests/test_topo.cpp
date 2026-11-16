@@ -2916,6 +2916,40 @@ TEST(Topo, NominalClearanceIsRead) {
   EXPECT_EQ((**pcb).clearanceNom(0, 1, 0), (**pcb).clearance(0, 1, 0));
 }
 
+// The automatic tools keep the nominal clearance wherever there is room for it — between a wire and round copper,
+// and between two wires side by side — and what there is room for where there is not, down to the minimum. Two
+// wires bent round a pad, 0.2 mm the minimum and 0.5 the nominal: in the open they stand 0.5 apart; with another
+// pad beside them (1.6 mm for what needs 1.2 at the minimum and 2.1 at the nominal) between the two, no violation.
+TEST(Topo, WiresKeepTheNominalWhereThereIsRoom) {
+  auto gap = [](bool tight) {
+    PinBoard p;
+    p.b.nominalRules.push_back({{}, {}, 0, mmToNm(0.5)});
+    p.pad("N3", 20, 10, PadShapeKind::Circle, 1, 1);
+    if (tight) p.pad("N4", 20, 12.6, PadShapeKind::Circle, 1, 1);
+    p.pad("N1", 10, 9.5, PadShapeKind::Circle, 1, 1);
+    p.pad("N1", 30, 9.5, PadShapeKind::Circle, 1, 1);
+    p.track("N1", {{10, 9.5}, {20, 11.2}, {30, 9.5}}, 0.3);
+    p.pad("N2", 10, 11.4, PadShapeKind::Circle, 1, 1);
+    p.pad("N2", 30, 11.4, PadShapeKind::Circle, 1, 1);
+    p.track("N2", {{10, 11.4}, {20, 11.7}, {30, 11.4}}, 0.3);
+    topo::Topology::assignIds(p.b);
+    topo::Topology t;
+    t.build(p.b);
+    EXPECT_TRUE(topo::runF5Model(p.b, t).drawn);
+    EXPECT_EQ(p.violations(), 0) << (tight ? "tight" : "open");
+    double least = 1e18;
+    for (const Track& x : p.b.tracks)
+      for (const Track& y : p.b.tracks)
+        if (p.b.nets[size_t(x.net)].name == "N1" && p.b.nets[size_t(y.net)].name == "N2")
+          least = std::min(least, distSegmentSegment(x.a.v(), x.b.v(), y.a.v(), y.b.v()) - double(x.width + y.width) / 2.0);
+    return least / kNmPerMm;
+  };
+  const double open = gap(false), tight = gap(true);
+  EXPECT_NEAR(open, 0.5, 0.02);
+  EXPECT_GT(tight, 0.2 - 0.001);
+  EXPECT_LT(tight, 0.45);
+}
+
 // F6 on the model re-lays a wire by a shorter path over the triangulation (TopoR's re-laying). A wire drawn
 // the long way round a pad of another net goes the short way; the model stays whole: no wires crossing, every
 // consecutive pair of crossings on one triangle, the capacities fresh.

@@ -455,6 +455,17 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
             const Wire& w = t.wires[t.crossings[end == 0 ? E.cross.front() : E.cross.back()].wire];
             if (takesNominal(o) && o.net != w.net && w.net >= 0) excess += nominalExcess(b, o.net, w.net, LayerMask(1) << m.layer);
           }
+          // ... and the gaps between the wires on the spoke (the realiser gives them the nominal as well):
+          // XR_F7_WIRE_GAPS. Tried 2026-11-16: fewer places below the nominal after F7 (Arcs 3050 -> 2663, arz_4L
+          // 3580 -> 3393, MinVia 1532 -> 1472), but the vias that stepped aside for a tight place stand still —
+          // arz_2L kept its 9 violations where F7 leaves 6. Off.
+          static const bool kWireGaps = std::getenv("XR_F7_WIRE_GAPS") != nullptr;
+          if (kWireGaps)
+            for (size_t k = 0; k + 1 < E.cross.size(); ++k) {
+              const Wire& x = t.wires[t.crossings[E.cross[k]].wire];
+              const Wire& y = t.wires[t.crossings[E.cross[k + 1]].wire];
+              if (x.net >= 0 && y.net >= 0 && x.net != y.net) excess += nominalExcess(b, x.net, y.net, LayerMask(1) << m.layer);
+            }
           // Only a spoke that has the nominal's room now: one already tighter is the minimum's business (in a
           // dense place everything is, and nothing could move: arz_2L gained half a millimetre).
           if (const double room = c.slack - excess - kNominalRoom; excess > 0 && room >= 0) s.nominal += std::max(0.0, -(room + grown));

@@ -6,6 +6,7 @@
 #include <array>
 #include <map>
 #include <set>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -49,6 +50,9 @@ struct DrawnWires {
   // the stack of wires round it reaches at the minimum and at the nominal.
   std::map<LayerId, std::vector<double>> share;
   std::map<LayerId, std::vector<std::array<double, 2>>> reach;
+  // Per layer, per two wires that lie side by side on an edge (the key: the lesser index << 32 | the greater): their
+  // gap's share of the nominal clearance, one for the two all the way along.
+  std::map<LayerId, std::unordered_map<std::uint64_t, double>> pairShare;
   // ... the edges that were overfull at their ends' shares and took them back.
   std::map<LayerId, std::set<std::pair<int, int>>> tookBack;
   // The counts of the computation (RealizeStats).

@@ -146,7 +146,9 @@ TEST(Realizer, ModelReshapeIsAFixedPoint) {
     EXPECT_NEAR(lengthAt[2], lengthAt[1], 0.5 * kNmPerMm) << name;
     // (A model built anew from the first drawing may find a loop the drawing closed — two wires of a net drawn into
     // each other: arz_2L has one of 1.7 mm in +5B — and the second pass takes it out; the third finds nothing.)
-    EXPECT_LE(lengthAt[1], lengthAt[0] + 0.5 * kNmPerMm) << name;
+    // (... and the gaps between the wires have their shares of the nominal clearance by the mesh's edges: where the
+    // branch points moved the mesh is another, and a gap may take more — arz_4L 0.9 mm of 8793.)
+    EXPECT_LE(lengthAt[1], lengthAt[0] + 1.5 * kNmPerMm) << name;
     EXPECT_GE(lengthAt[1], lengthAt[0] - 3 * kNmPerMm) << name;
   }
 }
@@ -497,9 +499,11 @@ TEST(Optimizer, ModelRelaxDoesNotBreak) {
   // gain: mm the drawing gets shorter by, at least; force: what is left of the forces on the objects, at most
   // (arz_2L: its vias stand against the pads of their own nets, pulled into them and held off, and — its rules
   // have a nominal clearance, 0.2 / 0.3 — stop where their wires would lose the nominal's room: 7 mm gained
-  // where 24 were with the stop at the minimum; Arcs_master.pcb has the one clearance).
+  // where 24 were with the stop at the minimum; Arcs_master.pcb has the one clearance. With the nominal between
+  // the wires as well the drawing of arz_2L is as long after as before — what the vias' steps gain the gaps that
+  // open take, 0.9 mm left of 5 — and the bends, wider, push 2 % harder: its violations go 9 -> 6 as they did).
   struct Expect { const char* file; int f5; int conflicts; double gain; double force; };
-  for (Expect x : {Expect{"topor/Example_04/Arcs_master.pcb", 32, 5, 150, 0.6}, Expect{"topor/Example_03/arz_2L.fst", 9, 6, 5, 0.97}}) {
+  for (Expect x : {Expect{"topor/Example_04/Arcs_master.pcb", 32, 5, 150, 0.6}, Expect{"topor/Example_03/arz_2L.fst", 9, 6, 0.5, 1.05}}) {
     auto lb = io::loadBoard(data(x.file));
     ASSERT_TRUE(lb.has_value()) << x.file;
     Board& b = **lb;

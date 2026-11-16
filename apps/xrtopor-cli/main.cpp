@@ -15,6 +15,7 @@
 #include "io/gerber/GerberWriter.h"
 #include "io/svg/SvgWriter.h"
 #include "core/Prof.h"
+#include "core/Rules.h"
 #include "router/topo/ModelRefine.h"
 #include "router/topo/ModelRelax.h"
 #include "router/topo/ModelTools.h"
@@ -35,7 +36,7 @@ void usage() {
       "usage: xrtopor-cli <command> <board> [args]\n"
       "  info       <board>                        summary of a board\n"
       "  convert    <board> <out.kicad_pcb|.dsn|.ses>\n"
-      "  drc        <board> [--max N]               design rule check\n"
+      "  drc        <board> [--max N] [--nominal]   design rule check (--nominal: against the nominal clearances)\n"
       "  route      <board> [-o out] [--passes N] [--via-cost MM] [--no-vias] [--layers 0,1] [--nets a,b] [--keep] [--soft] [--buses] [--no-optimize] [--no-refine] [--no-fill] [--svg out.svg]\n"
       "  import-ses <board> <routes.ses> -o <out>\n"
       "  gerber     <board> <outdir>\n"
@@ -195,6 +196,11 @@ int main(int argc, char** argv) {
     std::println("junk removed on load: {} loose crumb(s) of 5 um and shorter", b.junkRemoved.crumbs);
   if (cmd == "info") return cmdInfo(b);
   if (cmd == "drc") {
+    // --nominal: against the nominal clearances (how much of the copper has not got them).
+    if (a.flag("--nominal") && b.rules) {
+      for (ClearanceRule& c : b.rules->clearances) c.min = std::max(c.min, c.nom);
+      compileRules(b);
+    }
     auto m = a.opt("--max");
     return cmdDrc(b, m.empty() ? 50 : std::stoul(std::string(m)));
   }
