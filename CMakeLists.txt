@@ -15,6 +15,12 @@ endif()
 
 add_compile_options(-Wall -Wextra -Wno-unused-parameter)
 
+# MinGW's libstdc++ keeps std::print's console output (std::__open_terminal, std::__write_to_terminal) in a library
+# of its own.
+if(MINGW)
+  link_libraries(stdc++exp)
+endif()
+
 # Binaries built with a newer GCC (e.g. /opt/gcc-16) must load its libstdc++ at run time.
 execute_process(COMMAND ${CMAKE_CXX_COMPILER} -print-file-name=libstdc++.so
                 OUTPUT_VARIABLE XR_LIBSTDCXX OUTPUT_STRIP_TRAILING_WHITESPACE)
