@@ -1009,7 +1009,8 @@ std::optional<WireThrough> wireThrough(const Board& b, const Topology& live, int
   struct Laid {
     Topology t;
     int legs[2] = {-1, -1};
-    double length = 0;
+    double length = 0;  // as the search counts it (a squeezed gap at the price of its deficit many times over)
+    double taut = 0;    // pulled taut: what the variants are compared by
     bool squeezed = false;
     std::vector<int> castled;
     double othersBefore = 0, othersAfter = 0;
@@ -1041,6 +1042,7 @@ std::optional<WireThrough> wireThrough(const Board& b, const Topology& live, int
       if (!path) return false;
       applyRelay(t, l.legs[k], *path);
       l.length += path->length;
+      l.taut += tautLength(t, l.legs[k]);
       if (debug) {
         std::println(stderr, "  wireThrough: leg {} of {} crossings, {:.3f} mm{}", k, t.wires[size_t(l.legs[k])].cross.size(), path->length / 1e6, path->along ? ", along an edge" : "");
         for (int cid : t.wires[size_t(l.legs[k])].cross) {
@@ -1054,6 +1056,9 @@ std::optional<WireThrough> wireThrough(const Board& b, const Topology& live, int
     }
     return true;
   };
+  // What a variant costs: the legs pulled taut and what the others grew by; a squeezed one at a handicap.
+  const double kSqueezed = 2.0 * kNmPerMm;
+  auto score = [&](const Laid& l) { return l.taut + l.othersAfter - l.othersBefore + (l.squeezed ? kSqueezed : 0.0); };
   // The wire led round what is in its way.
   std::optional<Laid> round = Laid{t};
   if (!layLegs(*round, true)) round.reset();
@@ -1070,21 +1075,44 @@ std::optional<WireThrough> wireThrough(const Board& b, const Topology& live, int
       for (uint32_t id : x.tracks) wireOfTrack[id] = wi;
     }
     const Vec2 pts[3] = {t.owners[size_t(was.end[0])].c, t.owners[size_t(j)].c, t.owners[size_t(was.end[1])].c};
-    std::vector<int> crossed;
+    // ... and, before those, the wires the hand itself went across: between the point and the wire where it lay
+    // nearest. Those first, then the others by how near the point they lie (a long leg's straight line crosses
+    // wires all over the board: D1 of Arcs dragged under the via REST starts from had REST seventh of nine).
+    Vec2 grabbed = pts[1];
+    {
+      double best = std::numeric_limits<double>::max();
+      const std::set<uint32_t> own(was.tracks.begin(), was.tracks.end());
+      for (const Track& x : b.tracks) {
+        if (!own.contains(x.id)) continue;
+        const Vec2 mid = x.mid ? x.mid->v() : (x.a.v() + x.b.v()) * 0.5;
+        for (const auto& [u, v] : {std::pair{x.a.v(), mid}, std::pair{mid, x.b.v()}})
+          if (const Vec2 q = closestPointOnSegment(pts[1], u, v); (q - pts[1]).len() < best) best = (q - pts[1]).len(), grabbed = q;
+      }
+    }
+    std::map<int, double> near;  // per wire crossed: 0 under the hand, else how far from the point
     for (const Track& x : b.tracks) {
       if (!x.id || x.layer != was.layer) continue;
       const auto it = wireOfTrack.find(x.id);
-      if (it == wireOfTrack.end() || r::contains(crossed, it->second)) continue;
+      if (it == wireOfTrack.end()) continue;
       const Vec2 mid = x.mid ? x.mid->v() : (x.a.v() + x.b.v()) * 0.5;
-      for (int k = 0; k < 2; ++k)
-        if (segmentsIntersect(pts[k], pts[k + 1], x.a.v(), mid) || segmentsIntersect(pts[k], pts[k + 1], mid, x.b.v())) {
-          crossed.push_back(it->second);
-          break;
-        }
+      for (const auto& [u, v] : {std::pair{x.a.v(), mid}, std::pair{mid, x.b.v()}}) {
+        double d = -1;
+        if (segmentsIntersect(grabbed, pts[1], u, v)) d = 0;
+        else if (segmentsIntersect(pts[0], pts[1], u, v) || segmentsIntersect(pts[1], pts[2], u, v)) d = distPointSegment(pts[1], u, v) + 1;
+        if (d < 0) continue;
+        auto [at, fresh] = near.try_emplace(it->second, d);
+        if (!fresh) at->second = std::min(at->second, d);
+      }
     }
+    std::vector<int> crossed;
+    for (const auto& [wi, d] : near) crossed.push_back(wi);
+    r::sort(crossed, {}, [&](int wi) { return std::pair(near[wi], wi); });
     // Which of them: each alone, two together (of four at most), all of them — the least in sum; a wire that was
     // only brushed by the straight line stays where it lies.
-    auto castle = [&](const std::vector<int>& set) -> std::optional<Laid> {
+    // `othersFirst`: they are laid before the legs, with the dragged wire away — where its legs laid first take
+    // the old side again further on, and the others can only go round the hook at the point (D1 and REST of Arcs:
+    // drawn, the hook is gone and all lies as it lay), they take the side the wire leaves and the legs the other.
+    auto castle = [&](const std::vector<int>& set, bool othersFirst) -> std::optional<Laid> {
       Laid c{t};
       std::vector<std::pair<double, int>> order;
       for (int x : set) {
@@ -1093,7 +1121,9 @@ std::optional<WireThrough> wireThrough(const Board& b, const Topology& live, int
         takeOut(c.t, x);
       }
       r::sort(order);
-      bool ok = layLegs(c, false);
+      // (The legs may squeeze in: the point the hand holds is a vertex of its own in a narrow place, and gone
+      // when the wire is laid; a squeezed variant is taken at a handicap, and shown as one.)
+      bool ok = othersFirst || layLegs(c, true);
       for (size_t i = 0; ok && i < order.size(); ++i) {
         const int x = order[i].second;
         const std::optional<RelayPath> path = findRelay(c.t, x);
@@ -1101,9 +1131,10 @@ std::optional<WireThrough> wireThrough(const Board& b, const Topology& live, int
         applyRelay(c.t, x, *path);
         c.othersAfter += tautLength(c.t, x);
       }
+      ok = ok && (!othersFirst || layLegs(c, true));
       if (debug)
-        std::println(stderr, "  wireThrough: castling with {} wire(s) ({}...): {}; legs {:.3f} mm and the others {:.3f} -> {:.3f} mm, round them {:.3f} mm", set.size(), set.front(),
-                     ok ? "laid" : "no way", c.length / 1e6, c.othersBefore / 1e6, c.othersAfter / 1e6, round ? round->length / 1e6 : -1.0);
+        std::println(stderr, "  wireThrough: castling with {} wire(s) ({}...{}): {}{}; legs {:.3f} mm and the others {:.3f} -> {:.3f} mm, round them {:.3f} mm", set.size(), set.front(),
+                     othersFirst ? ", they first" : "", ok ? "laid" : "no way", c.squeezed ? ", squeezed" : "", c.taut / 1e6, c.othersBefore / 1e6, c.othersAfter / 1e6, round ? round->taut / 1e6 : -1.0);
       if (!ok) return std::nullopt;
       c.castled = set;
       return c;
@@ -1115,13 +1146,14 @@ std::optional<WireThrough> wireThrough(const Board& b, const Topology& live, int
       for (size_t i = 0; i < crossed.size(); ++i)
         for (size_t k = i + 1; k < crossed.size(); ++k) sets.push_back({crossed[i], crossed[k]});
     if (crossed.size() > 2) sets.push_back(crossed);
-    auto sum = [](const Laid& l) { return l.length + l.othersAfter - l.othersBefore; };
+    auto sum = [&](const Laid& l) { return score(l); };
     for (const std::vector<int>& set : sets)
-      if (std::optional<Laid> c = castle(set); c && (!castling || sum(*c) < sum(*castling))) castling = std::move(c);
+      for (bool othersFirst : {false, true})
+        if (std::optional<Laid> c = castle(set, othersFirst); c && (!castling || sum(*c) < sum(*castling))) castling = std::move(c);
   }
   if (!round && !castling) return std::nullopt;
   const double kCastlingGain = 0.2 * kNmPerMm;
-  const bool castle = castling && (!round || round->squeezed || castling->length + castling->othersAfter < round->length + castling->othersBefore - kCastlingGain);
+  const bool castle = castling && (!round || score(*castling) < score(*round) - kCastlingGain);
   Laid& laid = castle ? *castling : *round;
   t = std::move(laid.t);
   m = t.mesh(was.layer);

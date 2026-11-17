@@ -2043,6 +2043,7 @@ void BoardView::freestyleWireBy() {
   if (way) fsWay_.insert(fsWay_.end(), way->others.begin(), way->others.end());  // (a castling: the wires that change sides with it)
   fsWaySqueezed_ = way && way->squeezed;
   emit status(!way ? tr("Через эту точку проводник не проходит")
+              : fsWaySqueezed_ && fsCastled_ > 0 ? tr("Рокировка: проводник и ещё %1 поменяются сторонами, но места не хватает — будут нарушения зазоров").arg(fsCastled_)
               : fsWaySqueezed_ ? tr("Путь проводника: места не хватает, проводник будет втиснут")
               : fsCastled_ > 0 ? tr("Рокировка: проводник и ещё %1 лягут по новому пути после отпускания мыши").arg(fsCastled_)
                                : tr("Путь проводника после отпускания мыши"));
