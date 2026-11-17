@@ -52,6 +52,9 @@ class MainWindow : public QMainWindow {
   QString mcpUrl() const;  // empty: not listening
   void startMcpStdio();    // stdin's end closes the program
 
+  // At start-up, unless turned off: a release newer than this build is announced once, with a link to it.
+  void checkForUpdates();
+
  signals:
   // F6 or F7 is done (its result shown); `more`: another procedure of the same command follows it.
   void procedureFinished(const QString& title, const QString& summary, bool more);

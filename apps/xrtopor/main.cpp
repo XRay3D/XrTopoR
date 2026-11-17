@@ -67,6 +67,8 @@ int main(int argc, char** argv) {
     if (QString cfg = xr::gui::findToporConfig(); !cfg.isEmpty()) w.importToporSettings(cfg, false);
   if (!opened) w.openLastFile();
   if (drc) (*w.commands())["Accel_DRC"]->trigger();
+  // A newer release is announced once (GitHub is asked in the background); not in a screenshot or benchmark run.
+  if (shot.isEmpty() && bench == 0) w.checkForUpdates();
   if (bench > 0) {  // frame times of the board's rendering, the window maximised; then quit
     w.showMaximized();
     QTimer::singleShot(1500, &app, [&] {

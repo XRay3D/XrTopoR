@@ -8,6 +8,8 @@
 #include <QPushButton>
 #include <QTableWidget>
 #include <QFile>
+#include <QMessageBox>
+#include <QUrl>
 #include <QJsonDocument>
 #include <QTcpSocket>
 #include <QSlider>
@@ -40,6 +42,7 @@
 #include "core/Edit.h"
 #include "core/ZoneFill.h"
 #include "gui/AboutDialog.h"
+#include "gui/UpdateCheck.h"
 #include "gui/AppSettings.h"
 #include "gui/BoardView.h"
 #include "gui/Commands.h"
@@ -83,6 +86,8 @@ struct App {
   App() {
     QSettings::setDefaultFormat(QSettings::IniFormat);
     QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settings.path());
+    // Never GitHub: «О программе» and the start-up check read a file (none — the check fails quietly).
+    qputenv("XR_UPDATE_URL", QUrl::fromLocalFile(settings.filePath("no-release.json")).toString().toUtf8());
   }
 };
 
@@ -4339,5 +4344,56 @@ TEST(Gui, AboutShowsTheBuild) {
   const QString plain = buildInfo();
   EXPECT_TRUE(plain.startsWith(QString("XrTopoR ") + XR_VERSION_FULL));
   EXPECT_TRUE(plain.contains(XR_BUILD_DATE));
+  EXPECT_FALSE(text.contains("TopoR 7"));  // no word of the interface it copies
   if (const char* dir = std::getenv("XR_SHOT_DIR")) dlg.grab().save(QString(dir) + "/about.png");
+}
+
+TEST(Gui, ReleaseVersionsCompare) {
+  EXPECT_TRUE(isNewerVersion("0.3", "0.2.0"));
+  EXPECT_TRUE(isNewerVersion("v1.0", "0.9.9"));
+  EXPECT_TRUE(isNewerVersion("0.2.1", "0.2.0"));
+  EXPECT_TRUE(isNewerVersion("0.10", "0.9.0"));
+  EXPECT_FALSE(isNewerVersion("0.2", "0.2.0"));
+  EXPECT_FALSE(isNewerVersion("0.1", "0.2.0"));
+  EXPECT_FALSE(isNewerVersion("continuous", "0.2.0"));
+}
+
+// GitHub's answer (a file here): «О программе» shows the newer release with its link; a start-up check announces it
+// once, not again for the same release.
+TEST(Gui, NewReleaseIsAnnounced) {
+  App& a = app();
+  QFile f(a.settings.filePath("release.json"));
+  ASSERT_TRUE(f.open(QIODevice::WriteOnly));
+  f.write(R"({"tag_name": "99.1", "html_url": "https://github.com/XRay3D/XrTopoR/releases/tag/99.1"})");
+  f.close();
+  const QByteArray before = qgetenv("XR_UPDATE_URL");
+  qputenv("XR_UPDATE_URL", QUrl::fromLocalFile(f.fileName()).toString().toUtf8());
+  {
+    AboutDialog dlg;
+    auto* updates = dlg.findChild<QLabel*>("updates");
+    ASSERT_TRUE(updates);
+    EXPECT_TRUE(QTest::qWaitFor([&] { return updates->text().contains("99.1"); }, 5000)) << updates->text().toStdString();
+    EXPECT_TRUE(updates->text().contains("releases/tag/99.1"));
+    if (const char* dir = std::getenv("XR_SHOT_DIR")) dlg.grab().save(QString(dir) + "/about-update.png");
+  }
+  AppSettings::setAnnouncedRelease({});
+  auto boxes = [] {
+    int n = 0;
+    for (QWidget* w : QApplication::topLevelWidgets())
+      if (auto* b = qobject_cast<QMessageBox*>(w); b && b->isVisible() && b->text().contains("99.1")) ++n;
+    return n;
+  };
+  {
+    MainWindow w;
+    w.checkForUpdates();
+    EXPECT_TRUE(QTest::qWaitFor([&] { return boxes() == 1; }, 5000));
+    EXPECT_EQ(AppSettings::announcedRelease(), "99.1");
+    for (QWidget* t : QApplication::topLevelWidgets())
+      if (auto* b = qobject_cast<QMessageBox*>(t)) b->close();
+    QApplication::processEvents();
+    w.checkForUpdates();  // the same release: said once
+    QTest::qWait(300);
+    EXPECT_EQ(boxes(), 0);
+  }
+  qputenv("XR_UPDATE_URL", before);
 }

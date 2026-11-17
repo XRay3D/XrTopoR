@@ -86,6 +86,7 @@ if(XR_BUILD_GUI)
   set(CMAKE_AUTOMOC ON)
   add_library(xrgui STATIC
     gui/AboutDialog.cpp
+    gui/UpdateCheck.cpp
     gui/AppSettings.cpp
     gui/AutorouteWindow.cpp
     gui/BoardScene.cpp

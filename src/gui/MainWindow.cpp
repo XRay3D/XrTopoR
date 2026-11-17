@@ -5,6 +5,7 @@
 #include <QColorDialog>
 #include <QDialog>
 #include <QDir>
+#include <QDesktopServices>
 #include <QDockWidget>
 #include <QFileDialog>
 #include <QFontDatabase>
@@ -17,6 +18,7 @@
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QProgressDialog>
+#include <QPushButton>
 #include <QSettings>
 #include <QStatusBar>
 #include <QStatusTipEvent>
@@ -41,6 +43,7 @@
 #include "gui/MessagesPanel.h"
 #include "gui/PropertiesPanel.h"
 #include "gui/TextStylesDialog.h"
+#include "gui/UpdateCheck.h"
 #include "gui/SearchPanel.h"
 #include "gui/SmallDialogs.h"
 #include "gui/ModeBar.h"
@@ -57,6 +60,7 @@
 #include "router/topo/Optimizer.h"
 #include "router/topo/Refine.h"
 #include "router/topo/TopoRouter.h"
+#include "xr/Version.h"
 
 // Resources of a static library are registered explicitly (outside any namespace).
 static void initGuiResources() { Q_INIT_RESOURCE(icons); }
@@ -754,6 +758,30 @@ bool MainWindow::maybeSave() {
 void MainWindow::warn(const QString& title, const QString& text) {
   if (quietError_) *quietError_ = text;
   else QMessageBox::warning(this, title, text);
+}
+
+void MainWindow::checkForUpdates() {
+  if (!AppSettings::checkUpdates()) return;
+  auto* check = new UpdateCheck(this);
+  connect(check, &UpdateCheck::finished, this, [this, check](const UpdateCheck::Result& r) {
+    check->deleteLater();
+    if (!r.newer || r.tag == AppSettings::announcedRelease()) return;  // a failed check says nothing at start-up
+    AppSettings::setAnnouncedRelease(r.tag);
+    // Not modal: whatever started with the program (an MCP client, a procedure) goes on.
+    auto* box = new QMessageBox(QMessageBox::Information, tr("Новая версия"),
+                                tr("Вышла XrTopoR %1 (у вас %2).<br><br><a href=\"%3\">Страница выпуска</a> · "
+                                   "<a href=\"%4\">Все выпуски</a>")
+                                    .arg(r.tag.toHtmlEscaped(), QStringLiteral(XR_VERSION_FULL), r.url, releasesUrl()),
+                                QMessageBox::Close, this);
+    box->setTextFormat(Qt::RichText);
+    box->setTextInteractionFlags(Qt::TextBrowserInteraction);
+    box->setInformativeText(tr("Проверку при запуске можно выключить в «Справка › О программе»."));
+    QPushButton* open = box->addButton(tr("Открыть страницу"), QMessageBox::AcceptRole);
+    connect(open, &QPushButton::clicked, this, [url = r.url] { QDesktopServices::openUrl(QUrl(url)); });
+    box->setAttribute(Qt::WA_DeleteOnClose);
+    box->open();
+  });
+  check->start();
 }
 
 bool MainWindow::openFile(const QString& path) {

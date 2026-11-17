@@ -1,6 +1,7 @@
 #include "gui/AboutDialog.h"
 
 #include <QApplication>
+#include <QCheckBox>
 #include <QClipboard>
 #include <QDialogButtonBox>
 #include <QLabel>
@@ -12,6 +13,8 @@
 #include <utility>
 #include <vector>
 
+#include "gui/AppSettings.h"
+#include "gui/UpdateCheck.h"
 #include "xr/Version.h"
 
 namespace xr::gui {
@@ -53,7 +56,7 @@ AboutDialog::AboutDialog(QWidget* parent) : QDialog(parent) {
   setWindowTitle(tr("О программе"));
   auto* v = new QVBoxLayout(this);
   auto* text = new QLabel(tr("<h2>XrTopoR %1</h2>"
-                             "<p>Топологический редактор и трассировщик печатных плат.<br>Интерфейс повторяет TopoR 7.0.</p>"
+                             "<p>Топологический редактор и трассировщик печатных плат.</p>"
                              "%2"
                              "<p><a href=\"%3\">%3</a></p>")
                               .arg(XR_VERSION_FULL, buildInfo(true), XR_REPOSITORY));
@@ -61,6 +64,30 @@ AboutDialog::AboutDialog(QWidget* parent) : QDialog(parent) {
   text->setOpenExternalLinks(true);
   text->setTextInteractionFlags(Qt::TextBrowserInteraction);
   v->addWidget(text);
+
+  // Updates: GitHub is asked while the dialog is open; the check at start-up can be turned off here.
+  updates_ = new QLabel(tr("Обновления: проверка…"));
+  updates_->setObjectName("updates");
+  updates_->setTextFormat(Qt::RichText);
+  updates_->setOpenExternalLinks(true);
+  updates_->setTextInteractionFlags(Qt::TextBrowserInteraction);
+  updates_->setWordWrap(true);
+  v->addWidget(updates_);
+  auto* atStart = new QCheckBox(tr("Проверять обновления при запуске"));
+  atStart->setChecked(AppSettings::checkUpdates());
+  connect(atStart, &QCheckBox::toggled, this, [](bool on) { AppSettings::setCheckUpdates(on); });
+  v->addWidget(atStart);
+  auto* check = new UpdateCheck(this);
+  connect(check, &UpdateCheck::finished, this, [this](const UpdateCheck::Result& r) {
+    const QString all = QString("<a href=\"%1\">%2</a>").arg(releasesUrl(), tr("все выпуски"));
+    if (!r.ok) updates_->setText(tr("Обновления: не удалось проверить (%1) — %2.").arg(r.error.toHtmlEscaped(), all));
+    else if (r.newer)
+      updates_->setText(tr("<b>Доступна версия %1</b> — <a href=\"%2\">страница выпуска</a>, %3.")
+                            .arg(r.tag.toHtmlEscaped(), r.url, all));
+    else updates_->setText(tr("Обновления: установлена последняя версия (%1) — %2.").arg(r.tag.toHtmlEscaped(), all));
+  });
+  check->start();
+
   auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, this);
   buttons->button(QDialogButtonBox::Close)->setText(tr("Закрыть"));
   QPushButton* copy = buttons->addButton(tr("Скопировать сведения"), QDialogButtonBox::ActionRole);
