@@ -366,6 +366,7 @@ struct SourceDoc;
 struct JunkRemoved {
   int twins = 0;   // tracks lying exactly on another of their net and layer
   int crumbs = 0;  // crumbs with a loose end: tracks of 5 um and less that lead nowhere
+  int netless = 0; // tracks of no net: a wire is of a net of the netlist, or it is not there
 };
 
 struct Board {

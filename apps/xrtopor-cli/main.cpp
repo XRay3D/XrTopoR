@@ -201,6 +201,7 @@ int main(int argc, char** argv) {
   Board& b = **loaded;
   auto second = [&]() -> std::string { return a.v.size() > 1 ? std::string(a.v[1]) : std::string(); };
 
+  if (b.junkRemoved.netless > 0) std::println("junk removed on load: {} track(s) of no net", b.junkRemoved.netless);
   if (b.junkRemoved.twins + b.junkRemoved.crumbs > 0)
     std::println("junk removed on load: {} loose crumb(s) of 5 um and shorter", b.junkRemoved.crumbs);
   if (cmd == "info") return cmdInfo(b);

@@ -4397,3 +4397,54 @@ TEST(Gui, NewReleaseIsAnnounced) {
   }
   qputenv("XR_UPDATE_URL", before);
 }
+
+// «Прокладка» begins a wire from copper of a net of the netlist only — a wire, a pad, a via, a copper area: a click
+// in the open, or on a pad of no net, begins nothing.
+TEST(Gui, AWireIsBegunFromCopperOfANet) {
+  Fixture f("tt.kicad_pcb");
+  auto at = [](double x, double y) { return Vec2{x * kNmPerMm, y * kNmPerMm}; };
+  auto board = std::make_unique<Board>();
+  {
+    Board& b = *board;
+    const LayerId top = b.addLayer("Top", LayerKind::Copper, Side::Top);
+    b.layers[top].copperIndex = 0;
+    b.outline.push_back({at(0, 0), at(40, 0), at(40, 20), at(0, 20)});
+    auto pad = [&](int net, double x, double y) {
+      Component c;
+      c.ref = "P" + std::to_string(b.components.size());
+      c.pos = Point(at(x, y));
+      Pad p;
+      p.number = "1";
+      p.component = int(b.components.size());
+      p.net = net;
+      p.pos = Point(at(x, y));
+      p.shape.kind = PadShapeKind::Circle;
+      p.shape.w = p.shape.h = mmToNm(1);
+      p.copper = LayerMask(1) << top;
+      c.pads.push_back(int(b.pads.size()));
+      b.pads.push_back(p);
+      b.components.push_back(c);
+    };
+    pad(b.addNet("S"), 30, 10);
+    pad(kNoNet, 10, 10);
+    b.rules = rulesFromBoard(b);
+    compileRules(b);
+  }
+  f.doc.setBoard(std::move(board), "open");
+  f.look(at(20, 10), 44);
+  auto click = [&](Vec2 w) { QTest::mouseClick(&f.view, Qt::LeftButton, {}, f.at(w)); };
+  f.view.setMode(Mode::Route);
+  click(at(5, 5));  // in the open
+  EXPECT_FALSE(f.view.isRouting());
+  click(at(12, 5));
+  QTest::keyClick(&f.view, Qt::Key_Return);
+  EXPECT_TRUE(f.b().tracks.empty());
+  click(at(10, 10));  // a pad of no net
+  EXPECT_FALSE(f.view.isRouting());
+  click(at(30, 10));  // the pad of S
+  EXPECT_TRUE(f.view.isRouting());
+  click(at(20, 12));
+  QTest::keyClick(&f.view, Qt::Key_Return);
+  ASSERT_EQ(f.b().tracks.size(), 1u);
+  EXPECT_EQ(f.b().tracks[0].net, f.b().findNet("S"));
+}

@@ -737,8 +737,16 @@ void BoardView::mousePressEvent(QMouseEvent* e) {
         else pairAddPoint(constrained(routeLast_, w), pk);
         break;
       }
-      if (!routing_) routeStart(pk, pk.item ? pk.snap : w);
-      else if (auto m = routeMagnet(toWorld(e->position()))) routeLand(*m);
+      if (!routing_) {
+        // A wire is begun from copper of a net of the netlist — a wire, a pad, a via, a copper area — and from
+        // nothing else: a click in the open, or on copper of no net, begins none.
+        const bool copper = pk.item && (pk.item->type == ItemType::Track || pk.item->type == ItemType::Pad || pk.item->type == ItemType::Via || pk.item->type == ItemType::Zone);
+        if (!copper || itemNet(*doc_->board(), *pk.item) < 0) {
+          emit status(tr("Прокладка начинается с проводника, контакта, перехода или металлизации, у которых назначена цепь"));
+          break;
+        }
+        routeStart(pk, pk.snap);
+      } else if (auto m = routeMagnet(toWorld(e->position()))) routeLand(*m);
       else routeAddPoint(constrained(routeLast_, pk.item && itemNet(*doc_->board(), *pk.item) == routeNet_ ? pk.snap : w), pk);
       break;
     }
@@ -2734,6 +2742,7 @@ void BoardView::changeNet() {
   if (!net) return;
   auto before = doc_->beginEdit();
   edit::changeNet(b, f, pads, *net);
+  if (*net == kNoNet && !f.tracks.empty()) doc_->clearSelection();  // (the wires given no net are gone)
   doc_->commitEdit(before, tr("Изменить цепь"));
 }
 

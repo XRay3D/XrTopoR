@@ -96,6 +96,24 @@ bool inOwnCopper(const Board& b, const SpatialIndex& idx, ItemRef r) {
 bool skipPair(const Board& b, ItemRef a, ItemRef c) {
   int na = itemNet(b, a), nc = itemNet(b, c);
   if (na != kNoNet && na == nc) return true;
+  // Copper of no net that is joined is one piece: the segments of a wire drawn in the open meet at their ends, and
+  // such a wire may end in a pad or a via of no net (every two of them were a short of «<no net>» with itself).
+  if (na == kNoNet && nc == kNoNet) {
+    if (a.type != ItemType::Track) std::swap(a, c);
+    if (a.type == ItemType::Track) {
+      const Track& t = b.tracks[a.index];
+      for (Vec2 p : {t.a.v(), t.b.v()}) {
+        if (c.type == ItemType::Track) {
+          const Track& o = b.tracks[c.index];
+          if (o.layer == t.layer && ((o.a.v() - p).len() <= 1000 || (o.b.v() - p).len() <= 1000)) return true;
+        } else if (c.type == ItemType::Pad) {
+          if (b.pads[c.index].onLayer(t.layer) && b.pads[c.index].shapeGeom().contains(p)) return true;
+        } else if (c.type == ItemType::Via) {
+          if (b.vias[c.index].onLayer(t.layer) && (b.vias[c.index].pos.v() - p).len() <= b.vias[c.index].diameter / 2.0) return true;
+        }
+      }
+    }
+  }
   // The two conductors of one zipped section of a differential pair are one object (their gap is the rule).
   if (a.type == ItemType::Track && c.type == ItemType::Track && b.tracks[a.index].zip >= 0 && b.tracks[a.index].zip == b.tracks[c.index].zip) return true;
   if (a.type == ItemType::Pad && c.type == ItemType::Pad) {

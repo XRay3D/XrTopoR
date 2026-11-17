@@ -794,6 +794,7 @@ void changeNet(Board& b, const Fragment& f, const std::vector<int>& pads, int ne
   for (int vi : f.vias) b.vias[vi].net = net;
   for (int zi : f.zones) b.zones[zi].net = net;
   for (int pi : pads) b.pads[pi].net = net;
+  if (net == kNoNet) removeNetless(b);  // (a wire given no net goes)
 }
 
 std::string removeNet(Board& b, int net) {
@@ -817,6 +818,8 @@ std::string removeNet(Board& b, int net) {
     fix(z.netN);
   }
   b.nets.erase(b.nets.begin() + net);
+  b.rebuildNetIndex();  // (the names' numbers moved: a net looked up by name was found under the old one)
+  removeNetless(b);     // (its wires go with it: there are no wires of no net)
   if (b.rules) compileRules(b);
   return {};
 }
@@ -908,6 +911,7 @@ Fragment paste(Board& b, const Clip& c, Vec2 at) {
     t.layer = layer(t.layer);
     if (t.layer < 0) continue;
     t.net = net(t.net);
+    if (t.net == kNoNet) continue;  // (a wire of a net this design has not: there are no wires of no net)
     t.locked = false;
     t.id = 0;  // new copper: no id of the copied one's
     t.zip = -1;
@@ -1108,9 +1112,17 @@ std::vector<char> junkTracks(const Board& b, bool twins, double crumbLength, Jun
   return drop;
 }
 
+int removeNetless(Board& b) {
+  const size_t was = b.tracks.size();
+  std::erase_if(b.tracks, [](const Track& t) { return t.net == kNoNet && t.zip < 0; });
+  return int(was - b.tracks.size());
+}
+
 JunkRemoved removeJunkTracks(Board& b, bool twins) {
   JunkRemoved out;
+  const int netless = removeNetless(b);
   const std::vector<char> drop = junkTracks(b, twins, kCrumb, &out);
+  out.netless = netless;
   if (out.twins + out.crumbs == 0) return out;
   size_t k = 0;
   for (size_t i = 0; i < b.tracks.size(); ++i)

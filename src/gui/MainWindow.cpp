@@ -843,6 +843,9 @@ bool MainWindow::openDesign(const QString& file) {
                     .arg(b.nets.size())
                     .arg(b.tracks.size())
                     .arg(b.vias.size())});
+  if (b.junkRemoved.netless > 0)
+    doc_->addLog({LogMessage::Kind::Warning, tr("Документ"),
+                  tr("Удалено дорожек без цепи: %1. Сохраните дизайн, чтобы убрать их из файла.").arg(b.junkRemoved.netless)});
   if (b.junkRemoved.twins + b.junkRemoved.crumbs > 0)
     doc_->addLog({LogMessage::Kind::Warning, tr("Документ"),
                   tr("Удалён мусор: совпадающих дорожек %1, хвостиков короче 5 мкм со свободным концом %2. Сохраните дизайн, чтобы убрать их из файла.")

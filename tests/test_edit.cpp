@@ -776,6 +776,41 @@ TEST(ZoneFill, ABridgeCrossesTheNotchOfAPad) {
   EXPECT_EQ(Connectivity::compute(t.b).ratsnest.size(), 0u);
 }
 
+// There are no wires of no net: a track without one goes when the design is loaded (with the other junk), when
+// its net is taken out of the design, when it is given «без цепи», and is not pasted where its net is not known.
+TEST(Edit, TracksOfNoNetGo) {
+  Fixture fx;
+  const size_t n = fx.b.tracks.size();
+  ASSERT_GT(n, 1u);
+  const int net = fx.b.tracks[0].net;
+  ASSERT_GE(net, 0);
+  const size_t ofNet = size_t(r::count(fx.b.tracks, net, &Track::net));
+  // Loaded with a track of no net.
+  Board loaded = fx.b;
+  loaded.tracks[0].net = kNoNet;
+  const JunkRemoved junk = edit::removeJunkTracks(loaded, false);
+  EXPECT_EQ(junk.netless, 1);
+  EXPECT_EQ(loaded.tracks.size(), n - 1);
+  // Given no net.
+  Board given = fx.b;
+  edit::Fragment f;
+  f.tracks = {0};
+  edit::changeNet(given, f, {}, kNoNet);
+  EXPECT_EQ(given.tracks.size(), n - 1);
+  EXPECT_TRUE(r::none_of(given.tracks, [](const Track& t) { return t.net == kNoNet; }));
+  // Its net taken out: the net's tracks with it, the pads left without a net.
+  Board taken = fx.b;
+  ASSERT_EQ(edit::removeNet(taken, net), "");
+  EXPECT_EQ(taken.tracks.size(), n - ofNet);
+  EXPECT_TRUE(r::none_of(taken.tracks, [](const Track& t) { return t.net == kNoNet; }));
+  // Pasted into a design that has not the net.
+  edit::Fragment all;
+  for (int i = 0; i < int(fx.b.tracks.size()); ++i) all.tracks.push_back(i);
+  const edit::Clip clip = edit::copy(fx.b, all);
+  const edit::Fragment pasted = edit::paste(taken, clip, Vec2{});
+  EXPECT_EQ(pasted.tracks.size(), n - ofNet);
+}
+
 // A net taken out of a design: its objects are of no net, the nets after it keep their objects and their rules; a
 // net named anew keeps what the rules give it, or is not renamed.
 TEST(Edit, ANetIsTakenOutAndNamedAnew) {

@@ -293,10 +293,11 @@ std::optional<int> askNet(QWidget* parent, Document* doc, std::optional<int> cur
     for (const Via& x : b.vias) used += x.net == n;
     for (const Zone& z : b.zones) used += z.net == n;
     if (used > 0 && QMessageBox::question(&dlg, QObject::tr("Удалить цепь"),
-                                          QObject::tr("К цепи %1 относится объектов: %2. Они останутся без цепи. Удалить?").arg(netName(n)).arg(used)) != QMessageBox::Yes)
+                                          QObject::tr("К цепи %1 относится объектов: %2. Её проводники будут удалены, остальные объекты останутся без цепи. Удалить?").arg(netName(n)).arg(used)) != QMessageBox::Yes)
       return;
     auto before = doc->beginEdit();
     if (const std::string why = edit::removeNet(*doc->board(), n); !why.empty()) return refuse(why);
+    doc->clearSelection();  // (the net's wires are gone: an index names another track now)
     doc->invalidateModel();
     doc->commitEdit(before, QObject::tr("Удалить цепь"), false);
     if (current) current = *current == n ? kNoNet : *current > n ? *current - 1 : *current;
