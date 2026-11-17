@@ -1001,6 +1001,121 @@ TEST(Gui, PropertiesEditWireWidth) {
   EXPECT_EQ(f.b().tracks[0].width, w0);
 }
 
+// A via, or the end of a segment, dragged up to the other end of its segment swallows the segment: the vertex
+// there is the dragged one from then on, with what met at it; an end brought on to a pad stays joined to it.
+// S: pad (5, 10), wire to the via at (15, 10), on to a bend at (25, 10) and up to the pad at (25, 16).
+// T: pad (5, 4) — (15, 4) — (25, 4) — pad (35, 4).
+TEST(Gui, ADraggedViaOrVertexSwallowsTheSegmentItClosesUp) {
+  Fixture f("tt.kicad_pcb");
+  auto at = [](double x, double y) { return Vec2{x * kNmPerMm, y * kNmPerMm}; };
+  auto make = [&] {
+    auto board = std::make_unique<Board>();
+    Board& b = *board;
+    const LayerId top = b.addLayer("Top", LayerKind::Copper, Side::Top);
+    b.layers[top].copperIndex = 0;
+    b.netClasses[0].clearance = mmToNm(0.2);
+    b.outline.push_back({at(0, 0), at(40, 0), at(40, 20), at(0, 20)});
+    auto pad = [&](const char* net, double x, double y) {
+      Component c;
+      c.ref = "P" + std::to_string(b.components.size());
+      c.pos = Point(at(x, y));
+      c.locked = true;
+      Pad p;
+      p.number = "1";
+      p.component = int(b.components.size());
+      p.net = b.addNet(net);
+      p.pos = Point(at(x, y));
+      p.shape.kind = PadShapeKind::Circle;
+      p.shape.w = p.shape.h = mmToNm(1);
+      p.copper = LayerMask(1) << top;
+      c.pads.push_back(int(b.pads.size()));
+      b.pads.push_back(p);
+      b.components.push_back(c);
+    };
+    auto track = [&](const char* net, Vec2 a, Vec2 c) {
+      Track t;
+      t.a = Point(a);
+      t.b = Point(c);
+      t.width = mmToNm(0.3);
+      t.layer = top;
+      t.net = b.addNet(net);
+      b.tracks.push_back(t);
+    };
+    pad("S", 5, 10);
+    pad("S", 25, 16);
+    Via v;
+    v.pos = Point(at(15, 10));
+    v.net = b.addNet("S");
+    v.diameter = mmToNm(1);
+    v.drill = mmToNm(0.5);
+    v.layers = LayerMask(1) << top;
+    b.vias.push_back(v);
+    track("S", at(5, 10), at(15, 10));
+    track("S", at(15, 10), at(25, 10));
+    track("S", at(25, 10), at(25, 16));
+    pad("T", 5, 4);
+    pad("T", 35, 4);
+    track("T", at(5, 4), at(15, 4));
+    track("T", at(15, 4), at(25, 4));
+    track("T", at(25, 4), at(35, 4));
+    b.rules = rulesFromBoard(b);
+    compileRules(b);
+    f.doc.setBoard(std::move(board), "swallow");
+    f.look(at(20, 10), 44);
+  };
+  auto tracksOf = [&](const char* net) {
+    std::vector<Track> out;
+    for (const Track& t : f.b().tracks)
+      if (f.b().nets[size_t(t.net)].name == net) out.push_back(t);
+    return out;
+  };
+  auto hasEnd = [](const std::vector<Track>& ts, Vec2 p) {
+    return r::any_of(ts, [&](const Track& t) { return (t.a.v() - p).len() < 20000 || (t.b.v() - p).len() < 20000; });
+  };
+  auto dragTo = [&](Vec2 from, std::initializer_list<Vec2> way) {
+    QTest::mousePress(&f.view, Qt::LeftButton, {}, f.at(from));
+    moveTo(f.view, f.at(from) + QPoint(6, 0), Qt::LeftButton);
+    for (Vec2 w : way) moveTo(f.view, f.at(w), Qt::LeftButton);
+    QTest::mouseRelease(&f.view, Qt::LeftButton, {}, f.at(*(way.end() - 1)));
+  };
+
+  // The via up to the bend at (25, 10), and on: the segment between them is gone, the wire up to the pad goes
+  // from the via.
+  make();
+  dragTo(at(15, 10), {at(20, 10), at(24.8, 10.1), at(27, 11)});
+  ASSERT_EQ(f.b().vias.size(), 1u);
+  const Vec2 via = f.b().vias[0].pos.v();
+  EXPECT_LT((via - at(27, 11)).len(), 0.3 * kNmPerMm);
+  EXPECT_EQ(tracksOf("S").size(), 2u);
+  EXPECT_EQ(r::count_if(tracksOf("S"), [&](const Track& t) { return (t.a.v() - via).len() < 20000 || (t.b.v() - via).len() < 20000; }), 2);
+  EXPECT_TRUE(hasEnd(tracksOf("S"), at(5, 10)) && hasEnd(tracksOf("S"), at(25, 16)));
+  EXPECT_EQ(Connectivity::compute(f.b()).ratsnest.size(), 0u);
+  f.doc.undoStack()->undo();
+  EXPECT_EQ(tracksOf("S").size(), 3u);
+
+  // The end (25, 4) of T's middle segment back to its other end (15, 4), and down: the segment is gone, the
+  // vertex that was (15, 4) is the dragged one.
+  make();
+  QTest::mouseClick(&f.view, Qt::LeftButton, {}, f.at(at(20, 4)));
+  ASSERT_EQ(f.doc.selectedItems().size(), 1u);
+  dragTo(at(25, 4), {at(20, 4.5), at(15.1, 4.1), at(15, 7)});
+  EXPECT_EQ(tracksOf("T").size(), 2u);
+  EXPECT_EQ(r::count_if(tracksOf("T"), [&](const Track& t) { return (t.a.v() - at(15, 7)).len() < 0.3 * kNmPerMm || (t.b.v() - at(15, 7)).len() < 0.3 * kNmPerMm; }), 2);
+  EXPECT_TRUE(hasEnd(tracksOf("T"), at(5, 4)) && hasEnd(tracksOf("T"), at(35, 4)));
+  EXPECT_EQ(Connectivity::compute(f.b()).ratsnest.size(), 0u);
+
+  // The end (15, 4) of T's first segment on to the pad at (5, 4): the segment is gone, the next one starts from
+  // the pad, and stays there though the mouse goes on.
+  make();
+  QTest::mouseClick(&f.view, Qt::LeftButton, {}, f.at(at(10, 4)));
+  ASSERT_EQ(f.doc.selectedItems().size(), 1u);
+  dragTo(at(15, 4), {at(10, 4.3), at(5.2, 4.1), at(5.5, 4.4)});
+  EXPECT_EQ(tracksOf("T").size(), 2u);
+  EXPECT_TRUE(hasEnd(tracksOf("T"), at(5, 4)) && hasEnd(tracksOf("T"), at(25, 4)) && hasEnd(tracksOf("T"), at(35, 4)));
+  EXPECT_FALSE(hasEnd(tracksOf("T"), at(15, 4)));
+  EXPECT_EQ(Connectivity::compute(f.b()).ratsnest.size(), 0u);
+}
+
 // «Атрибуты» of a component: a flag puts the attribute's label on the board and takes it away, each an undoable
 // step; the label goes with its component.
 TEST(Gui, AttributeLabelsAreFlagged) {

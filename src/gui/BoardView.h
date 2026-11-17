@@ -280,6 +280,13 @@ class BoardView : public QOpenGLWidget {
   bool dragMoved_ = false;  // past the threshold: a drag, not a click
   QPointF dragScreen_;
   Vec2 dragStart_;
+  // The other ends of the segments a dragged via, lone pad or wire vertex has swallowed on its way, in their order
+  // (edit::closedUpEnd): the thing is put on each in turn before it goes on to the cursor.
+  std::vector<Vec2> dragEaten_;
+  // Drags the thing through the swallowed ends and on to `target`: `anchor` says where it stands, `put` moves it
+  // to a point; a segment closed up on the way is swallowed. False: it stays on a pad or via it was joined to.
+  bool dragSwallowing(Vec2 target, double tol, LayerMask layers, int net, const std::function<Vec2()>& anchor, const std::function<const Shape*()>& copper,
+                      const std::function<void(Vec2)>& put);
   edit::Fragment dragFragment_;
   Vec2 dragPivot_;
   double dragRotate_ = 0;

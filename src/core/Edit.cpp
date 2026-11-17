@@ -405,6 +405,20 @@ bool moveVertex(Board& b, int track, int end, Vec2 to) {
   return true;
 }
 
+std::optional<Vec2> closedUpEnd(const Board& b, Vec2 at, const Shape* copper, LayerMask layers, int net, Vec2 to, double tol) {
+  std::optional<Vec2> best;
+  auto there = [&](Vec2 p) { return copper ? copper->contains(p) : sameVertex(p, at); };
+  for (const Track& t : b.tracks) {
+    if (t.locked || t.net != net || !((layers >> t.layer) & 1)) continue;
+    for (int e : {0, 1}) {
+      const Vec2 here = endOf(t, e), far = endOf(t, 1 - e);
+      if (!there(here) || there(far)) continue;
+      if ((far - to).len() <= tol && (!best || (far - to).len() < (*best - to).len())) best = far;
+    }
+  }
+  return best;
+}
+
 bool moveSegment(Board& b, int track, Vec2 d) {
   Fragment f;
   f.tracks = {track};

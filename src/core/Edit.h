@@ -69,6 +69,12 @@ bool move(Board& b, const Fragment& f, const Motion& m);
 // there. A vertex on a pad or via stays: the grabbed track breaks off it with a new segment.
 // False if a locked track ends there.
 bool moveVertex(Board& b, int track, int end, Vec2 to);
+// A segment a dragged vertex, via or pad has all but closed up: of the tracks of the net and the layers that end
+// where the dragged thing stands — at `at`, or in `copper` when it is given —, the other end of one, nearest `to`
+// and within `tol` of it. The caller puts the thing on that end (the segment is then of no length, and goes with
+// the degenerate ones), and drags on from there: what met at that end goes with it now. Locked tracks and those
+// with both ends at the place are not looked at.
+std::optional<Vec2> closedUpEnd(const Board& b, Vec2 at, const Shape* copper, LayerMask layers, int net, Vec2 to, double tol);
 // A track's ends to a2 and b2, an arc keeping its shape (the similarity taking the old ends to the new).
 void stretchEnds(Track& t, Vec2 a2, Vec2 b2);
 // Parallel transfer of one segment by d (neighbours stretch, as in move()).

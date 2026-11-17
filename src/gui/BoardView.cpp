@@ -1615,6 +1615,22 @@ void BoardView::startDrag(Drag kind, Vec2 at, std::optional<Marker> marker) {
   dragMirror_ = false;
   dragMarker_ = marker ? *marker : Marker{};
   dragBefore_.reset();
+  dragEaten_.clear();
+}
+
+bool BoardView::dragSwallowing(Vec2 target, double tol, LayerMask layers, int net, const std::function<Vec2()>& anchor, const std::function<const Shape*()>& copper,
+                               const std::function<void(Vec2)>& put) {
+  Board& b = *doc_->board();
+  for (Vec2 q : dragEaten_) put(q);
+  // A vertex put on a pad or via is joined to it, and stays: dragged on, it would pull the segment out again.
+  auto joined = [&] { return !dragEaten_.empty() && !copper() && edit::anchoredAt(b, dragEaten_.back(), LayerId(std::countr_zero(layers)), net); };
+  for (int guard = 0; guard < 16 && !joined(); ++guard) {
+    const std::optional<Vec2> q = edit::closedUpEnd(b, anchor(), copper(), layers, net, target, tol);
+    if (!q) break;
+    dragEaten_.push_back(*q);
+    put(*q);
+  }
+  return !joined();
 }
 
 void BoardView::applyDrag() {
@@ -1633,11 +1649,49 @@ void BoardView::applyDrag() {
   switch (drag_) {
     case Drag::None:
     case Drag::Freestyle: break;
-    case Drag::Fragment:
+    case Drag::Fragment: {
+      // A via or a lone pad alone, not turned: it swallows the segments it closes up on its way.
+      const edit::Fragment& f = dragFragment_;
+      const bool plain = dragRotate_ == 0 && !dragMirror_ && f.tracks.empty() && f.zones.empty() && f.keepouts.empty() && f.texts.empty() && f.details.empty();
+      // (When the thing's copper covers the segment's other end.)
+      if (plain && f.vias.size() == 1 && f.components.empty()) {
+        const int vi = f.vias[0];
+        const Vec2 home = b.vias[size_t(vi)].pos.v();
+        Shape disc;
+        auto copper = [&]() -> const Shape* { return &(disc = Shape::circle(b.vias[size_t(vi)].pos.v(), b.vias[size_t(vi)].diameter / 2.0)); };
+        auto put = [&](Vec2 q) {
+          edit::Motion step;
+          step.shift = q - b.vias[size_t(vi)].pos.v();
+          edit::move(b, f, step);
+        };
+        const Vec2 target = home + d;
+        if (dragSwallowing(target, b.vias[size_t(vi)].diameter / 2.0, b.vias[size_t(vi)].layers, b.vias[size_t(vi)].net,
+                           [&] { return b.vias[size_t(vi)].pos.v(); }, copper, put))
+          put(target);
+        break;
+      }
+      if (plain && f.components.size() == 1 && f.vias.empty() && b.components[size_t(f.components[0])].pads.size() == 1) {
+        const int pi = b.components[size_t(f.components[0])].pads[0];
+        const Vec2 home = b.pads[size_t(pi)].pos.v();
+        Shape shape;
+        auto copper = [&]() -> const Shape* { return &(shape = b.pads[size_t(pi)].shapeGeom()); };
+        auto put = [&](Vec2 q) {
+          edit::Motion step;
+          step.shift = q - b.pads[size_t(pi)].pos.v();
+          edit::move(b, f, step);
+        };
+        const Vec2 target = home + d;
+        const PadShape& ps = b.pads[size_t(pi)].shape;
+        if (dragSwallowing(target, double(std::min(ps.w, ps.h)) / 2.0, b.pads[size_t(pi)].copper, b.pads[size_t(pi)].net,
+                           [&] { return b.pads[size_t(pi)].pos.v(); }, copper, put))
+          put(target);
+        break;
+      }
       m.shift = d;
       edit::move(b, dragFragment_, m);
       if (dragFragment_.touchesOutline(b)) syncOutline();
       break;
+    }
     case Drag::Segment: {
       // A straight segment (of a wire or a drawn line) moves across itself, so its neighbours keep their
       // directions roughly.
@@ -1688,9 +1742,20 @@ void BoardView::applyDrag() {
         moveAxisVertex(b, dragMarker_.zip, k, constrained(other, to));
         selectSection(dragMarker_.zip);
       } else if (dragMarker_.item.type == ItemType::Track) {
-        const Track& t = b.tracks[dragMarker_.item.index];
-        Vec2 other = dragMarker_.vertex ? t.a.v() : t.b.v();
-        edit::moveVertex(b, dragMarker_.item.index, dragMarker_.vertex, constrained(other, to));
+        // The end of a segment: it swallows the segments it closes up — its own, or one that meets it there —,
+        // the vertex at their other end is the dragged one from then on; on a pad or via it stays joined.
+        const int ti = dragMarker_.item.index, end = dragMarker_.vertex;
+        const double px = (toWorld(QPointF(6, 0)) - toWorld(QPointF(0, 0))).len();
+        auto anchor = [&] { return dragMarker_.vertex ? b.tracks[size_t(ti)].b.v() : b.tracks[size_t(ti)].a.v(); };
+        auto put = [&](Vec2 q) { edit::moveVertex(b, ti, end, q); };
+        // (Within six pixels of the other end, between three quarters of the wire's width and two widths.)
+        const double w = double(b.tracks[size_t(ti)].width);
+        if (dragSwallowing(to, std::clamp(px, 0.75 * w, 2.0 * w), LayerMask(1) << b.tracks[size_t(ti)].layer, b.tracks[size_t(ti)].net, anchor,
+                           [] { return static_cast<const Shape*>(nullptr); }, put)) {
+          const Track& t = b.tracks[size_t(ti)];
+          const Vec2 other = end ? t.a.v() : t.b.v();
+          edit::moveVertex(b, ti, end, dragEaten_.empty() ? constrained(other, to) : to);
+        }
       } else {
         editMarked([&](std::vector<Graphic>& list, int i) {
           // The angle mode holds the dragged vertex to its previous neighbour, as a wire's end to the other.
