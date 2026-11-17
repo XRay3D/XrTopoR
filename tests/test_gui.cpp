@@ -1910,10 +1910,14 @@ TEST(Gui, FreestyleWireDrag) {
   moveTo(f.view, f.at(to), Qt::LeftButton);
   EXPECT_FALSE(f.view.freestyleWay().empty()) << "the way through the cursor is shown";
   EXPECT_EQ(f.b().tracks.size(), before.size()) << "the board stands while the wire is dragged";
+  // (The wire's own way, and with a castling the wires of other nets that change sides with it.)
+  bool own = false;
   for (const Track& tr : f.view.freestyleWay()) {
-    EXPECT_EQ(tr.net, net);
+    own |= tr.net == net;
+    if (f.view.freestyleCastled() == 0) EXPECT_EQ(tr.net, net);
     EXPECT_EQ(tr.layer, layer);
   }
+  EXPECT_TRUE(own);
   QTest::mouseRelease(&f.view, Qt::LeftButton, {}, f.at(to));
   EXPECT_TRUE(f.view.freestyleWay().empty());
   EXPECT_EQ(f.doc.undoStack()->count(), stack + 1);

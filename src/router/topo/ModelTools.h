@@ -129,8 +129,14 @@ struct WireThrough {
   std::vector<Track> tracks;  // from the wire's first end through the point to its other end
   bool squeezed = false;      // a leg found no way with room
   double length = 0;          // over the triangles, nm
+  // A castling: the wires of other nets the wire was dragged across change sides with it — they are laid anew
+  // after it, round its ends — when that is shorter in sum than the wire led round theirs. Their numbers in the
+  // model, and their new tracks.
+  std::vector<int> castled;
+  std::vector<Track> others;
+  std::shared_ptr<Topology> model;  // (when asked for) the model with the two legs laid and the others laid anew
 };
-std::optional<WireThrough> wireThrough(const Board& b, const Topology& live, int wire, Vec2 p);
+std::optional<WireThrough> wireThrough(const Board& b, const Topology& live, int wire, Vec2 p, bool keepModel = false);
 // ... and laid so for good: the wire's tracks give way to the two legs, the model follows the board (built anew if
 // it cannot), and the wire's shape is computed as F5 computes the edited wires' — the bend at the point goes where
 // nothing holds it, the wire lies on the other side of what it was led round. False: nothing changed.

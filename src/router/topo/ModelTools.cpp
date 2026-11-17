@@ -976,7 +976,7 @@ DrawnConnection drawConnection(const Board& b, ModelConnection c) {
   return out;
 }
 
-std::optional<WireThrough> wireThrough(const Board& b, const Topology& live, int wire, Vec2 p) {
+std::optional<WireThrough> wireThrough(const Board& b, const Topology& live, int wire, Vec2 p, bool keepModel) {
   if (wire < 0 || wire >= int(live.wires.size())) return std::nullopt;
   const Wire was = live.wires[size_t(wire)];
   if (was.locked || was.pair >= 0 || was.net < 0 || was.end[0] < 0 || was.end[1] < 0 || b.flexFixed(was.net)) return std::nullopt;
@@ -1004,42 +1004,133 @@ std::optional<WireThrough> wireThrough(const Board& b, const Topology& live, int
   bool isFree = false;
   const int j = connectionEnd(t, *m, p, t.owners[size_t(was.end[1])].c, was.net, was.width, isFree);
   if (j < 0 || !isFree) return std::nullopt;
-  WireThrough out;
-  int legs[2];
-  for (int k = 0; k < 2; ++k) {
-    Wire w;
-    w.net = was.net;
-    w.layer = was.layer;
-    w.width = was.width;
-    w.widthMin = was.widthMin;
-    w.clr = was.clr;
-    w.end[0] = k == 0 ? was.end[0] : j;
-    w.end[1] = k == 0 ? j : was.end[1];
-    w.endVertex[0] = wireEndVertex(t, *m, w.end[0], t.owners[size_t(w.end[1])].c);
-    w.endVertex[1] = wireEndVertex(t, *m, w.end[1], t.owners[size_t(w.end[0])].c);
-    legs[k] = int(t.wires.size());
-    t.wires.push_back(std::move(w));
-    std::optional<RelayPath> path = findRelay(t, legs[k]);
-    const double line = (t.owners[size_t(t.wires[size_t(legs[k])].end[0])].c - t.owners[size_t(t.wires[size_t(legs[k])].end[1])].c).len();
-    if (!path || path->length > 3 * line + 5 * kNmPerMm)
-      if (std::optional<RelayPath> tight = findRelay(t, legs[k], nullptr, nullptr, true); tight && (!path || tight->length < path->length)) {
-        path = tight;
-        out.squeezed = true;
-      }
-    if (!path) return std::nullopt;
-    applyRelay(t, legs[k], *path);
-    out.length += path->length;
-    if (static const bool debug = std::getenv("XR_FS_DEBUG") != nullptr; debug) {
-      std::println(stderr, "  wireThrough: leg {} of {} crossings, {:.3f} mm{}", k, t.wires[size_t(legs[k])].cross.size(), path->length / 1e6, path->along ? ", along an edge" : "");
-      for (int cid : t.wires[size_t(legs[k])].cross) {
-        const Edge& E = m->edges[size_t(t.crossings[size_t(cid)].edge)];
-        const Vertex& u = m->verts[size_t(E.v[0])];
-        const Vertex& v = m->verts[size_t(E.v[1])];
-        std::println(stderr, "    across [owner {} kind {} ({:.3f}, {:.3f})] - [owner {} kind {} ({:.3f}, {:.3f})], {} of {}", u.owner, int(t.owners[size_t(u.owner)].kind), u.p.x / 1e6, u.p.y / 1e6, v.owner,
-                     int(t.owners[size_t(v.owner)].kind), v.p.x / 1e6, v.p.y / 1e6, int(r::find(E.cross, cid) - E.cross.begin()), E.cross.size());
+  const int nWas = int(t.wires.size());
+  // The two legs laid in a model: from the wire's first end to the point, from the point to its other end.
+  struct Laid {
+    Topology t;
+    int legs[2] = {-1, -1};
+    double length = 0;
+    bool squeezed = false;
+    std::vector<int> castled;
+    double othersBefore = 0, othersAfter = 0;
+  };
+  static const bool debug = std::getenv("XR_FS_DEBUG") != nullptr;
+  auto layLegs = [&](Laid& l, bool squeeze) {
+    Topology& t = l.t;
+    LayerMesh* m = t.mesh(was.layer);
+    for (int k = 0; k < 2; ++k) {
+      Wire w;
+      w.net = was.net;
+      w.layer = was.layer;
+      w.width = was.width;
+      w.widthMin = was.widthMin;
+      w.clr = was.clr;
+      w.end[0] = k == 0 ? was.end[0] : j;
+      w.end[1] = k == 0 ? j : was.end[1];
+      w.endVertex[0] = wireEndVertex(t, *m, w.end[0], t.owners[size_t(w.end[1])].c);
+      w.endVertex[1] = wireEndVertex(t, *m, w.end[1], t.owners[size_t(w.end[0])].c);
+      l.legs[k] = int(t.wires.size());
+      t.wires.push_back(std::move(w));
+      std::optional<RelayPath> path = findRelay(t, l.legs[k]);
+      const double line = (t.owners[size_t(t.wires[size_t(l.legs[k])].end[0])].c - t.owners[size_t(t.wires[size_t(l.legs[k])].end[1])].c).len();
+      if (squeeze && (!path || path->length > 3 * line + 5 * kNmPerMm))
+        if (std::optional<RelayPath> tight = findRelay(t, l.legs[k], nullptr, nullptr, true); tight && (!path || tight->length < path->length)) {
+          path = tight;
+          l.squeezed = true;
+        }
+      if (!path) return false;
+      applyRelay(t, l.legs[k], *path);
+      l.length += path->length;
+      if (debug) {
+        std::println(stderr, "  wireThrough: leg {} of {} crossings, {:.3f} mm{}", k, t.wires[size_t(l.legs[k])].cross.size(), path->length / 1e6, path->along ? ", along an edge" : "");
+        for (int cid : t.wires[size_t(l.legs[k])].cross) {
+          const Edge& E = m->edges[size_t(t.crossings[size_t(cid)].edge)];
+          const Vertex& u = m->verts[size_t(E.v[0])];
+          const Vertex& v = m->verts[size_t(E.v[1])];
+          std::println(stderr, "    across [owner {} kind {} ({:.3f}, {:.3f})] - [owner {} kind {} ({:.3f}, {:.3f})], {} of {}", u.owner, int(t.owners[size_t(u.owner)].kind), u.p.x / 1e6, u.p.y / 1e6, v.owner,
+                       int(t.owners[size_t(v.owner)].kind), v.p.x / 1e6, v.p.y / 1e6, int(r::find(E.cross, cid) - E.cross.begin()), E.cross.size());
+        }
       }
     }
+    return true;
+  };
+  // The wire led round what is in its way.
+  std::optional<Laid> round = Laid{t};
+  if (!layLegs(*round, true)) round.reset();
+  // ... or a castling: the wires of other nets that the straight legs cross as they are drawn — the wires the hand
+  // dragged this one across — are taken out, the legs laid without them, and they laid anew after the legs, the
+  // shorter first: they go round this wire's ends, as it would have gone round theirs. Taken when it is shorter
+  // in sum (or the only way).
+  std::optional<Laid> castling;
+  {
+    std::map<uint32_t, int> wireOfTrack;
+    for (int wi = 0; wi < nWas; ++wi) {
+      const Wire& x = t.wires[size_t(wi)];
+      if (wi == wire || x.layer != was.layer || x.net == was.net || x.net < 0 || x.locked || x.pair >= 0 || x.end[0] < 0 || x.end[1] < 0 || b.flexFixed(x.net)) continue;
+      for (uint32_t id : x.tracks) wireOfTrack[id] = wi;
+    }
+    const Vec2 pts[3] = {t.owners[size_t(was.end[0])].c, t.owners[size_t(j)].c, t.owners[size_t(was.end[1])].c};
+    std::vector<int> crossed;
+    for (const Track& x : b.tracks) {
+      if (!x.id || x.layer != was.layer) continue;
+      const auto it = wireOfTrack.find(x.id);
+      if (it == wireOfTrack.end() || r::contains(crossed, it->second)) continue;
+      const Vec2 mid = x.mid ? x.mid->v() : (x.a.v() + x.b.v()) * 0.5;
+      for (int k = 0; k < 2; ++k)
+        if (segmentsIntersect(pts[k], pts[k + 1], x.a.v(), mid) || segmentsIntersect(pts[k], pts[k + 1], mid, x.b.v())) {
+          crossed.push_back(it->second);
+          break;
+        }
+    }
+    // Which of them: each alone, two together (of four at most), all of them — the least in sum; a wire that was
+    // only brushed by the straight line stays where it lies.
+    auto castle = [&](const std::vector<int>& set) -> std::optional<Laid> {
+      Laid c{t};
+      std::vector<std::pair<double, int>> order;
+      for (int x : set) {
+        order.push_back({tautLength(c.t, x), x});
+        c.othersBefore += order.back().first;
+        takeOut(c.t, x);
+      }
+      r::sort(order);
+      bool ok = layLegs(c, false);
+      for (size_t i = 0; ok && i < order.size(); ++i) {
+        const int x = order[i].second;
+        const std::optional<RelayPath> path = findRelay(c.t, x);
+        if (!(ok = path.has_value())) break;
+        applyRelay(c.t, x, *path);
+        c.othersAfter += tautLength(c.t, x);
+      }
+      if (debug)
+        std::println(stderr, "  wireThrough: castling with {} wire(s) ({}...): {}; legs {:.3f} mm and the others {:.3f} -> {:.3f} mm, round them {:.3f} mm", set.size(), set.front(),
+                     ok ? "laid" : "no way", c.length / 1e6, c.othersBefore / 1e6, c.othersAfter / 1e6, round ? round->length / 1e6 : -1.0);
+      if (!ok) return std::nullopt;
+      c.castled = set;
+      return c;
+    };
+    if (crossed.size() > 6) crossed.resize(6);
+    std::vector<std::vector<int>> sets;
+    for (int x : crossed) sets.push_back({x});
+    if (crossed.size() <= 4)
+      for (size_t i = 0; i < crossed.size(); ++i)
+        for (size_t k = i + 1; k < crossed.size(); ++k) sets.push_back({crossed[i], crossed[k]});
+    if (crossed.size() > 2) sets.push_back(crossed);
+    auto sum = [](const Laid& l) { return l.length + l.othersAfter - l.othersBefore; };
+    for (const std::vector<int>& set : sets)
+      if (std::optional<Laid> c = castle(set); c && (!castling || sum(*c) < sum(*castling))) castling = std::move(c);
   }
+  if (!round && !castling) return std::nullopt;
+  const double kCastlingGain = 0.2 * kNmPerMm;
+  const bool castle = castling && (!round || round->squeezed || castling->length + castling->othersAfter < round->length + castling->othersBefore - kCastlingGain);
+  Laid& laid = castle ? *castling : *round;
+  t = std::move(laid.t);
+  m = t.mesh(was.layer);
+  WireThrough out;
+  out.squeezed = laid.squeezed;
+  out.length = laid.length;
+  out.castled = laid.castled;
+  const int legs[2] = {laid.legs[0], laid.legs[1]};
+  if (keepModel) out.model = std::make_shared<Topology>(t);
   // Drawn: the two legs and the wires of other nets they share an edge with, the rest of the net standing.
   Board trial = b;
   {
@@ -1050,8 +1141,17 @@ std::optional<WireThrough> wireThrough(const Board& b, const Topology& live, int
     if (t.wires[size_t(wi)].net == was.net && wi != legs[0] && wi != legs[1]) t.wires[size_t(wi)].locked = true;
   RealizeStats stats;
   int drawn = 0;
-  const std::vector<int> only{legs[0], legs[1]};
+  std::vector<int> only{legs[0], legs[1]};
+  only.insert(only.end(), out.castled.begin(), out.castled.end());
   drawModel(trial, t, true, stats, drawn, false, &only);
+  for (int x : out.castled) {
+    const std::set<uint32_t> own(t.wires[size_t(x)].tracks.begin(), t.wires[size_t(x)].tracks.end());
+    const size_t had = out.others.size();
+    for (const Track& tr : trial.tracks)
+      if (own.contains(tr.id)) out.others.push_back(tr);
+    if (out.others.size() == had) return std::nullopt;
+    for (size_t i = had; i < out.others.size(); ++i) out.others[i].id = 0;
+  }
   const Vec2 at = t.owners[size_t(j)].c;
   for (int k = 0; k < 2; ++k) {
     const std::set<uint32_t> own(t.wires[size_t(legs[k])].tracks.begin(), t.wires[size_t(legs[k])].tracks.end());
@@ -1076,24 +1176,53 @@ std::optional<WireThrough> wireThrough(const Board& b, const Topology& live, int
     std::vector<char> nets(b.nets.size(), 0);
     nets[size_t(was.net)] = 1;
     Board led = b;
-    const std::set<uint32_t> old(was.tracks.begin(), was.tracks.end());
+    std::set<uint32_t> old(was.tracks.begin(), was.tracks.end());
+    for (int x : out.castled) {
+      nets[size_t(live.wires[size_t(x)].net)] = 1;
+      old.insert(live.wires[size_t(x)].tracks.begin(), live.wires[size_t(x)].tracks.end());
+    }
     std::erase_if(led.tracks, [&](const Track& x) { return old.contains(x.id); });
     led.tracks.insert(led.tracks.end(), out.tracks.begin(), out.tracks.end());
+    led.tracks.insert(led.tracks.end(), out.others.begin(), out.others.end());
     if (Connectivity::compute(led, nets).ratsnest.size() > Connectivity::compute(b, nets).ratsnest.size()) return std::nullopt;
   }
   return out;
 }
 
 bool leadWireThrough(Board& b, Topology& t, int wire, Vec2 p) {
-  std::optional<WireThrough> way = wireThrough(b, t, wire, p);
+  std::optional<WireThrough> way = wireThrough(b, t, wire, p, true);
   if (!way) return false;
-  const Board old = b;
-  const std::set<uint32_t> gone(t.wires[size_t(wire)].tracks.begin(), t.wires[size_t(wire)].tracks.end());
-  std::erase_if(b.tracks, [&](const Track& x) { return gone.contains(x.id); });
-  for (Track x : way->tracks) {
-    x.edited = true;
-    b.tracks.push_back(x);
+  if (!way->castled.empty() && way->model) {
+    // A castling: the model with the wires on their new sides is drawn whole — the others lie where the old sides
+    // put them, and the preview's tracks among those would cross them, the model built from such a drawing
+    // losing the change of sides (Arcs as TopoR routed it, not yet shaped). Then as below: the model of that
+    // drawing, where the two legs are one wire again, and its shape.
+    Board nb = b;
+    const std::set<uint32_t> gone(t.wires[size_t(wire)].tracks.begin(), t.wires[size_t(wire)].tracks.end());
+    std::erase_if(nb.tracks, [&](const Track& x) { return gone.contains(x.id); });
+    Topology nt = std::move(*way->model);
+    RealizeStats stats;
+    int drawn = 0;
+    drawModel(nb, nt, true, stats, drawn);
+    Topology::assignIds(nb);
+    b = std::move(nb);
+    t = Topology();
+    t.build(b);
+    F5ModelOptions o;
+    o.branches = false;
+    runF5Model(b, t, o);
+    for (Track& x : b.tracks) x.edited = false;
+    return true;
   }
+  const Board old = b;
+  std::set<uint32_t> gone(t.wires[size_t(wire)].tracks.begin(), t.wires[size_t(wire)].tracks.end());
+  for (int x : way->castled) gone.insert(t.wires[size_t(x)].tracks.begin(), t.wires[size_t(x)].tracks.end());  // (a castling: they lie anew)
+  std::erase_if(b.tracks, [&](const Track& x) { return gone.contains(x.id); });
+  for (const std::vector<Track>* list : {&way->tracks, &way->others})
+    for (Track x : *list) {
+      x.edited = true;
+      b.tracks.push_back(x);
+    }
   Topology::assignIds(b);
   if (!t.follow(old, b)) {
     t = Topology();

@@ -24,6 +24,9 @@ struct RefineModelOptions {
   // A wire with no shorter way alone is tried with a wire that holds it taken out and laid anew after it (the
   // clinches of Luzin, Popov, Popov, NTV ITMO 2012 no. 4).
   bool clinches = true;
+  // ... and, with no clinch found, with each of them alone, the wire itself no shorter for it: a castling — the two
+  // change sides when they are shorter so in sum.
+  bool castlings = true;
   // A via next to another via or a through pad goes when its wires reach that one on their own layers
   // (ModelVias.h: the local via minimisation of Luzin, Popov, Popov, NTV ITMO 2013 no. 6).
   bool vias = true;

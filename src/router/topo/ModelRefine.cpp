@@ -162,6 +162,25 @@ RefineModelResult refineModel(Board& b, Topology& t, const RefineModelOptions& o
         if (key.size() != 1) break;
         std::erase(hs, key.front());  // not with this one: the next that holds it
       }
+      // A castling: the wire and one of them change sides — it need not get shorter itself (the search above asks
+      // that of it, and takes out with the one in its way another its straightest path brushes, which then goes
+      // a long way round: BSIA of Arcs with EB1 and WTBT, 46.4 -> 51.7 mm), the two do in sum.
+      for (size_t i = 0; !found && o.castlings && i < hs.size(); ++i) {
+        const int h = hs[i];
+        if (refusedPairs.contains({c.wire, std::vector<int>{h}})) continue;
+        // (The search's length is over the triangles, a fifth longer than the taut one it is judged by below: the
+        // limit is no bound on the gain, only on where the search goes.)
+        const std::optional<PastResult> past = relayPast(t, c.wire, {h}, 1.5 * was, &unsettled, saved);
+        if (!past) continue;
+        now = past->length + past->othersAfter;
+        wasAll = was + past->othersBefore;
+        if (now <= wasAll - std::max(o.gain, o.gainPart * wasAll)) {
+          found = true;
+          partners = {h};
+          break;
+        }
+        t = std::move(*saved);
+      }
     }
     if (!found) continue;
     if (debug) {

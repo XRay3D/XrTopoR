@@ -2950,6 +2950,64 @@ TEST(Topo, WiresKeepTheNominalWhereThereIsRoom) {
   EXPECT_LT(tight, 0.45);
 }
 
+// A castling (the user's case on Arcs, D4-19 and D5-15). B's wire comes from the left over the pad E1, round its
+// right side and down to its own pad B2; E's wire starts at E1 and goes down past B2 on its left. B's wire dragged
+// to the left of E1 — across E's — cannot cross it: led round, it would go back round E1. Instead the two change
+// sides: B's goes straight to its pad, E's is laid anew after it and passes B2 on the right. The preview has both
+// wires, and on release both are laid.
+TEST(Topo, AWireDraggedAcrossAnotherChangesSidesWithIt) {
+  PinBoard p;
+  p.pad("E", 20, 6, PadShapeKind::Circle, 1, 1);   // E1
+  p.pad("E", 26, 18, PadShapeKind::Circle, 1, 1);
+  p.track("E", {{20, 6}, {19.6, 12}, {20.5, 14}, {26, 18}}, 0.3);
+  p.pad("B", 8, 2, PadShapeKind::Circle, 1, 1);
+  p.pad("B", 21, 12, PadShapeKind::Circle, 1, 1);   // B2
+  p.track("B", {{8, 2}, {19.5, 4.6}, {21.3, 5.5}, {21.3, 7}, {21, 12}}, 0.3);
+  topo::Topology::assignIds(p.b);
+  topo::Topology t;
+  t.build(p.b);
+  ASSERT_TRUE(topo::runF5Model(p.b, t).drawn);
+  ASSERT_EQ(p.violations(), 0);
+  const int B = p.net("B"), E = p.net("E");
+  // Where a net's tracks cross the horizontal through a point: the x there less the point's.
+  auto sideOf = [&](int net, double x, double y) {
+    const Vec2 at = PinBoard::at(x, y);
+    double best = 1e18;
+    for (const Track& tr : p.b.tracks) {
+      if (tr.net != net || (tr.a.y - at.y) * (tr.b.y - at.y) > 0 || tr.a.y == tr.b.y) continue;
+      const double cx = tr.a.x + (tr.b.x - tr.a.x) * (at.y - tr.a.y) / (tr.b.y - tr.a.y) - at.x;
+      if (std::abs(cx) > 1000 && std::abs(cx) < std::abs(best)) best = cx;
+    }
+    return best / kNmPerMm;
+  };
+  EXPECT_GT(sideOf(B, 20, 6), 0) << "B passes E1 on the right";
+  EXPECT_LT(sideOf(E, 21, 12), 0) << "E passes B2 on the left";
+  const double lengthB = p.length("B"), lengthE = p.length("E");
+  int wire = -1;
+  for (int wi = 0; wi < int(t.wires.size()); ++wi)
+    if (t.wires[size_t(wi)].net == B) wire = wi;
+  ASSERT_GE(wire, 0);
+  const Vec2 hand = PinBoard::at(18.3, 7.5);
+
+  const auto way = topo::wireThrough(p.b, t, wire, hand);
+  ASSERT_TRUE(way);
+  ASSERT_EQ(way->castled.size(), 1u);
+  EXPECT_EQ(t.wires[size_t(way->castled[0])].net, E);
+  EXPECT_FALSE(way->squeezed);
+  ASSERT_FALSE(way->others.empty());
+  for (const Track& tr : way->others) EXPECT_EQ(tr.net, E);
+  for (const Track& tr : way->tracks) EXPECT_EQ(tr.net, B);
+
+  ASSERT_TRUE(topo::leadWireThrough(p.b, t, wire, hand));
+  EXPECT_LT(sideOf(B, 20, 6), 0) << "B passes E1 on the left now";
+  EXPECT_GT(sideOf(E, 21, 12), 0) << "E passes B2 on the right now";
+  EXPECT_LT(p.length("B"), lengthB - 0.5);
+  EXPECT_LT(p.length("E"), lengthE + 1.5);
+  EXPECT_EQ(Connectivity::compute(p.b).ratsnest.size(), 0u);
+  EXPECT_EQ(p.violations(), 0);
+  EXPECT_EQ(t.check(), std::vector<std::string>{});
+}
+
 // F6 on the model re-lays a wire by a shorter path over the triangulation (TopoR's re-laying). A wire drawn
 // the long way round a pad of another net goes the short way; the model stays whole: no wires crossing, every
 // consecutive pair of crossings on one triangle, the capacities fresh.

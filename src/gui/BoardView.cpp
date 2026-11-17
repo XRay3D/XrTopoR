@@ -2039,8 +2039,13 @@ void BoardView::freestyleBy(Vec2 shift, double rotate) {
 void BoardView::freestyleWireBy() {
   const std::optional<topo::WireThrough> way = topo::wireThrough(*doc_->board(), doc_->topology(), fsWire_, snapped(cursor_));
   fsWay_ = way ? way->tracks : std::vector<Track>{};
+  fsCastled_ = way ? int(way->castled.size()) : 0;
+  if (way) fsWay_.insert(fsWay_.end(), way->others.begin(), way->others.end());  // (a castling: the wires that change sides with it)
   fsWaySqueezed_ = way && way->squeezed;
-  emit status(!way ? tr("Через эту точку проводник не проходит") : fsWaySqueezed_ ? tr("Путь проводника: места не хватает, проводник будет втиснут") : tr("Путь проводника после отпускания мыши"));
+  emit status(!way ? tr("Через эту точку проводник не проходит")
+              : fsWaySqueezed_ ? tr("Путь проводника: места не хватает, проводник будет втиснут")
+              : fsCastled_ > 0 ? tr("Рокировка: проводник и ещё %1 лягут по новому пути после отпускания мыши").arg(fsCastled_)
+                               : tr("Путь проводника после отпускания мыши"));
   update();  // (the board is as it was: the way is drawn over its picture)
 }
 

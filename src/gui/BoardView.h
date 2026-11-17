@@ -50,6 +50,7 @@ class BoardView : public QOpenGLWidget {
   topo::Push freestylePush() const { return push_; }
   // The way of the wire being dragged in Freestyle, as it is drawn dashed (empty: no drag, or no way).
   const std::vector<Track>& freestyleWay() const { return fsWay_; }
+  int freestyleCastled() const { return fsCastled_; }
   // Frame times of the rendering (xrtopor --render-bench): the whole board and zoomed in (drawn anew), panned (the
   // picture moved), the cursor moved with the ruler (the tools only); `frames` of each, painted at once.
   QString benchmark(int frames);
@@ -319,6 +320,7 @@ class BoardView : public QOpenGLWidget {
   int fsWireTrack_ = -1, fsWire_ = -1;
   std::vector<Track> fsWay_;
   bool fsWaySqueezed_ = false;
+  int fsCastled_ = 0;  // the wires of other nets that change sides with the dragged one
   void freestyleWireBy();  // the way through the cursor, found anew
   topo::FreestyleTarget fsTarget_;
   Vec2 fsLast_;
