@@ -45,6 +45,7 @@ struct OptimizeModelResult {
   int junctionsInCopper = 0;  // branch points that ended inside copper of their own net
   int merged = 0;             // ... and were merged with the pad or via there
   int untangled = 0;          // double crossings taken apart first (resolveCrossings)
+  int ledOut = 0;  // wires led out of another net's copper first (leadOutOfCopper)
   int spareLinks = 0, spareVias = 0;  // twins and loops taken out first (simplifyNets), and the vias inside them
   int branches = 0, reattached = 0, branchesMerged = 0;  // the trees made anew first: branch points made, moved, made one
   int drawings = 0;    // how many times the model was drawn and judged

@@ -566,6 +566,36 @@ int resolveCrossings(const Board& b, Topology& t) {
   return swaps;
 }
 
+int leadOutOfCopper(const Board& b, Topology& t) {
+  std::vector<int> through;
+  for (const Violation& v : t.violations)
+    if (v.kind == Violation::Kind::ThroughPad && v.wireA >= 0 && v.wireA < int(t.wires.size()) && !r::contains(through, v.wireA)) through.push_back(v.wireA);
+  if (through.empty()) return 0;
+  std::set<uint32_t> lockedByHand;
+  for (const Track& tr : b.tracks)
+    if (tr.locked && tr.id) lockedByHand.insert(tr.id);
+  std::set<int> out;
+  for (int wi : through) {
+    Wire& w = t.wires[size_t(wi)];
+    if (w.pair >= 0 || w.zone >= 0 || w.net < 0 || w.end[0] < 0 || w.end[1] < 0 || b.flexFixed(w.net)) continue;
+    if (r::any_of(w.tracks, [&](uint32_t id) { return lockedByHand.contains(id); })) continue;
+    // (The build locks a wire it could not bend out of the copper: it stays as drawn. Here it is laid.)
+    const bool was = w.locked;
+    w.locked = false;
+    const std::optional<RelayPath> path = findRelay(t, wi);
+    if (!path) {
+      t.wires[size_t(wi)].locked = was;
+      continue;
+    }
+    applyRelay(t, wi, *path);
+    t.wires[size_t(wi)].rerouted = true;
+    t.wires[size_t(wi)].dirty = true;
+    out.insert(wi);
+  }
+  std::erase_if(t.violations, [&](const Violation& v) { return v.kind == Violation::Kind::ThroughPad && out.contains(v.wireA); });
+  return int(out.size());
+}
+
 bool prepareModel(Topology& t, bool flips, bool weighted, int& nFlips, std::vector<Violation>& stopping) {
   for (const Violation& v : t.violations)
     if (v.kind == Violation::Kind::Crossing || v.kind == Violation::Kind::ThroughPad) stopping.push_back(v);
@@ -1273,6 +1303,7 @@ F5ModelResult runF5Model(Board& b, Topology& t, const F5ModelOptions& o) {
   ProfScope pAll("F5 model total");
   F5ModelResult r;
   r.untangled = resolveCrossings(b, t);
+  r.ledOut = leadOutOfCopper(b, t);
   if (o.simplify) {
     const SimplifyResult sr = simplifyNets(b, t);
     r.spareLinks = sr.links;

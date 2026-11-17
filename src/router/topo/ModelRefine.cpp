@@ -38,6 +38,7 @@ RefineModelResult refineModel(Board& b, Topology& t, const RefineModelOptions& o
   RefineModelResult r;
   int nFlips = 0;
   r.untangled = resolveCrossings(b, t);
+  r.ledOut = leadOutOfCopper(b, t);
   if (o.simplify) {
     const SimplifyResult sr = simplifyNets(b, t);
     r.spareLinks = sr.links;

@@ -1359,6 +1359,7 @@ void MainWindow::refineModel(bool thenLayers) {
                  .arg(res.reattached)
                  .arg(res.zoneTracksRemoved) +
                  (untangled > 0 ? tr("; распутано двойных пересечений: %1").arg(untangled) : QString()) +
+                 (res.ledOut > 0 ? tr("; выведено из чужой меди проводников: %1").arg(res.ledOut) : QString()) +
                  (res.spareLinks > 0 ? tr("; снято лишних проводников (дубли, петли): %1, переходов %2").arg(res.spareLinks).arg(res.spareVias) : QString());
     showHint(text, 10000);
     emit procedureFinished(tr("Перекладка проводников"), text, thenLayers);
@@ -1539,6 +1540,7 @@ void MainWindow::optimizeModel(bool thenRefine) {
                      .arg(res.lengthAfter / 1e6, 0, 'f', 1) +
                  (res.stats.narrowedWires > 0 ? tr("; заужено проводников: %1").arg(res.stats.narrowedWires) : QString()) +
                  (untangled > 0 ? tr("; распутано двойных пересечений: %1").arg(untangled) : QString()) +
+                 (res.ledOut > 0 ? tr("; выведено из чужой меди проводников: %1").arg(res.ledOut) : QString()) +
                  (res.spareLinks > 0 ? tr("; снято лишних проводников (дубли, петли): %1, переходов %2").arg(res.spareLinks).arg(res.spareVias) : QString());
     showHint(text, 10000);
     emit procedureFinished(tr("Подвижка"), text, thenRefine);

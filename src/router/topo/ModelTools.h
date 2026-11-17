@@ -46,6 +46,7 @@ struct F5ModelResult {
   int wires = 0;
   int junctionMoves = 0;  // branch points moved to their balance
   int untangled = 0;      // double crossings taken apart first (resolveCrossings)
+  int ledOut = 0;         // wires led out of another net's copper first (leadOutOfCopper)
   int spareLinks = 0, spareVias = 0;  // twins and loops taken out first (simplifyNets), and the vias inside them
   int branches = 0, reattached = 0, branchesMerged = 0;  // the trees made anew: branch points made, moved, made one
   RealizeStats stats;
@@ -87,6 +88,11 @@ bool prepareModel(Topology& t, bool flips, bool weighted, int& nFlips, std::vect
 // board's tracks, where the double crossings of wires are taken apart (Chains.h untangleChains). The
 // swaps made; a crossing left is in the model's violations, and prepareModel stops on it.
 int resolveCrossings(const Board& b, Topology& t);
+// A wire through another net's copper — over a pad it was drawn across, between two vias that touch — is led out
+// of it: laid anew by a way with room, round the copper, where there is one; its violations go, and the tools that
+// would have stopped at them go on. Wires locked by hand, the conductors of a zipped pair, wires of the flexibly
+// fixed nets and those in a pour stay. Returns how many were led out.
+int leadOutOfCopper(const Board& b, Topology& t);
 // Draws every unlocked wire of the model on the board: their tracks go, and the hand-drawn runs inside the
 // pads they end at; the model's wires then own the new tracks.
 // `only` (with editedOnly false): these wires alone, the rest as they lie.

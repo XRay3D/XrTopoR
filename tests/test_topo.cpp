@@ -4219,3 +4219,65 @@ TEST(Topo, TheModelFollowsAViaGone) {
     EXPECT_GE(returned * 4, tried * 3) << name;
   }
 }
+
+// A wire through another net's copper is led out of it before the tools run (they stopped there: «нарушение
+// топологии», and the wire had to be dragged out by hand): a wire drawn across a rectangular pad, a wire between
+// two vias that touch. It is laid round the copper; F5, F6 and F7 go on and leave no violation. A wire locked by
+// hand stays where it lies, and the tool stops as before.
+TEST(Topo, AWireThroughCopperIsLedOut) {
+  auto overAPad = [](PinBoard& p) {
+    p.pad("N1", 5, 10, PadShapeKind::Circle, 1, 1);
+    p.pad("N1", 35, 10, PadShapeKind::Circle, 1, 1);
+    p.track("N1", {{5, 10}, {35, 10}}, 0.3);
+    p.pad("N2", 20, 10.2, PadShapeKind::Rect, 2, 1.5);
+  };
+  auto betweenVias = [](PinBoard& p) {
+    p.pad("N1", 5, 10, PadShapeKind::Circle, 1, 1);
+    p.pad("N1", 35, 10, PadShapeKind::Circle, 1, 1);
+    p.track("N1", {{5, 10}, {35, 10}}, 0.3);
+    p.via("N2", 20, 9.6, 1.0);
+    p.via("N2", 20, 10.5, 1.0);
+  };
+  auto through = [](const topo::Topology& t) {
+    return r::count_if(t.violations, [](const topo::Violation& v) { return v.kind == topo::Violation::Kind::ThroughPad; });
+  };
+  for (int tool = 0; tool < 3; ++tool)
+    for (int layout = 0; layout < 2; ++layout) {
+      PinBoard p;
+      layout == 0 ? overAPad(p) : betweenVias(p);
+      topo::Topology::assignIds(p.b);
+      topo::Topology t;
+      t.build(p.b);
+      ASSERT_GT(through(t), 0) << "layout " << layout;
+      int ledOut = 0;
+      bool drawn = false;
+      if (tool == 0) {
+        const auto res = topo::runF5Model(p.b, t);
+        ledOut = res.ledOut, drawn = res.drawn;
+      } else if (tool == 1) {
+        const auto res = topo::refineModel(p.b, t);
+        ledOut = res.ledOut, drawn = res.drawn;
+      } else {
+        const auto res = topo::optimizeModel(p.b, t);
+        ledOut = res.ledOut, drawn = res.drawn;
+      }
+      EXPECT_TRUE(drawn) << "tool " << tool << ", layout " << layout;
+      EXPECT_EQ(ledOut, 1) << "tool " << tool << ", layout " << layout;
+      EXPECT_EQ(through(t), 0) << "tool " << tool << ", layout " << layout;
+      EXPECT_EQ(p.violations(), 0) << "tool " << tool << ", layout " << layout;
+      EXPECT_GT(p.length("N1"), 30.05) << "round the copper";
+      EXPECT_LT(p.length("N1"), 33.0);
+      EXPECT_EQ(Connectivity::compute(p.b).ratsnest.size(), 0u);
+    }
+  // Locked by hand: it stays.
+  PinBoard p;
+  overAPad(p);
+  for (Track& tr : p.b.tracks) tr.locked = true;
+  topo::Topology::assignIds(p.b);
+  topo::Topology t;
+  t.build(p.b);
+  const auto res = topo::runF5Model(p.b, t);
+  EXPECT_EQ(res.ledOut, 0);
+  EXPECT_FALSE(res.drawn);
+  EXPECT_NEAR(p.length("N1"), 30.0, 0.01);
+}

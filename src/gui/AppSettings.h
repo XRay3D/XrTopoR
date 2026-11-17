@@ -53,6 +53,12 @@ void setMcpEnabled(bool on);
 int mcpPort();
 void setMcpPort(int port);
 
+// New releases (gui/UpdateCheck): looked for at start-up unless turned off; a release is announced once.
+bool checkUpdates();
+void setCheckUpdates(bool on);
+QString announcedRelease();
+void setAnnouncedRelease(const QString& tag);
+
 }  // namespace AppSettings
 
 }  // namespace xr::gui

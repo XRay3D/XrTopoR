@@ -131,4 +131,9 @@ void setMcpEnabled(bool on) { QSettings().setValue("mcp/enabled", on); }
 int mcpPort() { return std::clamp(QSettings().value("mcp/port", kDefaultMcpPort).toInt(), 1, 65535); }
 void setMcpPort(int port) { QSettings().setValue("mcp/port", port); }
 
+bool checkUpdates() { return QSettings().value("updates/check", true).toBool(); }
+void setCheckUpdates(bool on) { QSettings().setValue("updates/check", on); }
+QString announcedRelease() { return QSettings().value("updates/announced").toString(); }
+void setAnnouncedRelease(const QString& tag) { QSettings().setValue("updates/announced", tag); }
+
 }  // namespace xr::gui::AppSettings

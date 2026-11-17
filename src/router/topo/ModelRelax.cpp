@@ -224,6 +224,7 @@ OptimizeModelResult optimizeModel(Board& b, Topology& t, const OptimizeModelOpti
   OptimizeModelResult r;
   int nFlips = 0;
   r.untangled = resolveCrossings(b, t);
+  r.ledOut = leadOutOfCopper(b, t);
   if (o.simplify && o.owners.empty()) {
     const SimplifyResult sr = simplifyNets(b, t);
     r.spareLinks = sr.links;

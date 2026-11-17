@@ -2410,6 +2410,7 @@ bool BoardView::recomputeShapesModel(bool editedOnly) {
   if (res.junctionMoves > 0) msg += tr("; ветвлений сдвинуто: %1").arg(res.junctionMoves);
   if (res.spareLinks > 0) msg += tr("; снято лишних проводников (дубли, петли): %1, переходов %2").arg(res.spareLinks).arg(res.spareVias);
   if (res.stats.narrowedWires > 0) msg += tr("; заужено проводников: %1").arg(res.stats.narrowedWires);
+  if (res.ledOut > 0) msg += tr("; выведено из чужой меди проводников: %1").arg(res.ledOut);
   // (Taken apart when the model was built, here or before: said once.)
   if (topo::Topology& live = doc_->topology(); live.untangled > 0) {
     msg += tr("; распутано двойных пересечений: %1").arg(live.untangled);
