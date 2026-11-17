@@ -4,6 +4,7 @@
 #include <tuple>
 
 #include "core/Padstack.h"
+#include "core/ZoneFill.h"
 #include "io/BoardIO.h"
 #include "io/Encoding.h"
 #include "io/sexpr/SExpr.h"
@@ -410,6 +411,96 @@ struct Reader {
     return out;
   }
 
+  // A (pcbPoly ...) as it was drawn: its points are the polygon with the roundings already in chords, its fillets
+  // the corners and their radii — the roundings as arcs.
+  Graphic polyFigure(const Node* n) {
+    std::vector<Vec2> corners;
+    std::vector<double> radii;
+    if (const Node* f = n ? n->find("fillets") : nullptr)
+      for (auto* d : f->findAll("filletDesc")) {
+        corners.push_back(toBoard(ptOf(d->find("pt"))));
+        radii.push_back(val1(d->find("radius")));
+      }
+    if (corners.size() >= 3 && r::any_of(radii, [](double r) { return r > 0; })) return roundedPolygon(corners, radii);
+    Graphic g;
+    g.kind = GraphicKind::Poly;
+    g.filled = true;
+    g.pts = polyOf(n);
+    return g;
+  }
+
+  // The copper of a signal layer that is no wire, and what keeps things off it: P-CAD's polygon (copper as drawn),
+  // a line or an arc of no net (a stripe), the cutouts of the pours, the keepouts. True: `k` was one of them.
+  bool readCopperObject(const Node& k, LayerId l) {
+    const LayerMask on = LayerMask(1) << l;
+    if (k.is("pcbPoly")) {
+      Zone z;
+      z.layer = l;
+      z.net = b.findNet(str(k.find("netNameRef")));
+      z.solid = true;
+      z.setShape(polyFigure(&k));
+      if (z.outline.size() < 3) return true;
+      refreshSolidZone(z);
+      b.zones.push_back(std::move(z));
+      return true;
+    }
+    if ((k.is("line") || k.is("arc")) && !k.find("netNameRef")) {
+      std::vector<std::pair<int, Graphic>> gs;
+      readGraphic(k, 0, gs);
+      if (gs.empty()) return true;
+      Graphic g = gs.front().second;
+      g.a = toBoard(g.a);
+      g.b = toBoard(g.b);
+      g.m = toBoard(g.m);
+      Zone z;
+      z.layer = l;
+      z.lineWidth = g.width;
+      std::vector<Graphic> line{g};
+      if (g.kind == GraphicKind::Circle) {  // a whole turn: a ring, two halves end to start
+        const Vec2 c = g.a, d = g.b - g.a;
+        Graphic h;
+        h.kind = GraphicKind::Arc;
+        h.width = g.width;
+        h.a = c + d, h.m = c + d.perp(), h.b = c - d;
+        line = {h, h};
+        line[1].a = c - d, line[1].m = c - d.perp(), line[1].b = c + d;
+      }
+      z.setShape(std::move(line));
+      refreshSolidZone(z);
+      b.zones.push_back(std::move(z));
+      return true;
+    }
+    if (k.is("polyCutOut") || k.is("polyKeepOut")) {
+      const Node* p = k.find("pcbPoly");
+      if (!p) p = k.find("poly");
+      Graphic g = polyFigure(p);
+      if (g.pts.size() < 3) return true;
+      Keepout ko;
+      ko.layers = on;
+      if (k.is("polyCutOut")) {
+        ko.wires = ko.vias = false;
+        ko.pour = true;
+      }
+      ko.shape.push_back(std::move(g));
+      b.keepouts.push_back(std::move(ko));
+      return true;
+    }
+    if (k.is("lineKeepOut")) {
+      auto pts = k.findAll("pt");
+      if (pts.size() < 2) return true;
+      Graphic g;
+      g.kind = GraphicKind::Line;
+      g.a = toBoard(ptOf(pts[0]));
+      g.b = toBoard(ptOf(pts[1]));
+      Keepout ko;
+      ko.layers = on;
+      ko.shape.push_back(g);
+      b.keepouts.push_back(std::move(ko));
+      return true;
+    }
+    return false;
+  }
+
   // A text style has a stroke font and a TrueType one; the style says which is shown. P-CAD's height of a TrueType
   // font is 1/1.1875 of the height of its text («extent» in the file), which is what a style's height is here.
   void readTextStyle(const Node& n) {
@@ -455,7 +546,9 @@ struct Reader {
     z.clearance = Coord(val1(k.find("pourBackoff")));
     const Node* rules = k.find("useDesignRules");
     z.useClearance = !rules || rules->arg(0) != "True";
-    z.outline = polyOf(k.find("pcbPoly"));
+    z.lineWidth = Coord(val1(k.find("width")));  // (the pour's line: its outline drawn that wide)
+    if (Graphic g = polyFigure(k.find("pcbPoly")); g.hasArcs()) z.setShape(std::move(g));
+    else z.outline = std::move(g.pts);
     auto thermal = [&](ZoneThermal& t, const char* type, const char* width) {
       if (const Node* tw = k.find(width)) t.spoke = Coord(val1(tw));
       t.gap = z.clearance;
@@ -526,6 +619,7 @@ struct Reader {
           readText(k, l);
           continue;
         }
+        if (copper && readCopperObject(k, l)) continue;
         std::vector<std::pair<int, Graphic>> gs;
         readGraphic(k, ln, gs);
         for (auto& [n, g] : gs) {

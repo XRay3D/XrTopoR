@@ -2258,6 +2258,24 @@ TEST(Gui, KeepoutsByTheirInsideAndOfThePours) {
   EXPECT_TRUE(w.commands()->contains("Cmd_CopperArcP"));
 }
 
+// P-CAD's copper and keepouts drawn (pcad_shapes.pcb): the pour poured, the stripes and the polygon as copper, the
+// keepouts hatched or as lines. XR_SHOT_DIR: the picture.
+TEST(Gui, PcadShapesAreDrawn) {
+  Fixture f("pcad_shapes.pcb");
+  const Board& b = f.b();
+  ASSERT_GE(b.zones.size(), 7u);
+  ASSERT_GE(b.keepouts.size(), 9u);
+  BBox bb;
+  for (const Zone& z : b.zones)
+    for (Vec2 p : z.outline) bb.add(p);
+  for (const Keepout& k : b.keepouts)
+    for (const Graphic& g : k.shape) bb.add(g.bbox());
+  f.look(bb.center(), bb.width() / kNmPerMm * 1.3);
+  const QImage pic = f.view.picture();
+  if (pic.isNull()) GTEST_SKIP() << "no OpenGL context";
+  if (const char* dir = std::getenv("XR_SHOT_DIR")) pic.save(QString(dir) + "/pcad_shapes.png");
+}
+
 // Texts are picked by their box and move with the selection.
 TEST(Gui, TextsSelectAndMove) {
   Fixture f("topor/Example_05/MinVia.fst");

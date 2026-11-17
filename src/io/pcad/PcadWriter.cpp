@@ -113,6 +113,63 @@ Node outlineNode(const char* head, const Polyline& pts) {
   return n;
 }
 
+// P-CAD's chords of a rounded corner: off the arc by at most this (its chordHeight, 5 mil).
+constexpr double kChord = 5 * kNmPerMil;
+
+// A closed figure as a (pcbPoly ...): its points with the roundings in chords, and the corners with their radii
+// (fillets) when it has rounded corners; a circle or another arc in chords.
+Node polyNode(const char* head, const Graphic& g) {
+  Graphic poly = g;
+  if (g.kind != GraphicKind::Poly) {
+    poly.kind = GraphicKind::Poly;
+    poly.pts = g.path(kChord);
+    poly.arcs.clear();
+  }
+  std::vector<Vec2> corners;
+  std::vector<double> radii;
+  polygonCorners(poly, corners, radii, kChord);
+  const bool fillets = r::any_of(radii, [](double r) { return r > 0; });
+  Node n = outlineNode(head, fillets ? poly.path(kChord) : corners);
+  if (fillets) {
+    Node f = Node::list("fillets");
+    f.add(mmNode("chordHeight", kChord));
+    for (size_t i = 0; i < corners.size(); ++i) {
+      Node d = Node::list("filletDesc");
+      d.add(pt(corners[i]));
+      d.add(mmNode("radius", radii[i]));
+      f.add(std::move(d));
+    }
+    n.add(std::move(f));
+  }
+  return n;
+}
+
+// A line or an arc (board frame) as P-CAD's (line ...) or (arc ...): an arc by its centre, radius and angles.
+Node lineOrArc(Vec2 a, std::optional<Vec2> mid, Vec2 b) {
+  Node n;
+  auto g = mid ? ArcGeom::fromThreePoints(a, *mid, b) : ArcGeom{};
+  if (!g.valid) {
+    n = Node::list("line");
+    n.add(pt(a));
+    n.add(pt(b));
+    return n;
+  }
+  // P-CAD frame is Y up: angles and sweep change sign; keep the sweep positive (CCW).
+  double start = -radToDeg(g.startAngle), sweep = -radToDeg(g.sweep);
+  if (sweep < 0) {
+    start += sweep;
+    sweep = -sweep;
+  }
+  start = std::fmod(start + 720.0, 360.0);
+  if (start > 359.9995) start = 0;  // (written to a thousandth: not «360»)
+  n = Node::list("arc");
+  n.add(pt(g.center));
+  n.add(mmNode("radius", g.radius));
+  n.add(numNode("startAngle", start));
+  n.add(numNode("sweepAngle", sweep));
+  return n;
+}
+
 // A pour as the area is: its own node of the file (the settings the model has not got, the fillets of an outline
 // left as it was) or a new one, the settings, the outline and the islands of the fill from the model.
 Node pourNode(const Zone& z, const std::string& net, const Node* own, double unit) {
@@ -120,14 +177,17 @@ Node pourNode(const Zone& z, const std::string& net, const Node* own, double uni
   if (!own) {
     n.add(atomNode("pourType", "SolidPour"));
     n.add(strNode("netNameRef", net));
-    n.add(mmNode("width", double(z.minWidth > 0 ? z.minWidth : mmToNm(0.254))));
+    n.add(mmNode("width", double(z.lineWidth > 0 ? z.lineWidth : mmToNm(0.254))));
     n.add(mmNode("pourSpacing", double(mmToNm(0.762))));
     n.add(mmNode("pourBackoff", double(z.clearance)));
     n.add(atomNode("useDesignRules", "True"));
     n.add(numNode("pourSmoothness", 3));
     n.add(Node::list("pcbPoly"));
   }
-  setChild(n, strNode("netNameRef", net));
+  // A pour of no net has no netNameRef (P-CAD's format).
+  if (net.empty()) std::erase_if(n.kids, [](const Node& k) { return k.is("netNameRef"); });
+  else setChild(n, strNode("netNameRef", net));
+  if (z.lineWidth > 0) setChild(n, mmNode("width", double(z.lineWidth)));
   setChild(n, mmNode("pourBackoff", double(z.clearance)));
   setChild(n, atomNode("useDesignRules", z.useClearance ? "False" : "True"));
   auto thermal = [&](const ZoneThermal& t, const char* type, const char* width, const char* spokes) {
@@ -146,12 +206,17 @@ Node pourNode(const Zone& z, const std::string& net, const Node* own, double uni
   const Polyline was = polyNm(*poly, unit);
   const bool same = was.size() == z.outline.size() &&
                     r::equal(was, z.outline, [](Vec2 a, Vec2 b) { return (a - b).len2() < 100.0 * 100.0; });
-  if (!same) {
+  if (!z.shape.empty() && z.shape.front().closed() && (z.shape.front().kind != GraphicKind::Poly || z.shape.front().hasArcs())) {
+    Node p = polyNode("pcbPoly", z.shape.front());  // (the roundings as fillets)
+    if (!net.empty()) p.add(strNode("netNameRef", net));
+    *poly = std::move(p);
+  } else if (!same) {
     Node p = outlineNode("pcbPoly", z.outline);  // the fillets were the old outline's
-    p.add(strNode("netNameRef", net));
+    if (!net.empty()) p.add(strNode("netNameRef", net));
     *poly = std::move(p);
   } else if (Node* pn = findChild(*poly, "netNameRef")) {
-    *pn = strNode("netNameRef", net);
+    if (net.empty()) std::erase_if(poly->kids, [](const Node& k) { return k.is("netNameRef"); });
+    else *pn = strNode("netNameRef", net);
   }
 
   std::erase_if(n.kids, [](const Node& k) { return k.is("island"); });
@@ -329,7 +394,11 @@ Result<std::string> writePcad(const Board& b) {
     for (LayerId l = 0; l < LayerId(b.layers.size()); ++l)
       if (layerNum(l) == num && b.layers[l].kind == LayerKind::Copper) copper = true;
     if (!copper) continue;
-    std::erase_if(k.kids, [](const Node& n) { return (n.is("line") || n.is("arc")) && n.find("netNameRef"); });
+    // The lines and arcs of the layer (wires, and the stripes of copper of no net), its polygons, the cutouts of
+    // the pours and the keepouts: all from the model.
+    std::erase_if(k.kids, [](const Node& n) {
+      return n.is("line") || n.is("arc") || n.is("pcbPoly") || n.is("polyCutOut") || n.is("polyKeepOut") || n.is("lineKeepOut");
+    });
     // The pours are written anew from the areas (below).
     std::erase_if(k.kids, [](const Node& n) { return n.is("copperPour95") || n.is("copperPour"); });
     contents[num] = &k;
@@ -352,37 +421,80 @@ Result<std::string> writePcad(const Board& b) {
     int num = layerNum(t.layer);
     if (num < 0) continue;
     layerContents(num);
-    Node n;
-    if (!t.isArc()) {
-      n = Node::list("line");
-      n.add(pt(t.a.v()));
-      n.add(pt(t.b.v()));
-    } else {
-      auto g = ArcGeom::fromThreePoints(t.a.v(), t.mid->v(), t.b.v());
-      // P-CAD frame is Y up: angles and sweep change sign; keep the sweep positive (CCW).
-      double start = -radToDeg(g.startAngle), sweep = -radToDeg(g.sweep);
-      if (sweep < 0) {
-        start += sweep;
-        sweep = -sweep;
-      }
-      start = std::fmod(start + 720.0, 360.0);
-      n = Node::list("arc");
-      n.add(pt(g.center));
-      n.add(mmNode("radius", g.radius));
-      n.add(numNode("startAngle", start));
-      n.add(numNode("sweepAngle", sweep));
-    }
+    Node n = lineOrArc(t.a.v(), t.isArc() ? std::optional(t.mid->v()) : std::nullopt, t.b.v());
     n.add(mmNode("width", double(t.width)));
     if (t.net >= 0) n.add(strNode("netNameRef", netName(t.net)));
     contents[num]->add(std::move(n));
   }
 
-  // Copper areas.
+  // Copper areas: the pours, P-CAD's polygons (solid copper) and the stripes (lines and arcs of the area's width).
   for (const Zone& z : b.zones) {
     int num = layerNum(z.layer);
-    if (num < 0 || b.layers[z.layer].kind != LayerKind::Copper || z.outline.size() < 3) continue;
+    if (num < 0 || b.layers[z.layer].kind != LayerKind::Copper) continue;
+    if (z.open()) {
+      auto add = [&](Node n) {
+        n.add(mmNode("width", double(z.lineWidth)));
+        if (z.net >= 0) n.add(strNode("netNameRef", netName(z.net)));
+        layerContents(num).add(std::move(n));
+      };
+      const auto& s = z.shape;
+      // A ring (two halves of one circle, end to start): one arc all the way round.
+      if (s.size() == 2 && s[0].kind == GraphicKind::Arc && s[1].kind == GraphicKind::Arc && (s[1].b - s[0].a).len() < 10) {
+        auto g0 = ArcGeom::fromThreePoints(s[0].a, s[0].m, s[0].b), g1 = ArcGeom::fromThreePoints(s[1].a, s[1].m, s[1].b);
+        if (g0.valid && g1.valid && (g0.center - g1.center).len() < 10 && std::abs(g0.radius - g1.radius) < 10) {
+          Node n = Node::list("arc");
+          n.add(pt(g0.center));
+          n.add(mmNode("radius", g0.radius));
+          n.add(numNode("startAngle", 0));
+          n.add(numNode("sweepAngle", 360));
+          add(std::move(n));
+          continue;
+        }
+      }
+      for (const Graphic& g : s) add(lineOrArc(g.a, g.kind == GraphicKind::Arc ? std::optional(g.m) : std::nullopt, g.b));
+      continue;
+    }
+    if (z.outline.size() < 3) continue;
+    if (z.solid) {
+      Graphic g;
+      if (!z.shape.empty()) g = z.shape.front();
+      else g.kind = GraphicKind::Poly, g.pts = z.outline;
+      Node p = polyNode("pcbPoly", g);
+      if (z.net >= 0) p.add(strNode("netNameRef", netName(z.net)));
+      layerContents(num).add(std::move(p));
+      continue;
+    }
     const Node* own = z.source >= 0 && z.source < int(pours.size()) ? &pours[z.source] : nullptr;
     layerContents(num).add(pourNode(z, netName(z.net), own, unit));
+  }
+
+  // Keepouts of the signal layers: of the pours (polyCutOut), of the wires as areas (polyKeepOut) and as lines
+  // (lineKeepOut: one segment each, arcs and circles in chords). One on all layers is one on each. P-CAD has no
+  // keepout of placement among these: those are not written.
+  for (const Keepout& k : b.keepouts) {
+    if (k.role != Keepout::Role::Route) continue;
+    for (LayerId l = 0; l < LayerId(b.layers.size()); ++l) {
+      if (!k.onLayer(l) || b.layers[l].kind != LayerKind::Copper || b.layers[l].plane) continue;
+      const int num = layerNum(l);
+      if (num < 0) continue;
+      for (const Graphic& g : k.shape) {
+        if (Keepout::isArea(g)) {
+          Node n = Node::list(k.pour ? "polyCutOut" : "polyKeepOut");
+          n.add(polyNode("pcbPoly", g));
+          layerContents(num).add(std::move(n));
+          continue;
+        }
+        if (k.pour) continue;  // (a line cuts no pour in P-CAD)
+        Polyline pts = g.path(kChord);
+        if (g.closed() && !pts.empty()) pts.push_back(pts.front());
+        for (size_t i = 1; i < pts.size(); ++i) {
+          Node n = Node::list("lineKeepOut");
+          n.add(pt(pts[i - 1]));
+          n.add(pt(pts[i]));
+          layerContents(num).add(std::move(n));
+        }
+      }
+    }
   }
 
   // Vias.

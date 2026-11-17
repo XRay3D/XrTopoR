@@ -273,6 +273,55 @@ TEST(PcadIO, WriterRoundTripAndRouting) {
   EXPECT_NEAR(double(it->mid->y), double(arc.mid->y), 1000);
 }
 
+// What P-CAD has on a signal layer besides wires and pours (pcad_shapes.pcb, drawn in P-CAD 2002): line keepouts,
+// a cutout of the pours, a pour with its line's width, lines and arcs of no net (stripes of copper; an arc all the
+// way round is a ring), a polygon (solid copper) with a rounded corner. Written and read again, all of it is there.
+TEST(PcadIO, KeepoutsCutoutsStripesAndPolygons) {
+  auto check = [](const Board& b) {
+    EXPECT_EQ(r::count_if(b.keepouts, [](const Keepout& k) { return !k.pour && k.wires && k.vias && k.shape.size() == 1 && k.shape[0].kind == GraphicKind::Line; }), 8);
+    ASSERT_EQ(r::count_if(b.keepouts, &Keepout::pour), 1);
+    const Keepout& cut = *r::find_if(b.keepouts, &Keepout::pour);
+    EXPECT_EQ(cut.layers, LayerMask(1) << b.findLayer("Top"));
+    ASSERT_EQ(cut.shape.size(), 1u);
+    EXPECT_TRUE(Keepout::isArea(cut.shape[0]));
+    auto pours = b.zones | v::filter([](const Zone& z) { return !z.alwaysCopper(); });
+    ASSERT_EQ(r::distance(pours), 1);
+    EXPECT_NEAR(double(pours.front().lineWidth), 25 * kNmPerMil, 10);
+    const auto stripes = r::count_if(b.zones, &Zone::open);
+    EXPECT_EQ(stripes, 5) << "two lines, an arc, two rings";
+    EXPECT_EQ(r::count_if(b.zones, [](const Zone& z) { return z.open() && z.shape.size() == 1 && z.shape[0].kind == GraphicKind::Arc; }), 1);
+    EXPECT_EQ(r::count_if(b.zones, [](const Zone& z) { return z.open() && z.shape.size() == 2; }), 2) << "the rings";
+    for (const Zone& z : b.zones)
+      if (z.open()) {
+        EXPECT_NEAR(double(z.lineWidth), 10 * kNmPerMil, 10);
+        EXPECT_FALSE(z.filled.empty());
+      }
+    ASSERT_EQ(r::count_if(b.zones, &Zone::solid), 1);
+    const Zone& poly = *r::find_if(b.zones, &Zone::solid);
+    ASSERT_EQ(poly.shape.size(), 1u);
+    EXPECT_TRUE(poly.shape[0].hasArcs()) << "the rounded corner";
+    std::vector<Vec2> corners;
+    std::vector<double> radii;
+    polygonCorners(poly.shape[0], corners, radii);
+    EXPECT_EQ(corners.size(), 8u);
+    EXPECT_EQ(r::count_if(radii, [](double r) { return r > 0; }), 1);
+    EXPECT_NEAR(*r::max_element(radii), 2.27184 * kNmPerMm, 1000);
+    EXPECT_FALSE(poly.filled.empty());
+  };
+  auto b = io::loadBoard(data("pcad_shapes.pcb"));
+  ASSERT_TRUE(b) << b.error();
+  {
+    SCOPED_TRACE("read");
+    check(**b);
+  }
+  auto text = io::writePcad(**b);
+  ASSERT_TRUE(text) << text.error();
+  auto again = io::readPcad(*text, "x.pcb");
+  ASSERT_TRUE(again) << again.error();
+  SCOPED_TRACE("written and read");
+  check(**again);
+}
+
 // The labels of the components' attributes: P-CAD keeps a label's point from the pattern's origin on the board,
 // TopoR in the footprint's frame; both are read to the same place, written back and go with their component.
 TEST(PcadIO, AttributeLabels) {
