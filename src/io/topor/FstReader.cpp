@@ -1450,20 +1450,39 @@ struct Reader {
     connection(z.vias, "connectVia", "ThermalVia");
     z.removeIslands = c.flag("deleteUnconnected");
     z.minIslandArea = c.num("minSquare") * double(len(1)) * double(len(1));
-    // The area's figure as TopoR drew it: a circle, a rectangle, a contour with arcs.
+    z.lineWidth = len(c.num("lineWidth"));
+    z.solid = c.attr("state") == "Locked";  // (TopoR's «Зафиксирована»: the copper stays as it is)
+    // The area's figure as TopoR drew it: a circle, a rectangle, a contour with arcs — or lines and arcs end to
+    // start (a stripe of copper).
     if (auto* sh = c.find("Shape"))
       for (auto& f : sh->kids) {
         std::vector<FpGraphic> figs;
         figure(f, figs, "", 0);
-        if (figs.empty() || !toGraphic(figs.front(), z.layer).closed()) continue;
-        z.setShape(toGraphic(figs.front(), z.layer));
-        if (z.outline.size() >= 3) break;
-        z.shape.reset();
+        if (figs.empty()) continue;
+        std::vector<Graphic> gs;
+        for (auto& fg : figs) gs.push_back(toGraphic(fg, z.layer));
+        if (gs.front().closed()) gs.resize(1);
+        z.setShape(std::move(gs));
+        if (z.outline.size() >= (z.open() ? 2u : 3u)) break;
+        z.shape.clear();
+        z.outline.clear();
       }
     if (z.outline.empty()) return;
+    // The cutouts of the area: keepouts of the pours on its layer (as drawn, arcs and all).
     if (auto* vs = c.find("Voids"))
-      for (auto& f : vs->kids)
-        if (auto h = filledPolygon(f); h.size() >= 3) z.cutouts.push_back(std::move(h));
+      for (auto& f : vs->kids) {
+        std::vector<FpGraphic> figs;
+        figure(f, figs, "", 0);
+        if (figs.empty() || !toGraphic(figs.front(), -1).closed()) continue;
+        Keepout k;
+        k.wires = k.vias = false;
+        k.pour = true;
+        k.layers = LayerMask(1) << layer;
+        Graphic g = toGraphic(figs.front(), -1);
+        g.filled = true;
+        k.shape.push_back(std::move(g));
+        b.keepouts.push_back(std::move(k));
+      }
     if (auto* is = c.find("Islands"))
       for (auto* island : is->findAll("Island")) {
         // Island = outer contour + Voids (holes) + thermal spokes (separate copper pieces).
@@ -1486,6 +1505,7 @@ struct Reader {
         }
         if (outer.size() >= 3) z.filled.push_back(fracture(outer, std::move(holes)));
       }
+    if (z.filled.empty()) refreshSolidZone(z);  // (copper as drawn, when it was not written)
     b.zones.push_back(std::move(z));
   }
 };

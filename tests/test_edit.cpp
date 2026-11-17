@@ -440,6 +440,20 @@ TEST(Edit, RectanglesAndCirclesKeepTheirKind) {
 namespace {
 
 // A 20 x 20 mm board, the rules' clearance 1 mm from everything; a copper area of G over the whole of it.
+// «Металлизация»: a keepout of the pours alone, an area on one layer.
+Keepout pourKeepout(LayerId layer, std::vector<Vec2> pts) {
+  Keepout k;
+  k.wires = k.vias = false;
+  k.pour = true;
+  k.layers = LayerMask(1) << layer;
+  Graphic g;
+  g.kind = GraphicKind::Poly;
+  g.filled = true;
+  g.pts = std::move(pts);
+  k.shape.push_back(g);
+  return k;
+}
+
 struct PourBoard {
   Board b;
   LayerId top;
@@ -536,7 +550,7 @@ TEST(ZoneFill, IslandsByTheAreasSettings) {
   PourBoard t;
   t.b.netClasses[0].clearance = mmToNm(0.2);
   t.b.edgeClearance = 0;
-  t.zone().cutouts.push_back({PourBoard::at(4, -1), PourBoard::at(5, -1), PourBoard::at(5, 21), PourBoard::at(4, 21)});
+  t.b.keepouts.push_back(pourKeepout(t.top, {PourBoard::at(4, -1), PourBoard::at(5, -1), PourBoard::at(5, 21), PourBoard::at(4, 21)}));
   t.via(10, 10, t.g);
   fillZones(t.b);
   EXPECT_TRUE(t.poured(2, 10)) << "kept: the area does not remove them";
@@ -549,6 +563,140 @@ TEST(ZoneFill, IslandsByTheAreasSettings) {
   fillZones(t.b);
   EXPECT_FALSE(t.poured(2, 10));
   EXPECT_TRUE(t.poured(10 + 3, 10));
+}
+
+// «Толщина линии обводки»: the copper goes half the line's width past the outline, round at its corners.
+TEST(ZoneFill, LineWidthTakesTheCopperPastTheOutline) {
+  PourBoard t;
+  t.b.edgeClearance = 0;
+  t.zone().setShape([] {
+    Graphic g;
+    g.kind = GraphicKind::Rect;
+    g.a = PourBoard::at(5, 5);
+    g.b = PourBoard::at(15, 15);
+    return g;
+  }());
+  fillZones(t.b);
+  EXPECT_TRUE(t.poured(5.2, 10));
+  EXPECT_FALSE(t.poured(4.8, 10)) << "no line: the outline is the edge";
+  t.zone().lineWidth = mmToNm(2);
+  fillZones(t.b);
+  EXPECT_TRUE(t.poured(4.2, 10));
+  EXPECT_FALSE(t.poured(3.8, 10));
+  EXPECT_TRUE(t.poured(4.5, 4.5)) << "0.71 mm from the corner";
+  EXPECT_FALSE(t.poured(4.2, 4.2)) << "1.13 mm from it: the corner is round";
+}
+
+// A keepout of the pours (a cutout of the areas): not poured, and wires and vias may go there.
+TEST(ZoneFill, PourKeepoutCutsThePoursOnly) {
+  PourBoard t;
+  t.b.netClasses[0].clearance = mmToNm(0.2);
+  t.b.keepouts.push_back(pourKeepout(t.top, {PourBoard::at(8, 8), PourBoard::at(12, 8), PourBoard::at(12, 12), PourBoard::at(8, 12)}));
+  fillZones(t.b);
+  EXPECT_FALSE(t.poured(10, 10));
+  EXPECT_TRUE(t.poured(6, 10));
+  Track tr;
+  tr.a = Point(PourBoard::at(10, 9));
+  tr.b = Point(PourBoard::at(10, 11));
+  tr.width = mmToNm(0.3);
+  tr.layer = t.top;
+  tr.net = t.o;
+  t.b.tracks.push_back(tr);
+  t.via(9, 10, t.o);
+  DrcOptions o;
+  o.unconnected = false;
+  o.widths = false;
+  for (const DrcViolation& v : runDrc(t.b, o)) EXPECT_NE(v.type, DrcViolation::Type::Keepout) << v.message;
+}
+
+// A keepout circle that is not filled is a barrier round its rim (the pour goes inside and out), a disc an area.
+TEST(ZoneFill, KeepoutCircleIsARim) {
+  PourBoard t;
+  t.b.netClasses[0].clearance = mmToNm(0.2);
+  Keepout k;
+  k.layers = LayerMask(1) << t.top;
+  Graphic c;
+  c.kind = GraphicKind::Circle;
+  c.a = PourBoard::at(10, 10);
+  c.b = PourBoard::at(14, 10);
+  k.shape.push_back(c);
+  t.b.keepouts.push_back(k);
+  fillZones(t.b);
+  EXPECT_TRUE(t.poured(10, 10)) << "inside the rim";
+  EXPECT_FALSE(t.poured(14, 10)) << "on it";
+  EXPECT_TRUE(t.poured(15, 10));
+  t.b.keepouts[0].shape[0].filled = true;
+  fillZones(t.b);
+  EXPECT_FALSE(t.poured(10, 10)) << "a disc";
+}
+
+// An area of no net is poured as any (keeping clear of everything), and the junk taken out of a design (the tracks
+// of no net) leaves it.
+TEST(ZoneFill, AreaOfNoNetIsPoured) {
+  PourBoard t;
+  t.zone().net = kNoNet;
+  t.via(10, 10, t.g);
+  fillZones(t.b);
+  EXPECT_TRUE(t.poured(5, 5));
+  EXPECT_FALSE(t.poured(10, 10)) << "the via of a net";
+  edit::removeJunkTracks(t.b);
+  ASSERT_EQ(t.b.zones.size(), 1u);
+  EXPECT_TRUE(t.poured(5, 5));
+}
+
+// A line of copper (an area drawn as lines and arcs): a stripe of its line's width, copper as drawn — no pour cuts
+// it, and the pours of other nets keep clear of it; the arc stays an arc.
+TEST(ZoneFill, StripeIsCopperAsDrawn) {
+  PourBoard t;
+  t.b.netClasses[0].clearance = mmToNm(0.2);
+  Zone s;
+  s.layer = t.top;
+  s.net = t.o;
+  s.lineWidth = mmToNm(1);
+  Graphic line;
+  line.kind = GraphicKind::Line;
+  line.a = PourBoard::at(3, 10);
+  line.b = PourBoard::at(10, 10);
+  Graphic arc;
+  arc.kind = GraphicKind::Arc;
+  arc.a = PourBoard::at(10, 10);
+  arc.m = PourBoard::at(13, 13);
+  arc.b = PourBoard::at(16, 10);
+  s.setShape({line, arc});
+  ASSERT_TRUE(s.open());
+  ASSERT_TRUE(s.alwaysCopper());
+  EXPECT_EQ(s.shape[1].kind, GraphicKind::Arc);
+  t.b.zones.push_back(s);
+  t.via(6, 10, t.g);  // (of the pour's net, on the stripe: it cuts nothing)
+  fillZones(t.b);
+  const Zone& z = t.b.zones[1];
+  auto stripe = [&](double x, double y) { return r::any_of(z.filled, [&](const Polyline& f) { return pointInPolygon(PourBoard::at(x, y), f); }); };
+  EXPECT_TRUE(stripe(6, 10));
+  EXPECT_TRUE(stripe(5, 10.4));
+  EXPECT_FALSE(stripe(5, 10.6));
+  EXPECT_TRUE(stripe(13, 13));
+  EXPECT_FALSE(t.poured(5, 10)) << "the pour of G keeps off O's stripe";
+  EXPECT_FALSE(t.poured(5, 10.6)) << "... by the clearance";
+  EXPECT_TRUE(t.poured(5, 12));
+  clearZoneFills(t.b);
+  EXPECT_FALSE(t.b.zones[1].filled.empty()) << "a stripe is not unpoured";
+}
+
+// P-CAD's rounded corners: a polygon's corner of a radius becomes an arc tangent to its sides, and back.
+TEST(Geometry, RoundedCornersBothWays) {
+  const std::vector<Vec2> corners{{0, 0}, {10e6, 0}, {10e6, 10e6}, {0, 10e6}};
+  Graphic g = roundedPolygon(corners, {0, 2e6, 0, 0});
+  ASSERT_EQ(g.pts.size(), 5u);
+  EXPECT_NEAR((g.pts[1] - Vec2(8e6, 0)).len(), 0, 1);
+  EXPECT_NEAR((g.pts[2] - Vec2(10e6, 2e6)).len(), 0, 1);
+  EXPECT_NEAR(std::abs(g.arcOf(1)), 90, 1e-6);
+  std::vector<Vec2> back;
+  std::vector<double> radii;
+  polygonCorners(g, back, radii);
+  ASSERT_EQ(back.size(), 4u);
+  for (size_t i = 0; i < 4; ++i) EXPECT_NEAR((back[i] - corners[i]).len(), 0, 10) << i;
+  EXPECT_NEAR(radii[1], 2e6, 10);
+  EXPECT_EQ(radii[0], 0);
 }
 
 // The junk a design comes with (edit::removeJunkTracks): a track lying exactly on another goes, the widest stays; a

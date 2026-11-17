@@ -277,9 +277,11 @@ struct Reader {
       const Node* w = ko.find(what);
       return w && w->arg(0) == "not_allowed";
     };
-    k.wires = denied("tracks") || denied("copperpour");
+    // (A keepout of tracks keeps the pours off too; one of the pours alone is «Металлизация».)
+    k.wires = denied("tracks");
     k.vias = denied("vias");
-    if (!k.wires && !k.vias) return;
+    k.pour = !k.wires && denied("copperpour");
+    if (!k.wires && !k.vias && !k.pour) return;
     std::vector<std::string> names;
     if (const Node* l = n.find("layer")) names.push_back(l->arg(0));
     else if (const Node* ls = n.find("layers"))

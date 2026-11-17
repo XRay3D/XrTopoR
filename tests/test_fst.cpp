@@ -8,6 +8,7 @@
 #include <tuple>
 
 #include "core/Connectivity.h"
+#include "core/ZoneFill.h"
 #include "io/BoardIO.h"
 #include "io/Report.h"
 #include "io/topor/Fst.h"
@@ -222,9 +223,9 @@ TEST(FstIO, FiguresKeepTheirKind) {
   EXPECT_NEAR(edges[1]->arcs[1], -90, 1e-6);
   EXPECT_NEAR(edges[1]->arcs[3], 180, 1e-6);
   EXPECT_EQ(b.outline.size(), 2u);
-  ASSERT_TRUE(b.zones.back().shape);
-  EXPECT_EQ(b.zones.back().shape->kind, GraphicKind::Circle);
-  EXPECT_NEAR((b.zones.back().shape->b - b.zones.back().shape->a).len(), 3e6, 10);
+  ASSERT_EQ(b.zones.back().shape.size(), 1u);
+  EXPECT_EQ(b.zones.back().shape[0].kind, GraphicKind::Circle);
+  EXPECT_NEAR((b.zones.back().shape[0].b - b.zones.back().shape[0].a).len(), 3e6, 10);
 }
 
 // A text of several lines as TopoR writes it (the lines parted by "\r\r\n" in the file) and one without an
@@ -767,12 +768,39 @@ TEST(FstIO, KeepoutsTextsCutouts) {
   EXPECT_EQ(r::count_if(b.texts, &Text::isLabel), 36);  // the designators of the components
   EXPECT_GT(b.textStyles.size(), 1u);
   ASSERT_FALSE(b.zones.empty() && b.copperCount() == 0);
-  // A cutout in a copper area of our own.
+  // A cutout of a copper area of our own: a keepout of the pours on its layer, written as the area's Voids.
   Zone z;
   z.layer = b.topCopper();
   z.outline = {{0, 0}, {10e6, 0}, {10e6, 10e6}, {0, 10e6}};
-  z.cutouts.push_back({{2e6, 2e6}, {4e6, 2e6}, {4e6, 4e6}});
+  z.lineWidth = mmToNm(0.3);
   b.zones.push_back(z);
+  Keepout cut;
+  cut.wires = cut.vias = false;
+  cut.pour = true;
+  cut.layers = LayerMask(1) << z.layer;
+  Graphic disc;
+  disc.kind = GraphicKind::Circle;
+  disc.a = {3e6, 3e6};
+  disc.b = {4e6, 3e6};
+  disc.filled = true;
+  cut.shape.push_back(disc);
+  b.keepouts.push_back(cut);
+  const size_t pourKeepouts = size_t(r::count_if(b.keepouts, &Keepout::pour));
+  // A stripe of copper: a line and an arc, as drawn.
+  Zone s;
+  s.layer = z.layer;
+  s.lineWidth = mmToNm(0.5);
+  Graphic l1, a1;
+  l1.kind = GraphicKind::Line;
+  l1.a = {20e6, 0};
+  l1.b = {25e6, 0};
+  a1.kind = GraphicKind::Arc;
+  a1.a = {25e6, 0};
+  a1.m = {28e6, -3e6};
+  a1.b = {31e6, 0};
+  s.setShape({l1, a1});
+  refreshSolidZone(s);
+  b.zones.push_back(s);
   auto again = io::readFst(io::writeFst(b), "rt.fst");
   ASSERT_TRUE(again) << again.error();
   const Board& c = **again;
@@ -789,8 +817,20 @@ TEST(FstIO, KeepoutsTextsCutouts) {
     EXPECT_EQ(c.texts[i].component, b.texts[i].component);
     EXPECT_EQ(c.texts[i].attr, b.texts[i].attr);
   }
-  ASSERT_FALSE(c.zones.empty());
-  EXPECT_EQ(c.zones.back().cutouts.size(), 1u);
+  ASSERT_GE(c.zones.size(), 2u);
+  EXPECT_EQ(size_t(r::count_if(c.keepouts, &Keepout::pour)), pourKeepouts);
+  const Keepout& back = *r::find_if(c.keepouts, &Keepout::pour);
+  ASSERT_EQ(back.shape.size(), 1u);
+  EXPECT_EQ(back.shape[0].kind, GraphicKind::Circle) << "as drawn";
+  const Zone& area = c.zones[c.zones.size() - 2];
+  EXPECT_EQ(area.lineWidth, mmToNm(0.3));
+  const Zone& stripe = c.zones.back();
+  ASSERT_TRUE(stripe.open());
+  ASSERT_EQ(stripe.shape.size(), 2u);
+  EXPECT_EQ(stripe.shape[1].kind, GraphicKind::Arc);
+  EXPECT_NEAR((stripe.shape[1].m - a1.m).len(), 0, 1000);
+  EXPECT_EQ(stripe.lineWidth, mmToNm(0.5));
+  EXPECT_FALSE(stripe.filled.empty());
 
   auto a = io::loadBoard(data("topor/Example_04/Arcs.fst"));
   ASSERT_TRUE(a) << a.error();

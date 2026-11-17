@@ -25,7 +25,7 @@ namespace xr::gui {
 
 enum class Mode { Select, Freestyle, Route, Via, Measure, Draw, Text };
 // Creation tools of the «Вставка» menu: what is drawn and with which figure.
-enum class DrawTarget { Board, Keepout, Copper, Cutout, Detail };
+enum class DrawTarget { Board, Keepout, Copper, Detail };
 enum class DrawShape { Poly, Rect, Disk, Circle, Line, ArcC, ArcP };
 enum class ViaKind { Single, Row, Matrix };
 enum class MeasureKind { Points, Objects };

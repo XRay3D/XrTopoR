@@ -179,7 +179,7 @@ RealizeStats reshapeTracks(Board& b, std::vector<char> chosen, const ReshapeOpti
   // Zone fills on the touched layers no longer match the copper: drop them (refill in the CAD).
   for (auto& z : b.zones)
     for (auto& w : wires)
-      if (z.layer == w.layer) { z.filled.clear(); break; }
+      if (z.layer == w.layer && !z.alwaysCopper()) { z.filled.clear(); break; }
   RealizeOptions opt;
   opt.tracksAsObstacles = true;
   // Chain ends in free space (branch points) stay where they are and keep other nets away.

@@ -218,6 +218,13 @@ double arcAngleForRadius(Vec2 a, Vec2 b, double r, double deg);
 // turning the way `deg` does.
 double arcAngleAbout(Vec2 a, Vec2 b, Vec2 c, double deg);
 
+// A polygon with rounded corners (P-CAD's fillets): a corner of radius > 0 becomes an arc tangent to its two sides,
+// when they are long enough for it (else it stays a corner). A filled Poly.
+Graphic roundedPolygon(const std::vector<Vec2>& corners, const std::vector<double>& radii);
+// The other way: the corners of a Poly whose arc sides are such roundings (tangent to straight sides at both ends)
+// with their radii; any other arc in chords at most `tol` off (corners of radius 0).
+void polygonCorners(const Graphic& poly, std::vector<Vec2>& corners, std::vector<double>& radii, double tol = 5000);
+
 // A component's attribute: «Type», «Value», «Unique Id» and the like (the designator is Component::ref).
 struct Attribute {
   std::string name, value;
@@ -280,13 +287,22 @@ struct Zone {
   int net = kNoNet;
   LayerId layer = 0;
   std::string name;
-  std::vector<Vec2> outline;
-  // The figure the area was drawn as (a circle, a rectangle, a polygon with arcs); outline is its path. None: the
-  // outline is all there is (imported as a polygon).
-  std::optional<Graphic> shape;
-  void setShape(Graphic g);
-  std::vector<std::vector<Vec2>> cutouts;  // «Вырезы в металлизации»: never poured
+  std::vector<Vec2> outline;  // closed: the area's loop; open: its line (not a polygon)
+  // The figures the area was drawn as: one closed figure (a circle, a rectangle, a polygon with arcs), or open ones
+  // end to start (lines and arcs: a stripe of copper). outline is their path, in chords. Empty: the outline is all
+  // there is (imported as a polygon).
+  std::vector<Graphic> shape;
+  void setShape(std::vector<Graphic> figs);
+  void setShape(Graphic g) { setShape(std::vector<Graphic>{std::move(g)}); }
+  // A stripe along lines and arcs: no inside to pour, the copper is the stripe itself.
+  bool open() const { return !shape.empty() && !shape.front().closed(); }
+  // Copper as drawn (the stripe, or the solid area), nothing cut out of it: never poured, never unpoured.
+  bool alwaysCopper() const { return open() || solid; }
   std::vector<std::vector<Vec2>> filled;
+  // «Толщина линии обводки»: the copper goes half of it past the outline (round at the corners), a stripe is this
+  // wide, and no neck of a pour is narrower.
+  Coord lineWidth = 0;
+  bool solid = false;            // «Сплошная медь»: the closed area is copper as drawn (P-CAD's polygon)
   Coord clearance = 0;           // used only with useClearance
   bool useClearance = false;     // the area's own clearance, to everything; else the rules' (Board::zoneClearance)
   int priority = 0;              // higher priority zones are cut out of lower ones
@@ -297,17 +313,21 @@ struct Zone {
   int source = -1;               // P-CAD: which pour of the file (counted through it) the area was read from
 };
 
-// «Запрет». A routing keepout keeps wires and/or vias off its copper layers, a placement keepout keeps
-// components off a side. Its shape is a closed figure (an area) or open lines (a barrier wires may not cross).
+// «Запрет». A routing keepout keeps wires and/or vias off its copper layers — or only the pours («Металлизация»: a
+// cutout of every copper area there) —, a placement keepout keeps components off a side. Its shape is a closed
+// figure (an area: a polygon, a rectangle, a disc) or open lines, arcs and circles (a barrier wires may not cross).
 struct Keepout {
   enum class Role { Route, Place } role = Role::Route;
   bool wires = true, vias = true;  // routing: what is kept out
+  bool pour = false;               // routing: the pours only (wires and vias then false)
   LayerMask layers = 0;            // routing: copper layers, 0 = all
   Side side = Side::None;          // placement: Top, Bottom, None = both sides
   std::vector<Graphic> shape;      // layer unused
   bool onLayer(LayerId l) const { return role == Role::Route && (!layers || ((layers >> l) & 1)); }
-  // Areas as polygons and circles, lines as zero-width capsules (arcs in chords).
+  // Areas as polygons and circles, lines as zero-width capsules (arcs and unfilled circles in chords).
   std::vector<Shape> shapes() const;
+  // An area (it has an inside: hatched, picked by its body, poured round), not a barrier.
+  static bool isArea(const Graphic& g) { return g.closed() && (g.kind != GraphicKind::Circle || g.filled); }
 };
 
 // Text style («Редактор стилей надписей»): TopoR's vector fonts by name, character height and stroke.

@@ -98,7 +98,7 @@ MainWindow::MainWindow()
   bars->setSpacing(0);
   modeBar_ = new ModeBar(tr("Режимы Редактора"), "editor_mode_toolbar", cmds_,
                          {"Cmd_ModeSelect", "Accel_FM", "-", "Accel_RouteMode", "Cmd_ModeBoard", "Cmd_ModeKeepout",
-                          "Cmd_ModeCopper", "Cmd_ModeCutout", "Cmd_ModeDetail", "Accel_InsertText", "Cmd_ModeVia", "-",
+                          "Cmd_ModeCopper", "Cmd_ModeDetail", "Accel_InsertText", "Cmd_ModeVia", "-",
                           "Cmd_ModeSwap", "Accel_Measure"},
                          central);
   autoBar_ = new ModeBar(tr("Действия Редактора Топологии"), "editor_autoproc_toolbar", cmds_,
@@ -366,8 +366,7 @@ void MainWindow::bindCommands() {
     DrawShape shape;
   };
   for (auto [prefix, target] : {Target{"Board", DrawTarget::Board}, Target{"Keepout", DrawTarget::Keepout},
-                                Target{"Copper", DrawTarget::Copper}, Target{"Cutout", DrawTarget::Cutout},
-                                Target{"Detail", DrawTarget::Detail}})
+                                Target{"Copper", DrawTarget::Copper}, Target{"Detail", DrawTarget::Detail}})
     for (auto [suffix, shape] : {Figure{"Poly", DrawShape::Poly}, Figure{"Rect", DrawShape::Rect}, Figure{"Disk", DrawShape::Disk},
                                  Figure{"Circle", DrawShape::Circle}, Figure{"Line", DrawShape::Line},
                                  Figure{"ArcC", DrawShape::ArcC}, Figure{"ArcP", DrawShape::ArcP}}) {
@@ -413,14 +412,13 @@ void MainWindow::buildMenus() {
     cmds_->fill(m, ids);
     return m;
   };
-  auto shapeMenu = [&](QMenu* parent, const QString& title, const QString& p, bool disk, bool open) {
+  auto shapeMenu = [&](QMenu* parent, const QString& title, const QString& p, bool disk, bool circle) {
     QMenu* m = parent->addMenu(title);
     cmds_->fill(m, {p + "Poly", p + "Rect"});
     if (disk) cmds_->fill(m, {p + "Disk"});
-    if (open) {
-      cmds_->fill(m, {p + "Circle", p + "Line"});
-      sub(m, tr("&Дуга"), {p + "ArcC", p + "ArcP"});
-    }
+    if (circle) cmds_->fill(m, {p + "Circle"});
+    cmds_->fill(m, {p + "Line"});
+    sub(m, tr("&Дуга"), {p + "ArcC", p + "ArcP"});
   };
 
   QMenu* file = menu(tr("&Файл"), {"Cmd_NewProject", "Accel_FileOpen", "Cmd_OpenExamples", "Cmd_CloseProject", "-",
@@ -451,8 +449,7 @@ void MainWindow::buildMenus() {
   QMenu* insert = menuBar()->addMenu(tr("Вс&тавка"));
   shapeMenu(insert, tr("&Контур платы"), "Cmd_Board", false, true);
   shapeMenu(insert, tr("&Запрет"), "Cmd_Keepout", true, true);
-  shapeMenu(insert, tr("Область &металлизации"), "Cmd_Copper", true, true);
-  shapeMenu(insert, tr("&Вырез в металлизации"), "Cmd_Cutout", true, false);
+  shapeMenu(insert, tr("Область &металлизации"), "Cmd_Copper", true, false);
   shapeMenu(insert, tr("&Деталь"), "Cmd_Detail", true, true);
   cmds_->fill(insert, {"Accel_InsertText"});
   sub(insert, tr("&Переход"), {"Accel_ViaSingle", "Cmd_ViaRow", "Cmd_ViaMatrix"});
@@ -720,7 +717,7 @@ void MainWindow::updateModeButtons() {
     case Mode::Select: modeBar_->setActiveMode("Cmd_ModeSelect"); break;
     case Mode::Freestyle: modeBar_->setActiveMode("Accel_FM"); break;
     case Mode::Draw: {
-      static const char* groups[] = {"Cmd_ModeBoard", "Cmd_ModeKeepout", "Cmd_ModeCopper", "Cmd_ModeCutout", "Cmd_ModeDetail"};
+      static const char* groups[] = {"Cmd_ModeBoard", "Cmd_ModeKeepout", "Cmd_ModeCopper", "Cmd_ModeDetail"};
       modeBar_->setActiveMode(groups[int(view_->drawTarget())]);
       break;
     }
@@ -1157,10 +1154,14 @@ void MainWindow::pourSelected(int how) {
   if (!doc_->hasBoard()) return;
   Board& b = *doc_->board();
   std::vector<int> zones;
+  bool solid = false;  // (an area that is always copper among them: a stripe, solid copper — nothing to pour)
   for (ItemRef r : doc_->selectedItems())
-    if (r.type == ItemType::Zone) zones.push_back(r.index);
+    if (r.type == ItemType::Zone) {
+      if (b.zones[r.index].alwaysCopper()) solid = true;
+      else zones.push_back(r.index);
+    }
   if (zones.empty()) {
-    showHint(tr("Выделите области металлизации"));
+    showHint(solid ? tr("Линия, дуга и сплошная медь — всегда медь: заливать нечего") : tr("Выделите области металлизации"));
     return;
   }
   auto before = doc_->beginEdit();

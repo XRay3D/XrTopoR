@@ -84,10 +84,10 @@ void BoardView::sceneGraphic(gl::SceneBuilder& sb, const Graphic& g, const QColo
   sb.graphic(g, {double(g.width) / 2, 0.5f}, col(c), doc_->board()->drawnFilled(g));
 }
 
-// A keepout: its areas hatched with a contour, its lines dashed.
+// A keepout: its areas hatched with a contour, its lines, arcs and circles (barriers) dashed.
 void BoardView::sceneKeepout(gl::SceneBuilder& sb, const Keepout& k, const QColor& c) const {
   for (const Graphic& g : k.shape) {
-    if (!g.closed()) {
+    if (!Keepout::isArea(g)) {
       sb.graphic(g, {0, 1, 0, 5}, col(c), false);
       continue;
     }
@@ -112,9 +112,13 @@ void BoardView::sceneLayer(gl::SceneBuilder& sb, LayerId l) const {
         if (z.layer == l) {
           const gl::Color c = col(netColor(z.net, d.colorizeCopper).value_or(details));
           for (auto& f : z.filled) sb.polygon(f, c);
-          // An unpoured area shows its outline; cutouts are dashed.
-          if (z.filled.empty()) sb.loop(z.outline, kHair, c);
-          for (auto& cut : z.cutouts) sb.loop(cut, {0, 0.5f, 0, 4}, c);
+          // An unpoured area shows its outline as wide as its line, the figure as drawn (arcs as arcs).
+          if (z.filled.empty()) {
+            const gl::Stroke line{double(z.lineWidth) / 2, 0.5f};
+            if (!z.shape.empty())
+              for (const Graphic& g : z.shape) sb.graphic(g, line, c, false);
+            else sb.loop(z.outline, line, c);
+          }
         }
       sb.flush();
     }
@@ -349,7 +353,9 @@ void BoardView::buildHighlightScene(gl::SceneData& out) const {
           const Zone& z = b.zones[r.index];
           const gl::Color c = col(lit(z.layer));
           for (auto& f : z.filled) sb.polygon(f, c);
-          sb.loop(z.outline, {0, 1}, c);
+          if (z.open())
+            for (const Graphic& g : z.shape) sb.graphic(g, {0, 1}, c, false);
+          else sb.loop(z.outline, {0, 1}, c);
           break;
         }
         case ItemType::Keepout:

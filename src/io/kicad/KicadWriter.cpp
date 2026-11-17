@@ -4,6 +4,7 @@
 #include <boost/json.hpp>
 #include <cmath>
 
+#include "core/ZoneFill.h"
 #include "io/BoardIO.h"
 #include "io/sexpr/SExpr.h"
 
@@ -97,7 +98,9 @@ void appendRouting(const Board& b, const NetStyle& st, Node& root) {
 void appendZones(const Board& b, const NetStyle& st, Node& root) {
   for (size_t zi = 0; zi < b.zones.size(); ++zi) {
     const Zone& z = b.zones[zi];
-    if (z.outline.size() < 3) continue;
+    // (A stripe of copper: KiCad's areas are polygons — the stripe's contour.)
+    const Polyline outline = z.open() ? zoneContour(z) : z.outline;
+    if (outline.size() < 3) continue;
     Node n = Node::list("zone");
     n.add(netNode(b, st, z.net));
     n.add(strNode("net_name", z.net >= 0 ? b.nets[z.net].name : ""));
@@ -126,7 +129,7 @@ void appendZones(const Board& b, const NetStyle& st, Node& root) {
     n.add(std::move(fill));
     Node poly = Node::list("polygon");
     Node pts = Node::list("pts");
-    for (auto& p : z.outline) pts.add(xyNode("xy", p));
+    for (auto& p : outline) pts.add(xyNode("xy", p));
     poly.add(std::move(pts));
     n.add(std::move(poly));
     for (auto& f : z.filled) {
@@ -225,7 +228,7 @@ void appendKeepouts(const Board& b, Node& root) {
       rule("tracks", k.wires);
       rule("vias", k.vias);
       rule("pads", false);
-      rule("copperpour", k.wires);
+      rule("copperpour", k.wires || k.pour);
       rule("footprints", false);
       z.add(std::move(ko));
       Node poly = Node::list("polygon");

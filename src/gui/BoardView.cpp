@@ -1,5 +1,6 @@
 #include "gui/BoardView.h"
 
+#include "core/ZoneFill.h"
 #include "core/DiffPairs.h"
 #include "core/Padstack.h"
 
@@ -367,14 +368,17 @@ BoardView::Pick BoardView::pick(QPointF screen) const {
     int best = -1;
     for (int zi = 0; zi < int(b.zones.size()); ++zi) {
       const Zone& z = b.zones[zi];
-      if (!layerVisible(z.layer) || z.outline.size() < 3 || passed({ItemType::Zone, zi})) continue;
+      if (!layerVisible(z.layer) || z.outline.size() < (z.open() ? 2u : 3u) || passed({ItemType::Zone, zi})) continue;
       // A poured area is taken by its copper, an unpoured one by its contour alone: its inside is empty board, and a
       // click there meant what lies there (the areas of a board with its pours taken off covered everything).
       bool hit = false;
       if (!z.filled.empty()) {
         hit = r::any_of(z.filled, [&](const Polyline& f) { return pointInPolygon(w, f); });
       } else {
-        for (size_t k = 0; k < z.outline.size() && !hit; ++k) hit = distPointSegment(w, z.outline[k], z.outline[(k + 1) % z.outline.size()]) <= tol;
+        // (By the outline's line, as wide as it is drawn.)
+        const size_t sides = z.open() ? z.outline.size() - 1 : z.outline.size();
+        for (size_t k = 0; k < sides && !hit; ++k)
+          hit = distPointSegment(w, z.outline[k], z.outline[(k + 1) % z.outline.size()]) <= tol + double(z.lineWidth) / 2;
       }
       if (!hit) continue;
       // The active layer's first; of two there the smaller (the one inside the other).
@@ -382,6 +386,22 @@ BoardView::Pick BoardView::pick(QPointF screen) const {
       if (best < 0 || rank(zi) < rank(best)) best = zi;
     }
     if (best >= 0) pk.item = ItemRef{ItemType::Zone, best};
+  }
+  // A keepout's area by its inside, when nothing else is there (its border was looked for above): the smallest.
+  if (!pk.item && (filter & SelKeepouts)) {
+    double least = std::numeric_limits<double>::max();
+    for (int i = 0; i < int(b.keepouts.size()); ++i) {
+      if (!keepoutVisible(b.keepouts[i]) || passed({ItemType::Keepout, i})) continue;
+      for (const Graphic& g : b.keepouts[i].shape) {
+        if (!Keepout::isArea(g)) continue;
+        const Polyline loop = g.path();
+        if (loop.size() < 3 || !pointInPolygon(w, loop)) continue;
+        if (const double area = std::abs(polygonArea(loop)); area < least) {
+          least = area;
+          pk.item = ItemRef{ItemType::Keepout, i};
+        }
+      }
+    }
   }
   return pk;
 }
@@ -1307,7 +1327,7 @@ void BoardView::setMode(Mode m) {
                                                       : tr("Линейка: укажите первый объект"));
       break;
     case Mode::Draw: {
-      static const char* what[] = {"контур платы", "запрет", "область металлизации", "вырез в металлизации", "деталь"};
+      static const char* what[] = {"контур платы", "запрет", "область металлизации", "деталь"};
       QString how;
       switch (drawShape_) {
         case DrawShape::Poly: how = tr("щёлкайте вершины; двойной щелчок, Enter или правая кнопка — завершить"); break;
@@ -1811,14 +1831,6 @@ void BoardView::applyDrag() {
 
 void BoardView::startDraw(DrawTarget target, DrawShape shape) {
   if (!doc_->hasBoard()) return;
-  if (target == DrawTarget::Cutout) {
-    // TopoR: a cutout goes into the one selected copper area, which must not be poured.
-    auto items = doc_->selectedItems();
-    if (items.size() != 1 || items[0].type != ItemType::Zone || !doc_->board()->zones[items[0].index].filled.empty()) {
-      emit status(tr("Для создания выреза выделите одну незалитую область металлизации"));
-      return;
-    }
-  }
   drawSticky_ = QApplication::keyboardModifiers() & Qt::ShiftModifier;
   drawTarget_ = target;
   drawShape_ = shape;
@@ -1948,23 +1960,6 @@ std::vector<Graphic> figureOf(DrawShape shape, const std::vector<Vec2>& pts) {
   return out;
 }
 
-namespace {
-
-// A closed outline of the figure (copper areas and cutouts are polygons).
-Polyline polygonOf(const std::vector<Graphic>& fig) {
-  Polyline out;
-  for (const Graphic& g : fig) {
-    auto pts = g.path();
-    // Lines drawn one after another share their ends.
-    if (!out.empty() && !pts.empty() && (out.back() - pts.front()).len() < 1) out.pop_back();
-    out.insert(out.end(), pts.begin(), pts.end());
-  }
-  if (out.size() >= 2 && (out.front() - out.back()).len() < 1) out.pop_back();
-  return out;
-}
-
-}  // namespace
-
 void BoardView::finishShape() {
   if (mode_ != Mode::Draw) return;
   auto fig = figureOf(drawShape_, drawPts_);
@@ -1980,10 +1975,21 @@ void BoardView::finishShape() {
 
 void BoardView::createShape(std::vector<Graphic> fig) {
   Board& b = *doc_->board();
-  auto before = doc_->beginEdit();
   LayerId active = doc_->activeLayer();
   LayerId copper = doc_->activeCopper();
   if (b.layers[copper].plane) copper = b.topCopper();
+  // A copper area: one closed figure (a polygon, a rectangle, a disc), or lines and arcs end to start — a stripe
+  // of copper —, all as drawn (the arcs are arcs; they become chords in the copper only).
+  Zone area;
+  if (drawTarget_ == DrawTarget::Copper) {
+    area.layer = copper;
+    area.lineWidth = b.trackWidth(kNoNet, copper);
+    if (fig.front().closed()) fig.resize(1);
+    area.setShape(fig);
+    if (area.outline.size() < (area.open() ? 2u : 3u)) return;
+    refreshSolidZone(area);
+  }
+  auto before = doc_->beginEdit();
   ItemRef made;
   QString title;
   switch (drawTarget_) {
@@ -2023,25 +2029,9 @@ void BoardView::createShape(std::vector<Graphic> fig) {
       break;
     }
     case DrawTarget::Copper: {
-      Polyline poly = polygonOf(fig);
-      if (poly.size() < 3) return;
-      Zone z;
-      z.layer = copper;
-      // One figure stays itself (a circle, a rectangle), lines become the polygon they close.
-      if (fig.size() == 1 && fig[0].closed()) z.setShape(fig[0]);
-      else z.outline = std::move(poly);
-      b.zones.push_back(std::move(z));
+      b.zones.push_back(std::move(area));
       made = {ItemType::Zone, int(b.zones.size()) - 1};
       title = tr("Создать область металлизации");
-      break;
-    }
-    case DrawTarget::Cutout: {
-      Polyline poly = polygonOf(fig);
-      auto items = doc_->selectedItems();
-      if (poly.size() < 3 || items.size() != 1 || items[0].type != ItemType::Zone) return;
-      b.zones[items[0].index].cutouts.push_back(std::move(poly));
-      made = items[0];
-      title = tr("Создать вырез в металлизации");
       break;
     }
     case DrawTarget::Detail: {

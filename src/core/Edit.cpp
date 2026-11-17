@@ -17,6 +17,7 @@
 #include <numeric>
 
 #include "core/SpatialIndex.h"
+#include "core/ZoneFill.h"
 
 namespace xr::edit {
 
@@ -344,15 +345,13 @@ bool move(Board& b, const Fragment& f, const Motion& m) {
   for (int zi : f.zones) {
     Zone& z = b.zones[zi];
     for (auto& p : z.outline) p = m.apply(p);
-    if (z.shape) transform(*z.shape, m, rightAngle);
-    for (auto* polys : {&z.filled, &z.cutouts})
-      for (auto& poly : *polys)
-        for (auto& p : poly) p = m.apply(p);
+    for (auto& g : z.shape) transform(g, m, rightAngle);
+    for (auto& poly : z.filled)
+      for (auto& p : poly) p = m.apply(p);
     if (m.mirror) {
       z.layer = mirrorLayer(b, z.layer);
       r::reverse(z.outline);
-      for (auto* polys : {&z.filled, &z.cutouts})
-        for (auto& poly : *polys) r::reverse(poly);
+      for (auto& poly : z.filled) r::reverse(poly);
     }
   }
   for (int ki : f.keepouts) {
@@ -626,8 +625,11 @@ std::optional<Graphic> figureOf(const Board& b, ItemRef r, int part) {
     }
     case ItemType::Zone: {
       const Zone& z = b.zones[r.index];
-      if (z.shape) return z.shape;
-      if (z.outline.size() < 3) return std::nullopt;
+      if (!z.shape.empty()) {
+        if (part >= 0 && part < int(z.shape.size())) return z.shape[size_t(part)];
+        return std::nullopt;
+      }
+      if (part != 0 || z.outline.size() < 3) return std::nullopt;
       Graphic g;
       g.kind = GraphicKind::Poly;
       g.layer = z.layer;
@@ -644,11 +646,17 @@ void editFigure(Board& b, ItemRef r, int part, const std::function<void(std::vec
     case ItemType::Detail: fn(b.graphics, r.index); break;
     case ItemType::Keepout: fn(b.keepouts[r.index].shape, part); break;
     case ItemType::Zone: {
-      auto g = figureOf(b, r, part);
-      if (!g) break;
-      std::vector<Graphic> list{*g};
-      fn(list, 0);
-      b.zones[r.index].setShape(list[0]);
+      Zone& z = b.zones[r.index];
+      std::vector<Graphic> list = z.shape;
+      if (list.empty()) {
+        auto g = figureOf(b, r, 0);
+        if (!g) break;
+        list = {*g};
+      }
+      if (part < 0 || part >= int(list.size())) break;
+      fn(list, part);
+      z.setShape(std::move(list));
+      refreshSolidZone(z);
       break;
     }
     default: break;
@@ -857,7 +865,9 @@ LayerMask viaHeldBy(const Board& b, const Via& v) {
   for (const Pad& p : b.pads)
     if (p.net == v.net && p.shapeGeom().contains(v.pos.v())) used |= p.copper;
   for (const Zone& z : b.zones)
-    if (z.net == v.net && v.onLayer(z.layer) && z.outline.size() >= 3 && pointInPolygon(v.pos.v(), z.outline))
+    if (z.net == v.net && v.onLayer(z.layer) &&
+        (z.open() ? r::any_of(z.filled, [&](const Polyline& f) { return pointInPolygon(v.pos.v(), f); })  // (a stripe: its copper)
+                  : z.outline.size() >= 3 && pointInPolygon(v.pos.v(), z.outline)))
       used |= LayerMask(1) << z.layer;
   for (LayerId l : b.copperLayers())
     if (b.layers[l].plane && b.layers[l].planeNet == v.net && v.onLayer(l)) used |= LayerMask(1) << l;
@@ -940,10 +950,8 @@ Fragment paste(Board& b, const Clip& c, Vec2 at) {
     if (z.layer < 0) continue;
     z.net = net(z.net);
     for (auto& p : z.outline) p = m.apply(p);
-    if (z.shape) transform(*z.shape, m, true);
+    for (auto& g : z.shape) transform(g, m, true);
     for (auto& poly : z.filled)
-      for (auto& p : poly) p = m.apply(p);
-    for (auto& poly : z.cutouts)
       for (auto& p : poly) p = m.apply(p);
     f.zones.push_back(int(b.zones.size()));
     b.zones.push_back(std::move(z));

@@ -422,6 +422,83 @@ double arcAngle(Vec2 a, Vec2 m, Vec2 b) {
   return arc.valid ? -radToDeg(arc.sweep) : 0;
 }
 
+Graphic roundedPolygon(const std::vector<Vec2>& corners, const std::vector<double>& radii) {
+  Graphic g;
+  g.kind = GraphicKind::Poly;
+  g.filled = true;
+  const size_t n = corners.size();
+  auto turn = [&](size_t i) { return std::abs(orient(corners[(i + n - 1) % n], corners[i], corners[(i + 1) % n])); };
+  for (size_t i = 0; i < n; ++i) {
+    const Vec2 v = corners[i], p = corners[(i + n - 1) % n], q = corners[(i + 1) % n];
+    const double r = i < radii.size() ? radii[i] : 0;
+    const Vec2 up = (p - v).normalized(), uq = (q - v).normalized();
+    const double cosA = std::clamp(up.dot(uq), -1.0, 1.0), half = std::acos(cosA) / 2;  // half the inner angle
+    // The tangent points: r / tan(half) from the corner along each side, within it.
+    const double t = r > 0 && half > 1e-6 && turn(i) > 0 ? r / std::tan(half) : 0;
+    if (t <= 0 || t > (p - v).len() + 1 || t > (q - v).len() + 1) {
+      g.pts.push_back(v);
+      g.arcs.push_back(0);
+      continue;
+    }
+    const Vec2 a = v + up * t, b = v + uq * t;
+    const Vec2 bis = (up + uq).normalized();
+    const Vec2 c = v + bis * (r / std::sin(half)), m = c - bis * r;
+    g.pts.push_back(a);
+    g.arcs.push_back(arcAngle(a, m, b));
+    g.pts.push_back(b);
+    g.arcs.push_back(0);
+  }
+  if (!g.hasArcs()) g.arcs.clear();
+  return g;
+}
+
+void polygonCorners(const Graphic& poly, std::vector<Vec2>& corners, std::vector<double>& radii, double tol) {
+  corners.clear();
+  radii.clear();
+  const size_t n = poly.pts.size();
+  if (n < 3) return;
+  // A side that is an arc tangent to the straight sides before and after it: a rounded corner.
+  std::vector<char> rounding(n, 0);
+  std::vector<double> radius(n, 0);
+  std::vector<Vec2> corner(n);
+  for (size_t k = 0; k < n; ++k) {
+    const double deg = poly.arcOf(k);
+    if (deg == 0 || poly.arcOf((k + n - 1) % n) != 0 || poly.arcOf((k + 1) % n) != 0) continue;
+    const Vec2 p0 = poly.pts[(k + n - 1) % n], a = poly.pts[k], b = poly.pts[(k + 1) % n], q0 = poly.pts[(k + 2) % n];
+    auto arc = ArcGeom::fromThreePoints(a, arcMiddle(a, b, deg), b);
+    if (!arc.valid) continue;
+    const Vec2 da = (a - p0).normalized(), db = (q0 - b).normalized();
+    // Tangent: the radius at each end square to its side.
+    if (std::abs((a - arc.center).normalized().dot(da)) > 1e-3 || std::abs((b - arc.center).normalized().dot(db)) > 1e-3) continue;
+    const double den = da.cross(db);
+    if (std::abs(den) < 1e-9) continue;
+    const double s = (b - a).cross(db) / den;
+    corner[k] = a + da * s;
+    radius[k] = arc.radius;
+    rounding[k] = 1;
+  }
+  for (size_t k = 0; k < n; ++k) {
+    if (rounding[(k + n - 1) % n]) continue;  // (the end of a rounding: its corner came with it)
+    if (rounding[k]) {
+      corners.push_back(corner[k]);
+      radii.push_back(radius[k]);
+      continue;
+    }
+    corners.push_back(poly.pts[k]);
+    radii.push_back(0);
+    if (const double deg = poly.arcOf(k); deg != 0) {  // another arc: in chords
+      const Vec2 a = poly.pts[k], b = poly.pts[(k + 1) % n];
+      if (auto arc = ArcGeom::fromThreePoints(a, arcMiddle(a, b, deg), b); arc.valid) {
+        const Polyline pl = arc.tessellate(tol);
+        for (size_t i = 1; i + 1 < pl.size(); ++i) {
+          corners.push_back(pl[i]);
+          radii.push_back(0);
+        }
+      }
+    }
+  }
+}
+
 double arcAngleForRadius(Vec2 a, Vec2 b, double r, double deg) {
   const double half = (b - a).len() / 2;
   if (half <= 0 || r < half) return 0;
@@ -482,10 +559,20 @@ void Graphic::mirrorArcs() {
   for (double& x : arcs) x = -x;
 }
 
-void Zone::setShape(Graphic g) {
-  g.filled = true;
-  outline = g.path();
-  shape = std::move(g);
+void Zone::setShape(std::vector<Graphic> figs) {
+  outline.clear();
+  for (Graphic& g : figs) {
+    if (g.closed()) {
+      g.filled = true;
+      outline = g.path();
+      figs.resize(1);  // (a closed figure is the area alone)
+      break;
+    }
+    // A line of figures end to start: the joints once.
+    for (Vec2 p : g.path())
+      if (outline.empty() || outline.back() != p) outline.push_back(p);
+  }
+  shape = std::move(figs);
 }
 
 static Vec2 rotAround(Vec2 p, Vec2 c, double deg) { return c + rotateBoard(p - c, deg); }
@@ -534,9 +621,11 @@ std::vector<Shape> Keepout::shapes() const {
       continue;
     }
     auto pts = g.path();
-    if (g.closed()) {
+    if (isArea(g)) {
       if (pts.size() >= 3) out.push_back(Shape::polygon(pts));
     } else {
+      // A barrier: lines, arcs and a circle's rim (round, back to its start).
+      if (g.closed() && !pts.empty()) pts.push_back(pts.front());
       for (size_t i = 1; i < pts.size(); ++i) out.push_back(Shape::capsule(pts[i - 1], pts[i], 0));
     }
   }

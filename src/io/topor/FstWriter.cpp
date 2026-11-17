@@ -747,9 +747,10 @@ struct Writer {
   }
 
   void writeKeepouts() {
-    if (b.keepouts.empty()) return;
+    if (r::all_of(b.keepouts, &Keepout::pour)) return;
     x.open("Keepouts");
     for (auto& k : b.keepouts) {
+      if (k.pour) continue;  // (written as the cutouts of the areas they reach)
       x.open("Keepout");
       x.open("Role");
       if (k.role == Keepout::Role::Place) {
@@ -1285,13 +1286,13 @@ struct Writer {
   }
 
   void writeCopper(const Zone& z) {
-    if (z.outline.size() < 3 || z.layer < 0 || z.layer >= int(b.layers.size()) || layerName[z.layer].empty()) return;
+    if (z.outline.size() < (z.open() ? 2u : 3u) || z.layer < 0 || z.layer >= int(b.layers.size()) || layerName[z.layer].empty()) return;
     auto how = [](const ZoneThermal& t) { return t.connection == PadConnection::Thermal ? "Thermal" : t.connection == PadConnection::None ? "None" : "Direct"; };
     x.open("Copper", {{"priority", std::to_string(z.priority)}, {"useBackoff", onOff(z.useClearance)},
                       {"backoff", mm(z.clearance > 0 ? z.clearance : b.netClasses[0].clearance)},
-                      {"connectPad", how(z.pads)}, {"connectVia", how(z.vias)}, {"lineWidth", "0.1"},
+                      {"connectPad", how(z.pads)}, {"connectVia", how(z.vias)}, {"lineWidth", mm(double(z.lineWidth))},
                       {"minSquare", num(z.minIslandArea / 1e12, 6)}, {"deleteUnconnected", onOff(z.removeIslands)},
-                      {"state", z.filled.empty() ? "Unpoured" : "Poured"}});
+                      {"state", z.alwaysCopper() ? "Locked" : z.filled.empty() ? "Unpoured" : "Poured"}});
     x.empty("LayerRef", {{"name", layerName[z.layer]}});
     if (z.net >= 0) x.empty("NetRef", {{"name", netName(z.net)}});
     auto thermal = [&](const char* element, const ZoneThermal& t) {
@@ -1308,20 +1309,48 @@ struct Writer {
     thermal("ThermalPad", z.pads);
     thermal("ThermalVia", z.vias);
     x.open("Shape");
-    if (z.shape && (z.shape->kind != GraphicKind::Poly || z.shape->hasArcs())) {
-      Graphic l = fstGraphic(*z.shape);
+    if (z.open()) {
+      // Lines and arcs end to start: one Polyline.
+      x.open("Polyline");
+      xy("Start", toFst(z.shape.front().a));
+      for (const Graphic& g : z.shape) {
+        const Graphic l = fstGraphic(g);
+        auto arc = l.kind == GraphicKind::Arc ? ArcGeom::fromThreePoints(l.a, l.m, l.b) : ArcGeom{};
+        if (arc.valid) {
+          x.open(arc.sweep >= 0 ? "SegmentArcCCW" : "SegmentArcCW");
+          xy("Center", arc.center);
+        } else {
+          x.open("SegmentLine");
+        }
+        xy("End", l.b);
+        x.close();
+      }
+      x.close();
+    } else if (!z.shape.empty() && (z.shape.front().kind != GraphicKind::Poly || z.shape.front().hasArcs())) {
+      Graphic l = fstGraphic(z.shape.front());
       l.filled = true;
       writeFigure(l);
     } else {
       writeFilledContour(z.outline);
     }
     x.close();
-    if (!z.cutouts.empty()) {
-      x.open("Voids");
-      for (auto& c : z.cutouts)
-        if (c.size() >= 3) writeFilledContour(c);
-      x.close();
+    // The keepouts of the pours on its layer that reach it: its cutouts.
+    bool voids = false;
+    BBox zb;
+    for (Vec2 p : z.outline) zb.add(p);
+    zb = zb.inflated(double(z.lineWidth) / 2);
+    for (const Keepout& k : b.keepouts) {
+      if (!k.pour || !k.onLayer(z.layer)) continue;
+      for (const Graphic& g : k.shape) {
+        if (!Keepout::isArea(g) || !g.bbox().intersects(zb)) continue;
+        if (!voids) x.open("Voids");
+        voids = true;
+        Graphic l = fstGraphic(g);
+        l.filled = true;
+        writeFigure(l);
+      }
     }
+    if (voids) x.close();
     if (!z.filled.empty()) {
       x.open("Islands");
       for (auto& f : z.filled) {

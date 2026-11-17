@@ -1256,8 +1256,8 @@ TEST(Gui, ShapeEditor) {
   EXPECT_EQ(tabs->tabText(tabs->count() - 1), "Форма (Круг)");
   ASSERT_EQ(table()->rowCount(), 2);
   table()->item(1, 1)->setText("3");
-  EXPECT_NEAR(f.b().zones[zi].outline.front().x - f.b().zones[zi].shape->a.x, 3 * kNmPerMm, 1000);
-  EXPECT_EQ(f.b().zones[zi].shape->kind, GraphicKind::Circle);
+  EXPECT_NEAR(f.b().zones[zi].outline.front().x - f.b().zones[zi].shape[0].a.x, 3 * kNmPerMm, 1000);
+  EXPECT_EQ(f.b().zones[zi].shape[0].kind, GraphicKind::Circle);
 
   // A drawn arc: its centre (edited, the arc moves whole) and its radius (edited, the ends stay).
   {
@@ -2166,14 +2166,22 @@ TEST(Gui, DrawingTools) {
   ASSERT_EQ(b.zones.size(), zones + 1);
   EXPECT_EQ(b.zones.back().outline.size(), 4u);
   EXPECT_TRUE(b.zones.back().filled.empty());
-  // A cutout goes into the selected (unpoured) area.
-  f.view.startDraw(DrawTarget::Cutout, DrawShape::Circle);
-  ASSERT_EQ(f.view.mode(), Mode::Draw);
-  click(c + Vec2{3e6, 3e6});
-  click(c + Vec2{4e6, 3e6});
-  ASSERT_EQ(b.zones.back().cutouts.size(), 1u);
+  EXPECT_GT(b.zones.back().lineWidth, 0) << "the outline's line: a wire's width";
   f.doc.undoStack()->undo();
-  EXPECT_TRUE(b.zones.back().cutouts.empty());
+  EXPECT_EQ(b.zones.size(), zones);
+  // A copper arc: an arc as drawn (not chords), a stripe of copper at once.
+  f.view.startDraw(DrawTarget::Copper, DrawShape::ArcP);
+  click(c + Vec2{-3e6, 0});
+  click(c + Vec2{3e6, 0});
+  click(c + Vec2{0, 3e6});
+  ASSERT_EQ(b.zones.size(), zones + 1);
+  {
+    const Zone& arc = b.zones.back();
+    ASSERT_TRUE(arc.open());
+    ASSERT_EQ(arc.shape.size(), 1u);
+    EXPECT_EQ(arc.shape[0].kind, GraphicKind::Arc);
+    EXPECT_FALSE(arc.filled.empty());
+  }
   f.doc.undoStack()->undo();
   EXPECT_EQ(b.zones.size(), zones);
 
@@ -2193,6 +2201,61 @@ TEST(Gui, DrawingTools) {
   EXPECT_EQ(f.view.mode(), Mode::Draw);
   f.view.cancelTool();
   EXPECT_EQ(f.view.mode(), Mode::Select);
+}
+
+// A keepout's area is picked by its inside too (when nothing else is there), a keepout circle — a rim — by its line
+// only. «Металлизация» makes a keepout of the pours alone. No tool of cutouts is left: the keepouts are they.
+TEST(Gui, KeepoutsByTheirInsideAndOfThePours) {
+  Fixture f("tt.kicad_pcb");
+  Board& b = *f.doc.board();
+  BBox bb = b.bbox();
+  const Vec2 c{bb.maxX + 20 * kNmPerMm, bb.center().y};
+  auto figure = [&](GraphicKind kind, Vec2 at, bool filled) {
+    Keepout k;
+    k.layers = LayerMask(1) << b.topCopper();
+    Graphic g;
+    g.kind = kind;
+    g.a = at - Vec2{3e6, 3e6};
+    g.b = at + Vec2{3e6, 3e6};
+    if (kind == GraphicKind::Circle) g.a = at, g.b = at + Vec2{3e6, 0};
+    g.filled = filled;
+    k.shape.push_back(g);
+    b.keepouts.push_back(k);
+    return int(b.keepouts.size()) - 1;
+  };
+  const int rect = figure(GraphicKind::Rect, c, true);
+  const int rim = figure(GraphicKind::Circle, c + Vec2{10e6, 0}, false);
+  f.doc.invalidate();
+  f.look(c + Vec2{5e6, 0}, 40);
+  auto clickAt = [&](Vec2 w) {
+    f.doc.clearSelection();
+    QTest::mouseClick(&f.view, Qt::LeftButton, {}, f.at(w));
+    return f.doc.selectedItems();
+  };
+  auto sel = clickAt(c + Vec2{1e6, 1e6});
+  ASSERT_EQ(sel.size(), 1u);
+  EXPECT_EQ(sel[0], (ItemRef{ItemType::Keepout, rect}));
+  EXPECT_TRUE(clickAt(c + Vec2{10e6, 0}).empty()) << "inside the rim: nothing";
+  sel = clickAt(c + Vec2{13e6, 0});
+  ASSERT_EQ(sel.size(), 1u);
+  EXPECT_EQ(sel[0], (ItemRef{ItemType::Keepout, rim}));
+
+  PropertiesPanel props(&f.doc);
+  f.doc.setSelection({{ItemType::Keepout, rect}}, {});
+  auto* what = props.findChild<QComboBox*>("keepoutWhat");
+  ASSERT_TRUE(what);
+  ASSERT_EQ(what->count(), 4);
+  what->setCurrentIndex(3);
+  emit what->activated(3);
+  EXPECT_TRUE(b.keepouts[size_t(rect)].pour);
+  EXPECT_FALSE(b.keepouts[size_t(rect)].wires);
+  EXPECT_FALSE(b.keepouts[size_t(rect)].vias);
+
+  MainWindow w;
+  EXPECT_FALSE(w.commands()->contains("Cmd_ModeCutout"));
+  EXPECT_FALSE(w.commands()->contains("Cmd_CutoutPoly"));
+  EXPECT_FALSE(w.commands()->contains("Cmd_CopperCircle")) << "a copper area is no rim";
+  EXPECT_TRUE(w.commands()->contains("Cmd_CopperArcP"));
 }
 
 // Texts are picked by their box and move with the selection.
@@ -2615,6 +2678,16 @@ TEST(Gui, ZoneProperties) {
   EXPECT_NEAR(b.zones[1].minIslandArea, 0.5e12, 1e6);
   settled();
 
+  // The outline's line: both areas, poured again — the copper half of it past the outline.
+  auto* line = props.findChild<QDoubleSpinBox*>("lineWidth");
+  ASSERT_TRUE(line);
+  line->setValue(0.5);
+  emit line->editingFinished();
+  EXPECT_EQ(b.zones[0].lineWidth, mmToNm(0.5));
+  EXPECT_EQ(b.zones[1].lineWidth, mmToNm(0.5));
+  EXPECT_FALSE(b.zones[1].filled.empty());
+  settled();
+
   // Re-pour: the fill as it should be again; the state: all off, then all on.
   b.zones[0].filled = {b.zones[0].filled[0]};
   b.zones[0].filled[0].resize(3);
@@ -2684,8 +2757,14 @@ TEST(Gui, SceneHasARecordAnObject) {
   Graphic round;
   round.kind = GraphicKind::Circle;
   round.a = mm(45, 20), round.b = mm(48, 20);
+  round.filled = true;  // (a disc: an area; a circle is a rim, no area, not hatched)
   k.shape.push_back(round);
   f.b->keepouts.push_back(k);
+  Keepout rim;
+  round.a = mm(20, 10), round.b = mm(22, 10);
+  round.filled = false;
+  rim.shape.push_back(round);
+  f.b->keepouts.push_back(rim);
   f.doc.invalidate();
   const gl::SceneData s = f.view.boardScene();
   const auto nm = [](double v) { return std::int32_t(std::llround(v * kNmPerMm)); };
@@ -2724,6 +2803,7 @@ TEST(Gui, SceneHasARecordAnObject) {
     }
   EXPECT_EQ(onCircle, 24);
   EXPECT_EQ(r::count_if(s.arcs, [&](const gl::ArcRec& a) { return a.cx == nm(45) && a.halfSweep > 3.14f; }), 1) << "its contour: a whole circle";
+  EXPECT_EQ(r::count_if(s.arcs, [&](const gl::ArcRec& a) { return a.cx == nm(20) && a.halfSweep > 3.14f; }), 1) << "the rim: its circle, no fill";
 }
 
 // An arc on the screen is the arc: far in, the copper ends at the radius and half the width from the centre at any

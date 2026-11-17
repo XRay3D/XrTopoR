@@ -218,9 +218,11 @@ uint64_t boardHashOf(const Board& b, bool places) {
       f.i(int(k.role));
       f.i(k.wires);
       f.i(k.vias);
+      if (k.pour) f.s("pour");  // (only when set: the models of the files before it stay good)
       for (const std::string& l : maskNames(b, k.layers)) f.s(l);
       for (const Graphic& g : k.shape) {
         f.i(int(g.kind));
+        if (!Keepout::isArea(g) && g.closed()) f.s("rim");  // a circle as a barrier
         f.v(g.a);
         f.v(g.b);
         f.v(g.m);
@@ -237,6 +239,10 @@ uint64_t boardHashOf(const Board& b, bool places) {
       f.i(z.useClearance ? q(double(z.clearance)) : -1);
       f.i(z.filled.empty() ? 0 : 1);
       for (Vec2 p : z.outline) f.v(p);
+      // (Only when set: the models of the files before them stay good.)
+      if (z.lineWidth > 0) f.i(q(double(z.lineWidth)));
+      if (z.solid) f.s("solid");
+      if (z.open()) f.s("open");
       if (debug)
         std::fprintf(stderr, "hash zone: net %s layer %d (%s) clearance %lld filled %d, %zu points, first (%lld, %lld)\n", netName(b, z.net).c_str(), int(z.layer),
                      layerName(b, z.layer).c_str(), static_cast<long long>(z.useClearance ? q(double(z.clearance)) : -1), z.filled.empty() ? 0 : 1, z.outline.size(),

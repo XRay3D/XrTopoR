@@ -1,5 +1,7 @@
 #include "topo/Topology.h"
 
+#include "core/ZoneFill.h"
+
 #include <algorithm>
 #include <unordered_set>
 #include <cmath>
@@ -407,21 +409,24 @@ void Topology::buildOwners(const Board& b, BuildScratch& scratch) {
   const double pitch = std::max(1.2 * (viaDia + double(b.maxClearance())), 1.0 * kNmPerMm);
   // The poured zones: a pad of its net whose vertices are its outline, subdivided like the walls, and no
   // centre (one could lie outside an L-shaped outline, in a cutout, on a pad's centre). The owner's shape
-  // is the outline; its cutouts are not taken off it (what lies in them lies in the zone).
+  // is the outline (the keepouts of pours are not taken off it: what lies in them lies in the zone).
   scratch.zoneOwner.assign(b.zones.size(), -1);
   for (int zi = 0; zi < int(b.zones.size()); ++zi) {
     const Zone& z = b.zones[zi];
-    if (z.filled.empty() || z.outline.size() < 3 || z.layer < 0 || z.layer >= LayerId(b.layers.size()) || !((cuMask >> z.layer) & 1)) continue;
+    if (z.filled.empty() || z.layer < 0 || z.layer >= LayerId(b.layers.size()) || !((cuMask >> z.layer) & 1)) continue;
+    // A closed area's copper goes half its line's width past the outline; a stripe is its contour.
+    const Polyline loop = z.open() ? zoneContour(z) : z.outline;
+    if (loop.size() < 3) continue;
     Owner o;
     o.kind = Owner::Kind::Zone;
     o.zone = zi;
     o.net = z.net;
     o.layers = LayerMask(1) << z.layer;
-    o.shape = Shape::polygon(z.outline);
-    for (Vec2 p : z.outline) o.c = o.c + p / double(z.outline.size());
+    o.shape = Shape::polygon(loop, z.open() ? 0.0 : double(z.lineWidth) / 2);
+    for (Vec2 p : loop) o.c = o.c + p / double(loop.size());
     const Vec2 c = o.c;
     std::vector<Vec2> ring;
-    for (Vec2 p : subdivide(z.outline, true, pitch)) ring.push_back(p - c);
+    for (Vec2 p : subdivide(loop, true, pitch)) ring.push_back(p - c);
     const int id = add(std::move(o));
     corners[id] = std::move(ring);
     scratch.zoneOwner[zi] = id;

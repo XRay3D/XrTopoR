@@ -2423,7 +2423,7 @@ RouterResult Router::run() {
   keptRouting_ = !b_.tracks.empty() || !b_.vias.empty();
   int clearedZones = 0;
   for (auto& z : b_.zones)
-    if (!z.filled.empty()) { z.filled.clear(); ++clearedZones; }
+    if (!z.filled.empty() && !z.alwaysCopper()) { z.filled.clear(); ++clearedZones; }
   if (clearedZones && !o_.fillZones)
     res_.log.push_back(std::format("{} zone fill(s) cleared (refill in the source CAD)", clearedZones));
   setup();

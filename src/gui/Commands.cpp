@@ -152,22 +152,21 @@ Commands::Commands(QWidget* window) : QObject(window), window_(window) {
   add("Cmd_Unroute", tr("&Удалить разводку"), tr("Удалить разводку"), {})
       ->setStatusTip(tr("Удалить всю разводку на плате"));
 
-  // ---- Вставка (shape tools: board outline, keepout, copper, cutout, detail)
+  // ---- Вставка (shape tools: board outline, keepout, copper, detail; a cutout of the pours is a keepout of them)
   struct ShapeKind {
     const char* prefix;
     const char* icon;
     bool disk;    // «Круг» (filled circle)
-    bool open;    // circle/line/arcs
+    bool circle;  // «Окружность» (a rim)
   };
-  for (auto [prefix, icon, disk, open] : {ShapeKind{"Board", "board", false, true}, ShapeKind{"Keepout", "keepout", true, true},
-                                          ShapeKind{"Copper", "copper", true, true}, ShapeKind{"Cutout", "cutout", true, false},
-                                          ShapeKind{"Detail", "detail", true, true}}) {
+  for (auto [prefix, icon, disk, circle] : {ShapeKind{"Board", "board", false, true}, ShapeKind{"Keepout", "keepout", true, true},
+                                            ShapeKind{"Copper", "copper", true, false}, ShapeKind{"Detail", "detail", true, true}}) {
     QString p = QString("Cmd_") + prefix;
     add(p + "Poly", tr("&Многоугольник"), tr("Многоугольник"), {}, {}, icon);
     add(p + "Rect", tr("&Прямоугольник"), tr("Прямоугольник"), {}, {}, icon);
     if (disk) add(p + "Disk", tr("&Круг"), tr("Круг"), {}, {}, icon);
-    if (open) {
-      add(p + "Circle", tr("&Окружность"), tr("Окружность"), {}, {}, icon);
+    if (circle) add(p + "Circle", tr("&Окружность"), tr("Окружность"), {}, {}, icon);
+    {
       add(p + "Line", tr("&Линия"), tr("Линия"), {}, {}, icon);
       add(p + "ArcC", tr("Дуга (по &центру)"), tr("Дуга по центру"), {}, {}, icon);
       add(p + "ArcP", tr("Дуга (по &точкам)"), tr("Дуга по точкам"), {}, {}, icon);
@@ -222,22 +221,22 @@ Commands::Commands(QWidget* window) : QObject(window), window_(window) {
   add("Cmd_ModeBoard", tr("Контур платы"), tr("Контур платы"), {}, {}, "board");
   add("Cmd_ModeKeepout", tr("Запрет"), tr("Запрет"), {}, {}, "keepout");
   add("Cmd_ModeCopper", tr("Область металлизации"), tr("Область металлизации"), {}, {}, "copper");
-  add("Cmd_ModeCutout", tr("Вырез в металлизации"), tr("Вырез в металлизации"), {}, {}, "cutout");
   add("Cmd_ModeDetail", tr("Деталь"), tr("Деталь"), {}, {}, "detail");
   add("Cmd_ModeVia", tr("Переход"), tr("Создать переход"), {}, {}, "via");
   add("Cmd_ModeSwap", tr("Переназначение"), tr("Переназначение"), {}, {}, "swap");
   addGroup("Accel_FM", {"Cmd_FmNoPush", "Cmd_FmPushVias", "Cmd_FmPushComps"}, "Cmd_FmNoPush");
   addGroup("Accel_RouteMode", {"Cmd_RouteWire", "Cmd_RouteDiff"}, "Cmd_RouteWire");
-  auto shapes = [](const QString& p, bool disk, bool open) {
+  auto shapes = [](const QString& p, bool disk, bool circle) {
     QStringList l{p + "Poly", p + "Rect"};
-    if (open) l << p + "ArcC" << p + "ArcP" << p + "Circle" << p + "Line";
-    if (disk) l.insert(2, p + "Disk");
+    if (disk) l << p + "Disk";
+    l << p + "ArcC" << p + "ArcP";
+    if (circle) l << p + "Circle";
+    l << p + "Line";
     return l;
   };
   addGroup("Cmd_ModeBoard", shapes("Cmd_Board", false, true), "Cmd_BoardPoly");
   addGroup("Cmd_ModeKeepout", shapes("Cmd_Keepout", true, true), "Cmd_KeepoutPoly");
-  addGroup("Cmd_ModeCopper", shapes("Cmd_Copper", true, true), "Cmd_CopperPoly");
-  addGroup("Cmd_ModeCutout", shapes("Cmd_Cutout", true, false), "Cmd_CutoutPoly");
+  addGroup("Cmd_ModeCopper", shapes("Cmd_Copper", true, false), "Cmd_CopperPoly");
   addGroup("Cmd_ModeDetail", shapes("Cmd_Detail", true, true), "Cmd_DetailPoly");
   addGroup("Cmd_ModeVia", {"Accel_ViaSingle", "Cmd_ViaRow", "Cmd_ViaMatrix"}, "Accel_ViaSingle");
   addGroup("Cmd_ModeSwap", {"Cmd_SwapPins", "Cmd_SwapGates"}, "Cmd_SwapPins");

@@ -1,6 +1,7 @@
 #include "core/ZoneFill.h"
 
 #include <boost/geometry.hpp>
+#include <boost/geometry/geometries/linestring.hpp>
 #include <boost/geometry/geometries/multi_polygon.hpp>
 #include <boost/geometry/geometries/point_xy.hpp>
 #include <boost/geometry/geometries/polygon.hpp>
@@ -74,7 +75,8 @@ Polyline ringToPolyline(const bg::model::ring<BPt>& r) {
 }  // namespace
 
 void clearZoneFills(Board& b) {
-  for (auto& z : b.zones) z.filled.clear();
+  for (auto& z : b.zones)
+    if (!z.alwaysCopper()) z.filled.clear();
 }
 
 namespace {
@@ -182,14 +184,80 @@ void addPlaneZones(Board& b) {
   }
 }
 
+namespace {
+
+// The copper an area reaches as polygons with holes (zoneCopper).
+BMulti copperReach(const Zone& z) {
+  const double half = double(z.lineWidth) / 2;
+  if (z.open()) {
+    if (z.outline.size() < 2 || half <= 0) return {};
+    bg::model::linestring<BPt> line;
+    for (Vec2 p : z.outline) line.push_back({p.x, p.y});
+    BMulti out;
+    bg::strategy::buffer::distance_symmetric<double> dist(half);
+    bg::strategy::buffer::join_round join(32);
+    bg::strategy::buffer::end_round end(32);
+    bg::strategy::buffer::point_circle circle(32);
+    bg::strategy::buffer::side_straight side;
+    bg::buffer(line, out, dist, side, join, end, circle);
+    return out;
+  }
+  if (z.outline.size() < 3) return {};
+  return grow(toMulti(z.outline), half);
+}
+
+std::vector<Polyline> fractured(const BMulti& m) {
+  std::vector<Polyline> out;
+  for (auto& poly : m) {
+    Polyline outer = ringToPolyline(poly.outer());
+    if (outer.size() < 3) continue;
+    std::vector<Polyline> inner;
+    for (auto& h : poly.inners()) inner.push_back(ringToPolyline(h));
+    out.push_back(fracture(outer, inner));
+  }
+  return out;
+}
+
+}  // namespace
+
+std::vector<Polyline> zoneCopper(const Zone& z, double tol) {
+  // (Arcs are already in chords in the outline: tol is theirs.)
+  (void)tol;
+  return fractured(copperReach(z));
+}
+
+Polyline zoneContour(const Zone& z) {
+  if (!z.open() && z.lineWidth <= 0) return z.outline;
+  BMulti m = copperReach(z);
+  const BPoly* best = nullptr;
+  for (const BPoly& p : m)
+    if (!best || std::abs(bg::area(p)) > std::abs(bg::area(*best))) best = &p;
+  return best ? ringToPolyline(best->outer()) : z.outline;
+}
+
+void refreshSolidZone(Zone& z) {
+  if (z.alwaysCopper()) z.filled = zoneCopper(z);
+}
+
+void refreshSolidZones(Board& b) {
+  for (Zone& z : b.zones) refreshSolidZone(z);
+}
+
 // How far a thermal's bridge goes into the pour past the barrier.
 constexpr double kSpokeInto = 50000;
 
 ZoneFillStats fillZones(Board& b, const ZoneFillOptions& opt) {
   ZoneFillStats st;
   auto selected = [&](int zi) { return opt.only.empty() || r::contains(opt.only, zi); };
-  for (int zi = 0; zi < int(b.zones.size()); ++zi)
-    if (selected(zi)) b.zones[zi].filled.clear();
+  for (int zi = 0; zi < int(b.zones.size()); ++zi) {
+    Zone& z = b.zones[zi];
+    // (Copper as drawn: an obstacle of the pours below. Kept as it is when it has some — TopoR's fixed area keeps
+    // what it was poured as —; an edit of its shape makes it again.)
+    if (z.alwaysCopper()) {
+      if (z.filled.empty()) refreshSolidZone(z);
+    }
+    else if (selected(zi)) z.filled.clear();
+  }
   SpatialIndex idx;
   idx.build(b);
 
@@ -217,12 +285,15 @@ ZoneFillStats fillZones(Board& b, const ZoneFillOptions& opt) {
     if (b.zones[i].priority != b.zones[j].priority) return b.zones[i].priority > b.zones[j].priority;
     return std::abs(polygonArea(b.zones[i].outline)) < std::abs(polygonArea(b.zones[j].outline));
   });
+  std::vector<int> rank(b.zones.size());
+  for (int k = 0; k < int(order.size()); ++k) rank[size_t(order[size_t(k)])] = k;
   for (int zi : order) {
     Zone& z = b.zones[zi];
-    if (z.outline.size() < 3 || !selected(zi)) continue;
+    if (z.alwaysCopper() || z.outline.size() < 3 || !selected(zi)) continue;
     ++st.zones;
     double zoneClr = double(b.zoneClearance(z));
-    BMulti area = toMulti(z.outline);
+    // Up to the outer edge of the outline's line (round at the corners).
+    BMulti area = copperReach(z);
     if (const BMulti& inside = boardInset(z.useClearance ? z.clearance : b.edgeClearance); !inside.empty()) {
       BMulti tmp;
       bg::intersection(area, inside, tmp);
@@ -231,6 +302,7 @@ ZoneFillStats fillZones(Board& b, const ZoneFillOptions& opt) {
     if (area.empty()) continue;
     BBox zb;
     for (auto& p : z.outline) zb.add(p);
+    zb = zb.inflated(double(z.lineWidth) / 2);
     double maxClr = std::max(zoneClr, double(b.maxClearance()));
 
     std::vector<BMulti> holes;
@@ -266,10 +338,11 @@ ZoneFillStats fillZones(Board& b, const ZoneFillOptions& opt) {
       double clr = double(b.zoneClearance(z, net)) + opt.arcTolerance;
       for (auto& s : itemShapes(b, r)) holes.push_back(toMulti(s.inflated(clr).outline(opt.arcTolerance)));
     });
-    // Already poured zones (higher priority) of other nets on this layer.
+    // Already poured zones (higher priority) of other nets on this layer, and the copper of the areas that are
+    // always copper.
     for (int oz : order) {
-      if (oz == zi) break;
       const Zone& o = b.zones[oz];
+      if (oz == zi || (!o.alwaysCopper() && rank[size_t(oz)] > rank[size_t(zi)])) continue;
       if (o.layer != z.layer || o.net == z.net) continue;
       double clr = double(b.zoneClearance(z, o.net)) + opt.arcTolerance;
       // (The pour as polygons, grown: a fill is kept as one contour with its holes on seams, and that contour
@@ -281,12 +354,9 @@ ZoneFillStats fillZones(Board& b, const ZoneFillOptions& opt) {
     for (auto& p : b.pads)
       if (p.drill > 0 && !p.copper && zb.inflated(maxClr).contains(p.pos.v()))
         holes.push_back(toMulti(Shape::circle(p.pos.v(), p.drill / 2.0 + zoneClr + opt.arcTolerance).outline(opt.arcTolerance)));
-    // The area's cutouts and the routing keepouts of its layer stay unpoured (a keepout line cuts the
-    // pour in two).
-    for (auto& c : z.cutouts)
-      if (c.size() >= 3) holes.push_back(toMulti(c));
+    // The keepouts of its layer of wires or of pours stay unpoured (a keepout line cuts the pour in two).
     for (auto& k : b.keepouts) {
-      if (!k.onLayer(z.layer) || !k.wires) continue;
+      if (!k.onLayer(z.layer) || !(k.wires || k.pour)) continue;
       for (auto& s : k.shapes()) {
         if (s.kind == Shape::Kind::Polygon) holes.push_back(toMulti(s.poly));  // may be concave: taken as drawn
         else holes.push_back(toMulti(s.inflated(s.kind == Shape::Kind::Segment ? zoneClr / 2 : 0).outline(opt.arcTolerance)));
@@ -319,10 +389,10 @@ ZoneFillStats fillZones(Board& b, const ZoneFillOptions& opt) {
     BMulti fill;
     bg::difference(area, obstacles, fill);
     // Opening removes necks narrower than minWidth.
-    double minW = double(z.minWidth > 0 ? z.minWidth : opt.minWidth);
+    double minW = std::max(double(z.minWidth > 0 ? z.minWidth : opt.minWidth), double(z.lineWidth));
     if (std::getenv("XR_DEBUG_FILL"))
-      std::fprintf(stderr, "zone %d: net %d layer %d clr %.3f minW %.3f gap %.3f spoke %.3f conn %d priority %d cutouts %zu; %zu polygons after difference, area %.1f mm2\n",
-                   zi, z.net, int(z.layer), zoneClr / 1e6, minW / 1e6, double(z.pads.gap) / 1e6, double(z.pads.spoke) / 1e6, int(z.pads.connection), z.priority, z.cutouts.size(),
+      std::fprintf(stderr, "zone %d: net %d layer %d clr %.3f minW %.3f gap %.3f spoke %.3f conn %d priority %d; %zu polygons after difference, area %.1f mm2\n",
+                   zi, z.net, int(z.layer), zoneClr / 1e6, minW / 1e6, double(z.pads.gap) / 1e6, double(z.pads.spoke) / 1e6, int(z.pads.connection), z.priority,
                    fill.size(), bg::area(fill) / 1e12);
     // Polygon by polygon: the pieces are disjoint, so the opening of the whole is the union of the
     // openings, and boost's buffer of one big multipolygon with thousands of holes went wrong (a KiCad
@@ -395,6 +465,14 @@ ZoneFillStats fillZones(Board& b, const ZoneFillOptions& opt) {
         for (auto& v : outer) pbb.add(v);
         // (... or a bridge lands on it: the pads it is joined to by thermals do not touch it themselves.)
         connected = r::any_of(bridges, [&](const Bridge& br) { return bg::covered_by(BPt(br.lands.x, br.lands.y), poly); });
+        // (... or copper of an area of its net that is always copper.)
+        for (const Zone& o : b.zones)
+          if (!connected && o.alwaysCopper() && o.layer == z.layer && o.net == z.net)
+            for (const Polyline& oc : o.filled)
+              if (Shape::polygon(oc).distance(piece) <= 1000) {
+                connected = true;
+                break;
+              }
         idx.query(pbb, LayerMask(1) << z.layer, [&](ItemRef r) {
           if (connected || r.type == ItemType::Zone || itemNet(b, r) != z.net) return;
           for (auto& s : itemShapes(b, r))

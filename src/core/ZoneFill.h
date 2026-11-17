@@ -20,8 +20,20 @@ struct ZoneFillStats {
   int islandsRemoved = 0;
 };
 
+// Pours the areas (opt.only, or all); an area that is always copper (Zone::alwaysCopper) keeps its copper (gets it
+// as drawn when it has none).
 ZoneFillStats fillZones(Board& b, const ZoneFillOptions& opt = {});
+// Takes the pours off (not the copper of the areas that are always copper).
 void clearZoneFills(Board& b);
+
+// The copper an area reaches: its outline grown by half its line width (round at the corners), or the stripe
+// along an open one; as fractured polygons, like Zone::filled. Arcs in chords at most `tol` off.
+std::vector<Polyline> zoneCopper(const Zone& z, double tol = 5000);
+// Its outer contour (of the largest piece): what the model and the picking take for the area.
+Polyline zoneContour(const Zone& z);
+// An area that is always copper gets its copper again (after its shape, width or place changed); others stay.
+void refreshSolidZone(Zone& z);
+void refreshSolidZones(Board& b);
 
 // A piece of poured copper with the holes in it.
 struct Island {

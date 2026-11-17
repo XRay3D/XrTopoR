@@ -257,7 +257,7 @@ std::vector<DrcViolation> check(const Board& b, const DrcOptions& opt, const Drc
   };
   auto keepoutOf = [&](int ki, const std::vector<Shape>& ks, ItemRef r) -> std::optional<DrcViolation> {
     const Keepout& k = b.keepouts[size_t(ki)];
-    const bool kept = (r.type == ItemType::Track && k.wires) || (r.type == ItemType::Via && k.vias) || (r.type == ItemType::Zone && k.wires);
+    const bool kept = (r.type == ItemType::Track && k.wires) || (r.type == ItemType::Via && k.vias) || (r.type == ItemType::Zone && (k.wires || k.pour));
     if (!kept) return std::nullopt;
     for (auto& s1 : itemShapes(b, r))
       for (auto& s2 : ks)

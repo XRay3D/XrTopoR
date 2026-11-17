@@ -246,12 +246,16 @@ QWidget* PropertiesPanel::keepoutPage(int ki) {
   f->addRow(tr("Роль:"), role);
   if (k.role == Keepout::Role::Route) {
     auto* what = new QComboBox;
-    what->addItems({tr("Проводники"), tr("Переходные отверстия"), tr("Проводники и переходные отверстия")});
-    what->setCurrentIndex(k.wires && k.vias ? 2 : k.vias ? 1 : 0);
+    what->setObjectName("keepoutWhat");
+    // «Металлизация»: the pours only, a cutout of every copper area of its layers.
+    what->addItems({tr("Проводники"), tr("Переходные отверстия"), tr("Проводники и переходные отверстия"), tr("Металлизация")});
+    what->setCurrentIndex(k.pour && !k.wires && !k.vias ? 3 : k.wires && k.vias ? 2 : k.vias ? 1 : 0);
     connect(what, &QComboBox::activated, this, [this, ki](int i) {
       edit(tr("Запрет трассировки"), [&](Board& bd) {
-        bd.keepouts[ki].wires = i != 1;
-        bd.keepouts[ki].vias = i != 0;
+        Keepout& x = bd.keepouts[ki];
+        x.pour = i == 3;
+        x.wires = i == 0 || i == 2;
+        x.vias = i == 1 || i == 2;
       });
     });
     f->addRow(tr("Распространяется на:"), what);
@@ -543,7 +547,7 @@ void PropertiesPanel::editShape(ItemRef r, int part, const QString& t, const std
   edit(t, [&](Board& bd) {
     edit::editFigure(bd, r, part, [&](std::vector<Graphic>& list, int i) { fn(list[i]); });
     if (r.type == ItemType::Detail && bd.isEdge(bd.graphics[r.index].layer)) io::rebuildOutline(bd);
-    if (r.type == ItemType::Zone && !bd.zones[r.index].filled.empty()) {
+    if (r.type == ItemType::Zone && !bd.zones[r.index].filled.empty() && !bd.zones[r.index].alwaysCopper()) {
       bd.zones[r.index].filled.clear();
       ZoneFillOptions o;
       o.only = {r.index};
@@ -1046,13 +1050,19 @@ QWidget* PropertiesPanel::zonePage(const std::vector<int>& zones) {
   const Board& b = *doc_->board();
   const Unit u = doc_->unit();
   auto again = [this] { QMetaObject::invokeMethod(this, &PropertiesPanel::rebuild, Qt::QueuedConnection); };
-  // Every selected area, and those of them that are poured poured again.
-  auto editZones = [this, zones](const QString& name, const std::function<void(Zone&)>& fn) {
+  // Every selected area, and those of them that are poured poured again (`reshape`: the copper of those that are
+  // always copper made again too — their width changed).
+  auto editZones = [this, zones](const QString& name, const std::function<void(Zone&)>& fn, bool reshape = false) {
     edit(name, [&](Board& bd) {
       ZoneFillOptions o;
       for (int zi : zones) {
-        fn(bd.zones[size_t(zi)]);
-        if (!bd.zones[size_t(zi)].filled.empty()) o.only.push_back(zi);
+        Zone& z = bd.zones[size_t(zi)];
+        fn(z);
+        if (z.alwaysCopper()) {
+          if (reshape) refreshSolidZone(z);
+        } else if (!z.filled.empty()) {
+          o.only.push_back(zi);
+        }
       }
       if (!o.only.empty()) fillZones(bd, o);
     });
@@ -1091,24 +1101,48 @@ QWidget* PropertiesPanel::zonePage(const std::vector<int>& zones) {
     again();
   });
   f->addRow(tr("Слой:"), layer);
+  // The areas that are poured (not those that are always copper: a stripe, solid copper).
+  std::vector<int> pourable;
+  for (int zi : zones)
+    if (!zoneOf(zi).alwaysCopper()) pourable.push_back(zi);
   auto* state = new QCheckBox(tr("Залита"));
   state->setObjectName("poured");
   showCheck(state, common<bool>(zones, [&](int zi) { return !zoneOf(zi).filled.empty(); }));
-  connect(state, &QCheckBox::clicked, this, [this, zones, again](bool on) {
+  state->setEnabled(!pourable.empty());
+  connect(state, &QCheckBox::clicked, this, [this, pourable, again](bool on) {
     edit(on ? tr("Залить") : tr("Удалить заливку"), [&](Board& bd) {
-      for (int zi : zones) bd.zones[size_t(zi)].filled.clear();
+      for (int zi : pourable) bd.zones[size_t(zi)].filled.clear();
       if (on) {
         ZoneFillOptions o;
-        o.only = zones;
+        o.only = pourable;
         fillZones(bd, o);
       }
     });
     again();
   });
   f->addRow(tr("Состояние заливки:"), state);
+  // «Сплошная медь»: a closed area that is copper as drawn, nothing cut out of it (P-CAD's polygon).
+  if (r::none_of(zones, [&](int zi) { return zoneOf(zi).open(); })) {
+    auto* solid = new QCheckBox(tr("Сплошная медь"));
+    solid->setObjectName("solid");
+    solid->setToolTip(tr("Медь по контуру как нарисована: без выкусывания, термобарьеров и заливки"));
+    showCheck(solid, common<bool>(zones, [&](int zi) { return zoneOf(zi).solid; }));
+    connect(solid, &QCheckBox::clicked, this, [this, zones, again](bool on) {
+      edit(on ? tr("Сплошная медь") : tr("Не сплошная медь"), [&](Board& bd) {
+        for (int zi : zones) {
+          Zone& z = bd.zones[size_t(zi)];
+          z.solid = on;
+          z.filled.clear();
+          refreshSolidZone(z);
+        }
+      });
+      again();
+    });
+    f->addRow(solid);
+  }
   auto* repour = new QPushButton(tr("Перезалить"));
   repour->setObjectName("repour");
-  repour->setEnabled(r::any_of(zones, [&](int zi) { return !zoneOf(zi).filled.empty(); }));
+  repour->setEnabled(r::any_of(pourable, [&](int zi) { return !zoneOf(zi).filled.empty(); }));
   connect(repour, &QPushButton::clicked, this, [editZones] { editZones(tr("Перезалить"), [](Zone&) {}); });
   f->addRow(repour);
   tabs->addTab(general, tr("Общие"));
@@ -1167,6 +1201,11 @@ QWidget* PropertiesPanel::zonePage(const std::vector<int>& zones) {
   // «Заливка».
   auto* fill = new QWidget;
   auto* fl = new QFormLayout(fill);
+  // The outline's line: the copper goes half of it past the outline, a stripe is this wide.
+  QWidget* lineWidth = length(common<double>(zones, [&](int zi) { return double(zoneOf(zi).lineWidth); }),
+                              [editZones](double nm) { editZones(tr("Толщина линии обводки"), [&](Zone& z) { z.lineWidth = Coord(std::llround(nm)); }, true); });
+  lineWidth->setObjectName("lineWidth");
+  fl->addRow(tr("Толщина линии обводки:"), lineWidth);
   auto* prio = new QSpinBox;
   prio->setObjectName("priority");
   const auto prioShared = common<int>(zones, [&](int zi) { return zoneOf(zi).priority; });
@@ -1229,8 +1268,17 @@ QWidget* PropertiesPanel::zonePage(const std::vector<int>& zones) {
   fl->addRow(tr("Мин. ширина:"), length(common<double>(zones, [&](int zi) { return double(zoneOf(zi).minWidth > 0 ? zoneOf(zi).minWidth : fillDefaults.minWidth); }),
                                         [editZones](double nm) { editZones(tr("Минимальная ширина"), [&](Zone& z) { z.minWidth = Coord(std::llround(nm)); }); }));
   tabs->addTab(fill, tr("Заливка"));
-  if (zones.size() == 1)
-    if (auto g = edit::figureOf(b, {ItemType::Zone, zones[0]})) tabs->addTab(shapePage({ItemType::Zone, zones[0]}, 0), shapeTitle(*g));
+  // The figures of one area: a closed one, or the lines and arcs of a stripe each.
+  if (zones.size() == 1) {
+    const Zone& z = zoneOf(zones[0]);
+    const int parts = z.shape.empty() ? 1 : int(z.shape.size());
+    for (int i = 0; i < parts; ++i)
+      if (auto g = edit::figureOf(b, {ItemType::Zone, zones[0]}, i)) {
+        QString name = shapeTitle(*g);
+        if (parts > 1) name.insert(name.indexOf(' '), QString(" %1").arg(i + 1));
+        tabs->addTab(shapePage({ItemType::Zone, zones[0]}, i), name);
+      }
+  }
   return tabs;
 }
 
