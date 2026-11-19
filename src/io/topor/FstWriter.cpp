@@ -654,11 +654,14 @@ struct Writer {
         if (distPointSegment(p, loop[k], loop[(k + 1) % loop.size()]) <= 20000) return true;
       return false;
     };
+    const std::vector<int> depth = b.outlineDepth();
     for (auto& g : b.graphics)
       if (b.isEdge(g.layer) && !b.outline.empty()) {
         auto path = g.path();
         if (path.empty()) continue;
-        bool hole = r::any_of(b.outline | v::drop(1), [&](auto& loop) { return onLoop(path.front(), loop); });
+        // (A contour in no other is a board's edge, however many there are; one inside it is a cutout.)
+        bool hole = false;
+        for (size_t i = 0; i < b.outline.size(); ++i) hole |= depth[i] % 2 == 1 && onLoop(path.front(), b.outline[i]);
         (hole ? voids : contour).push_back(&g);
       }
     auto shapes = [&](const std::vector<const Graphic*>& gs) {
@@ -674,7 +677,8 @@ struct Writer {
     if (!contour.empty()) {
       shapes(contour);
     } else if (!b.outline.empty() && b.outline.front().size() >= 3) {
-      writeContour(b.outline.front());
+      for (size_t i = 0; i < b.outline.size(); ++i)
+        if (depth[i] % 2 == 0 && b.outline[i].size() >= 3) writeContour(b.outline[i]);
     } else {
       BBox bb = b.bbox();
       if (!bb.valid()) bb = {0, 0, double(mmToNm(100)), double(mmToNm(100))};
@@ -688,10 +692,10 @@ struct Writer {
         shapes(voids);
         x.close();
       }
-    } else if (b.outline.size() > 1) {
+    } else if (r::any_of(depth, [](int d) { return d % 2 == 1; })) {
       x.open("Voids");
-      for (size_t i = 1; i < b.outline.size(); ++i)
-        if (b.outline[i].size() >= 3) writeContour(b.outline[i]);
+      for (size_t i = 0; i < b.outline.size(); ++i)
+        if (depth[i] % 2 == 1 && b.outline[i].size() >= 3) writeContour(b.outline[i]);
       x.close();
     }
     x.close();

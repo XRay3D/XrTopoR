@@ -205,7 +205,7 @@ std::optional<Polyline> findPath(const Board& b, Vec2 from, Vec2 to, LayerId lay
     for (auto& loop : b.outline)
       for (size_t i = 0; i < loop.size(); ++i) g.mark(Shape::capsule(loop[i], loop[(i + 1) % loop.size()], 0), ec);
     for (int c = 0; c < int(g.blocked.size()); ++c)
-      if (!g.blocked[c] && !pointInPolygon(g.centre(c), b.outline[0])) g.blocked[c] = 1;
+      if (!g.blocked[c] && !b.onBoard(g.centre(c))) g.blocked[c] = 1;
   }
   int s = g.cell(from), t = g.cell(to);
   g.blocked[s] = g.blocked[t] = 0;

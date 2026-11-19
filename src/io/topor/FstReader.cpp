@@ -782,7 +782,20 @@ struct Reader {
       tmp.graphics = contour;
       buildOutline(tmp, edge);
       if (!tmp.outline.empty()) b.outline.push_back(tmp.outline.front());
-      for (size_t i = 1; i < tmp.outline.size(); ++i) contourHoles.push_back(tmp.outline[i]);
+      // (A loop that does not lie in the largest is the edge of another board of the design: HARTMASTER has two
+      // side by side, and the second, with all the components on it, was dropped — a loop with copper in it.)
+      // (Beside it: their boxes apart. A boundary drawn twice, or one that shares a corner with the largest, is not.)
+      auto box = [](const Polyline& loop) {
+        BBox bb;
+        for (Vec2 p : loop) bb.add(p);
+        return bb;
+      };
+      for (size_t i = 1; i < tmp.outline.size(); ++i) {
+        const BBox big = box(tmp.outline.front()), one = box(tmp.outline[i]);
+        const bool apart = one.valid() && (one.minX >= big.maxX || one.maxX <= big.minX || one.minY >= big.maxY || one.maxY <= big.minY);
+        if (apart) b.outline.push_back(tmp.outline[i]);
+        else contourHoles.push_back(tmp.outline[i]);
+      }
       tmp.graphics = voids;
       buildOutline(tmp, edge);
       for (auto& h : tmp.outline) b.outline.push_back(h);

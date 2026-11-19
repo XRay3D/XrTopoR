@@ -959,6 +959,32 @@ TEST(Edit, TracksOfNoNetGo) {
   EXPECT_EQ(pasted.tracks.size(), n - ofNet);
 }
 
+// A design of two boards side by side, one copper area over both: both are poured, the strip between them and a
+// cutout in the second are not; the two contours go through a TopoR file as two boards (the second was read as
+// a loop with copper in it and dropped — only one board was poured —, and written as a cutout of the first).
+TEST(ZoneFill, AnAreaOverTwoBoardsPoursBoth) {
+  PourBoard t;
+  t.b.outline.push_back({t.at(0, 30), t.at(20, 30), t.at(20, 50), t.at(0, 50)});
+  t.b.outline.push_back({t.at(8, 38), t.at(12, 38), t.at(12, 42), t.at(8, 42)});  // a cutout in the second
+  t.zone().outline = {t.at(-5, -5), t.at(25, -5), t.at(25, 55), t.at(-5, 55)};
+  EXPECT_EQ(t.b.outlineDepth(), (std::vector<int>{0, 0, 1}));
+  EXPECT_TRUE(t.b.onBoard(t.at(10, 10)) && t.b.onBoard(t.at(3, 40)));
+  EXPECT_FALSE(t.b.onBoard(t.at(10, 25)) || t.b.onBoard(t.at(10, 40)));
+  fillZones(t.b);
+  EXPECT_TRUE(t.poured(10, 10)) << "the first board";
+  EXPECT_TRUE(t.poured(3, 40)) << "the second board";
+  EXPECT_FALSE(t.poured(10, 25)) << "between the boards";
+  EXPECT_FALSE(t.poured(10, 40)) << "the cutout";
+  EXPECT_FALSE(t.poured(0.5, 40)) << "the edge's clearance";
+
+  auto again = io::readFst(io::writeFst(t.b), "two.fst");
+  ASSERT_TRUE(again) << again.error();
+  const Board& c = **again;
+  ASSERT_EQ(c.outline.size(), 3u);
+  EXPECT_TRUE(c.onBoard(t.at(10, 10)) && c.onBoard(t.at(3, 40)));
+  EXPECT_FALSE(c.onBoard(t.at(10, 25)) || c.onBoard(t.at(10, 40)));
+}
+
 // A net taken out of a design: its objects are of no net, the nets after it keep their objects and their rules; a
 // net named anew keeps what the rules give it, or is not renamed.
 TEST(Edit, ANetIsTakenOutAndNamedAnew) {

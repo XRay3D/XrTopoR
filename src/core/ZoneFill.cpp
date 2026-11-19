@@ -261,12 +261,22 @@ ZoneFillStats fillZones(Board& b, const ZoneFillOptions& opt) {
   SpatialIndex idx;
   idx.build(b);
 
+  // The board: every contour that lies in no other (a design may hold several boards side by side) with the
+  // contours inside it cut out, and a contour inside a cutout a piece of board again — by how deep each is nested.
+  // (The first was taken for the board and the rest for its cutouts: of two boards one was poured.)
   BMulti board;
-  for (size_t i = 0; i < b.outline.size(); ++i) {
-    BMulti loop = toMulti(b.outline[i]);
-    BMulti tmp;
-    if (i == 0) board = loop;
-    else bg::difference(board, loop, tmp), board = std::move(tmp);
+  {
+    const std::vector<int> depth = b.outlineDepth();
+    std::vector<size_t> order(b.outline.size());
+    r::iota(order, size_t(0));
+    r::stable_sort(order, {}, [&](size_t i) { return depth[i]; });
+    for (size_t i : order) {
+      if (b.outline[i].size() < 3) continue;
+      BMulti tmp;
+      if (depth[i] % 2 == 0) bg::union_(board, toMulti(b.outline[i]), tmp);
+      else bg::difference(board, toMulti(b.outline[i]), tmp);
+      board = std::move(tmp);
+    }
   }
   // Keep the copper away from the board edge: by the rule, or by the area's own clearance.
   std::map<Coord, BMulti> inset;
@@ -336,7 +346,9 @@ ZoneFillStats fillZones(Board& b, const ZoneFillOptions& opt) {
       }
       // Outlines are inscribed polygons: grow by the chord error so the true clearance holds.
       double clr = double(b.zoneClearance(z, net)) + opt.arcTolerance;
-      for (auto& s : itemShapes(b, r)) holes.push_back(toMulti(s.inflated(clr).outline(opt.arcTolerance)));
+      // (As the copper is on the area's layer: a pad of a stack is another size on another layer — HARTMASTER's
+      // crystal has 1 mm on Top and 1.5 on Bottom, and the pour of Bottom came 0.05 mm from it.)
+      for (auto& s : itemShapes(b, r, 0, z.layer)) holes.push_back(toMulti(s.inflated(clr).outline(opt.arcTolerance)));
     });
     // Already poured zones (higher priority) of other nets on this layer, and the copper of the areas that are
     // always copper.

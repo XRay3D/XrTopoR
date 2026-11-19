@@ -480,6 +480,10 @@ struct Board {
   LayerMask assignedLayers(int net) const;
   int findNetClass(const std::string& name) const;
 
+  // The outline's contours: how deep each lies in the others — even: the edge of a board (a design may hold several
+  // side by side), odd: a cutout in one. And whether a point is on a board: inside an odd number of them.
+  std::vector<int> outlineDepth() const;
+  bool onBoard(Vec2 p) const;
   int findComponent(const std::string& ref) const;
   // The component's attributes as they are shown: the designator («RefDes») first, then those of the file, the
   // value («Value») among them when the file gave it apart.

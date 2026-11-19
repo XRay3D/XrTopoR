@@ -321,6 +321,18 @@ int Board::findNetClass(const std::string& name) const {
   return -1;
 }
 
+std::vector<int> Board::outlineDepth() const {
+  std::vector<int> depth(outline.size(), 0);
+  for (size_t i = 0; i < outline.size(); ++i)
+    for (size_t k = 0; k < outline.size(); ++k)
+      if (k != i && !outline[i].empty() && outline[k].size() >= 3 && pointInPolygon(outline[i].front(), outline[k])) ++depth[i];
+  return depth;
+}
+
+bool Board::onBoard(Vec2 p) const {
+  return r::count_if(outline, [&](const Polyline& loop) { return loop.size() >= 3 && pointInPolygon(p, loop); }) % 2 == 1;
+}
+
 int Board::findComponent(const std::string& ref) const {
   for (int i = 0; i < int(components.size()); ++i)
     if (components[i].ref == ref) return i;
