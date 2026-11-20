@@ -39,6 +39,23 @@ class DesignParamsDialog : public QDialog {
   QWidget* viaTypesPage();
   QWidget* netlistPage();
   QWidget* netGroupsPage();
+  QWidget* compGroupsPage();
+  QWidget* layerGroupsPage();
+  QWidget* compClearancesPage();
+  // What the editor of groups of one kind works on: the groups' names, their objects, the groups put into them
+  // (`nested`: none for the kind), every object there is; and what follows a group renamed.
+  struct GroupsEditor {
+    QString title, one, members, others;
+    std::function<int()> count;
+    std::function<std::string&(int)> name;
+    std::function<std::vector<std::string>&(int)> objects;
+    std::function<std::vector<std::string>&(int)> nested;
+    std::function<std::vector<std::string>()> all;
+    std::function<void(std::string)> add;
+    std::function<void(int)> remove;
+    std::function<void(const std::string& old, const std::string& name)> renamed;
+  };
+  QWidget* groupsPage(GroupsEditor e);
   QWidget* widthsPage();
   QWidget* clearancesPage();
   QWidget* edgePage();
@@ -61,7 +78,9 @@ class DesignParamsDialog : public QDialog {
                     std::function<void(Coord low, Coord high)> set);
   std::pair<QDoubleSpinBox*, QDoubleSpinBox*> orderedSpins(Coord low, Coord high, std::function<void(Coord low, Coord high)> set);
   QWidget* netsCell(const RuleNets& value, std::function<void(RuleNets)> set);
-  QWidget* layerCell(const std::vector<std::string>& value, std::function<void(std::vector<std::string>)> set);
+  QWidget* compsCell(const RuleComps& value, std::function<void(RuleComps)> set);
+  QWidget* layerCell(const std::vector<std::string>& layers, const std::vector<std::string>& groups,
+                     std::function<void(std::vector<std::string>, std::vector<std::string>)> set, bool copper = true);
   QWidget* checkCell(bool value, std::function<void(bool)> set);
 
   // Pad stacks: the editor, «Создать детали на слоях», the stacks of the selected rows.
@@ -72,6 +91,7 @@ class DesignParamsDialog : public QDialog {
   Document* doc_;
   DesignRules rules_;
   std::vector<Padstack> stacks_;           // the design's pad stacks, edited
+  std::vector<char> placement_;            // «Учитывать при размещении» per layer of the design, edited
   std::vector<int> stackOrigin_;           // the board's index of each (-1: new)
   std::set<std::string> hiddenPadColumns_;  // «Выбор столбцов»: layers not shown in the stacks' table
   std::vector<int> selectedStacks_;        // rows selected in the stacks' table (kept across rebuilds)

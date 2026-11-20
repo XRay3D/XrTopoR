@@ -1,5 +1,6 @@
 // GUI smoke test: drives the board view with synthetic mouse/key events on the offscreen platform.
 #include <QCheckBox>
+#include <QInputDialog>
 #include <QApplication>
 #include <format>
 #include <print>
@@ -4545,4 +4546,187 @@ TEST(Gui, AWireIsBegunFromCopperOfANet) {
   QTest::keyClick(&f.view, Qt::Key_Return);
   ASSERT_EQ(f.b().tracks.size(), 1u);
   EXPECT_EQ(f.b().tracks[0].net, f.b().findNet("S"));
+}
+
+namespace {
+
+// Answers the name the groups' pages ask for (QInputDialog) once the dialog is up.
+void answerName(const QString& name) {
+  QTimer::singleShot(0, [name] {
+    auto* dlg = qobject_cast<QInputDialog*>(QApplication::activeModalWidget());
+    ASSERT_TRUE(dlg);
+    dlg->setTextValue(name);
+    dlg->accept();
+  });
+}
+
+void applyParams(DesignParamsDialog& dlg) {
+  for (auto* b : dlg.findChildren<QPushButton*>())
+    if (b->text() == "Применить") b->click();
+}
+
+// A list's row of the given text selected alone; false: no such row.
+bool selectRow(QListWidget* list, const QString& text) {
+  list->clearSelection();
+  for (int i = 0; i < list->count(); ++i)
+    if (list->item(i)->text() == text) {
+      list->item(i)->setSelected(true);
+      return true;
+    }
+  return false;
+}
+
+}  // namespace
+
+// «Группы компонентов»: a group is made, components and a group go into it; a group goes into one group only.
+TEST(Gui, ComponentGroupsPageEditsGroups) {
+  Fixture f("topor/Example_02/Placement.fst");
+  const std::string c0 = f.b().components[0].ref, c1 = f.b().components[1].ref;
+  DesignParamsDialog dlg(&f.doc);
+  auto* stack = dlg.findChild<QStackedWidget*>();
+  dlg.showPage("Группы компонентов");
+  QWidget* page = stack->currentWidget();
+  auto* groups = page->findChild<QListWidget*>("groups");
+  auto* members = page->findChild<QListWidget*>("members");
+  auto* others = page->findChild<QListWidget*>("others");
+  ASSERT_TRUE(groups && members && others);
+  EXPECT_EQ(groups->count(), 0);
+  for (const char* name : {"Inner", "Outer", "Third"}) {
+    answerName(name);
+    page->findChild<QToolButton*>("addGroup")->click();
+  }
+  ASSERT_EQ(groups->count(), 3);
+  // Two components into «Inner».
+  groups->setCurrentRow(0);
+  EXPECT_EQ(others->count(), int(f.b().components.size()) + 2);  // every component and the two other groups
+  ASSERT_TRUE(selectRow(others, QString::fromStdString(c0)));
+  page->findChild<QToolButton*>("toGroup")->click();
+  ASSERT_TRUE(selectRow(others, QString::fromStdString(c1)));
+  page->findChild<QToolButton*>("toGroup")->click();
+  EXPECT_EQ(members->count(), 2);
+  // «Inner» into «Outer»; then it is not offered to «Third», nor «Outer» to «Inner».
+  groups->setCurrentRow(1);
+  ASSERT_TRUE(selectRow(others, "‹Inner›"));
+  page->findChild<QToolButton*>("toGroup")->click();
+  EXPECT_TRUE(selectRow(members, "‹Inner›"));
+  groups->setCurrentRow(2);
+  EXPECT_FALSE(selectRow(others, "‹Inner›"));
+  EXPECT_TRUE(selectRow(others, "‹Outer›"));
+  groups->setCurrentRow(0);
+  EXPECT_FALSE(selectRow(others, "‹Outer›"));
+  EXPECT_TRUE(selectRow(others, "‹Third›"));
+  // One component out again.
+  ASSERT_TRUE(selectRow(members, QString::fromStdString(c1)));
+  page->findChild<QToolButton*>("fromGroup")->click();
+  applyParams(dlg);
+  const DesignRules& r = *f.b().rules;
+  ASSERT_EQ(r.compGroups.size(), 3u);
+  EXPECT_EQ(r.compGroups[0], (CompGroup{"Inner", {c0}, {}}));
+  EXPECT_EQ(r.compGroups[1], (CompGroup{"Outer", {}, {"Inner"}}));
+  EXPECT_EQ(r.compsOf("Outer"), std::vector<std::string>{c0});
+}
+
+TEST(Gui, LayerGroupsPageEditsGroups) {
+  Fixture f("topor/Example_02/Placement.fst");
+  const std::string top = f.b().layers[f.b().topCopper()].name;
+  DesignParamsDialog dlg(&f.doc);
+  auto* stack = dlg.findChild<QStackedWidget*>();
+  dlg.showPage("Группы слоёв");
+  QWidget* page = stack->currentWidget();
+  answerName("Outer");
+  page->findChild<QToolButton*>("addGroup")->click();
+  auto* others = page->findChild<QListWidget*>("others");
+  EXPECT_EQ(others->count(), int(f.b().layers.size()));
+  ASSERT_TRUE(selectRow(others, QString::fromStdString(top)));
+  page->findChild<QToolButton*>("toGroup")->click();
+  // The group is offered to the rules of wires.
+  dlg.showPage("Ширина проводников");
+  auto* table = stack->currentWidget()->findChild<QTableWidget*>();
+  auto* layer = qobject_cast<QComboBox*>(table->cellWidget(0, 2));
+  ASSERT_TRUE(layer);
+  const int at = layer->findText("Группа: Outer");
+  ASSERT_GE(at, 0);
+  layer->setCurrentIndex(at);
+  emit layer->activated(at);
+  applyParams(dlg);
+  const DesignRules& r = *f.b().rules;
+  ASSERT_EQ(r.layerGroups.size(), 1u);
+  EXPECT_EQ(r.layerGroups[0], (LayerGroup{"Outer", {top}, {}}));
+  EXPECT_TRUE(r.widths[0].layers.empty());
+  EXPECT_EQ(r.widths[0].layerGroups, std::vector<std::string>{"Outer"});
+}
+
+// A group renamed: the rules naming it and the group it sits in follow.
+TEST(Gui, RenamedGroupFollowsIntoRules) {
+  Fixture f("topor/Example_02/Placement.fst");
+  Board& b = *f.doc.board();
+  const std::string c0 = b.components[0].ref, top = b.layers[b.topCopper()].name;
+  b.rules->compGroups = {{"Big", {c0}, {}}, {"All", {}, {"Big"}}};
+  b.rules->layerGroups = {{"Outer", {top}, {}}};
+  b.rules->compClearances.push_back({true, {}, {"Outer"}, {RuleComps::Kind::Group, "Big"}, {}, mmToNm(1.0)});
+  b.rules->widths.push_back({true, {}, {}, mmToNm(0.3), mmToNm(0.3), {"Outer"}});
+  DesignParamsDialog dlg(&f.doc);
+  auto* stack = dlg.findChild<QStackedWidget*>();
+  dlg.showPage("Группы компонентов");
+  stack->currentWidget()->findChild<QListWidget*>("groups")->setCurrentRow(0);
+  answerName("Large");
+  stack->currentWidget()->findChild<QToolButton*>("renameGroup")->click();
+  dlg.showPage("Группы слоёв");
+  stack->currentWidget()->findChild<QListWidget*>("groups")->setCurrentRow(0);
+  answerName("Faces");
+  stack->currentWidget()->findChild<QToolButton*>("renameGroup")->click();
+  applyParams(dlg);
+  const DesignRules& r = *f.b().rules;
+  EXPECT_EQ(r.compGroups[0].name, "Large");
+  EXPECT_EQ(r.compGroups[1].groups, std::vector<std::string>{"Large"});
+  EXPECT_EQ(r.compClearances.back().a, (RuleComps{RuleComps::Kind::Group, "Large"}));
+  EXPECT_EQ(r.compClearances.back().layerGroups, std::vector<std::string>{"Faces"});
+  EXPECT_EQ(r.widths.back().layerGroups, std::vector<std::string>{"Faces"});
+}
+
+// «Зазор между компонентами»: the file's rule is shown, a rule is added for one component, applied and compiled.
+TEST(Gui, ComponentClearancePageAppliesRules) {
+  Fixture f("topor/Example_02/Placement.fst");
+  f.doc.setUnit(Unit::Mm);
+  const std::string c0 = f.b().components[0].ref;
+  DesignParamsDialog dlg(&f.doc);
+  dlg.resize(1100, 640);
+  auto* stack = dlg.findChild<QStackedWidget*>();
+  dlg.showPage("Зазор между компонентами");
+  auto table = [&] { return stack->currentWidget()->findChild<QTableWidget*>(); };
+  ASSERT_EQ(table()->rowCount(), 1);
+  auto* clrn = qobject_cast<QDoubleSpinBox*>(table()->cellWidget(0, 5));
+  ASSERT_TRUE(clrn);
+  EXPECT_NEAR(clrn->value(), 0.25, 1e-9);
+  for (auto* b : stack->currentWidget()->findChildren<QToolButton*>())
+    if (b->text() == "+") b->click();
+  ASSERT_EQ(table()->rowCount(), 2);
+  auto* a = qobject_cast<QComboBox*>(table()->cellWidget(1, 3));
+  ASSERT_TRUE(a);
+  const int at = a->findText(QString::fromStdString(c0));
+  ASSERT_GE(at, 0);
+  a->setCurrentIndex(at);
+  emit a->activated(at);
+  qobject_cast<QDoubleSpinBox*>(table()->cellWidget(1, 5))->setValue(1.5);
+  if (const char* dir = std::getenv("XR_SHOT_DIR")) dlg.grab().save(QString(dir) + "/dpe-comp-clearance.png");
+  applyParams(dlg);
+  const Board& b = f.b();
+  ASSERT_EQ(b.rules->compClearances.size(), 2u);
+  EXPECT_EQ(b.componentClearance(0, 1), mmToNm(1.5));
+  EXPECT_EQ(b.componentClearance(1, 2), mmToNm(0.25));
+
+  // «Учитывать при размещении» of a layer, on the layers' page.
+  dlg.showPage("Слои");
+  auto* layers = qobject_cast<QTableWidget*>(stack->currentWidget());  // (the page is the table)
+  ASSERT_TRUE(layers);
+  int row = -1;
+  for (int l = 0; l < layers->rowCount(); ++l)
+    if (f.b().layers[size_t(l)].placement) row = l;
+  ASSERT_GE(row, 0);
+  EXPECT_FALSE(layers->cellWidget(int(f.b().topCopper()), 4));  // not for copper
+  auto* flag = layers->cellWidget(row, 4)->findChild<QCheckBox*>();
+  ASSERT_TRUE(flag && flag->isChecked());
+  flag->setChecked(false);
+  applyParams(dlg);
+  EXPECT_FALSE(f.b().layers[size_t(row)].placement);
 }
