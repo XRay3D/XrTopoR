@@ -61,6 +61,7 @@
 #include "gui/mcp/McpServer.h"
 #include "gui/mcp/McpTransports.h"
 #include "gui/MessagesPanel.h"
+#include "gui/SettingsDialogs.h"
 #include "gui/PropertiesPanel.h"
 #include "gui/TextStylesDialog.h"
 #include "gui/SearchPanel.h"
@@ -4834,4 +4835,73 @@ TEST(Gui, DelayViolationIsShownInMessages) {
   EXPECT_LT(text.indexOf("SDCLK_U2"), 0 + text.size());
   f.doc.clearDrc();
   EXPECT_FALSE(delayGroup());
+}
+
+// «Фильтр сообщений»: a warning switched off is not in the window of messages; the setting is the design's and
+// can be undone.
+TEST(Gui, MessageFilterHidesTheUntickedCategories) {
+  Fixture f("topor/Example_03/arz_2L.fst");
+  MessagesPanel panel(&f.doc, &f.view);
+  auto* tree = panel.findChild<QTreeWidget*>();
+  auto drcRows = [&] {
+    int n = 0;
+    for (int i = 0; i < tree->topLevelItemCount(); ++i)
+      if (tree->topLevelItem(i)->text(0).startsWith("Нарушение DRC")) n += tree->topLevelItem(i)->childCount();
+    return n;
+  };
+  auto hasText = [&](const QString& part) {
+    for (int i = 0; i < tree->topLevelItemCount(); ++i)
+      if (tree->topLevelItem(i)->text(0).contains(part)) return true;
+    return false;
+  };
+  // Two violations: a via on the edge of the board (5012) and a wire too narrow (not one of the filter's).
+  DrcViolation via;
+  via.type = DrcViolation::Type::Edge;
+  via.a = {ItemType::Via, 0};
+  ASSERT_FALSE(f.b().vias.empty());
+  DrcViolation width;
+  width.type = DrcViolation::Type::Width;
+  width.a = {ItemType::Track, 0};
+  f.doc.setDrc({via, width});
+  EXPECT_EQ(drcRows(), 2);
+  // The dialog: «проверять отмеченные» as the design has it; 5012 unticked.
+  auto answer = [&](auto&& act) {
+    QTimer::singleShot(0, [&] {
+      auto* dlg = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+      ASSERT_TRUE(dlg);
+      act(dlg);
+      dlg->accept();
+    });
+    return editMessageFilter(nullptr, &f.doc);
+  };
+  EXPECT_TRUE(answer([](QDialog* dlg) {
+    EXPECT_TRUE(dlg->findChild<QRadioButton*>("checked")->isChecked());
+    auto* c = dlg->findChild<QCheckBox*>("W5012");
+    ASSERT_TRUE(c && c->isChecked() && c->isEnabled());
+    c->setChecked(false);
+  }));
+  EXPECT_FALSE(f.b().settings.messages.shows(5012));
+  EXPECT_EQ(drcRows(), 1);
+  EXPECT_EQ(f.doc.drc().size(), 2u);  // the check's result is whole
+  // Nothing changed: no step.
+  const int steps = f.doc.undoStack()->count();
+  EXPECT_FALSE(answer([](QDialog*) {}));
+  EXPECT_EQ(f.doc.undoStack()->count(), steps);
+  // «Проверять все»: the ticks do not count.
+  EXPECT_TRUE(answer([](QDialog* dlg) {
+    dlg->findChild<QRadioButton*>("all")->setChecked(true);
+    EXPECT_FALSE(dlg->findChild<QCheckBox*>("W5012")->isEnabled());
+  }));
+  EXPECT_EQ(drcRows(), 2);
+  f.doc.undoStack()->undo();
+  EXPECT_EQ(drcRows(), 1);
+  // «Ничего не проверять»: with the one warning alone the window says what was hidden.
+  f.doc.setDrc({via});
+  EXPECT_TRUE(answer([](QDialog* dlg) { dlg->findChild<QRadioButton*>("nothing")->setChecked(true); }));
+  EXPECT_EQ(drcRows(), 0);
+  EXPECT_TRUE(hasText("скрыто фильтром сообщений: 1"));
+  // The filter goes with the design.
+  auto again = io::readFst(io::writeFst(f.b()), "filter.fst");
+  ASSERT_TRUE(again) << again.error();
+  EXPECT_EQ((*again)->settings.messages, f.b().settings.messages);
 }

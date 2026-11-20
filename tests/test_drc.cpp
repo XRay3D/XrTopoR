@@ -223,3 +223,49 @@ TEST(Drc, LockedComponentsMayOverlap) {
 TEST(Drc, ComponentsOnOppositeSidesDoNotMeet) {
   EXPECT_TRUE(componentViolations(twoComponentBoard(0.5, Side::Bottom)).empty());
 }
+
+// TopoR's numbers of the warnings its filter of messages switches, for our violations.
+TEST(Drc, MessageCodesOfViolations) {
+  Board b = twoComponentBoard(1.0);  // the bodies overlap
+  auto v = componentViolations(b);
+  ASSERT_EQ(v.size(), 1u);
+  EXPECT_EQ(messageCode(b, v[0]), 5036);
+  b = twoComponentBoard(2.0);  // short of the clearance only: not a warning of the filter
+  v = componentViolations(b);
+  ASSERT_EQ(v.size(), 1u);
+  EXPECT_EQ(messageCode(b, v[0]), 0);
+  b = twoComponentBoard(5.0);
+  b.moveComponent(1, {mmToNm(19.5), 0});
+  v = componentViolations(b);
+  ASSERT_EQ(v.size(), 1u);
+  EXPECT_EQ(messageCode(b, v[0]), 5034);
+  // A via on the edge of the board; a fixed wire across a via of another net, a loose one is an error.
+  DrcViolation x;
+  x.type = DrcViolation::Type::Edge;
+  x.a = {ItemType::Via, 0};
+  EXPECT_EQ(messageCode(b, x), 5012);
+  x.a = {ItemType::Track, 0};
+  EXPECT_EQ(messageCode(b, x), 0);
+  Track t;
+  t.locked = true;
+  b.tracks.push_back(t);
+  x.type = DrcViolation::Type::Short;
+  x.a = {ItemType::Via, 0};
+  x.b = {ItemType::Track, 0};
+  x.hasB = true;
+  EXPECT_EQ(messageCode(b, x), 5018);
+  x.a = {ItemType::Pad, 0};
+  EXPECT_EQ(messageCode(b, x), 5017);
+  b.tracks[0].locked = false;
+  EXPECT_EQ(messageCode(b, x), 0);
+  x.b = {ItemType::Zone, 0};
+  EXPECT_EQ(messageCode(b, x), 5013);
+  x.type = DrcViolation::Type::Clearance;  // near, not across
+  EXPECT_EQ(messageCode(b, x), 0);
+  x.type = DrcViolation::Type::Keepout;
+  x.a = {ItemType::Via, 0};
+  x.b = {ItemType::Keepout, 0};
+  EXPECT_EQ(messageCode(b, x), 5024);
+  x.a = {ItemType::Zone, 0};
+  EXPECT_EQ(messageCode(b, x), 5026);
+}

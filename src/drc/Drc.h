@@ -53,6 +53,11 @@ DrcEarlier drcEarlier(const Board& was, const std::vector<DrcViolation>& violati
 // Required clearance between two nets (max of their class clearances).
 double requiredClearance(const Board& b, int netA, int netB, LayerMask layers = 0);
 const char* drcTypeName(DrcViolation::Type t);
+// TopoR's number of the warning a violation is, of those its filter of messages switches (MessageFilter::kCodes):
+// 5012 a via on the board's outline, 5013 / 5014 a pad / a via across a copper area of another net, 5017 / 5018 a
+// fixed wire across a pad / a via, 5024 / 5026 a via / a copper area on a routing keepout, 5034 a loose component
+// across the outline (nearer it than allowed), 5036 loose components across each other. 0: none of them.
+int messageCode(const Board& b, const DrcViolation& v);
 
 // Online check of a prospective copper shape: returns the worst (smallest) margin
 // distance - required clearance (>= 0 means OK). `hit` receives the offending item.

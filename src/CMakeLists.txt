@@ -109,6 +109,7 @@ if(XR_BUILD_GUI)
     gui/Schemes.cpp
     gui/SpinBox.cpp
     gui/SearchPanel.cpp
+    gui/SettingsDialogs.cpp
     gui/SmallDialogs.cpp
     gui/TextFont.cpp
     gui/TextStylesDialog.cpp

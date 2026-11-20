@@ -45,6 +45,7 @@
 #include "gui/TextStylesDialog.h"
 #include "gui/UpdateCheck.h"
 #include "gui/SearchPanel.h"
+#include "gui/SettingsDialogs.h"
 #include "gui/SmallDialogs.h"
 #include "gui/ModeBar.h"
 #include "gui/ProgramSettingsDialog.h"
@@ -318,6 +319,7 @@ void MainWindow::bindCommands() {
     });
     dlg.exec();
   });
+  c.bind("Cmd_MsgFilter", [this] { editMessageFilter(this, doc_); });
   c.bind("Cmd_Summary", [this] { showSummary(); });
   c.bind("Cmd_CopperArea", [this] { showCopperArea(this, doc_); });
 

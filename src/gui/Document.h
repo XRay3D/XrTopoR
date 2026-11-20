@@ -48,9 +48,10 @@ struct EditSnapshot {
   std::vector<Padstack> padstacks;
   std::vector<TextStyle> textStyles;
   std::vector<ZippedWire> zips;  // the differential pairs' zipped sections (their conductors are tracks)
+  DesignSettings settings;       // labels, pad corners, the warnings shown: changed by their dialogs
   static EditSnapshot take(const Board& b) {
     return {b.components, b.pads, b.tracks, b.vias, b.zones, b.keepouts, b.texts, b.graphics, b.outline, b.nets,
-            b.padstacks, b.textStyles, b.zips};
+            b.padstacks, b.textStyles, b.zips, b.settings};
   }
   void apply(Board& b) const {
     b.components = components;
@@ -65,6 +66,7 @@ struct EditSnapshot {
     b.nets = nets;
     b.padstacks = padstacks;
     b.textStyles = textStyles;
+    b.settings = settings;
     b.zips = zips;
   }
 };

@@ -188,7 +188,12 @@ void MessagesPanel::rebuild() {
   // DRC, by kind of violation.
   if (doc_->drcRun()) {
     const auto& drc = doc_->drc();
-    if (drc.empty() && doc_->delayViolations().empty()) group(tr("DRC: нарушений нет"), kInfo, -1);
+    // «Фильтр сообщений»: the warnings it switches off are not shown (they stay in the check's result).
+    const MessageFilter& filter = b.settings.messages;
+    auto shown = [&](const DrcViolation& v) { return filter.shows(messageCode(b, v)); };
+    const int hidden = int(r::count_if(drc, [&](const DrcViolation& v) { return !shown(v); }));
+    if (drc.size() == size_t(hidden) && doc_->delayViolations().empty())
+      group(hidden ? tr("DRC: нарушений нет (скрыто фильтром сообщений: %1)").arg(hidden) : tr("DRC: нарушений нет"), kInfo, -1);
     struct Kind {
       DrcViolation::Type type;
       QString title;
@@ -201,11 +206,11 @@ void MessagesPanel::rebuild() {
                                 Kind{DrcViolation::Type::Component, tr("Нарушение DRC: зазор между компонентами")},
                                 Kind{DrcViolation::Type::Unconnected, tr("Нарушение DRC: несоединённые объекты")},
                                 Kind{DrcViolation::Type::Topology, tr("Топологическое нарушение (команда прервана)")}}) {
-      int n = int(r::count(drc, type, &DrcViolation::type));
+      int n = int(r::count_if(drc, [&](const DrcViolation& v) { return v.type == type && shown(v); }));
       if (!n) continue;
       auto* g = group(title, kDrc, n);
       for (int i = 0; i < int(drc.size()); ++i)
-        if (drc[size_t(i)].type == type) child(g, describeViolation(b, doc_->unit(), drc[size_t(i)]), kDrc, drc[size_t(i)].pos)->setData(0, DrcIndex, i);
+        if (drc[size_t(i)].type == type && shown(drc[size_t(i)])) child(g, describeViolation(b, doc_->unit(), drc[size_t(i)]), kDrc, drc[size_t(i)].pos)->setData(0, DrcIndex, i);
     }
     // The delay rules the board does not keep: the nets furthest apart, the shorter first.
     if (const auto& delays = doc_->delayViolations(); !delays.empty()) {

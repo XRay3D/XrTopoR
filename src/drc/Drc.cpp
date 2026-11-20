@@ -710,6 +710,27 @@ std::vector<DrcViolation> check(const Board& b, const DrcOptions& opt, const Drc
 }
 }  // namespace
 
+int messageCode(const Board& b, const DrcViolation& v) {
+  using T = DrcViolation::Type;
+  auto is = [&](ItemType x, ItemType y) { return v.hasB && ((v.a.type == x && v.b.type == y) || (v.a.type == y && v.b.type == x)); };
+  auto lockedTrack = [&] {
+    const ItemRef t = v.a.type == ItemType::Track ? v.a : v.b;
+    return t.type == ItemType::Track && t.index >= 0 && size_t(t.index) < b.tracks.size() && b.tracks[size_t(t.index)].locked;
+  };
+  switch (v.type) {
+    case T::Edge: return v.a.type == ItemType::Via ? 5012 : 0;
+    case T::Short:
+      if (is(ItemType::Pad, ItemType::Zone)) return 5013;
+      if (is(ItemType::Via, ItemType::Zone)) return 5014;
+      if (is(ItemType::Track, ItemType::Pad) && lockedTrack()) return 5017;
+      if (is(ItemType::Track, ItemType::Via) && lockedTrack()) return 5018;
+      return 0;
+    case T::Keepout: return v.a.type == ItemType::Via ? 5024 : v.a.type == ItemType::Zone ? 5026 : 0;
+    case T::Component: return !v.hasB ? 5034 : v.actual <= 0 ? 5036 : 0;
+    default: return 0;
+  }
+}
+
 std::vector<DrcViolation> runDrc(const Board& b, const DrcOptions& opt) { return check(b, opt, nullptr); }
 
 std::vector<DrcViolation> runDrc(const Board& b, const DrcOptions& opt, const DrcEarlier& earlier) {
