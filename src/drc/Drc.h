@@ -10,7 +10,9 @@ namespace xr {
 struct DrcViolation {
   // Topology: a violation of the topological model that stopped F5/F7 before anything was drawn (wires
   // crossing on a layer, a wire through another net's pad); `message` names the kind and the nets.
-  enum class Type { Clearance, Short, Edge, Unconnected, Width, Keepout, Topology };
+  // Component: two components closer than their clearance rule allows (`a`, `b`: a pad of each; `actual` <= 0:
+  // they overlap), or — without `b` — a component nearer the edge of the board than allowed.
+  enum class Type { Clearance, Short, Edge, Unconnected, Width, Keepout, Topology, Component };
   Type type = Type::Clearance;
   std::string message;
   Vec2 pos;
@@ -26,6 +28,10 @@ struct DrcOptions {
   bool unconnected = true;
   bool widths = true;        // wires narrower than the minimum of their width rules
   bool keepouts = true;      // wires, vias and copper areas in (or across) routing keepouts
+  // The clearance between components and from them to the edge of the board (the «Зазор между компонентами»
+  // rules, «Зазор от компонентов до края платы»); two fixed components are not checked against each other.
+  // Off unless asked for: the counts the tools steer by are of the copper.
+  bool components = false;
   double tolerance = 2000;   // nm: smaller shortfalls are rounding
   size_t maxViolations = 5000;
 };

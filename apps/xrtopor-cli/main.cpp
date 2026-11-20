@@ -39,7 +39,8 @@ void usage() {
       "usage: xrtopor-cli <command> <board> [args]   (xrtopor-cli --version: the build)\n"
       "  info       <board>                        summary of a board\n"
       "  convert    <board> <out.kicad_pcb|.dsn|.ses>\n"
-      "  drc        <board> [--max N] [--nominal]   design rule check (--nominal: against the nominal clearances)\n"
+      "  drc        <board> [--max N] [--nominal] [--components]   design rule check (--nominal: against the nominal\n"
+      "             clearances; --components: the clearance between components and from them to the board's edge too)\n"
       "  route      <board> [-o out] [--passes N] [--via-cost MM] [--no-vias] [--layers 0,1] [--nets a,b] [--keep] [--soft] [--buses] [--no-optimize] [--no-refine] [--no-fill] [--svg out.svg]\n"
       "  import-ses <board> <routes.ses> -o <out>\n"
       "  gerber     <board> <outdir>\n"
@@ -98,8 +99,10 @@ int cmdInfo(const Board& b) {
   return 0;
 }
 
-int cmdDrc(const Board& b, size_t maxShow) {
-  auto v = runDrc(b);
+int cmdDrc(const Board& b, size_t maxShow, bool components) {
+  DrcOptions opt;
+  opt.components = components;
+  auto v = runDrc(b, opt);
   std::flat_map<DrcViolation::Type, int> counts;
   for (auto& x : v) counts[x.type]++;
   for (auto& x : v | v::take(maxShow))
@@ -212,7 +215,7 @@ int main(int argc, char** argv) {
       compileRules(b);
     }
     auto m = a.opt("--max");
-    return cmdDrc(b, m.empty() ? 50 : std::stoul(std::string(m)));
+    return cmdDrc(b, m.empty() ? 50 : std::stoul(std::string(m)), a.flag("--components"));
   }
   if (cmd == "route") return cmdRoute(b, a);
   if (cmd == "report") {

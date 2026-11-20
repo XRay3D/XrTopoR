@@ -27,6 +27,7 @@ class DrcDialog : public QDialog {
   QCheckBox* pairs_[kKinds][kKinds] = {};
   QCheckBox* integrity_;
   QCheckBox* widths_;
+  QCheckBox* components_;
   QCheckBox* clearances_;
   QDoubleSpinBox* tolerance_;
   QCheckBox* limit_;

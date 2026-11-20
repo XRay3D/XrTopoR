@@ -98,7 +98,11 @@ DrcDialog::DrcDialog(Document* doc, QWidget* parent) : QDialog(parent), doc_(doc
   integrity_->setChecked(s.value("drc/integrity", true).toBool());
   widths_->setChecked(s.value("drc/widths", true).toBool());
   clearances_->setChecked(s.value("drc/clearances", true).toBool());
-  for (auto* c : {integrity_, widths_, clearances_}) cv->addWidget(c);
+  components_ = new QCheckBox(tr("Зазоры между компонентами"));
+  components_->setToolTip(tr("Правила «Зазор между компонентами» и зазор от компонентов до края платы.\n"
+                             "Габарит компонента — его графика на слоях «Учитывать при размещении» и контактные площадки."));
+  components_->setChecked(s.value("drc/components", true).toBool());
+  for (auto* c : {integrity_, widths_, clearances_, components_}) cv->addWidget(c);
   ov->addWidget(checks);
   auto* tol = new QHBoxLayout;
   tol->addWidget(new QLabel(tr("Допуск:")));
@@ -162,6 +166,7 @@ void DrcDialog::save() const {
   s.setValue("drc/integrity", integrity_->isChecked());
   s.setValue("drc/widths", widths_->isChecked());
   s.setValue("drc/clearances", clearances_->isChecked());
+  s.setValue("drc/components", components_->isChecked());
   s.setValue("drc/tolerance", fromUnit(tolerance_->value(), doc_->unit()));
   s.setValue("drc/limit", limit_->isChecked());
   s.setValue("drc/limitCount", limitCount_->value());
@@ -176,6 +181,7 @@ int DrcDialog::run(Document* doc, QWidget* parent) {
   o.unconnected = s.value("drc/integrity", true).toBool();
   o.widths = s.value("drc/widths", true).toBool();
   o.clearance = s.value("drc/clearances", true).toBool();
+  o.components = s.value("drc/components", true).toBool();
   o.edge = o.clearance && s.value(pairKey(6, 2), true).toBool();
   o.tolerance = s.value("drc/tolerance", 2000.0).toDouble();
   o.maxViolations = s.value("drc/limit", true).toBool() ? size_t(s.value("drc/limitCount", 5000).toInt()) : size_t(-1);

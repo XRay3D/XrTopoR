@@ -23,6 +23,7 @@ const char* drcTypeName(DrcViolation::Type t) {
     case DrcViolation::Type::Unconnected: return "unconnected";
     case DrcViolation::Type::Width: return "width";
     case DrcViolation::Type::Keepout: return "keepout";
+    case DrcViolation::Type::Component: return "component";
   }
   return "?";
 }
@@ -212,6 +213,49 @@ ConflictSum regionConflicts(const Board& b, const SpatialIndex& idx, const BBox&
 }
 
 namespace {
+// The components against each other and against the edge of the board, in their order.
+void checkComponents(const Board& b, const DrcOptions& opt, std::vector<DrcViolation>& out) {
+  const size_t n = b.components.size();
+  std::vector<Board::ComponentExtent> ext(n);
+  Coord widest = 0;
+  for (const auto& c : b.compClearances) widest = std::max(widest, c.clrn);
+  for (size_t i = 0; i < n; ++i)
+    if (!b.components[i].pads.empty()) ext[i] = b.componentExtent(int(i));
+  auto ref = [&](size_t i) { return ItemRef{ItemType::Pad, b.components[i].pads.front()}; };
+  for (size_t i = 0; i < n && out.size() < opt.maxViolations; ++i) {
+    if (!ext[i].box.valid()) continue;
+    const BBox near = ext[i].box.inflated(double(widest));
+    for (size_t j = i + 1; j < n && out.size() < opt.maxViolations; ++j) {
+      if (!ext[j].box.valid() || !near.intersects(ext[j].box)) continue;
+      if (b.components[i].locked && b.components[j].locked) continue;
+      auto g = b.componentGap(int(i), ext[i], int(j), ext[j]);
+      if (!g || g->margin >= -opt.tolerance) continue;
+      DrcViolation v;
+      v.type = DrcViolation::Type::Component;
+      v.a = ref(i);
+      v.b = ref(j);
+      v.hasB = true;
+      v.pos = g->at;
+      v.actual = g->distance;
+      v.required = double(g->required);
+      v.message = (g->distance <= 0 ? "Components overlap: " : "Component clearance " + mm(g->distance) + " < " + mm(double(g->required)) + " mm: ") +
+                  b.components[i].ref + " / " + b.components[j].ref;
+      out.push_back(std::move(v));
+    }
+    if (b.outline.empty() || b.components[i].locked || out.size() >= opt.maxViolations) continue;
+    auto g = b.componentEdgeGap(ext[i]);
+    if (!g || g->margin >= -opt.tolerance) continue;
+    DrcViolation v;
+    v.type = DrcViolation::Type::Component;
+    v.a = ref(i);
+    v.pos = g->at;
+    v.actual = g->distance;
+    v.required = double(g->required);
+    v.message = "Component to board edge " + mm(g->distance) + " < " + mm(double(g->required)) + " mm: " + b.components[i].ref;
+    out.push_back(std::move(v));
+  }
+}
+
 std::vector<DrcViolation> check(const Board& b, const DrcOptions& opt, const DrcEarlier* earlier) {
   std::vector<DrcViolation> out;
   // The checks of one item, for the whole board and for the changed items of a board checked before.
@@ -601,6 +645,7 @@ std::vector<DrcViolation> check(const Board& b, const DrcOptions& opt, const Drc
       r::stable_sort(all, {}, &Keyed::key);
       out.reserve(all.size());
       for (Keyed& kv : all) out.push_back(std::move(kv.v));
+      if (opt.components) checkComponents(b, opt, out);  // (the pads stand: as the earlier check found them)
       return out;
     }
     ps.emplace("drc.pairs");
@@ -645,6 +690,8 @@ std::vector<DrcViolation> check(const Board& b, const DrcOptions& opt, const Drc
         if (auto v = keepoutOf(ki, ks, r)) out.push_back(std::move(*v));
       }
     }
+
+  if (opt.components) checkComponents(b, opt, out);
 
   if (opt.unconnected) {
     auto conn = Connectivity::compute(b, index());

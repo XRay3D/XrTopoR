@@ -163,3 +163,63 @@ TEST(Board, ComponentsOnOppositeSidesDoNotMeet) {
   Board b = twoComponentBoard(0.5, Side::Bottom);
   EXPECT_FALSE(b.componentGap(0, b.componentExtent(0), 1, b.componentExtent(1)));
 }
+
+static std::vector<DrcViolation> componentViolations(const Board& b) {
+  DrcOptions o;
+  o.components = true;
+  auto v = runDrc(b, o);
+  std::erase_if(v, [](const DrcViolation& x) { return x.type != DrcViolation::Type::Component; });
+  return v;
+}
+
+// «Зазор между компонентами»: 0.5 mm are required between the bodies.
+TEST(Drc, ComponentsKeepTheirClearance) {
+  EXPECT_TRUE(componentViolations(twoComponentBoard(3.0)).empty());
+  EXPECT_TRUE(componentViolations(twoComponentBoard(2.1)).empty());  // exactly 0.5
+  Board b = twoComponentBoard(2.0);
+  auto v = componentViolations(b);
+  ASSERT_EQ(v.size(), 1u);
+  EXPECT_NEAR(v[0].actual, mmToNm(0.4), 2);
+  EXPECT_EQ(v[0].required, mmToNm(0.5));
+  ASSERT_TRUE(v[0].hasB);
+  EXPECT_EQ(b.pads[size_t(v[0].a.index)].component, 0);
+  EXPECT_EQ(b.pads[size_t(v[0].b.index)].component, 1);
+  // Overlapping bodies.
+  v = componentViolations(twoComponentBoard(1.0));
+  ASSERT_EQ(v.size(), 1u);
+  EXPECT_LE(v[0].actual, 0);
+  // Not asked for: the check of the copper only.
+  for (auto& x : runDrc(twoComponentBoard(1.0))) EXPECT_NE(x.type, DrcViolation::Type::Component);
+  // A rule for the pair allows it.
+  b.rules->compClearances.push_back({true, {}, {}, {RuleComps::Kind::Comp, "R1"}, {RuleComps::Kind::Comp, "R2"}, mmToNm(0.3)});
+  compileRules(b);
+  EXPECT_TRUE(componentViolations(b).empty());
+}
+
+TEST(Drc, ComponentKeepsOffTheBoardEdge) {
+  Board b = twoComponentBoard(5.0);
+  EXPECT_TRUE(componentViolations(b).empty());
+  b.moveComponent(1, {mmToNm(18.5), 0});  // the body's side 0.7 mm from the edge, 1 mm required
+  auto v = componentViolations(b);
+  ASSERT_EQ(v.size(), 1u);
+  EXPECT_FALSE(v[0].hasB);
+  EXPECT_NEAR(v[0].actual, mmToNm(0.7), 2);
+  EXPECT_EQ(b.pads[size_t(v[0].a.index)].component, 1);
+  b.moveComponent(1, {mmToNm(25.0), 0});  // off the board
+  v = componentViolations(b);
+  ASSERT_EQ(v.size(), 1u);
+  EXPECT_LT(v[0].actual, 0);
+}
+
+// Fixed components are where they are meant to be: not checked against each other nor against the edge.
+TEST(Drc, LockedComponentsMayOverlap) {
+  Board b = twoComponentBoard(1.0);
+  b.components[0].locked = true;
+  EXPECT_EQ(componentViolations(b).size(), 1u);
+  b.components[1].locked = true;
+  EXPECT_TRUE(componentViolations(b).empty());
+}
+
+TEST(Drc, ComponentsOnOppositeSidesDoNotMeet) {
+  EXPECT_TRUE(componentViolations(twoComponentBoard(0.5, Side::Bottom)).empty());
+}

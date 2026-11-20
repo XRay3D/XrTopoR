@@ -61,6 +61,15 @@ QString describeViolation(const Board& b, Unit u, const DrcViolation& v) {
     case DrcViolation::Type::Width:
       return QObject::tr("Ширина %1 < %2: %3").arg(len(v.actual), len(v.required), name(v.a)) + where + at;
     case DrcViolation::Type::Keepout: return QObject::tr("Объект в запрете: %1").arg(name(v.a)) + where + at;
+    case DrcViolation::Type::Component: {
+      auto ref = [&](ItemRef r) {
+        const int c = r.type == ItemType::Pad ? b.pads[size_t(r.index)].component : -1;
+        return c >= 0 ? QString::fromStdString(b.components[size_t(c)].ref) : QString();
+      };
+      if (!v.hasB) return QObject::tr("Зазор от компонента до края платы %1 < %2: %3").arg(len(v.actual), len(v.required), ref(v.a)) + at;
+      if (v.actual <= 0) return QObject::tr("Компоненты пересекаются: %1 / %2").arg(ref(v.a), ref(v.b)) + at;
+      return QObject::tr("Зазор между компонентами %1 < %2: %3 / %4").arg(len(v.actual), len(v.required), ref(v.a), ref(v.b)) + at;
+    }
     case DrcViolation::Type::Topology: return QObject::tr("Топология: %1").arg(QString::fromStdString(v.message)) + where + at;
   }
   return QString::fromStdString(v.message);
@@ -161,6 +170,7 @@ void MessagesPanel::rebuild() {
                                 Kind{DrcViolation::Type::Edge, tr("Нарушение DRC: зазор до края платы")},
                                 Kind{DrcViolation::Type::Width, tr("Нарушение DRC: ширина проводника")},
                                 Kind{DrcViolation::Type::Keepout, tr("Нарушение DRC: объект в запрете")},
+                                Kind{DrcViolation::Type::Component, tr("Нарушение DRC: зазор между компонентами")},
                                 Kind{DrcViolation::Type::Unconnected, tr("Нарушение DRC: несоединённые объекты")},
                                 Kind{DrcViolation::Type::Topology, tr("Топологическое нарушение (команда прервана)")}}) {
       int n = int(r::count(drc, type, &DrcViolation::type));
