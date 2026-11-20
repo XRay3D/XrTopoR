@@ -1,6 +1,8 @@
 // TopoR PCB (.fst) reader/writer tests.
 #include <gtest/gtest.h>
 
+#include <filesystem>
+
 #include <cmath>
 #include <algorithm>
 #include <map>
@@ -697,6 +699,44 @@ TEST(FstIO, DesignSettingsRoundTrip) {
   EXPECT_EQ((*amk)->settings.messages, MessageFilter{});
   EXPECT_TRUE((*amk)->settings.messages.shows(5013));
   EXPECT_TRUE(MessageFilter{}.shows(5007));  // not one that can be switched
+}
+
+// Every sample design keeps its groups, its rules of components and of delays and its settings when written
+// and read again.
+TEST(FstIO, EverySampleKeepsItsRulesAndSettings) {
+  int files = 0, compRules = 0, delays = 0;
+  for (const char* dir : {"topor", "buses"})
+    for (auto& e : std::filesystem::recursive_directory_iterator(data(dir))) {
+      if (e.path().extension() != ".fst") continue;
+      auto r = io::loadBoard(e.path().string());
+      ASSERT_TRUE(r) << e.path() << ": " << r.error();
+      const Board& a = **r;
+      auto again = io::readFst(io::writeFst(a), "again.fst");
+      ASSERT_TRUE(again) << e.path() << ": " << again.error();
+      const Board& c = **again;
+      ++files;
+      EXPECT_EQ(c.settings, a.settings) << e.path();
+      ASSERT_EQ(bool(c.rules), bool(a.rules)) << e.path();
+      if (a.rules) {
+        EXPECT_EQ(c.rules->compGroups, a.rules->compGroups) << e.path();
+        EXPECT_EQ(c.rules->layerGroups, a.rules->layerGroups) << e.path();
+        EXPECT_EQ(c.rules->compClearances, a.rules->compClearances) << e.path();
+        EXPECT_EQ(c.rules->edgeComps, a.rules->edgeComps) << e.path();
+        compRules += int(a.rules->compClearances.size());
+      }
+      ASSERT_EQ(c.hispeed.delays.size(), a.hispeed.delays.size()) << e.path();
+      for (size_t i = 0; i < a.hispeed.delays.size(); ++i) {
+        EXPECT_EQ(c.hispeed.delays[i].kind, a.hispeed.delays[i].kind) << e.path();
+        EXPECT_NEAR(c.hispeed.delays[i].constant, a.hispeed.delays[i].constant, 1e-6) << e.path();
+        EXPECT_NEAR(c.hispeed.delays[i].tolerance, a.hispeed.delays[i].tolerance, 1e-6) << e.path();
+      }
+      delays += int(a.hispeed.delays.size());
+      for (size_t l = 0; l < a.layers.size(); ++l)
+        if (LayerId m = c.findLayer(a.layers[l].name); m >= 0) EXPECT_EQ(c.layers[size_t(m)].placement, a.layers[l].placement) << e.path() << " " << a.layers[l].name;
+    }
+  EXPECT_GE(files, 19);
+  EXPECT_GE(compRules, 19);  // TopoR writes one into every design
+  EXPECT_GE(delays, 6);
 }
 
 // TopoR keeps a design's display settings in the file: they are read and written back.

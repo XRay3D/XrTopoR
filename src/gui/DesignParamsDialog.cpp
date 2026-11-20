@@ -467,13 +467,6 @@ QWidget* DesignParamsDialog::ruleTable(const QStringList& headers, std::function
 
 // ---------------------------------------------------------------- pages
 
-QWidget* DesignParamsDialog::notSupported(const QString& what) {
-  auto* l = new QLabel(tr("<i>%1: в XrTopoR пока не поддерживается.</i>").arg(what));
-  l->setAlignment(Qt::AlignTop | Qt::AlignLeft);
-  l->setMargin(8);
-  return l;
-}
-
 QWidget* DesignParamsDialog::layersPage() {
   const Board& b = *doc_->board();
   auto* t = new QTableWidget(int(b.layers.size()), 5);

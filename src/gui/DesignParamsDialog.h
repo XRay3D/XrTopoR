@@ -70,7 +70,6 @@ class DesignParamsDialog : public QDialog {
   QWidget* viaRulesPage();
   QWidget* planesPage();
   QWidget* layerNetsPage();
-  QWidget* notSupported(const QString& what);
 
   // A rule table: rows rebuilt from the list, with + − ▲ ▼ under it.
   QWidget* ruleTable(const QStringList& headers, std::function<int()> count,
