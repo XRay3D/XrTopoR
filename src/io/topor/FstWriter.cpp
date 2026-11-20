@@ -1145,12 +1145,26 @@ struct Writer {
     }
     x.close();
     x.open("RulesClearancesCompToComp");
-    x.open("ClearanceCompToComp", {{"enabled", "on"}, {"clrn", mm(b.netClasses[0].clearance)}});
-    x.open("ObjectsAffected");
-    x.empty("AllComps");
-    x.empty("AllComps");
-    x.close();
-    x.close();
+    // (a design with no such rule gets the one TopoR makes: the default clearance between all components)
+    std::vector<CompClearanceRule> comps = rules_.compClearances;
+    if (comps.empty()) comps.push_back({true, {}, {}, {}, {}, b.netClasses[0].clearance});
+    auto compObject = [&](const RuleComps& o) {
+      switch (o.kind) {
+        case RuleComps::Kind::All: x.empty("AllComps"); break;
+        case RuleComps::Kind::Comp: x.empty("CompInstanceRef", {{"name", o.name}}); break;
+        case RuleComps::Kind::Group: x.empty("CompGroupRef", {{"name", o.name}}); break;
+      }
+    };
+    for (auto& c : comps) {
+      x.open("ClearanceCompToComp", {{"enabled", onOff(c.enabled)}, {"clrn", mm(c.clrn)}});
+      // (TopoR writes no layers for a rule over all of them)
+      if (!c.layers.empty() || !c.layerGroups.empty()) ruleLayers(c.layers, c.layerGroups);
+      x.open("ObjectsAffected");
+      compObject(c.a);
+      compObject(c.b);
+      x.close();
+      x.close();
+    }
     x.close();
     Coord edge = rules_.edgeWires > 0 ? rules_.edgeWires : b.edgeClearance;
     x.empty("RulesClearancesToBoard",

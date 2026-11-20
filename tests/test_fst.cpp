@@ -567,6 +567,45 @@ TEST(FstIO, PlacementLayersRoundTrip) {
   }
 }
 
+// «Зазор между компонентами»: the rules are read, the later one wins, and written back as they are.
+TEST(FstIO, CompClearancesRoundTrip) {
+  auto r = io::loadBoard(data("topor/Example_02/Placement.fst"));
+  ASSERT_TRUE(r) << r.error();
+  Board& a = **r;
+  ASSERT_TRUE(a.rules);
+  // The file's own rule: all components, 0.25 mm.
+  ASSERT_EQ(a.rules->compClearances.size(), 1u);
+  EXPECT_EQ(a.rules->compClearances[0].clrn, mmToNm(0.25));
+  EXPECT_EQ(a.componentClearance(0, 1), mmToNm(0.25));
+
+  const std::string c0 = a.components[0].ref, c1 = a.components[1].ref, c2 = a.components[2].ref;
+  LayerId assy = -1;
+  for (size_t l = 0; l < a.layers.size(); ++l)
+    if (a.layers[l].placement) assy = LayerId(l);
+  ASSERT_GE(assy, 0);
+  a.rules->compGroups = {{"Big", {c1, c2}, {}}};
+  a.rules->layerGroups = {{"Bodies", {a.layers[assy].name}, {}}};
+  a.rules->compClearances.push_back({true, {}, {}, {RuleComps::Kind::Comp, c0}, {RuleComps::Kind::Group, "Big"}, mmToNm(1.0)});
+  a.rules->compClearances.push_back({true, {}, {"Bodies"}, {RuleComps::Kind::Comp, c0}, {}, mmToNm(2.0)});
+  a.rules->compClearances.push_back({false, {}, {}, {}, {}, mmToNm(5.0)});
+  compileRules(a);
+  auto check = [&](const Board& b) {
+    const int i0 = b.findComponent(c0), i1 = b.findComponent(c1), i2 = b.findComponent(c2);
+    const LayerId l = b.findLayer(a.layers[assy].name);
+    EXPECT_EQ(b.componentClearance(i0, i1), mmToNm(1.0));
+    EXPECT_EQ(b.componentClearance(i2, i0), mmToNm(1.0));   // either way round
+    EXPECT_EQ(b.componentClearance(i1, i2), mmToNm(0.25));  // the rule for all
+    EXPECT_EQ(b.componentClearance(i0, i1, l), mmToNm(2.0));  // the layer's rule is the later one
+    EXPECT_EQ(b.componentClearance(i1, i2, l), mmToNm(0.25));
+  };
+  check(a);
+  auto again = io::readFst(io::writeFst(a), "rules.fst");
+  ASSERT_TRUE(again) << again.error();
+  ASSERT_TRUE((*again)->rules);
+  EXPECT_EQ((*again)->rules->compClearances, a.rules->compClearances);
+  check(**again);
+}
+
 // TopoR keeps a design's display settings in the file: they are read and written back.
 TEST(FstIO, DisplayControlRoundTrip) {
   auto r = io::loadBoard(data("topor/Example_05/MinVia_standard_routing.fst"));

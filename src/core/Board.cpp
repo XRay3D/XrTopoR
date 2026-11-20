@@ -645,6 +645,81 @@ std::vector<Shape> Keepout::shapes() const {
   return out;
 }
 
+Board::ComponentExtent Board::componentExtent(int comp) const {
+  ComponentExtent e;
+  const Component& c = components[size_t(comp)];
+  auto add = [&](Shape s, LayerId layer, LayerMask copper) {
+    e.box.add(s.bbox());
+    e.items.push_back({std::move(s), layer, copper});
+  };
+  for (const Graphic& g : c.graphics) {
+    if (g.layer < 0 || g.layer >= LayerId(layers.size()) || !layers[size_t(g.layer)].placement) continue;
+    if (g.kind == GraphicKind::Circle) {
+      add(Shape::circle(g.a, (g.b - g.a).len() + g.width / 2.0), g.layer, 0);
+      continue;
+    }
+    auto pts = g.path();
+    if (g.closed() && pts.size() >= 3) add(Shape::polygon(pts, g.width / 2.0), g.layer, 0);
+    else
+      for (size_t i = 1; i < pts.size(); ++i) add(Shape::capsule(pts[i - 1], pts[i], g.width / 2.0), g.layer, 0);
+  }
+  for (int p : c.pads) add(pads[size_t(p)].shapeGeom(), -1, pads[size_t(p)].copper);
+  return e;
+}
+
+std::optional<Board::ComponentGap> Board::componentGap(int a, const ComponentExtent& ea, int b, const ComponentExtent& eb) const {
+  std::optional<ComponentGap> out;
+  if (!ea.box.valid() || !eb.box.valid()) return out;
+  const Coord padClr = componentClearance(a, b, -1);
+  // A pad and an outline meet when the outline's layer is of the pad's side (or of no side).
+  auto ofSide = [&](LayerId layer, LayerMask copper) {
+    const Side s = layers[size_t(layer)].side;
+    if (s == Side::None) return true;
+    const LayerId cu = s == Side::Top ? topCopper() : bottomCopper();
+    return cu >= 0 && ((copper >> cu) & 1);
+  };
+  for (const auto& x : ea.items)
+    for (const auto& y : eb.items) {
+      Coord req = padClr;
+      if (x.layer >= 0 && y.layer >= 0) {
+        if (x.layer != y.layer) continue;
+        req = componentClearance(a, b, x.layer);
+      } else if (x.layer < 0 && y.layer < 0) {
+        if (!(x.copper & y.copper)) continue;
+      } else if (!(x.layer >= 0 ? ofSide(x.layer, y.copper) : ofSide(y.layer, x.copper))) continue;
+      const double cut = double(req) + (out ? std::max(0.0, out->margin) : 0.0);
+      if (!x.shape.bbox().inflated(cut).intersects(y.shape.bbox()) && out) continue;
+      const double d = x.shape.distance(y.shape);
+      if (!out || d - double(req) < out->margin) {
+        const BBox xb = x.shape.bbox(), yb = y.shape.bbox();
+        // (where: the middle of what the two boxes share, else between them)
+        const Vec2 at{(std::max(xb.minX, yb.minX) + std::min(xb.maxX, yb.maxX)) / 2, (std::max(xb.minY, yb.minY) + std::min(xb.maxY, yb.maxY)) / 2};
+        out = ComponentGap{d - double(req), d, req, at};
+      }
+    }
+  return out;
+}
+
+std::optional<Board::ComponentGap> Board::componentEdgeGap(const ComponentExtent& e) const {
+  std::optional<ComponentGap> out;
+  for (const auto& x : e.items)
+    for (const auto& loop : outline)
+      for (size_t i = 0; i < loop.size(); ++i) {
+        const Vec2 p = loop[i], q = loop[(i + 1) % loop.size()];
+        const double d = x.shape.distanceToSegment(p, q);
+        if (!out || d < out->distance) {
+          const BBox xb = x.shape.bbox();
+          out = ComponentGap{d - double(edgeCompClearance), d, edgeCompClearance, Vec2{(xb.minX + xb.maxX) / 2, (xb.minY + xb.maxY) / 2}};
+        }
+      }
+  // Off the board altogether: the distance to the edge says nothing, the component is beyond it.
+  if (out && e.box.valid() && !onBoard(out->at)) {
+    out->margin = -out->distance - double(edgeCompClearance);
+    out->distance = -out->distance;
+  }
+  return out;
+}
+
 const TextStyle& Board::styleOf(const Text& t) const {
   static const TextStyle def;
   return t.style >= 0 && t.style < int(textStyles.size()) ? textStyles[size_t(t.style)] : def;

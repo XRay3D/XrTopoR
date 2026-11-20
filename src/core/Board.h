@@ -414,6 +414,43 @@ struct Board {
     Coord width = 0;
   };
   std::vector<MinWidthRule> minWidthRules;
+  // The component clearance rules as compileRules resolved them, in the rules' order (the last one naming both
+  // components on the layer wins): the layers (0: all, of any kind), the components sorted (`all*`: every one).
+  struct CompClearance {
+    LayerMask layers = 0;
+    bool allA = true, allB = true;
+    std::vector<int> a, b;
+    Coord clrn = 0;
+  };
+  std::vector<CompClearance> compClearances;
+  // The clearance between two components: on a layer (their outlines there), or `layer` < 0: of the rules over
+  // all layers (their pads). 0: no rule.
+  Coord componentClearance(int a, int b, LayerId layer = -1) const;
+  // «Зазор от компонентов до края платы».
+  Coord edgeCompClearance = 0;
+  // What a component takes up: its graphics on the layers considered at placement (Layer::placement) — a closed
+  // figure as an area, a line by its width — and its pads. No frame is made up: a component with no such
+  // graphics is its pads.
+  struct ComponentExtent {
+    struct Item {
+      Shape shape;
+      LayerId layer = -1;   // the outline's layer; -1: a pad
+      LayerMask copper = 0;  // a pad's copper layers
+    };
+    std::vector<Item> items;
+    BBox box;
+  };
+  ComponentExtent componentExtent(int comp) const;
+  // How two components stand: the least of (distance − clearance required) over what of theirs can meet — outlines
+  // on one layer, pads on a common copper layer, a pad and an outline of its side. Nothing can meet: no value.
+  struct ComponentGap {
+    double margin = 0, distance = 0;
+    Coord required = 0;
+    Vec2 at;  // on the first component
+  };
+  std::optional<ComponentGap> componentGap(int a, const ComponentExtent& ea, int b, const ComponentExtent& eb) const;
+  // The same to the edge of the board (the outline's contours): distance − edgeCompClearance.
+  std::optional<ComponentGap> componentEdgeGap(const ComponentExtent& e) const;
   std::pair<size_t, size_t> minWidthsFor{SIZE_MAX, SIZE_MAX};
   std::vector<Net> nets;
   std::vector<Component> components;

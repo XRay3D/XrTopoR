@@ -36,6 +36,22 @@ struct ClearanceRule {
   std::vector<std::string> layerGroups;
 };
 
+// Components a rule affects: all, one by its designator, a component group.
+struct RuleComps {
+  enum class Kind { All, Comp, Group } kind = Kind::All;
+  std::string name;
+  bool operator==(const RuleComps&) const = default;
+};
+
+// «Зазор между компонентами»: the nominal clearance between the components of `a` and of `b` on the layers.
+struct CompClearanceRule {
+  bool enabled = true;
+  std::vector<std::string> layers, layerGroups;  // both empty: all layers
+  RuleComps a, b;
+  Coord clrn = 0;
+  bool operator==(const CompClearanceRule&) const = default;
+};
+
 // The pad of a via type on a class of layers («Signal», «Plane», «Mask»...) or on one layer by name.
 struct ViaPadSize {
   std::string layerClass, layer;
@@ -99,6 +115,7 @@ struct DesignRules {
   std::vector<ViaRule> vias;
   std::vector<PlaneRule> planes;
   std::vector<LayerNetsRule> layerNets;
+  std::vector<CompClearanceRule> compClearances;
   Coord edgeWires = 0, edgeComps = 0;  // «Зазор до края платы»
 
   // The layers of a layer group and the components of a component group, with those of the groups in it.

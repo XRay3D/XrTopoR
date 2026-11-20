@@ -308,6 +308,45 @@ void compileRules(Board& b) {
     if (LayerId l = b.findLayer(p.layer); p.enabled && l >= 0)
       if (int n = b.findNet(p.net); n >= 0) b.layers[l].planeNet = n;
   if (r.edgeWires > 0) b.edgeClearance = r.edgeWires;
+  b.edgeCompClearance = r.edgeComps;
+
+  b.compClearances.clear();
+  for (auto& c : r.compClearances) {
+    if (!c.enabled) continue;
+    Board::CompClearance cc;
+    bool named = false;
+    auto layer = [&](const std::string& n) {
+      named = true;
+      if (LayerId l = b.findLayer(n); l >= 0) cc.layers |= LayerMask(1) << l;
+    };
+    for (auto& n : c.layers) layer(n);
+    for (auto& g : c.layerGroups)
+      for (auto& n : r.layersOf(g)) layer(n);
+    if (named && !cc.layers) continue;  // on no layer of the design
+    auto comps = [&](const RuleComps& o, bool& all, std::vector<int>& out) {
+      all = o.kind == RuleComps::Kind::All;
+      if (o.kind == RuleComps::Kind::Comp) {
+        if (int i = b.findComponent(o.name); i >= 0) out.push_back(i);
+      } else if (o.kind == RuleComps::Kind::Group)
+        for (auto& n : r.compsOf(o.name))
+          if (int i = b.findComponent(n); i >= 0) out.push_back(i);
+      r::sort(out);
+    };
+    comps(c.a, cc.allA, cc.a);
+    comps(c.b, cc.allB, cc.b);
+    cc.clrn = c.clrn;
+    b.compClearances.push_back(std::move(cc));
+  }
+}
+
+Coord Board::componentClearance(int a, int b, LayerId layer) const {
+  Coord out = 0;
+  for (const CompClearance& c : compClearances) {
+    if (layer < 0 ? c.layers != 0 : c.layers && !((c.layers >> layer) & 1)) continue;
+    auto has = [](bool all, const std::vector<int>& v, int i) { return all || std::binary_search(v.begin(), v.end(), i); };
+    if ((has(c.allA, c.a, a) && has(c.allB, c.b, b)) || (has(c.allA, c.a, b) && has(c.allB, c.b, a))) out = c.clrn;
+  }
+  return out;
 }
 
 DesignRules rulesFromBoard(const Board& b) {

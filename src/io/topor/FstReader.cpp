@@ -1178,6 +1178,25 @@ struct Reader {
                                 obj.size() > 1 ? ruleNets(*obj[1]) : RuleNets{}, len(c->num("clrnMin", c->num("clrnNom"))),
                                 len(c->num("clrnNom", c->num("clrnMin"))), groups});
       }
+    if (auto* rc = rules.find("RulesClearancesCompToComp"))
+      for (auto* c : rc->findAll("ClearanceCompToComp")) {
+        CompClearanceRule rule;
+        rule.enabled = c->flag("enabled", true);
+        rule.clrn = len(c->num("clrn", c->num("clrnNom")));
+        for (auto& k : c->kids) {
+          if (k.is("LayerRef")) rule.layers.emplace_back(k.attr("name"));
+          else if (k.is("LayerGroupRef")) rule.layerGroups.emplace_back(k.attr("name"));
+        }
+        auto comps = [](const Element& o) -> RuleComps {
+          if (o.is("CompInstanceRef") || o.is("ComponentRef")) return {RuleComps::Kind::Comp, std::string(o.attr("name"))};
+          if (o.is("CompGroupRef")) return {RuleComps::Kind::Group, std::string(o.attr("name"))};
+          return {};
+        };
+        auto obj = objects(*c);
+        if (!obj.empty()) rule.a = comps(*obj[0]);
+        if (obj.size() > 1) rule.b = comps(*obj[1]);
+        r.compClearances.push_back(std::move(rule));
+      }
     if (auto* rb = rules.find("RulesClearancesToBoard")) {
       r.edgeWires = len(rb->num("wires"));
       r.edgeComps = len(rb->num("comps"));
