@@ -4730,3 +4730,108 @@ TEST(Gui, ComponentClearancePageAppliesRules) {
   applyParams(dlg);
   EXPECT_FALSE(f.b().layers[size_t(row)].placement);
 }
+
+// «Выравнивание в группе», «Взаимное выравнивание», «Абсолютное значение»: the file's rules are shown by kind,
+// edited, added and applied to the design.
+TEST(Gui, DelayPagesEditRules) {
+  Fixture f("topor/Example_06/Signals.fst");
+  f.doc.setUnit(Unit::Mm);
+  DesignParamsDialog dlg(&f.doc);
+  dlg.resize(1100, 640);
+  auto* stack = dlg.findChild<QStackedWidget*>();
+  auto table = [&] { return stack->currentWidget()->findChild<QTableWidget*>(); };
+  auto plus = [&] {
+    for (auto* b : stack->currentWidget()->findChildren<QToolButton*>())
+      if (b->text() == "+") b->click();
+  };
+  // In the group: three rules of 1 ps.
+  dlg.showPage("Выравнивание в группе");
+  ASSERT_EQ(table()->rowCount(), 3);
+  ASSERT_EQ(table()->columnCount(), 5);
+  auto* group = qobject_cast<QComboBox*>(table()->cellWidget(0, 2));
+  ASSERT_TRUE(group);
+  EXPECT_EQ(group->currentText(), "Группа сигналов: ADD_DDR");
+  EXPECT_EQ(group->count(), 3);  // the groups only
+  auto* tol = qobject_cast<QDoubleSpinBox*>(table()->cellWidget(0, 4));
+  ASSERT_TRUE(tol);
+  EXPECT_NEAR(tol->value(), 1.0, 1e-9);
+  tol->setValue(2.5);
+  // Between objects: three rules against the clock pair, −6.5 ps.
+  dlg.showPage("Взаимное выравнивание");
+  ASSERT_EQ(table()->rowCount(), 3);
+  ASSERT_EQ(table()->columnCount(), 8);
+  EXPECT_EQ(qobject_cast<QComboBox*>(table()->cellWidget(0, 3))->currentText(), "Дифф. сигнал: SDCLK_U2");
+  auto* constant = qobject_cast<QDoubleSpinBox*>(table()->cellWidget(0, 5));
+  ASSERT_TRUE(constant);
+  EXPECT_NEAR(constant->value(), -6.5, 1e-9);
+  if (const char* dir = std::getenv("XR_SHOT_DIR")) dlg.grab().save(QString(dir) + "/dpe-delay-relation.png");
+  // By length: the values start anew, the cells are lengths.
+  auto* units = qobject_cast<QComboBox*>(table()->cellWidget(1, 4));
+  ASSERT_TRUE(units);
+  units->setCurrentIndex(1);
+  emit units->activated(1);
+  auto* over = qobject_cast<QDoubleSpinBox*>(table()->cellWidget(1, 7));
+  ASSERT_TRUE(over);
+  EXPECT_EQ(over->value(), 0);
+  over->setValue(0.3);  // mm
+  // The absolute value: none in the file; one is added for a signal.
+  dlg.showPage("Абсолютное значение");
+  ASSERT_EQ(table()->rowCount(), 0);
+  plus();
+  ASSERT_EQ(table()->rowCount(), 1);
+  auto* object = qobject_cast<QComboBox*>(table()->cellWidget(0, 2));
+  ASSERT_TRUE(object);
+  const int at = object->findText("Сигнал: A0");
+  ASSERT_GE(at, 0);
+  object->setCurrentIndex(at);
+  emit object->activated(at);
+  qobject_cast<QDoubleSpinBox*>(table()->cellWidget(0, 4))->setValue(120);
+  qobject_cast<QDoubleSpinBox*>(table()->cellWidget(0, 6))->setValue(10);
+  applyParams(dlg);
+  const auto& d = f.b().hispeed.delays;
+  ASSERT_EQ(d.size(), 7u);
+  EXPECT_EQ(d[0].tolerance, 2.5);
+  EXPECT_TRUE(d[3].time);
+  EXPECT_FALSE(d[4].time);
+  EXPECT_EQ(d[4].constant, 0);
+  EXPECT_EQ(d[4].toleranceOver, double(mmToNm(0.3)));
+  EXPECT_EQ(d[6].kind, DelayRule::Kind::Constant);
+  ASSERT_EQ(d[6].objects.size(), 1u);
+  EXPECT_EQ(d[6].objects[0].kind, ObjectSignal::Kind::Signal);
+  EXPECT_EQ(d[6].objects[0].name, "A0");
+  EXPECT_EQ(d[6].constant, 120);
+  EXPECT_EQ(d[6].toleranceOver, 10);
+}
+
+// A delay rule the board does not keep is in the window of messages once DRC is run: the nets, the shorter first,
+// the value in picoseconds.
+TEST(Gui, DelayViolationIsShownInMessages) {
+  Fixture f("topor/Example_06/Signals.fst");
+  f.doc.setUnit(Unit::Mm);
+  MessagesPanel panel(&f.doc, &f.view);
+  auto* tree = panel.findChild<QTreeWidget*>();
+  ASSERT_TRUE(tree);
+  auto delayGroup = [&]() -> QTreeWidgetItem* {
+    for (int i = 0; i < tree->topLevelItemCount(); ++i)
+      if (tree->topLevelItem(i)->text(0).startsWith("Нарушение правила выравнивания задержек")) return tree->topLevelItem(i);
+    return nullptr;
+  };
+  // As TopoR matched it the design keeps its rules.
+  f.doc.setDrc({});
+  EXPECT_TRUE(f.doc.delayViolations().empty());
+  EXPECT_FALSE(delayGroup());
+  // The clock must now stand 20 ps behind the address group: it stands 6.5.
+  f.doc.board()->hispeed.delays[3].constant = -20;
+  f.doc.setDrc({});
+  ASSERT_EQ(f.doc.delayViolations().size(), 1u);
+  QTreeWidgetItem* g = delayGroup();
+  ASSERT_TRUE(g);
+  ASSERT_EQ(g->childCount(), 1);
+  const QString text = g->child(0)->text(0);
+  EXPECT_TRUE(text.startsWith("Взаимное выравнивание, правило 0: цепи ")) << text.toStdString();
+  EXPECT_TRUE(text.contains("'SDCLK_B' (сигнал SDCLK_U2)")) << text.toStdString();
+  EXPECT_TRUE(text.contains("пс вне -21.00 пс … -19.00 пс")) << text.toStdString();
+  EXPECT_LT(text.indexOf("SDCLK_U2"), 0 + text.size());
+  f.doc.clearDrc();
+  EXPECT_FALSE(delayGroup());
+}

@@ -75,6 +75,34 @@ QString describeViolation(const Board& b, Unit u, const DrcViolation& v) {
   return QString::fromStdString(v.message);
 }
 
+QString describeDelayViolation(const Board& b, Unit u, const DelayViolation& v) {
+  auto val = [&](double x) { return v.time ? QObject::tr("%1 пс").arg(x, 0, 'f', 2) : QString("%1 %2").arg(formatLength(x, u, 3), unitName(u)); };
+  // The rule's number among those of its kind: as its page of the design parameters numbers it.
+  int number = 0;
+  if (v.kind != DelayViolation::Kind::Mismatch)
+    for (int i = 0; i < v.rule && i < int(b.hispeed.delays.size()); ++i) number += b.hispeed.delays[size_t(i)].kind == b.hispeed.delays[size_t(v.rule)].kind;
+  auto net = [](const std::string& signal, const std::string& name) {
+    return signal == name || name.empty() ? QString("'%1'").arg(QString::fromStdString(signal))
+                                          : QObject::tr("'%1' (сигнал %2)").arg(QString::fromStdString(name), QString::fromStdString(signal));
+  };
+  const QString s = net(v.shorter, v.netShorter), l = net(v.longer, v.netLonger);
+  switch (v.kind) {
+    case DelayViolation::Kind::Equal:
+      return QObject::tr("Выравнивание в группе, правило %1: цепи %2 – %3, расхождение %4 при допуске %5").arg(number).arg(s, l, val(v.value), val(v.high));
+    case DelayViolation::Kind::Relation:
+      return QObject::tr("Взаимное выравнивание, правило %1: цепи %2 – %3, разность задержек %4 вне %5 … %6")
+          .arg(number)
+          .arg(s, l, val(v.value), val(v.low), val(v.high));
+    case DelayViolation::Kind::Constant:
+      return QObject::tr("Абсолютное значение, правило %1: цепь %2, задержка %3 вне %4 … %5").arg(number).arg(s, val(v.value), val(v.low), val(v.high));
+    case DelayViolation::Kind::Mismatch:
+      return QObject::tr("Дифференциальный сигнал '%1': цепи %2 – %3, разность длин %4 при допуске %5")
+          .arg(v.rule >= 0 && v.rule < int(b.hispeed.diffSignals.size()) ? QString::fromStdString(b.hispeed.diffSignals[size_t(v.rule)].name) : QString())
+          .arg(s, l, val(v.value), val(v.high));
+  }
+  return {};
+}
+
 MessagesPanel::MessagesPanel(Document* doc, BoardView* view, QWidget* parent) : QWidget(parent), doc_(doc), view_(view) {
   auto* lay = new QVBoxLayout(this);
   lay->setContentsMargins(0, 0, 0, 0);
@@ -160,7 +188,7 @@ void MessagesPanel::rebuild() {
   // DRC, by kind of violation.
   if (doc_->drcRun()) {
     const auto& drc = doc_->drc();
-    if (drc.empty()) group(tr("DRC: нарушений нет"), kInfo, -1);
+    if (drc.empty() && doc_->delayViolations().empty()) group(tr("DRC: нарушений нет"), kInfo, -1);
     struct Kind {
       DrcViolation::Type type;
       QString title;
@@ -178,6 +206,14 @@ void MessagesPanel::rebuild() {
       auto* g = group(title, kDrc, n);
       for (int i = 0; i < int(drc.size()); ++i)
         if (drc[size_t(i)].type == type) child(g, describeViolation(b, doc_->unit(), drc[size_t(i)]), kDrc, drc[size_t(i)].pos)->setData(0, DrcIndex, i);
+    }
+    // The delay rules the board does not keep: the nets furthest apart, the shorter first.
+    if (const auto& delays = doc_->delayViolations(); !delays.empty()) {
+      auto* g = group(tr("Нарушение правила выравнивания задержек"), kDrc, int(delays.size()));
+      for (const DelayViolation& v : delays) {
+        auto* it = child(g, describeDelayViolation(b, doc_->unit(), v), kDrc, v.at);
+        if (int n = b.findNet(v.netShorter); n >= 0) it->setData(0, NetIndex, n);
+      }
     }
   }
 }

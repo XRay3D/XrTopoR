@@ -74,8 +74,8 @@ struct SignalGroup {
 };
 
 // RulesDelay: DelayEqual (the group's signals equal within the tolerance), DelayConstant (the objects' delay
-// a constant within the tolerances), DelayRelation (the difference of left and right). Values as the file has
-// them: a time in ps or a length in the file's units.
+// a constant within the tolerances), DelayRelation (the difference of left and right). The values: a time in
+// ps, or a length in nm.
 struct DelayRule {
   enum class Kind { Equal, Constant, Relation } kind = Kind::Equal;
   bool enabled = true;

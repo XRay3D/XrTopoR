@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "core/Connectivity.h"
+#include "core/Delay.h"
 #include "drc/Drc.h"
 #include "gui/Units.h"
 #include "topo/Topology.h"
@@ -143,7 +144,9 @@ class Document : public QObject {
   // DRC results
   const std::vector<DrcViolation>& drc() const { return drc_; }
   void setDrc(std::vector<DrcViolation> v);
-  bool drcRun() const { return drcRun_; }  // DRC was run on this board (an empty result means «no violations»)
+  bool drcRun() const { return drcRun_; }
+  // The delay rules the board does not keep (core/Delay.h), found when DRC was run.
+  const std::vector<DelayViolation>& delayViolations() const { return delays_; }  // DRC was run on this board (an empty result means «no violations»)
   void clearDrc();
 
   // Messages of procedures (load, autoroute, optimiser, …).
@@ -185,6 +188,7 @@ class Document : public QObject {
   std::vector<int> selComponents_;
   int highlightNet_ = kNoNet;
   std::vector<DrcViolation> drc_;
+  std::vector<DelayViolation> delays_;
   bool drcRun_ = false;
   std::vector<LogMessage> log_;
 };

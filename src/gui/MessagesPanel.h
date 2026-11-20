@@ -12,6 +12,8 @@ class BoardView;
 
 // A DRC violation in words, as the messages window and the DRC report show it.
 QString describeViolation(const Board& b, Unit u, const DrcViolation& v);
+// A delay rule the board does not keep, in words: the rule, the nets furthest apart (the shorter first), the value.
+QString describeDelayViolation(const Board& b, Unit u, const DelayViolation& v);
 
 class MessagesPanel : public QWidget {
   Q_OBJECT

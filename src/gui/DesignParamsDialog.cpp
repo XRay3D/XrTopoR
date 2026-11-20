@@ -156,8 +156,17 @@ DesignParamsDialog::DesignParamsDialog(Document* doc, QWidget* parent) : QDialog
        tr("Ширины проводников по слоям (и зазор внутри пары для дифференциальных сигналов). Ширины и зазор "
           "застёгнутой пары проводников задаются только здесь."));
   page(hs, tr("Сигналы"), [this] { return diffSignalsPage(); }, tr("Дифференциальные сигналы: пары цепей, правило и допустимый разброс длин."));
-  for (const QString& t : {tr("Выравнивание в группе"), tr("Взаимное выравнивание"), tr("Абсолютное значение")})
-    page(hs, t, [this, t] { return notSupported(t); }, {});
+  const QString delayNote = tr(" Допуск и константу рекомендуется задавать во времени (пс): погонная задержка на наружных и "
+                              "внутренних слоях разная. Задержка считается по длине проводников от источника сигнала до приёмника "
+                              "(змейка — по своей длине, переходы не добавляют ничего); нарушения правил показываются в окне "
+                              "сообщений после проверки DRC.");
+  page(hs, tr("Выравнивание в группе"), [this] { return delayRulesPage(DelayRule::Kind::Equal); },
+       tr("Задержки сигналов группы не должны различаться больше, чем на допуск.") + delayNote);
+  page(hs, tr("Взаимное выравнивание"), [this] { return delayRulesPage(DelayRule::Kind::Relation); },
+       tr("Соотношение задержек двух объектов (сигналов, дифференциальных сигналов или групп сигналов): "
+          "−допуск(−) ≤ Задержка(1) − Задержка(2) − константа ≤ допуск(+).") + delayNote);
+  page(hs, tr("Абсолютное значение"), [this] { return delayRulesPage(DelayRule::Kind::Constant); },
+       tr("Задержка объекта: константа − допуск(−) ≤ Задержка ≤ константа + допуск(+).") + delayNote);
   nav_->expandAll();
   connect(nav_, &QTreeWidget::currentItemChanged, this, [this](QTreeWidgetItem* it) {
     if (it && it->data(0, Qt::UserRole).isValid()) rebuildPages();
@@ -175,6 +184,7 @@ void DesignParamsDialog::load() {
   const Board& b = *doc_->board();
   rules_ = b.rules ? *b.rules : rulesFromBoard(b);
   stacks_ = b.padstacks;
+  delays_ = b.hispeed.delays;
   placement_.clear();
   for (auto& L : b.layers) placement_.push_back(L.placement);
   stackOrigin_.resize(stacks_.size());
@@ -223,6 +233,7 @@ bool DesignParamsDialog::apply() {
   setPadstacks(b, stacks_, stackOrigin_);
   for (size_t i = 0; i < stackOrigin_.size(); ++i) stackOrigin_[i] = int(i);
   b.rules = rules_;
+  b.hispeed.delays = delays_;
   for (size_t l = 0; l < b.layers.size() && l < placement_.size(); ++l) b.layers[l].placement = placement_[l];
   compileRules(b);
   // Plane layers follow their nets.
@@ -1263,6 +1274,115 @@ QWidget* DesignParamsDialog::compClearancesPage() {
       },
       [this](int r) { rules_.compClearances.erase(rules_.compClearances.begin() + r); },
       [this](int a, int b) { std::swap(rules_.compClearances[size_t(a)], rules_.compClearances[size_t(b)]); });
+}
+
+QWidget* DesignParamsDialog::signalsCell(const std::vector<ObjectSignal>& value, std::function<void(std::vector<ObjectSignal>)> set,
+                                         bool groupsOnly) {
+  const HiSpeed& h = doc_->board()->hispeed;
+  auto* c = new QComboBox;
+  c->setFrame(false);
+  auto same = [](const std::vector<ObjectSignal>& a, const std::vector<ObjectSignal>& b) {
+    return r::equal(a, b, [](const ObjectSignal& x, const ObjectSignal& y) { return x.kind == y.kind && x.name == y.name; });
+  };
+  auto text = [](const std::vector<ObjectSignal>& o) {
+    QStringList names;
+    for (auto& x : o)
+      names << (x.kind == ObjectSignal::Kind::SignalGroup ? tr("Группа сигналов: %1")
+                : x.kind == ObjectSignal::Kind::DiffSignal ? tr("Дифф. сигнал: %1") : tr("Сигнал: %1")).arg(QString::fromStdString(x.name));
+    return names.isEmpty() ? tr("(не задан)") : names.join(", ");
+  };
+  std::vector<std::vector<ObjectSignal>> options;
+  for (auto& g : h.groups) options.push_back({{ObjectSignal::Kind::SignalGroup, g.name}});
+  if (!groupsOnly) {
+    for (auto& d : h.diffSignals) options.push_back({{ObjectSignal::Kind::DiffSignal, d.name}});
+    for (auto& cl : h.clusters)
+      for (auto& sg : cl.signalList) options.push_back({{ObjectSignal::Kind::Signal, sg.name}});
+  }
+  auto at = r::find_if(options, [&](auto& o) { return same(o, value); });
+  if (at == options.end()) {
+    options.insert(options.begin(), value);  // what the rule has: several objects, none, or one not offered
+    at = options.begin();
+  }
+  for (auto& o : options) c->addItem(text(o));
+  c->setCurrentIndex(int(at - options.begin()));
+  connect(c, &QComboBox::activated, this, [this, set, options](int i) {
+    set(options[size_t(i)]);
+    changed();
+  });
+  return c;
+}
+
+QWidget* DesignParamsDialog::delayCell(double value, bool time, std::function<void(double)> set) {
+  Unit u = doc_->unit();
+  auto* s = new DoubleSpinBox;
+  s->setFrame(false);
+  s->setDecimals(time ? 2 : u == Unit::Mil ? 3 : 4);
+  s->setRange(-1e6, 1e6);
+  s->setValue(time ? value : toUnit(value, u));
+  connect(s, &QDoubleSpinBox::valueChanged, this, [this, set, u, time](double v) {
+    set(time ? v : double(std::llround(fromUnit(v, u))));
+    changed();
+  });
+  return s;
+}
+
+QWidget* DesignParamsDialog::delayRulesPage(DelayRule::Kind kind) {
+  // The rules of the kind among all the delay rules: the page's rows.
+  auto rows = [this, kind] {
+    std::vector<int> out;
+    for (size_t i = 0; i < delays_.size(); ++i)
+      if (delays_[i].kind == kind) out.push_back(int(i));
+    return out;
+  };
+  const bool equal = kind == DelayRule::Kind::Equal, relation = kind == DelayRule::Kind::Relation;
+  QStringList headers{"#", ""};
+  if (relation) headers << tr("Объект 1") << tr("Объект 2");
+  else headers << (equal ? tr("Группа сигналов") : tr("Объект"));
+  headers << tr("Единицы");
+  if (equal) headers << tr("Допуск");
+  else headers << tr("Константа") << tr("Допуск (−)") << tr("Допуск (+)");
+  return ruleTable(
+      headers, [rows] { return int(rows().size()); },
+      [this, rows, equal, relation](QTableWidget* t, int r) {
+        const int i = rows()[size_t(r)];
+        const DelayRule d = delays_[size_t(i)];
+        auto rule = [this, i]() -> DelayRule& { return delays_[size_t(i)]; };
+        int col = 1;
+        t->setCellWidget(r, col++, checkCell(d.enabled, [rule](bool on) { rule().enabled = on; }));
+        if (relation) {
+          t->setCellWidget(r, col++, signalsCell(d.left, [rule](auto v) { rule().left = std::move(v); }, false));
+          t->setCellWidget(r, col++, signalsCell(d.right, [rule](auto v) { rule().right = std::move(v); }, false));
+        } else t->setCellWidget(r, col++, signalsCell(d.objects, [rule](auto v) { rule().objects = std::move(v); }, equal));
+        // Time or length: the values are kept as numbers of the one or the other, so a change of the units
+        // starts them anew.
+        auto* units = new QComboBox;
+        units->setFrame(false);
+        units->addItems({tr("пс"), unitName(doc_->unit())});
+        units->setCurrentIndex(d.time ? 0 : 1);
+        connect(units, &QComboBox::activated, this, [this, rule](int at) {
+          if (rule().time == (at == 0)) return;
+          rule().time = at == 0;
+          rule().constant = rule().tolerance = rule().toleranceUnder = rule().toleranceOver = 0;
+          changed();
+          rebuildPages();
+        });
+        t->setCellWidget(r, col++, units);
+        if (equal) t->setCellWidget(r, col++, delayCell(d.tolerance, d.time, [rule](double v) { rule().tolerance = v; }));
+        else {
+          t->setCellWidget(r, col++, delayCell(d.constant, d.time, [rule](double v) { rule().constant = v; }));
+          t->setCellWidget(r, col++, delayCell(d.toleranceUnder, d.time, [rule](double v) { rule().toleranceUnder = v; }));
+          t->setCellWidget(r, col++, delayCell(d.toleranceOver, d.time, [rule](double v) { rule().toleranceOver = v; }));
+        }
+      },
+      [this, rows, kind] {
+        DelayRule d;
+        d.kind = kind;
+        d.time = true;
+        if (auto of = rows(); !of.empty()) d = delays_[size_t(of.back())];
+        delays_.push_back(std::move(d));
+      },
+      [this, rows](int r) { delays_.erase(delays_.begin() + rows()[size_t(r)]); },
+      [this, rows](int a, int b) { std::swap(delays_[size_t(rows()[size_t(a)])], delays_[size_t(rows()[size_t(b)])]); });
 }
 
 // The impedance rules as the file has them (read only): a row per rule and layer.

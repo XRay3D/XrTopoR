@@ -606,6 +606,59 @@ TEST(FstIO, CompClearancesRoundTrip) {
   check(**again);
 }
 
+// The delay rules: «Абсолютное значение» (DelayConstant, not in any of TopoR's examples) is written and read as
+// the other two; a rule by length keeps its length whatever unit the file is in.
+TEST(FstIO, DelayRulesRoundTrip) {
+  auto r = io::loadBoard(data("topor/Example_06/Signals.fst"));
+  ASSERT_TRUE(r) << r.error();
+  Board& a = **r;
+  ASSERT_EQ(a.hispeed.delays.size(), 6u);
+  EXPECT_EQ(a.hispeed.delays[0].tolerance, 1);       // ps
+  EXPECT_EQ(a.hispeed.delays[3].constant, -6.5);
+  DelayRule c;
+  c.kind = DelayRule::Kind::Constant;
+  c.time = true;
+  c.constant = 125.5, c.toleranceUnder = 2, c.toleranceOver = 3;
+  c.objects = {{ObjectSignal::Kind::SignalGroup, "ADD_DDR"}};
+  a.hispeed.delays.push_back(c);
+  DelayRule d;
+  d.kind = DelayRule::Kind::Relation;
+  d.time = false;  // by length: nm
+  d.enabled = false;
+  d.constant = -double(mmToNm(1.25)), d.toleranceUnder = double(mmToNm(0.1)), d.toleranceOver = double(mmToNm(0.2));
+  d.left = {{ObjectSignal::Kind::Signal, "A0"}};
+  d.right = {{ObjectSignal::Kind::DiffSignal, "SDCLK_U2"}};
+  a.hispeed.delays.push_back(d);
+  DelayRule e;
+  e.kind = DelayRule::Kind::Equal;
+  e.time = false;
+  e.tolerance = double(mmToNm(0.05));
+  e.objects = {{ObjectSignal::Kind::SignalGroup, "CTRL_DDR"}};
+  a.hispeed.delays.push_back(e);
+  const std::string text = io::writeFst(a);
+  EXPECT_NE(text.find("<DelayConstant enabled=\"on\" valueType=\"Time\" constant=\"125.5\" toleranceUnder=\"2\" toleranceOver=\"3\">"), std::string::npos);
+  EXPECT_NE(text.find("valueType=\"Dist\" constant=\"-1.25\" toleranceUnder=\"0.1\" toleranceOver=\"0.2\""), std::string::npos);
+  auto again = io::readFst(text, "delays.fst");
+  ASSERT_TRUE(again) << again.error();
+  const auto& now = (*again)->hispeed.delays;
+  ASSERT_EQ(now.size(), a.hispeed.delays.size());
+  for (size_t i = 0; i < now.size(); ++i) {
+    const DelayRule &x = a.hispeed.delays[i], &y = now[i];
+    EXPECT_EQ(x.kind, y.kind) << i;
+    EXPECT_EQ(x.enabled, y.enabled) << i;
+    EXPECT_EQ(x.time, y.time) << i;
+    EXPECT_NEAR(x.constant, y.constant, 1e-6) << i;
+    EXPECT_NEAR(x.tolerance, y.tolerance, 1e-6) << i;
+    EXPECT_NEAR(x.toleranceUnder, y.toleranceUnder, 1e-6) << i;
+    EXPECT_NEAR(x.toleranceOver, y.toleranceOver, 1e-6) << i;
+    EXPECT_EQ(x.objects.size(), y.objects.size()) << i;
+    EXPECT_EQ(x.left.size(), y.left.size()) << i;
+    EXPECT_EQ(x.right.size(), y.right.size()) << i;
+  }
+  EXPECT_EQ(now[6].objects[0].name, "ADD_DDR");
+  EXPECT_EQ(now[7].right[0].kind, ObjectSignal::Kind::DiffSignal);
+}
+
 // TopoR keeps a design's display settings in the file: they are read and written back.
 TEST(FstIO, DisplayControlRoundTrip) {
   auto r = io::loadBoard(data("topor/Example_05/MinVia_standard_routing.fst"));

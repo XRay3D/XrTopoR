@@ -1075,10 +1075,12 @@ struct Reader {
         else continue;
         d.enabled = r.flag("enabled", true);
         d.time = r.attr("valueType", "Dist") == "Time";
-        d.constant = r.num("constant");
-        d.tolerance = r.num("tolerance");
-        d.toleranceUnder = r.num("toleranceUnder");
-        d.toleranceOver = r.num("toleranceOver");
+        // (a time in ps; a length as every length of the design: nm)
+        auto value = [&](const char* name) { return d.time ? r.num(name) : double(len(r.num(name))); };
+        d.constant = value("constant");
+        d.tolerance = value("tolerance");
+        d.toleranceUnder = value("toleranceUnder");
+        d.toleranceOver = value("toleranceOver");
         auto objects = [&](const Element* parent, std::vector<ObjectSignal>& out) {
           if (!parent) return;
           for (auto& k : parent->kids)

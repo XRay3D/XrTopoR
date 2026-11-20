@@ -42,6 +42,12 @@ class DesignParamsDialog : public QDialog {
   QWidget* compGroupsPage();
   QWidget* layerGroupsPage();
   QWidget* compClearancesPage();
+  // «Выравнивание в группе», «Взаимное выравнивание», «Абсолютное значение»: the delay rules of one kind.
+  QWidget* delayRulesPage(DelayRule::Kind kind);
+  // A rule's object: a signal group, a differential signal, a signal (`groupsOnly`: the groups).
+  QWidget* signalsCell(const std::vector<ObjectSignal>& value, std::function<void(std::vector<ObjectSignal>)> set, bool groupsOnly);
+  // A delay rule's value: picoseconds, or a length in the design's units; may be negative.
+  QWidget* delayCell(double value, bool time, std::function<void(double)> set);
   // What the editor of groups of one kind works on: the groups' names, their objects, the groups put into them
   // (`nested`: none for the kind), every object there is; and what follows a group renamed.
   struct GroupsEditor {
@@ -90,6 +96,7 @@ class DesignParamsDialog : public QDialog {
 
   Document* doc_;
   DesignRules rules_;
+  std::vector<DelayRule> delays_;          // the delay rules (HiSpeed), edited
   std::vector<Padstack> stacks_;           // the design's pad stacks, edited
   std::vector<char> placement_;            // «Учитывать при размещении» per layer of the design, edited
   std::vector<int> stackOrigin_;           // the board's index of each (-1: new)

@@ -64,6 +64,7 @@ void Document::setBoard(std::unique_ptr<Board> b, const QString& path) {
   selComponents_.clear();
   highlightNet_ = kNoNet;
   drc_.clear();
+  delays_.clear();
   drcRun_ = false;
   log_.clear();
   if (board_) {
@@ -271,12 +272,14 @@ void Document::setHighlightedNet(int net) {
 
 void Document::setDrc(std::vector<DrcViolation> v) {
   drc_ = std::move(v);
+  delays_ = board_ ? checkDelays(*board_) : std::vector<DelayViolation>{};
   drcRun_ = true;
   emit drcChanged();
 }
 
 void Document::clearDrc() {
   drc_.clear();
+  delays_.clear();
   drcRun_ = false;
   emit drcChanged();
 }

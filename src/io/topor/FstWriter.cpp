@@ -1057,21 +1057,22 @@ struct Writer {
       for (const DelayRule& d : h.delays) {
         const char* onoff = d.enabled ? "on" : "off";
         const char* vt = d.time ? "Time" : "Dist";
+        auto val = [&](double v) { return d.time ? num(v) : mm(v); };
         switch (d.kind) {
           case DelayRule::Kind::Equal:
-            x.open("DelayEqual", {{"enabled", onoff}, {"valueType", vt}, {"tolerance", num(d.tolerance)}});
+            x.open("DelayEqual", {{"enabled", onoff}, {"valueType", vt}, {"tolerance", val(d.tolerance)}});
             x.open("ObjectsAffected");
             for (const ObjectSignal& o : d.objects) objectSignal(o);
             x.close();
             break;
           case DelayRule::Kind::Constant:
-            x.open("DelayConstant", {{"enabled", onoff}, {"valueType", vt}, {"constant", num(d.constant)}, {"toleranceUnder", num(d.toleranceUnder)}, {"toleranceOver", num(d.toleranceOver)}});
+            x.open("DelayConstant", {{"enabled", onoff}, {"valueType", vt}, {"constant", val(d.constant)}, {"toleranceUnder", val(d.toleranceUnder)}, {"toleranceOver", val(d.toleranceOver)}});
             x.open("ObjectsAffected");
             for (const ObjectSignal& o : d.objects) objectSignal(o);
             x.close();
             break;
           case DelayRule::Kind::Relation:
-            x.open("DelayRelation", {{"enabled", onoff}, {"valueType", vt}, {"constant", num(d.constant)}, {"toleranceUnder", num(d.toleranceUnder)}, {"toleranceOver", num(d.toleranceOver)}});
+            x.open("DelayRelation", {{"enabled", onoff}, {"valueType", vt}, {"constant", val(d.constant)}, {"toleranceUnder", val(d.toleranceUnder)}, {"toleranceOver", val(d.toleranceOver)}});
             x.open("ObjectLeft");
             for (const ObjectSignal& o : d.left) objectSignal(o);
             x.close();

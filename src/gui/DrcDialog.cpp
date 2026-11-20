@@ -194,15 +194,18 @@ int DrcDialog::run(Document* doc, QWidget* parent) {
     if (x.type == DrcViolation::Type::Keepout) return !s.value(pairKey(kindOf(x.a.type), 3), true).toBool();
     return false;
   });
+  // The delay rules are checked with the rest (Document::setDrc does it for the window of messages).
+  const auto delays = checkDelays(*doc->board());
   if (s.value("drc/report", false).toBool() && !s.value("drc/reportPath").toString().isEmpty()) {
     QString text = QObject::tr("Проверка соблюдения проектных норм: %1\nНарушений: %2\n\n")
                        .arg(QFileInfo(doc->path()).fileName())
-                       .arg(v.size());
+                       .arg(v.size() + delays.size());
     for (auto& x : v) text += describeViolation(*doc->board(), doc->unit(), x) + "\n";
+    for (auto& x : delays) text += describeDelayViolation(*doc->board(), doc->unit(), x) + "\n";
     if (auto r = io::writeFile(s.value("drc/reportPath").toString().toStdString(), text.toStdString()); !r)
       QMessageBox::warning(parent, QObject::tr("Отчет DRC"), QString::fromStdString(r.error()));
   }
-  int n = int(v.size());
+  int n = int(v.size() + delays.size());
   doc->setDrc(std::move(v));
   return n;
 }
