@@ -18,6 +18,8 @@ class QTreeWidget;
 
 namespace xr::gui {
 
+class GroupSource;
+
 class DesignParamsDialog : public QDialog {
   Q_OBJECT
  public:
@@ -48,20 +50,8 @@ class DesignParamsDialog : public QDialog {
   QWidget* signalsCell(const std::vector<ObjectSignal>& value, std::function<void(std::vector<ObjectSignal>)> set, bool groupsOnly);
   // A delay rule's value: picoseconds, or a length in the design's units; may be negative.
   QWidget* delayCell(double value, bool time, std::function<void(double)> set);
-  // What the editor of groups of one kind works on: the groups' names, their objects, the groups put into them
-  // (`nested`: none for the kind), every object there is; and what follows a group renamed.
-  struct GroupsEditor {
-    QString title, one, members, others;
-    std::function<int()> count;
-    std::function<std::string&(int)> name;
-    std::function<std::vector<std::string>&(int)> objects;
-    std::function<std::vector<std::string>&(int)> nested;
-    std::function<std::vector<std::string>()> all;
-    std::function<void(std::string)> add;
-    std::function<void(int)> remove;
-    std::function<void(const std::string& old, const std::string& name)> renamed;
-  };
-  QWidget* groupsPage(GroupsEditor e);
+  // The explorer of groups of a page over its source; an edit there is the dialog's change.
+  QWidget* explorerPage(std::unique_ptr<GroupSource> source);
   QWidget* widthsPage();
   QWidget* clearancesPage();
   QWidget* edgePage();

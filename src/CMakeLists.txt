@@ -101,6 +101,7 @@ if(XR_BUILD_GUI)
     gui/DrcDialog.cpp
     gui/Document.cpp
     gui/MainWindow.cpp
+    gui/GroupExplorer.cpp
     gui/ImpedanceModel.cpp
     gui/MessagesPanel.cpp
     gui/ModeBar.cpp

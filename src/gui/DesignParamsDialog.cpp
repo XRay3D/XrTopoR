@@ -29,6 +29,7 @@
 
 #include "core/Padstack.h"
 #include "core/ZoneFill.h"
+#include "gui/GroupExplorer.h"
 #include "gui/ImpedanceModel.h"
 #include "gui/PadstackDialogs.h"
 #include "gui/Schemes.h"
@@ -127,7 +128,9 @@ DesignParamsDialog::DesignParamsDialog(Document* doc, QWidget* parent) : QDialog
   page(nullptr, tr("Состав цепей (Netlist)"), [this] { return netlistPage(); }, tr("Цепи дизайна и число их контактов."));
   auto* groups = header(tr("Группы"));
   page(groups, tr("Группы цепей"), [this] { return netGroupsPage(); },
-       tr("Группы цепей: правило, назначенное группе, действует для всех её цепей."));
+       tr("Группы цепей: правило, назначенное группе, действует для всех её цепей. Цепь может входить в несколько "
+          "групп, группа — не более чем в одну. Объекты и группы перетаскиваются на группу в дереве: перемещаются, "
+          "с Ctrl — добавляются."));
   page(groups, tr("Группы компонентов"), [this] { return compGroupsPage(); },
        tr("Группы компонентов: правило зазора, назначенное группе, действует для всех её компонентов. Компонент может "
           "входить в несколько групп; группа — не более чем в одну (в списке справа группы показаны в ‹скобках›)."));
@@ -968,231 +971,119 @@ QWidget* DesignParamsDialog::netlistPage() {
   return t;
 }
 
+namespace {
+
+// The groups of nets, components or layers of the rules (DesignRules): a group holds its objects by name and the
+// groups in it. `renamed` makes what names a group follow it.
+template <class G>
+class RuleGroups : public GroupSource {
+ public:
+  RuleGroups(std::vector<G>& groups, std::vector<std::string> G::* members, std::vector<Object> objects, QString all, QString group,
+             std::function<void(const std::string&, const std::string&)> renamed)
+      : groups_(groups), members_(members), objects_(std::move(objects)), all_(std::move(all)), group_(std::move(group)), renamed_(std::move(renamed)) {}
+  QString allTitle() const override { return all_; }
+  QString groupTitle(const QString& name) const override { return group_.arg(name); }
+  std::vector<Object> objects() const override { return objects_; }
+  std::vector<std::string> groups() const override {
+    std::vector<std::string> out;
+    for (auto& g : groups_) out.push_back(g.name);
+    return out;
+  }
+  std::vector<std::string> members(const std::string& g) const override {
+    auto it = r::find(groups_, g, &G::name);
+    return it == groups_.end() ? std::vector<std::string>{} : (*it).*members_;
+  }
+  std::vector<std::string> subgroups(const std::string& g) const override {
+    auto it = r::find(groups_, g, &G::name);
+    return it == groups_.end() ? std::vector<std::string>{} : it->groups;
+  }
+  void addGroup(const std::string& name) override {
+    G g{};
+    g.name = name;
+    groups_.push_back(std::move(g));
+  }
+  bool renameGroup(const std::string& old, const std::string& name) override {
+    if (r::contains(groups_, name, &G::name)) return false;
+    for (auto& g : groups_) {
+      if (g.name == old) g.name = name;
+      for (auto& k : g.groups)
+        if (k == old) k = name;
+    }
+    renamed_(old, name);
+    return true;
+  }
+  void removeGroup(const std::string& name) override {
+    std::erase_if(groups_, [&](const G& g) { return g.name == name; });
+    for (auto& g : groups_) std::erase(g.groups, name);
+  }
+  void setMembers(const std::string& g, const std::vector<std::string>& ids) override {
+    if (auto it = r::find(groups_, g, &G::name); it != groups_.end()) (*it).*members_ = ids;
+  }
+  void setSubgroups(const std::string& g, const std::vector<std::string>& names) override {
+    if (auto it = r::find(groups_, g, &G::name); it != groups_.end()) it->groups = names;
+  }
+
+ private:
+  std::vector<G>& groups_;
+  std::vector<std::string> G::* members_;
+  std::vector<Object> objects_;
+  QString all_, group_;
+  std::function<void(const std::string&, const std::string&)> renamed_;
+};
+
+}  // namespace
+
+QWidget* DesignParamsDialog::explorerPage(std::unique_ptr<GroupSource> source) {
+  auto* e = new GroupExplorer(std::move(source));
+  connect(e, &GroupExplorer::edited, this, [this] { changed(); });
+  return e;
+}
+
 QWidget* DesignParamsDialog::netGroupsPage() {
   const Board& b = *doc_->board();
-  GroupsEditor e;
-  e.title = tr("Группы цепей");
-  e.one = tr("Группа цепей");
-  e.members = tr("Цепи группы");
-  e.others = tr("Остальные цепи");
-  e.count = [this] { return int(rules_.netGroups.size()); };
-  e.name = [this](int g) -> std::string& { return rules_.netGroups[size_t(g)].name; };
-  e.objects = [this](int g) -> std::vector<std::string>& { return rules_.netGroups[size_t(g)].nets; };
-  e.all = [&b] {
-    std::vector<std::string> out;
-    for (auto& n : b.nets) out.push_back(n.name);
-    return out;
-  };
-  e.add = [this](std::string name) { rules_.netGroups.push_back({std::move(name), {}}); };
-  e.remove = [this](int g) { rules_.netGroups.erase(rules_.netGroups.begin() + g); };
-  e.renamed = [this](const std::string& old, const std::string& name) {
-    auto follow = [&](RuleNets& r) {
-      if (r.kind == RuleNets::Kind::Group && r.name == old) r.name = name;
-    };
-    for (auto& r : rules_.widths) follow(r.nets);
-    for (auto& r : rules_.clearances) follow(r.a), follow(r.b);
-    for (auto& r : rules_.vias) follow(r.nets);
-    for (auto& r : rules_.layerNets)
-      for (auto& n : r.nets) follow(n);
-  };
-  return groupsPage(std::move(e));
+  std::vector<GroupSource::Object> nets;
+  for (auto& n : b.nets) nets.push_back({n.name, QString::fromStdString(n.name), QString::fromStdString(n.name), netIcon()});
+  return explorerPage(std::make_unique<RuleGroups<NetGroup>>(
+      rules_.netGroups, &NetGroup::nets, std::move(nets), tr("Все цепи"), tr("Группа цепей %1"), [this](const std::string& old, const std::string& name) {
+        auto follow = [&](RuleNets& r) {
+          if (r.kind == RuleNets::Kind::Group && r.name == old) r.name = name;
+        };
+        for (auto& r : rules_.widths) follow(r.nets);
+        for (auto& r : rules_.clearances) follow(r.a), follow(r.b);
+        for (auto& r : rules_.vias) follow(r.nets);
+        for (auto& r : rules_.layerNets)
+          for (auto& n : r.nets) follow(n);
+      }));
 }
 
 QWidget* DesignParamsDialog::compGroupsPage() {
   const Board& b = *doc_->board();
-  GroupsEditor e;
-  e.title = tr("Группы компонентов");
-  e.one = tr("Группа компонентов");
-  e.members = tr("Компоненты группы");
-  e.others = tr("Остальные компоненты и группы");
-  e.count = [this] { return int(rules_.compGroups.size()); };
-  e.name = [this](int g) -> std::string& { return rules_.compGroups[size_t(g)].name; };
-  e.objects = [this](int g) -> std::vector<std::string>& { return rules_.compGroups[size_t(g)].comps; };
-  e.nested = [this](int g) -> std::vector<std::string>& { return rules_.compGroups[size_t(g)].groups; };
-  e.all = [&b] {
-    std::vector<std::string> out;
-    for (auto& c : b.components) out.push_back(c.ref);
-    return out;
-  };
-  e.add = [this](std::string name) { rules_.compGroups.push_back({std::move(name), {}, {}}); };
-  e.remove = [this](int g) { rules_.compGroups.erase(rules_.compGroups.begin() + g); };
-  e.renamed = [this](const std::string& old, const std::string& name) {
-    for (auto& r : rules_.compClearances)
-      for (RuleComps* o : {&r.a, &r.b})
-        if (o->kind == RuleComps::Kind::Group && o->name == old) o->name = name;
-  };
-  return groupsPage(std::move(e));
+  std::vector<GroupSource::Object> comps;
+  for (auto& c : b.components)
+    comps.push_back({c.ref, QString::fromStdString(c.ref), QString::fromStdString(c.ref + (c.value.empty() ? "" : " (" + c.value + ")")), componentIcon()});
+  return explorerPage(std::make_unique<RuleGroups<CompGroup>>(
+      rules_.compGroups, &CompGroup::comps, std::move(comps), tr("Все компоненты"), tr("Группа компонентов %1"),
+      [this](const std::string& old, const std::string& name) {
+        for (auto& r : rules_.compClearances)
+          for (RuleComps* o : {&r.a, &r.b})
+            if (o->kind == RuleComps::Kind::Group && o->name == old) o->name = name;
+      }));
 }
 
 QWidget* DesignParamsDialog::layerGroupsPage() {
   const Board& b = *doc_->board();
-  GroupsEditor e;
-  e.title = tr("Группы слоёв");
-  e.one = tr("Группа слоёв");
-  e.members = tr("Слои группы");
-  e.others = tr("Остальные слои и группы");
-  e.count = [this] { return int(rules_.layerGroups.size()); };
-  e.name = [this](int g) -> std::string& { return rules_.layerGroups[size_t(g)].name; };
-  e.objects = [this](int g) -> std::vector<std::string>& { return rules_.layerGroups[size_t(g)].layers; };
-  e.nested = [this](int g) -> std::vector<std::string>& { return rules_.layerGroups[size_t(g)].groups; };
-  e.all = [&b] {
-    std::vector<std::string> out;
-    for (auto& l : b.layers) out.push_back(l.name);
-    return out;
-  };
-  e.add = [this](std::string name) { rules_.layerGroups.push_back({std::move(name), {}, {}}); };
-  e.remove = [this](int g) { rules_.layerGroups.erase(rules_.layerGroups.begin() + g); };
-  e.renamed = [this](const std::string& old, const std::string& name) {
-    auto follow = [&](std::vector<std::string>& groups) {
-      for (auto& g : groups)
-        if (g == old) g = name;
-    };
-    for (auto& r : rules_.widths) follow(r.layerGroups);
-    for (auto& r : rules_.clearances) follow(r.layerGroups);
-    for (auto& r : rules_.compClearances) follow(r.layerGroups);
-  };
-  return groupsPage(std::move(e));
-}
-
-// The editor of groups of one kind: the groups on the left, the selected group's members in the middle, what is
-// not in it on the right. Groups of components and of layers take groups too (shown in angle brackets): a group
-// sits in one group at most and never in one of its own.
-QWidget* DesignParamsDialog::groupsPage(GroupsEditor e) {
-  auto* w = new QWidget;
-  auto* h = new QHBoxLayout(w);
-  auto* left = new QVBoxLayout;
-  auto* groups = new QListWidget;
-  groups->setObjectName("groups");
-  for (int g = 0; g < e.count(); ++g) groups->addItem(QString::fromStdString(e.name(g)));
-  left->addWidget(new QLabel(e.title));
-  left->addWidget(groups, 1);
-  auto* gbar = new QHBoxLayout;
-  auto button = [](const QString& text, const char* name) {
-    auto* b = new QToolButton;
-    b->setText(text);
-    b->setObjectName(name);
-    return b;
-  };
-  auto* add = button("+", "addGroup");
-  auto* del = button("−", "removeGroup");
-  auto* ren = button(tr("Переименовать"), "renameGroup");
-  gbar->addWidget(add);
-  gbar->addWidget(del);
-  gbar->addWidget(ren);
-  gbar->addStretch(1);
-  left->addLayout(gbar);
-  h->addLayout(left, 1);
-  auto* mid = new QVBoxLayout;
-  auto* members = new QListWidget;
-  members->setObjectName("members");
-  members->setSelectionMode(QAbstractItemView::ExtendedSelection);
-  mid->addWidget(new QLabel(e.members));
-  mid->addWidget(members, 1);
-  h->addLayout(mid, 1);
-  auto* arrows = new QVBoxLayout;
-  auto* toGroup = button("◀", "toGroup");
-  auto* fromGroup = button("▶", "fromGroup");
-  arrows->addStretch(1);
-  arrows->addWidget(toGroup);
-  arrows->addWidget(fromGroup);
-  arrows->addStretch(1);
-  h->addLayout(arrows);
-  auto* right = new QVBoxLayout;
-  auto* others = new QListWidget;
-  others->setObjectName("others");
-  others->setSelectionMode(QAbstractItemView::ExtendedSelection);
-  right->addWidget(new QLabel(e.others));
-  right->addWidget(others, 1);
-  h->addLayout(right, 1);
-
-  // A list's row: an object by its name, or a group (UserRole: true).
-  auto row = [](QListWidget* list, const std::string& name, bool group) {
-    auto* it = new QListWidgetItem(group ? QString("‹%1›").arg(QString::fromStdString(name)) : QString::fromStdString(name), list);
-    it->setData(Qt::UserRole, group);
-    it->setData(Qt::UserRole + 1, QString::fromStdString(name));
-  };
-  auto parentOf = [e](const std::string& name) {
-    for (int g = 0; e.nested && g < e.count(); ++g)
-      if (r::contains(e.nested(g), name)) return g;
-    return -1;
-  };
-  auto fill = [e, groups, members, others, row, parentOf] {
-    members->clear();
-    others->clear();
-    const int g = groups->currentRow();
-    if (g < 0 || g >= e.count()) return;
-    auto& own = e.objects(g);
-    for (auto& n : own) row(members, n, false);
-    if (e.nested)
-      for (auto& n : e.nested(g)) row(members, n, true);
-    for (auto& n : e.all())
-      if (!r::contains(own, n)) row(others, n, false);
-    if (!e.nested) return;
-    // The groups that may go in: with no group round them, and not one this group sits in.
-    std::vector<std::string> above{e.name(g)};
-    for (int p = parentOf(above.back()); p >= 0 && !r::contains(above, e.name(p)); p = parentOf(above.back())) above.push_back(e.name(p));
-    for (int k = 0; k < e.count(); ++k)
-      if (parentOf(e.name(k)) < 0 && !r::contains(above, e.name(k))) row(others, e.name(k), true);
-  };
-  connect(groups, &QListWidget::currentRowChanged, w, fill);
-  connect(add, &QToolButton::clicked, this, [this, e, groups] {
-    bool ok = false;
-    const QString name = QInputDialog::getText(this, e.one, tr("Имя группы:"), QLineEdit::Normal, {}, &ok).trimmed();
-    if (!ok || name.isEmpty()) return;
-    for (int g = 0; g < e.count(); ++g)
-      if (e.name(g) == name.toStdString()) return;  // names are what rules refer to: one group of a name
-    e.add(name.toStdString());
-    groups->addItem(name);
-    groups->setCurrentRow(groups->count() - 1);
-    changed();
-  });
-  connect(del, &QToolButton::clicked, this, [this, e, groups] {
-    const int g = groups->currentRow();
-    if (g < 0) return;
-    const std::string name = e.name(g);
-    e.remove(g);
-    for (int k = 0; e.nested && k < e.count(); ++k) std::erase(e.nested(k), name);
-    delete groups->takeItem(g);
-    changed();
-  });
-  connect(ren, &QToolButton::clicked, this, [this, e, groups] {
-    const int g = groups->currentRow();
-    if (g < 0) return;
-    bool ok = false;
-    const QString old = groups->item(g)->text();
-    const QString name = QInputDialog::getText(this, e.one, tr("Имя группы:"), QLineEdit::Normal, old, &ok).trimmed();
-    if (!ok || name.isEmpty() || name == old) return;
-    for (int k = 0; k < e.count(); ++k)
-      if (e.name(k) == name.toStdString()) return;
-    e.name(g) = name.toStdString();
-    // Groups holding the group and rules naming it follow it.
-    for (int k = 0; e.nested && k < e.count(); ++k)
-      for (auto& n : e.nested(k))
-        if (n == old.toStdString()) n = name.toStdString();
-    e.renamed(old.toStdString(), name.toStdString());
-    groups->item(g)->setText(name);
-    changed();
-  });
-  connect(toGroup, &QToolButton::clicked, this, [this, e, groups, others, fill] {
-    const int g = groups->currentRow();
-    if (g < 0) return;
-    for (auto* it : others->selectedItems()) {
-      const std::string name = it->data(Qt::UserRole + 1).toString().toStdString();
-      (it->data(Qt::UserRole).toBool() ? e.nested(g) : e.objects(g)).push_back(name);
-    }
-    fill();
-    changed();
-  });
-  connect(fromGroup, &QToolButton::clicked, this, [this, e, groups, members, fill] {
-    const int g = groups->currentRow();
-    if (g < 0) return;
-    for (auto* it : members->selectedItems())
-      std::erase(it->data(Qt::UserRole).toBool() ? e.nested(g) : e.objects(g), it->data(Qt::UserRole + 1).toString().toStdString());
-    fill();
-    changed();
-  });
-  if (groups->count()) groups->setCurrentRow(0);
-  return w;
+  std::vector<GroupSource::Object> layers;
+  for (auto& l : b.layers) layers.push_back({l.name, QString::fromStdString(l.name), QString::fromStdString(layerTypeName(b, b.findLayer(l.name))), layerIcon()});
+  return explorerPage(std::make_unique<RuleGroups<LayerGroup>>(
+      rules_.layerGroups, &LayerGroup::layers, std::move(layers), tr("Все слои"), tr("Группа слоёв %1"), [this](const std::string& old, const std::string& name) {
+        auto follow = [&](std::vector<std::string>& groups) {
+          for (auto& g : groups)
+            if (g == old) g = name;
+        };
+        for (auto& r : rules_.widths) follow(r.layerGroups);
+        for (auto& r : rules_.clearances) follow(r.layerGroups);
+        for (auto& r : rules_.compClearances) follow(r.layerGroups);
+      }));
 }
 
 QWidget* DesignParamsDialog::widthsPage() {

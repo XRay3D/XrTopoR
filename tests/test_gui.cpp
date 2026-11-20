@@ -1,5 +1,8 @@
 // GUI smoke test: drives the board view with synthetic mouse/key events on the offscreen platform.
 #include <QCheckBox>
+#include <QMimeData>
+#include <QTreeView>
+#include <QListView>
 #include <QGroupBox>
 #include <QInputDialog>
 #include <QApplication>
@@ -53,6 +56,7 @@
 #include "gui/Document.h"
 #include "gui/AutorouteWindow.h"
 #include "gui/DesignParamsDialog.h"
+#include "gui/GroupExplorer.h"
 #include "gui/ImpedanceModel.h"
 #include "gui/PadstackDialogs.h"
 #include "gui/SpinBox.h"
@@ -4554,80 +4558,91 @@ TEST(Gui, AWireIsBegunFromCopperOfANet) {
 
 namespace {
 
-// Answers the name the groups' pages ask for (QInputDialog) once the dialog is up.
-void answerName(const QString& name) {
-  QTimer::singleShot(0, [name] {
-    auto* dlg = qobject_cast<QInputDialog*>(QApplication::activeModalWidget());
-    ASSERT_TRUE(dlg);
-    dlg->setTextValue(name);
-    dlg->accept();
-  });
-}
-
 void applyParams(DesignParamsDialog& dlg) {
   for (auto* b : dlg.findChildren<QPushButton*>())
     if (b->text() == "Применить") b->click();
 }
 
-// A list's row of the given text selected alone; false: no such row.
-bool selectRow(QListWidget* list, const QString& text) {
-  list->clearSelection();
-  for (int i = 0; i < list->count(); ++i)
-    if (list->item(i)->text() == text) {
-      list->item(i)->setSelected(true);
-      return true;
+}  // namespace
+
+namespace {
+
+// The explorer of the page shown, and the texts of its list.
+GroupExplorer* explorerOf(QStackedWidget* stack) { return qobject_cast<GroupExplorer*>(stack->currentWidget()); }
+
+QStringList listTexts(GroupExplorer* e) {
+  QStringList out;
+  auto* view = e->findChild<QListView*>("members");
+  for (int i = 0; i < view->model()->rowCount(); ++i) out << view->model()->index(i, 0).data().toString();
+  return out;
+}
+
+QStringList treeTexts(GroupExplorer* e) {
+  QStringList out;
+  auto* view = e->findChild<QTreeView*>("groupTree");
+  auto walk = [&](this auto& self, const QModelIndex& parent, int depth) -> void {
+    for (int i = 0; i < view->model()->rowCount(parent); ++i) {
+      const QModelIndex x = view->model()->index(i, 0, parent);
+      out << QString(depth * 2, ' ') + x.data().toString();
+      self(x, depth + 1);
     }
-  return false;
+  };
+  walk({}, 0);
+  return out;
 }
 
 }  // namespace
 
-// «Группы компонентов»: a group is made, components and a group go into it; a group goes into one group only.
+// «Группы компонентов» in TopoR's explorer: groups are made under the chosen one, components moved and added into
+// them, a group into one group at most and never into one of its own.
 TEST(Gui, ComponentGroupsPageEditsGroups) {
   Fixture f("topor/Example_02/Placement.fst");
   const std::string c0 = f.b().components[0].ref, c1 = f.b().components[1].ref;
   DesignParamsDialog dlg(&f.doc);
   auto* stack = dlg.findChild<QStackedWidget*>();
   dlg.showPage("Группы компонентов");
-  QWidget* page = stack->currentWidget();
-  auto* groups = page->findChild<QListWidget*>("groups");
-  auto* members = page->findChild<QListWidget*>("members");
-  auto* others = page->findChild<QListWidget*>("others");
-  ASSERT_TRUE(groups && members && others);
-  EXPECT_EQ(groups->count(), 0);
-  for (const char* name : {"Inner", "Outer", "Third"}) {
-    answerName(name);
-    page->findChild<QToolButton*>("addGroup")->click();
-  }
-  ASSERT_EQ(groups->count(), 3);
-  // Two components into «Inner».
-  groups->setCurrentRow(0);
-  EXPECT_EQ(others->count(), int(f.b().components.size()) + 2);  // every component and the two other groups
-  ASSERT_TRUE(selectRow(others, QString::fromStdString(c0)));
-  page->findChild<QToolButton*>("toGroup")->click();
-  ASSERT_TRUE(selectRow(others, QString::fromStdString(c1)));
-  page->findChild<QToolButton*>("toGroup")->click();
-  EXPECT_EQ(members->count(), 2);
-  // «Inner» into «Outer»; then it is not offered to «Third», nor «Outer» to «Inner».
-  groups->setCurrentRow(1);
-  ASSERT_TRUE(selectRow(others, "‹Inner›"));
-  page->findChild<QToolButton*>("toGroup")->click();
-  EXPECT_TRUE(selectRow(members, "‹Inner›"));
-  groups->setCurrentRow(2);
-  EXPECT_FALSE(selectRow(others, "‹Inner›"));
-  EXPECT_TRUE(selectRow(others, "‹Outer›"));
-  groups->setCurrentRow(0);
-  EXPECT_FALSE(selectRow(others, "‹Outer›"));
-  EXPECT_TRUE(selectRow(others, "‹Third›"));
-  // One component out again.
-  ASSERT_TRUE(selectRow(members, QString::fromStdString(c1)));
-  page->findChild<QToolButton*>("fromGroup")->click();
+  GroupExplorer* e = explorerOf(stack);
+  ASSERT_TRUE(e);
+  const int n = int(f.b().components.size());
+  EXPECT_EQ(treeTexts(e), (QStringList{QString("Все компоненты (%1)").arg(n), QString("Несгруппированные (%1)").arg(n), "Группы"}));
+  EXPECT_EQ(listTexts(e).size(), n);
+  e->newGroup();  // at the top: «NewGroup»
+  e->choose({GroupNode::Kind::Groups, {}});
+  e->newGroup();  // at the top again: «NewGroup_1»
+  e->choose({GroupNode::Kind::Group, "NewGroup"});
+  e->newGroup();  // under «NewGroup»: «NewGroup_2»
+  EXPECT_EQ(treeTexts(e).mid(2), (QStringList{"Группы", "  NewGroup", "    NewGroup_2", "  NewGroup_1"}));
+  // Two components into «NewGroup_1», one of them added into «NewGroup_2» too.
+  e->choose({});
+  e->moveTo("NewGroup_1", {c0, c1}, {}, false);
+  e->moveTo("NewGroup_2", {c0}, {}, true);
+  EXPECT_EQ(treeTexts(e)[1], QString("Несгруппированные (%1)").arg(n - 2));
+  e->choose({GroupNode::Kind::Group, "NewGroup_1"});
+  EXPECT_EQ(listTexts(e), (QStringList{QString::fromStdString(c0), QString::fromStdString(c1)}));
+  EXPECT_EQ(e->findChild<QLabel*>("title")->text(), "Группа компонентов NewGroup_1");
+  // Moved out of «NewGroup_1» into «NewGroup_2»: it leaves the one it was shown in.
+  e->moveTo("NewGroup_2", {c1}, {}, false);
+  EXPECT_EQ(listTexts(e), QStringList{QString::fromStdString(c0)});
+  // A group into one in it: refused; «NewGroup_1» into «NewGroup_2» (in «NewGroup»).
+  e->choose({GroupNode::Kind::Group, "NewGroup"});
+  e->moveTo("NewGroup_2", {}, {"NewGroup"}, false);
+  EXPECT_EQ(e->source().parentOf("NewGroup_2"), "NewGroup");
+  e->moveTo("NewGroup_2", {}, {"NewGroup_1"}, false);
+  EXPECT_EQ(e->source().parentOf("NewGroup_1"), "NewGroup_2");
+  // The group in the list: folders first.
+  e->choose({GroupNode::Kind::Group, "NewGroup_2"});
+  EXPECT_EQ(listTexts(e), (QStringList{"NewGroup_1", QString::fromStdString(c0), QString::fromStdString(c1)}));
+  // Out of all groups.
+  e->selectIds({c0});
+  e->excludeFromAllGroups();
+  EXPECT_EQ(listTexts(e), (QStringList{"NewGroup_1", QString::fromStdString(c1)}));
   applyParams(dlg);
   const DesignRules& r = *f.b().rules;
   ASSERT_EQ(r.compGroups.size(), 3u);
-  EXPECT_EQ(r.compGroups[0], (CompGroup{"Inner", {c0}, {}}));
-  EXPECT_EQ(r.compGroups[1], (CompGroup{"Outer", {}, {"Inner"}}));
-  EXPECT_EQ(r.compsOf("Outer"), std::vector<std::string>{c0});
+  EXPECT_EQ(r.compGroups[0], (CompGroup{"NewGroup", {}, {"NewGroup_2"}}));
+  EXPECT_EQ(r.compGroups[1], (CompGroup{"NewGroup_1", {}, {}}));
+  EXPECT_EQ(r.compGroups[2], (CompGroup{"NewGroup_2", {c1}, {"NewGroup_1"}}));
+  EXPECT_EQ(r.compsOf("NewGroup"), std::vector<std::string>{c1});
 }
 
 TEST(Gui, LayerGroupsPageEditsGroups) {
@@ -4636,49 +4651,52 @@ TEST(Gui, LayerGroupsPageEditsGroups) {
   DesignParamsDialog dlg(&f.doc);
   auto* stack = dlg.findChild<QStackedWidget*>();
   dlg.showPage("Группы слоёв");
-  QWidget* page = stack->currentWidget();
-  answerName("Outer");
-  page->findChild<QToolButton*>("addGroup")->click();
-  auto* others = page->findChild<QListWidget*>("others");
-  EXPECT_EQ(others->count(), int(f.b().layers.size()));
-  ASSERT_TRUE(selectRow(others, QString::fromStdString(top)));
-  page->findChild<QToolButton*>("toGroup")->click();
+  GroupExplorer* e = explorerOf(stack);
+  ASSERT_TRUE(e);
+  EXPECT_EQ(listTexts(e).size(), int(f.b().layers.size()));
+  e->newGroup();
+  e->moveTo("NewGroup", {top}, {}, false);
   // The group is offered to the rules of wires.
   dlg.showPage("Ширина проводников");
   auto* table = stack->currentWidget()->findChild<QTableWidget*>();
   auto* layer = qobject_cast<QComboBox*>(table->cellWidget(0, 2));
   ASSERT_TRUE(layer);
-  const int at = layer->findText("Группа: Outer");
+  const int at = layer->findText("Группа: NewGroup");
   ASSERT_GE(at, 0);
   layer->setCurrentIndex(at);
   emit layer->activated(at);
   applyParams(dlg);
   const DesignRules& r = *f.b().rules;
   ASSERT_EQ(r.layerGroups.size(), 1u);
-  EXPECT_EQ(r.layerGroups[0], (LayerGroup{"Outer", {top}, {}}));
-  EXPECT_TRUE(r.widths[0].layers.empty());
-  EXPECT_EQ(r.widths[0].layerGroups, std::vector<std::string>{"Outer"});
+  EXPECT_EQ(r.layerGroups[0], (LayerGroup{"NewGroup", {top}, {}}));
+  EXPECT_EQ(r.widths[0].layerGroups, std::vector<std::string>{"NewGroup"});
 }
 
-// A group renamed: the rules naming it and the group it sits in follow.
+// A group renamed in the tree: the rules naming it and the group it sits in follow.
 TEST(Gui, RenamedGroupFollowsIntoRules) {
   Fixture f("topor/Example_02/Placement.fst");
   Board& b = *f.doc.board();
   const std::string c0 = b.components[0].ref, top = b.layers[b.topCopper()].name;
   b.rules->compGroups = {{"Big", {c0}, {}}, {"All", {}, {"Big"}}};
   b.rules->layerGroups = {{"Outer", {top}, {}}};
+  b.rules->netGroups.push_back({"Power", {"G"}, {}});
   b.rules->compClearances.push_back({true, {}, {"Outer"}, {RuleComps::Kind::Group, "Big"}, {}, mmToNm(1.0)});
-  b.rules->widths.push_back({true, {}, {}, mmToNm(0.3), mmToNm(0.3), {"Outer"}});
+  b.rules->widths.push_back({true, {}, {RuleNets::Kind::Group, "Power"}, mmToNm(0.3), mmToNm(0.3), {"Outer"}});
   DesignParamsDialog dlg(&f.doc);
   auto* stack = dlg.findChild<QStackedWidget*>();
-  dlg.showPage("Группы компонентов");
-  stack->currentWidget()->findChild<QListWidget*>("groups")->setCurrentRow(0);
-  answerName("Large");
-  stack->currentWidget()->findChild<QToolButton*>("renameGroup")->click();
-  dlg.showPage("Группы слоёв");
-  stack->currentWidget()->findChild<QListWidget*>("groups")->setCurrentRow(0);
-  answerName("Faces");
-  stack->currentWidget()->findChild<QToolButton*>("renameGroup")->click();
+  auto rename = [&](const char* page, const char* group, const char* name) {
+    dlg.showPage(page);
+    GroupExplorer* e = explorerOf(stack);
+    auto* tree = e->findChild<QTreeView*>("groupTree");
+    auto* model = qobject_cast<GroupTreeModel*>(tree->model());
+    EXPECT_TRUE(model->setData(model->indexOf({GroupNode::Kind::Group, group}), QString(name)));
+    // A name another group has is refused.
+    EXPECT_FALSE(model->setData(model->indexOf({GroupNode::Kind::Group, name}), QString(name)));
+    QApplication::processEvents();
+  };
+  rename("Группы компонентов", "Big", "Large");
+  rename("Группы слоёв", "Outer", "Faces");
+  rename("Группы цепей", "Power", "Supply");
   applyParams(dlg);
   const DesignRules& r = *f.b().rules;
   EXPECT_EQ(r.compGroups[0].name, "Large");
@@ -4686,6 +4704,81 @@ TEST(Gui, RenamedGroupFollowsIntoRules) {
   EXPECT_EQ(r.compClearances.back().a, (RuleComps{RuleComps::Kind::Group, "Large"}));
   EXPECT_EQ(r.compClearances.back().layerGroups, std::vector<std::string>{"Faces"});
   EXPECT_EQ(r.widths.back().layerGroups, std::vector<std::string>{"Faces"});
+  EXPECT_EQ(r.widths.back().nets, (RuleNets{RuleNets::Kind::Group, "Supply"}));
+}
+
+// The explorer's tree takes what is dragged onto a group: moved out of the group it came from, with Ctrl added;
+// onto «Несгруппированные» out of it; a group onto «Группы» to the top.
+TEST(Gui, GroupExplorerDragMovesCtrlAdds) {
+  Fixture f("topor/Example_02/Placement.fst");
+  Board& b = *f.doc.board();
+  b.rules->netGroups = {{"A", {"G", "+5V"}, {}}, {"B", {}, {}}, {"C", {}, {}}};
+  DesignParamsDialog dlg(&f.doc);
+  auto* stack = dlg.findChild<QStackedWidget*>();
+  dlg.showPage("Группы цепей");
+  GroupExplorer* e = explorerOf(stack);
+  ASSERT_TRUE(e);
+  auto* tree = qobject_cast<GroupTreeModel*>(e->findChild<QTreeView*>("groupTree")->model());
+  auto* view = e->findChild<QListView*>("members");
+  auto drag = [&](const std::vector<int>& rows, const GroupNode& onto, Qt::DropAction action) {
+    QModelIndexList items;
+    for (int r : rows) items << view->model()->index(r, 0);
+    std::unique_ptr<QMimeData> m(view->model()->mimeData(items));
+    tree->dropMimeData(m.get(), action, -1, 0, tree->indexOf(onto));
+    QApplication::processEvents();  // (the explorer follows after the drop)
+  };
+  e->choose({GroupNode::Kind::Group, "A"});
+  ASSERT_EQ(listTexts(e), (QStringList{"G", "+5V"}));
+  drag({0}, {GroupNode::Kind::Group, "B"}, Qt::MoveAction);
+  EXPECT_EQ(e->source().members("A"), std::vector<std::string>{"+5V"});
+  EXPECT_EQ(e->source().members("B"), std::vector<std::string>{"G"});
+  drag({0}, {GroupNode::Kind::Group, "C"}, Qt::CopyAction);  // with Ctrl
+  EXPECT_EQ(e->source().members("A"), std::vector<std::string>{"+5V"});
+  EXPECT_EQ(e->source().members("C"), std::vector<std::string>{"+5V"});
+  drag({0}, {GroupNode::Kind::Ungrouped, {}}, Qt::MoveAction);
+  EXPECT_TRUE(e->source().members("A").empty());
+  EXPECT_EQ(e->source().members("C"), std::vector<std::string>{"+5V"});
+  // Groups: «B» into «C», and back to the top.
+  e->choose({GroupNode::Kind::Groups, {}});
+  ASSERT_EQ(listTexts(e), (QStringList{"A", "B", "C"}));
+  drag({1}, {GroupNode::Kind::Group, "C"}, Qt::MoveAction);
+  EXPECT_EQ(e->source().parentOf("B"), "C");
+  EXPECT_EQ(listTexts(e), (QStringList{"A", "C"}));
+  drag({1}, {GroupNode::Kind::Group, "B"}, Qt::MoveAction);  // C into B, which is in C: refused
+  EXPECT_EQ(e->source().parentOf("C"), "");
+  e->choose({GroupNode::Kind::Group, "C"});
+  drag({0}, {GroupNode::Kind::Groups, {}}, Qt::MoveAction);
+  EXPECT_EQ(e->source().parentOf("B"), "");
+  applyParams(dlg);
+  EXPECT_EQ(f.b().rules->netGroups[2], (NetGroup{"C", {"+5V"}, {}}));
+}
+
+// The counts and the search of the explorer; a group removed gives its groups to the one it was in.
+TEST(Gui, GroupExplorerCountsFilterAndRemove) {
+  Fixture f("topor/Example_02/Placement.fst");
+  Board& b = *f.doc.board();
+  b.rules->netGroups = {{"Outer", {"G"}, {"Mid"}}, {"Mid", {"+5V"}, {"Inner"}}, {"Inner", {}, {}}};
+  DesignParamsDialog dlg(&f.doc);
+  auto* stack = dlg.findChild<QStackedWidget*>();
+  dlg.showPage("Группы цепей");
+  GroupExplorer* e = explorerOf(stack);
+  const int n = int(b.nets.size());
+  EXPECT_EQ(treeTexts(e)[1], QString("Несгруппированные (%1)").arg(n - 2));
+  auto* count = e->findChild<QLabel*>("count");
+  EXPECT_EQ(count->text(), QString("Элементов: %1").arg(n));
+  e->findChild<QLineEdit*>("search")->setText("UN0000 6");
+  for (const QString& t : listTexts(e)) {
+    EXPECT_TRUE(t.contains("UN0000") && t.contains("6")) << t.toStdString();
+  }
+  EXPECT_EQ(count->text(), QString("Элементов: %1").arg(listTexts(e).size()));
+  e->findChild<QLineEdit*>("search")->clear();
+  e->selectIds({"G", "+5V"});
+  EXPECT_EQ(count->text(), "Выбрано элементов: 2");
+  e->choose({GroupNode::Kind::Group, "Mid"});
+  e->removeChosenGroup();
+  EXPECT_EQ(e->chosen(), (GroupNode{GroupNode::Kind::Group, "Outer"}));
+  EXPECT_EQ(e->source().subgroups("Outer"), std::vector<std::string>{"Inner"});
+  EXPECT_EQ(treeTexts(e)[1], QString("Несгруппированные (%1)").arg(n - 1));
 }
 
 // «Зазор между компонентами»: the file's rule is shown, a rule is added for one component, applied and compiled.
@@ -5139,4 +5232,18 @@ TEST(Gui, ImpedancePageIsATableOfRulesByLayers) {
   ASSERT_TRUE(again) << again.error();
   ASSERT_EQ((*again)->hispeed.impedances.size(), rules + 1);
   EXPECT_EQ((*again)->hispeed.impedances[size_t(single)].on("Top")->width, mmToNm(0.2));
+}
+
+// Screenshots of the explorer for a look against TopoR's (XR_SHOT_DIR).
+TEST(Gui, GroupExplorerLooksLikeTopoRs) {
+  const char* dir = std::getenv("XR_SHOT_DIR");
+  if (!dir) GTEST_SKIP() << "XR_SHOT_DIR not set";
+  Fixture f("topor/Example_06/Signals.fst");
+  Board& b = *f.doc.board();
+  b.rules->netGroups.push_back({"Inner", {"A0", "A1"}, {}});
+  b.rules->netGroups.front().groups.push_back("Inner");
+  DesignParamsDialog dlg(&f.doc);
+  dlg.resize(1280, 640);
+  dlg.showPage("Группы цепей");
+  dlg.grab().save(QString(dir) + "/explorer-nets.png");
 }
