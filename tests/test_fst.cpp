@@ -731,6 +731,20 @@ TEST(FstIO, EverySampleKeepsItsRulesAndSettings) {
         EXPECT_NEAR(c.hispeed.delays[i].tolerance, a.hispeed.delays[i].tolerance, 1e-6) << e.path();
       }
       delays += int(a.hispeed.delays.size());
+      // The signals, their groups (a group in a group too) and the search's settings.
+      ASSERT_EQ(c.hispeed.groups.size(), a.hispeed.groups.size()) << e.path();
+      for (size_t i = 0; i < a.hispeed.groups.size(); ++i) {
+        EXPECT_EQ(c.hispeed.groups[i].name, a.hispeed.groups[i].name) << e.path();
+        EXPECT_EQ(c.hispeed.groups[i].members, a.hispeed.groups[i].members) << e.path();
+      }
+      ASSERT_EQ(c.hispeed.clusters.size(), a.hispeed.clusters.size()) << e.path();
+      for (size_t i = 0; i < a.hispeed.clusters.size(); ++i) {
+        EXPECT_EQ(c.hispeed.clusters[i].nets, a.hispeed.clusters[i].nets) << e.path();
+        EXPECT_EQ(c.hispeed.clusters[i].pinPairs, a.hispeed.clusters[i].pinPairs) << e.path();
+        EXPECT_EQ(c.hispeed.clusters[i].signalList.size(), a.hispeed.clusters[i].signalList.size()) << e.path();
+      }
+      EXPECT_EQ(c.hispeed.search.excludedNets, a.hispeed.search.excludedNets) << e.path();
+      EXPECT_EQ(c.hispeed.search.names.size(), a.hispeed.search.names.size()) << e.path();
       for (size_t l = 0; l < a.layers.size(); ++l)
         if (LayerId m = c.findLayer(a.layers[l].name); m >= 0) EXPECT_EQ(c.layers[size_t(m)].placement, a.layers[l].placement) << e.path() << " " << a.layers[l].name;
     }
@@ -1174,4 +1188,26 @@ TEST(FstIO, NestedNetGroupsRoundTrip) {
   const Board& c = **again;
   EXPECT_EQ(c.rules->netGroups, a.rules->netGroups);
   EXPECT_EQ(c.trackWidth(c.findNet("G"), c.topCopper()), mmToNm(0.7));
+}
+
+// Groups of signals in groups, and the search's settings as the page edits them, are written and read.
+TEST(FstIO, SignalGroupsAndSearchRoundTrip) {
+  auto r = io::loadBoard(data("topor/Example_06/Signals.fst"));
+  ASSERT_TRUE(r) << r.error();
+  Board& a = **r;
+  a.hispeed.groups.push_back({"ALL_DDR", {{ObjectSignal::Kind::SignalGroup, "ADD_DDR"}, {ObjectSignal::Kind::DiffSignal, "SDCLK_U2"}}});
+  a.hispeed.search.maxNetsInCluster = 7;
+  a.hispeed.search.createPinPairs = false;
+  a.hispeed.search.names = {{false, "_P", "_N"}};
+  a.hispeed.search.excludedNets = {"GND", "1V8"};
+  auto again = io::readFst(io::writeFst(a), "signals.fst");
+  ASSERT_TRUE(again) << again.error();
+  const HiSpeed& h = (*again)->hispeed;
+  EXPECT_EQ(h.groups.back().members, a.hispeed.groups.back().members);
+  EXPECT_EQ(h.search.maxNetsInCluster, 7);
+  EXPECT_FALSE(h.search.createPinPairs);
+  ASSERT_EQ(h.search.names.size(), 1u);
+  EXPECT_FALSE(h.search.names[0].enabled);
+  EXPECT_EQ(h.search.names[0].pos, "_P");
+  EXPECT_EQ(h.search.excludedNets, (std::vector<std::string>{"GND", "1V8"}));
 }
