@@ -40,6 +40,7 @@ struct Layer {
   // «Учитывать при размещении»: the components' graphics on the layer are their outlines — what the
   // component clearance is kept between (Board::componentExtent).
   bool placement = false;
+  Coord thickness = 0;  // of the layer in the stack, as the design gives it (0: not given)
 };
 
 struct NetClass {

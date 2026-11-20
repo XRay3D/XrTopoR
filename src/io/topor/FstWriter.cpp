@@ -130,8 +130,8 @@ struct Writer {
       if (l.kind == LayerKind::Fab && l.placement) x.empty("Layer", {{"name", layerName[i]}, {"type", "Assy"}, {"compsOutline", "on"}});
       else if (l.kind == LayerKind::Fab) x.empty("Layer", {{"name", layerName[i]}, {"type", "Assy"}});
       else if (l.kind != LayerKind::Copper && l.placement)
-        x.empty("Layer", {{"name", layerName[i]}, {"type", layerType(l.kind)}, {"compsOutline", "on"}, {"thickness", "0"}});
-      else x.empty("Layer", {{"name", layerName[i]}, {"type", layerType(l.kind)}, {"thickness", "0"}});
+        x.empty("Layer", {{"name", layerName[i]}, {"type", layerType(l.kind)}, {"compsOutline", "on"}, {"thickness", mm(l.thickness)}});
+      else x.empty("Layer", {{"name", layerName[i]}, {"type", layerType(l.kind)}, {"thickness", mm(l.thickness)}});
     };
     // Top-side layers outside-in, copper top to bottom, bottom-side layers inside-out.
     const LayerKind order[] = {LayerKind::Paste, LayerKind::Mask, LayerKind::Silk, LayerKind::Fab, LayerKind::Other};

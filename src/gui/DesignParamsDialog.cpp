@@ -18,6 +18,7 @@
 #include <QPushButton>
 #include <QSplitter>
 #include <QStackedWidget>
+#include <QTableView>
 #include <QTableWidget>
 #include <QTextBrowser>
 #include <QToolButton>
@@ -28,6 +29,7 @@
 
 #include "core/Padstack.h"
 #include "core/ZoneFill.h"
+#include "gui/ImpedanceModel.h"
 #include "gui/PadstackDialogs.h"
 #include "gui/Schemes.h"
 #include "io/BoardIO.h"
@@ -154,7 +156,9 @@ DesignParamsDialog::DesignParamsDialog(Document* doc, QWidget* parent) : QDialog
   auto* hs = header(tr("High-speed правила"));
   page(hs, tr("Волновое сопротивление"), [this] { return impedancesPage(); },
        tr("Ширины проводников по слоям (и зазор внутри пары для дифференциальных сигналов). Ширины и зазор "
-          "застёгнутой пары проводников задаются только здесь."));
+          "застёгнутой пары проводников задаются только здесь. Правило — столбец: имя и Z сверху, ниже ширина "
+          "(у дифференциального — ширина и зазор) на каждом сигнальном слое; двойной щелчок по ячейке — правка, "
+          "крестик у имени удаляет правило, если на него не ссылаются сигналы."));
   page(hs, tr("Сигналы"), [this] { return diffSignalsPage(); }, tr("Дифференциальные сигналы: пары цепей, правило и допустимый разброс длин."));
   const QString delayNote = tr(" Допуск и константу рекомендуется задавать во времени (пс): погонная задержка на наружных и "
                               "внутренних слоях разная. Задержка считается по длине проводников от источника сигнала до приёмника "
@@ -184,7 +188,7 @@ void DesignParamsDialog::load() {
   const Board& b = *doc_->board();
   rules_ = b.rules ? *b.rules : rulesFromBoard(b);
   stacks_ = b.padstacks;
-  delays_ = b.hispeed.delays;
+  hispeed_ = b.hispeed;
   placement_.clear();
   for (auto& L : b.layers) placement_.push_back(L.placement);
   stackOrigin_.resize(stacks_.size());
@@ -233,7 +237,7 @@ bool DesignParamsDialog::apply() {
   setPadstacks(b, stacks_, stackOrigin_);
   for (size_t i = 0; i < stackOrigin_.size(); ++i) stackOrigin_[i] = int(i);
   b.rules = rules_;
-  b.hispeed.delays = delays_;
+  b.hispeed = hispeed_;
   for (size_t l = 0; l < b.layers.size() && l < placement_.size(); ++l) b.layers[l].placement = placement_[l];
   compileRules(b);
   // Plane layers follow their nets.
@@ -1271,7 +1275,7 @@ QWidget* DesignParamsDialog::compClearancesPage() {
 
 QWidget* DesignParamsDialog::signalsCell(const std::vector<ObjectSignal>& value, std::function<void(std::vector<ObjectSignal>)> set,
                                          bool groupsOnly) {
-  const HiSpeed& h = doc_->board()->hispeed;
+  const HiSpeed& h = hispeed_;
   auto* c = new QComboBox;
   c->setFrame(false);
   auto same = [](const std::vector<ObjectSignal>& a, const std::vector<ObjectSignal>& b) {
@@ -1323,8 +1327,8 @@ QWidget* DesignParamsDialog::delayRulesPage(DelayRule::Kind kind) {
   // The rules of the kind among all the delay rules: the page's rows.
   auto rows = [this, kind] {
     std::vector<int> out;
-    for (size_t i = 0; i < delays_.size(); ++i)
-      if (delays_[i].kind == kind) out.push_back(int(i));
+    for (size_t i = 0; i < hispeed_.delays.size(); ++i)
+      if (hispeed_.delays[i].kind == kind) out.push_back(int(i));
     return out;
   };
   const bool equal = kind == DelayRule::Kind::Equal, relation = kind == DelayRule::Kind::Relation;
@@ -1338,8 +1342,8 @@ QWidget* DesignParamsDialog::delayRulesPage(DelayRule::Kind kind) {
       headers, [rows] { return int(rows().size()); },
       [this, rows, equal, relation](QTableWidget* t, int r) {
         const int i = rows()[size_t(r)];
-        const DelayRule d = delays_[size_t(i)];
-        auto rule = [this, i]() -> DelayRule& { return delays_[size_t(i)]; };
+        const DelayRule d = hispeed_.delays[size_t(i)];
+        auto rule = [this, i]() -> DelayRule& { return hispeed_.delays[size_t(i)]; };
         int col = 1;
         t->setCellWidget(r, col++, checkCell(d.enabled, [rule](bool on) { rule().enabled = on; }));
         if (relation) {
@@ -1371,37 +1375,69 @@ QWidget* DesignParamsDialog::delayRulesPage(DelayRule::Kind kind) {
         DelayRule d;
         d.kind = kind;
         d.time = true;
-        if (auto of = rows(); !of.empty()) d = delays_[size_t(of.back())];
-        delays_.push_back(std::move(d));
+        if (auto of = rows(); !of.empty()) d = hispeed_.delays[size_t(of.back())];
+        hispeed_.delays.push_back(std::move(d));
       },
-      [this, rows](int r) { delays_.erase(delays_.begin() + rows()[size_t(r)]); },
-      [this, rows](int a, int b) { std::swap(delays_[size_t(rows()[size_t(a)])], delays_[size_t(rows()[size_t(b)])]); });
+      [this, rows](int r) { hispeed_.delays.erase(hispeed_.delays.begin() + rows()[size_t(r)]); },
+      [this, rows](int a, int b) { std::swap(hispeed_.delays[size_t(rows()[size_t(a)])], hispeed_.delays[size_t(rows()[size_t(b)])]); });
 }
 
-// The impedance rules as the file has them (read only): a row per rule and layer.
+// «Волновое сопротивление» as TopoR shows it: the layers down, the rules across (gui/ImpedanceModel.h).
 QWidget* DesignParamsDialog::impedancesPage() {
-  const Board& b = *doc_->board();
-  auto* t = new QTableWidget;
-  t->setColumnCount(5);
-  t->setHorizontalHeaderLabels({tr("Имя"), tr("Z0, Ом"), tr("Слой"), tr("Ширина"), tr("Зазор")});
-  int row = 0;
-  for (const Impedance& z : b.hispeed.impedances)
-    for (const ImpedanceLayerRule& r : z.rules) {
-      t->insertRow(row);
-      auto cell = [&](int c, const QString& v) {
-        auto* it = new QTableWidgetItem(v);
-        it->setFlags(it->flags() & ~Qt::ItemIsEditable);
-        t->setItem(row, c, it);
-      };
-      cell(0, QString::fromStdString(z.name) + (z.diff ? tr(" (дифф.)") : QString()));
-      cell(1, QString::number(z.z0));
-      cell(2, QString::fromStdString(r.layer));
-      cell(3, formatLength(double(r.width), doc_->unit(), 3));
-      cell(4, z.diff ? formatLength(double(r.gap), doc_->unit(), 3) : QString());
-      ++row;
+  auto* w = new QWidget;
+  auto* v = new QVBoxLayout(w);
+  v->setContentsMargins(0, 0, 0, 0);
+  auto* view = new QTableView(w);
+  view->setObjectName("impedances");
+  auto* model = new ImpedanceModel(*doc_->board(), hispeed_, doc_->unit(), view);
+  auto* delegate = new ImpedanceDelegate(view);
+  view->setModel(model);
+  view->setItemDelegate(delegate);
+  view->horizontalHeader()->hide();
+  view->verticalHeader()->hide();
+  view->setSelectionMode(QAbstractItemView::SingleSelection);
+  view->setEditTriggers(QAbstractItemView::DoubleClicked | QAbstractItemView::SelectedClicked | QAbstractItemView::EditKeyPressed |
+                        QAbstractItemView::AnyKeyPressed);
+  // The labels of the two rows above span the layer's columns; a pair's name, impedance and heading its two.
+  auto layOut = [view, model] {
+    view->clearSpans();
+    view->setSpan(ImpedanceModel::NameRow, ImpedanceModel::LayerCol, 1, ImpedanceModel::FirstRuleCol);
+    view->setSpan(ImpedanceModel::ZRow, ImpedanceModel::LayerCol, 1, ImpedanceModel::FirstRuleCol);
+    for (int r = 0; r < model->ruleCount(); ++r)
+      if (model->columnsOf(r) > 1)
+        for (int row : {ImpedanceModel::NameRow, ImpedanceModel::ZRow, ImpedanceModel::HeadRow}) view->setSpan(row, model->firstColumn(r), 1, 2);
+    view->resizeColumnsToContents();
+    for (int c = ImpedanceModel::FirstRuleCol; c < model->columnCount(); ++c)
+      view->setColumnWidth(c, std::max(view->columnWidth(c), model->columnsOf(model->partOf(c).rule) > 1 ? 70 : 110));
+  };
+  connect(model, &QAbstractItemModel::modelReset, view, layOut);
+  layOut();
+  connect(model, &QAbstractItemModel::dataChanged, this, [this] { changed(); });
+  connect(delegate, &ImpedanceDelegate::removeRequested, this, [this, model](int rule) {
+    if (model->removeRule(rule)) {
+      changed();
+      return;
     }
-  t->resizeColumnsToContents();
-  return t;
+    QMessageBox::warning(this, tr("Редактор параметров дизайна"),
+                         tr("<b>Правило волнового сопротивления используется и не может быть удалено.</b><br><br>"
+                            "Исправьте сигналы, ссылающиеся на это правило, и повторите операцию удаления."));
+  });
+  v->addWidget(view, 1);
+  auto* bar = new QHBoxLayout;
+  bar->addStretch(1);
+  for (bool diff : {true, false}) {
+    auto* add = new QPushButton(diff ? tr("Добавить Zdiff") : tr("Добавить Z0"), w);
+    add->setObjectName(diff ? "addZdiff" : "addZ0");
+    add->setAutoDefault(false);
+    connect(add, &QPushButton::clicked, this, [this, model, view, diff] {
+      const int rule = model->addRule(diff);
+      changed();
+      view->scrollTo(model->index(ImpedanceModel::NameRow, model->firstColumn(rule)));
+    });
+    bar->addWidget(add);
+  }
+  v->addLayout(bar);
+  return w;
 }
 
 // The differential signals (read only): the pair's nets, its rule and the allowed difference of lengths.
@@ -1410,11 +1446,11 @@ QWidget* DesignParamsDialog::diffSignalsPage() {
   auto* t = new QTableWidget;
   t->setColumnCount(4);
   t->setHorizontalHeaderLabels({tr("Дифф. сигнал"), tr("Цепи"), tr("Волновое сопротивление"), tr("Допустимый разброс")});
-  for (const DiffSignal& d : b.hispeed.diffSignals) {
+  for (const DiffSignal& d : hispeed_.diffSignals) {
     const int row = t->rowCount();
     t->insertRow(row);
     QStringList nets;
-    for (const std::string& n : b.hispeed.netsOf({ObjectSignal::Kind::DiffSignal, d.name})) nets << QString::fromStdString(n);
+    for (const std::string& n : hispeed_.netsOf({ObjectSignal::Kind::DiffSignal, d.name})) nets << QString::fromStdString(n);
     const QString v[4] = {QString::fromStdString(d.name), nets.join(", "), QString::fromStdString(d.impedance),
                           formatLength(double(d.mismatch), doc_->unit(), 3)};
     for (int c = 0; c < 4; ++c) {

@@ -95,7 +95,7 @@ class DesignParamsDialog : public QDialog {
 
   Document* doc_;
   DesignRules rules_;
-  std::vector<DelayRule> delays_;          // the delay rules (HiSpeed), edited
+  HiSpeed hispeed_;                        // the high-speed rules, edited: the impedances and the delay rules
   std::vector<Padstack> stacks_;           // the design's pad stacks, edited
   std::vector<char> placement_;            // «Учитывать при размещении» per layer of the design, edited
   std::vector<int> stackOrigin_;           // the board's index of each (-1: new)

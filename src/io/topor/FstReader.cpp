@@ -124,6 +124,7 @@ struct Reader {
       else kind = LayerKind::Other;  // Mechanical, Doc
       LayerId id = b.addLayer(name, kind, side);
       b.layers[id].placement = kind != LayerKind::Copper && l.flag("compsOutline", false);
+      b.layers[id].thickness = len(l.num("thickness"));
       if (t == "Plane") {
         planeLayers |= LayerMask(1) << id;
         b.layers[id].plane = true;

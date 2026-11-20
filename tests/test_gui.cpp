@@ -8,6 +8,7 @@
 #include <QDir>
 #include <QDockWidget>
 #include <QPushButton>
+#include <QTableView>
 #include <QTableWidget>
 #include <QFile>
 #include <QMessageBox>
@@ -52,6 +53,7 @@
 #include "gui/Document.h"
 #include "gui/AutorouteWindow.h"
 #include "gui/DesignParamsDialog.h"
+#include "gui/ImpedanceModel.h"
 #include "gui/PadstackDialogs.h"
 #include "gui/SpinBox.h"
 #include "core/Padstack.h"
@@ -5012,4 +5014,129 @@ TEST(Gui, PadConnectDialogEditsTheList) {
   EXPECT_EQ(f.b().settings.padConnect, PadConnectSettings{});
   f.doc.undoStack()->undo();
   EXPECT_EQ(f.b().settings.padConnect.mode, PadConnectSettings::Mode::AllPads);
+}
+
+// «Волновое сопротивление» as TopoR shows it: a table of the copper layers by the impedance rules — a rule a column
+// (a pair's two: widths and gaps) with its name and impedance above — on a model; a rule is added by the buttons
+// and removed by the mark at its name unless a signal uses it.
+TEST(Gui, ImpedancePageIsATableOfRulesByLayers) {
+  Fixture f("topor/Example_06/Signals.fst");
+  f.doc.setUnit(Unit::Mm);
+  const Board& b = f.b();
+  const size_t rules = b.hispeed.impedances.size();
+  ASSERT_GE(rules, 2u);
+  int single = -1, pair = -1;
+  for (size_t i = 0; i < rules; ++i) (b.hispeed.impedances[i].diff ? pair : single) = int(i);
+  ASSERT_GE(single, 0);
+  ASSERT_GE(pair, 0);
+  const std::string singleName = b.hispeed.impedances[size_t(single)].name;
+  DesignParamsDialog dlg(&f.doc);
+  dlg.resize(1100, 640);
+  auto* stack = dlg.findChild<QStackedWidget*>();
+  dlg.showPage("Волновое сопротивление");
+  auto* view = stack->currentWidget()->findChild<QTableView*>("impedances");
+  ASSERT_TRUE(view);
+  auto* model = qobject_cast<ImpedanceModel*>(view->model());
+  ASSERT_TRUE(model);
+  using M = ImpedanceModel;
+  const int layers = int(b.copperLayers().size());
+  EXPECT_EQ(model->rowCount(), M::FirstLayerRow + layers);
+  int columns = M::FirstRuleCol;
+  for (auto& z : b.hispeed.impedances) columns += z.diff ? 2 : 1;
+  EXPECT_EQ(model->columnCount(), columns);
+  auto text = [&](int row, int col) { return model->index(row, col).data().toString(); };
+  const int cs = model->firstColumn(single), cp = model->firstColumn(pair);
+  EXPECT_EQ(text(M::NameRow, cs), QString::fromStdString(singleName));
+  EXPECT_EQ(text(M::HeadRow, M::LayerCol), "Слой");
+  EXPECT_TRUE(text(M::HeadRow, cs).startsWith("Ширина, "));
+  EXPECT_TRUE(text(M::HeadRow, cp).startsWith("Ширина / Зазор"));
+  EXPECT_EQ(view->columnSpan(M::NameRow, cp), 2);  // the pair's name over its widths and gaps
+  EXPECT_EQ(view->columnSpan(M::NameRow, cs), 1);
+  EXPECT_EQ(view->columnSpan(M::NameRow, M::LayerCol), int(M::FirstRuleCol));
+  // The rows are the copper layers; a reference layer's is empty and not edited.
+  int top = -1, plane = -1;
+  for (int r = M::FirstLayerRow; r < model->rowCount(); ++r) {
+    if (text(r, M::LayerCol) == "Top") top = r;
+    if (text(r, M::TypeCol) == "опорный") plane = r;
+  }
+  ASSERT_GE(top, 0);
+  ASSERT_GE(plane, 0);
+  EXPECT_EQ(text(top, M::TypeCol), "сигнальный");
+  EXPECT_EQ(text(top, cs), "0.15");
+  EXPECT_EQ(text(top, cp + 1), "0.25");  // the pair's gap
+  EXPECT_TRUE(text(plane, cs).isEmpty());
+  EXPECT_FALSE(model->flags(model->index(plane, cs)) & Qt::ItemIsEditable);
+  EXPECT_TRUE(model->flags(model->index(top, cs)) & Qt::ItemIsEditable);
+  EXPECT_FALSE(model->flags(model->index(top, M::LayerCol)) & Qt::ItemIsEditable);
+  if (const char* dir = std::getenv("XR_SHOT_DIR")) dlg.grab().save(QString(dir) + "/dpe-impedance.png");
+
+  // A width is edited in its cell: the delegate's field, in the design's units.
+  const QModelIndex cell = model->index(top, cs);
+  view->setCurrentIndex(cell);
+  view->edit(cell);
+  auto* field = view->findChild<QDoubleSpinBox*>();
+  ASSERT_TRUE(field);
+  EXPECT_NEAR(field->value(), 0.15, 1e-9);
+  field->setValue(0.2);
+  emit view->itemDelegate()->commitData(field);
+  emit view->itemDelegate()->closeEditor(field);
+  EXPECT_EQ(text(top, cs), "0.2");
+  EXPECT_TRUE(model->setData(model->index(top, cp + 1), 0.3));
+  EXPECT_FALSE(model->setData(model->index(top, cp), 0.0));  // no width of nothing
+  EXPECT_TRUE(model->setData(model->index(M::ZRow, cs), 55.0));
+  // A rule renamed: its signals follow; a name another rule has is refused.
+  EXPECT_FALSE(model->setData(model->index(M::NameRow, cs), QString::fromStdString(b.hispeed.impedances[size_t(pair)].name)));
+  EXPECT_TRUE(model->setData(model->index(M::NameRow, cs), "Z0_55"));
+
+  // New rules: the design's default width (and clearance) on the signal layers.
+  auto click = [&](const char* name) { stack->currentWidget()->findChild<QPushButton*>(name)->click(); };
+  click("addZ0");
+  click("addZdiff");
+  ASSERT_EQ(model->ruleCount(), int(rules) + 2);
+  const int z0 = int(rules), zd = int(rules) + 1;
+  EXPECT_EQ(text(M::NameRow, model->firstColumn(z0)), "Z0_1");
+  EXPECT_EQ(text(M::NameRow, model->firstColumn(zd)), "Diff_1");
+  EXPECT_EQ(view->columnSpan(M::NameRow, model->firstColumn(zd)), 2);
+  EXPECT_EQ(text(M::ZRow, model->firstColumn(zd)), "100");
+  EXPECT_FALSE(text(top, model->firstColumn(z0)).isEmpty());
+  EXPECT_TRUE(text(plane, model->firstColumn(z0)).isEmpty());
+
+  // The mark at a rule's name removes it — unless a signal uses the rule: then a message, and it stays.
+  auto removeMark = [&](int rule) {
+    const QModelIndex name = model->index(M::NameRow, model->firstColumn(rule));
+    view->scrollTo(name);
+    QTest::mouseClick(view->viewport(), Qt::LeftButton, {}, ImpedanceDelegate::removeRect(view->visualRect(name)).center());
+  };
+  ASSERT_TRUE(model->used(single));
+  bool warned = false;
+  QTimer::singleShot(0, [&] {
+    auto* box = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+    ASSERT_TRUE(box);
+    warned = box->text().contains("используется и не может быть удалено");
+    box->accept();
+  });
+  removeMark(single);
+  EXPECT_TRUE(warned);
+  EXPECT_EQ(model->ruleCount(), int(rules) + 2);
+  EXPECT_FALSE(model->used(z0));
+  removeMark(z0);
+  ASSERT_EQ(model->ruleCount(), int(rules) + 1);
+  EXPECT_EQ(text(M::NameRow, model->firstColumn(z0)), "Diff_1");  // the next one took its place
+
+  applyParams(dlg);
+  const HiSpeed& h = f.b().hispeed;
+  ASSERT_EQ(h.impedances.size(), rules + 1);
+  EXPECT_EQ(h.impedances[size_t(single)].name, "Z0_55");
+  EXPECT_EQ(h.impedances[size_t(single)].z0, 55);
+  EXPECT_EQ(h.impedances[size_t(single)].on("Top")->width, mmToNm(0.2));
+  EXPECT_EQ(h.impedances[size_t(pair)].on("Top")->gap, mmToNm(0.3));
+  EXPECT_FALSE(r::contains(h.clusters, singleName, &SignalCluster::impedance));
+  EXPECT_TRUE(r::contains(h.clusters, std::string("Z0_55"), &SignalCluster::impedance));
+  EXPECT_TRUE(h.impedances.back().diff);
+  EXPECT_EQ(h.impedances.back().name, "Diff_1");
+  // ... and they are the design's: written and read.
+  auto again = io::readFst(io::writeFst(f.b()), "impedance.fst");
+  ASSERT_TRUE(again) << again.error();
+  ASSERT_EQ((*again)->hispeed.impedances.size(), rules + 1);
+  EXPECT_EQ((*again)->hispeed.impedances[size_t(single)].on("Top")->width, mmToNm(0.2));
 }
