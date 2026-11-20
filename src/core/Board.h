@@ -16,6 +16,7 @@
 #include "core/Display.h"
 #include "core/HiSpeed.h"
 #include "core/Rules.h"
+#include "core/Settings.h"
 #include "geom/Shape.h"
 
 namespace xr {
@@ -481,6 +482,7 @@ struct Board {
   std::shared_ptr<SourceDoc> source;       // original file tree for lossless round-trip
   std::optional<DisplayControl> display;   // display settings saved with the design (TopoR .fst)
   std::optional<DesignRules> rules;        // TopoR-style rules the classes are compiled from, if any
+  DesignSettings settings;                 // labels, pad corners, the warnings shown (TopoR's settings of a design)
 
   // Layers
   double tracksLength() const;     // of all tracks, nm

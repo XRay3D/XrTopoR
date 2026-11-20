@@ -1228,8 +1228,47 @@ struct Reader {
         for (auto* o : objects(*s)) rule.nets.push_back(ruleNets(*o));
         r.layerNets.push_back(std::move(rule));
       }
+    // The pads that take a wire at their corners.
+    if (auto* pc = rules.find("PadConnectSettings")) {
+      PadConnectSettings& c = b.settings.padConnect;
+      c.mode = pc->attr("mode", "AutoConnect") == "AllPads" ? PadConnectSettings::Mode::AllPads : PadConnectSettings::Mode::Auto;
+      for (auto& k : pc->kids) {
+        if (k.is("PadstackRef")) c.padstacks.emplace_back(k.attr("name"));
+        else if (k.is("PinRef")) c.pins.push_back({std::string(k.attr("compName")), std::string(k.attr("pinName"))});
+        else if (k.is("PadRef")) {
+          // (a pad of the footprint by its number: the pin it is)
+          auto it = pinToPad.find(key(std::string(k.attr("compName")), '\x02', k.attr("padNum")));
+          if (it != pinToPad.end()) c.pins.push_back({std::string(k.attr("compName")), b.pads[size_t(it->second)].number});
+        }
+      }
+    }
     b.rules = std::move(r);
     compileRules(b);
+  }
+
+  // Settings: how labels turn with their components. (The settings of the autorouter are the program's.)
+  void readSettings(const Element& st) {
+    if (auto* l = st.find("Labels")) {
+      LabelSettings& s = b.settings.labels;
+      s.rotateWithComp = l->flag("rotateWithComp", true);
+      s.useOrientRules = l->flag("useOrientRules", false);
+      s.topHorzRotate = l->flag("topHorzRotate", false);
+      s.topVertRotate = l->flag("topVertRotate", false);
+      s.bottomHorzRotate = l->flag("bottomHorzRotate", false);
+      s.bottomVertRotate = l->flag("bottomVertRotate", false);
+    }
+  }
+
+  // DialogSettings: the filter of messages. (The settings of DRC and of the exports are the program's.)
+  void readDialogSettings(const Element& ds) {
+    auto* mf = ds.find("MessageFilter");
+    if (!mf) return;
+    MessageFilter& f = b.settings.messages;
+    const auto mode = mf->attr("showWarnings", "ShowChecked");
+    f.mode = mode == "ShowAll" ? MessageFilter::Mode::All : mode == "ShowNothing" ? MessageFilter::Mode::Nothing : MessageFilter::Mode::Checked;
+    for (size_t i = 0; i < MessageFilter::kCodes.size(); ++i) f.on[i] = mf->flag(std::format("W{}", MessageFilter::kCodes[i]), true);
+    f.clearanceBetweenComps = mf->flag("WClrnBtwComps", false);
+    f.clearanceInNet = mf->flag("WClrnBtwObjSameNet", false);
   }
 
   void applyVia(NetClass& nc, const std::string& name) {
@@ -1623,6 +1662,8 @@ Result<BoardPtr> readFst(const std::string& text, const std::string& path) {
   else r.applyVia(b->netClasses[0], r.firstViastack);
   if (auto* cn = root.find("Connectivity")) r.readConnectivity(*cn);
   if (auto* dc = root.find("DisplayControl")) r.readDisplay(*dc);
+  if (auto* st = root.find("Settings")) r.readSettings(*st);
+  if (auto* ds = root.find("DialogSettings")) r.readDialogSettings(*ds);
   // The inner loops of the Contour: cutouts where no pad and no track lies in them.
   for (auto& loop : r.contourHoles) {
     bool empty = true;

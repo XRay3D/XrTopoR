@@ -659,6 +659,46 @@ TEST(FstIO, DelayRulesRoundTrip) {
   EXPECT_EQ(now[7].right[0].kind, ObjectSignal::Kind::DiffSignal);
 }
 
+// The settings of a design: how labels turn, which pads take a wire at their corners, which warnings are shown.
+// A design that has them as a new one does is written as TopoR writes it.
+TEST(FstIO, DesignSettingsRoundTrip) {
+  auto r = io::loadBoard(data("topor/Example_02/Placement.fst"));
+  ASSERT_TRUE(r) << r.error();
+  Board& a = **r;
+  EXPECT_EQ(a.settings, DesignSettings{});  // the example's: rotateWithComp on, AutoConnect, every warning on
+  std::string text = io::writeFst(a);
+  EXPECT_NE(text.find("<Labels rotateWithComp=\"on\"/>"), std::string::npos);
+  EXPECT_NE(text.find("<PadConnectSettings mode=\"AutoConnect\"/>"), std::string::npos);
+  EXPECT_EQ(text.find("<MessageFilter"), std::string::npos);
+
+  DesignSettings& s = a.settings;
+  s.labels = {false, true, true, false, false, true};
+  s.padConnect.mode = PadConnectSettings::Mode::AllPads;
+  ASSERT_FALSE(a.padstacks.empty());
+  s.padConnect.padstacks = {a.padstacks[0].name};
+  const Pad& pad = a.pads[size_t(a.components[0].pads[0])];
+  s.padConnect.pins = {{a.components[0].ref, pad.number}};
+  s.messages.mode = MessageFilter::Mode::Nothing;
+  s.messages.on[2] = s.messages.on[13] = false;
+  s.messages.clearanceBetweenComps = true;
+  text = io::writeFst(a);
+  EXPECT_NE(text.find("<Labels rotateWithComp=\"off\" useOrientRules=\"on\" topHorzRotate=\"on\" topVertRotate=\"off\" bottomHorzRotate=\"off\" bottomVertRotate=\"on\"/>"),
+            std::string::npos);
+  EXPECT_NE(text.find("<PadConnectSettings mode=\"AllPads\">"), std::string::npos);
+  EXPECT_NE(text.find("showWarnings=\"ShowNothing\""), std::string::npos);
+  EXPECT_NE(text.find("W5013=\"off\""), std::string::npos);
+  auto again = io::readFst(text, "settings.fst");
+  ASSERT_TRUE(again) << again.error();
+  EXPECT_EQ((*again)->settings, a.settings);
+  EXPECT_FALSE((*again)->settings.messages.shows(5013));
+  // A filter as TopoR's examples have it (every warning named, no mode): the ticked ones are shown.
+  auto amk = io::loadBoard(data("topor/AMK310/AMK310_MCU_V2.fst"));
+  ASSERT_TRUE(amk) << amk.error();
+  EXPECT_EQ((*amk)->settings.messages, MessageFilter{});
+  EXPECT_TRUE((*amk)->settings.messages.shows(5013));
+  EXPECT_TRUE(MessageFilter{}.shows(5007));  // not one that can be switched
+}
+
 // TopoR keeps a design's display settings in the file: they are read and written back.
 TEST(FstIO, DisplayControlRoundTrip) {
   auto r = io::loadBoard(data("topor/Example_05/MinVia_standard_routing.fst"));

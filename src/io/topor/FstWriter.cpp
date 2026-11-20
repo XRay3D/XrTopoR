@@ -929,7 +929,19 @@ struct Writer {
   DesignRules rules_;
 
   void writeGroups() {
+    // (in the format's order: layers, nets, components)
     x.open("Groups", {{"version", "1.1"}});
+    if (!rules_.layerGroups.empty()) {
+      x.open("LayerGroups");
+      for (auto& g : rules_.layerGroups) {
+        x.open("LayerGroup", {{"name", g.name}});
+        for (auto& n : g.layers)
+          if (LayerId l = b.findLayer(n); l >= 0 && !layerName[l].empty()) x.empty("LayerRef", {{"name", layerName[l]}});
+        for (auto& k : g.groups) x.empty("LayerGroupRef", {{"name", k}});
+        x.close();
+      }
+      x.close();
+    }
     if (!rules_.netGroups.empty()) {
       x.open("NetGroups");
       for (auto& g : rules_.netGroups) {
@@ -945,17 +957,6 @@ struct Writer {
         x.open("CompGroup", {{"name", g.name}});
         for (auto& c : g.comps) x.empty("CompInstanceRef", {{"name", c}});
         for (auto& k : g.groups) x.empty("CompGroupRef", {{"name", k}});
-        x.close();
-      }
-      x.close();
-    }
-    if (!rules_.layerGroups.empty()) {
-      x.open("LayerGroups");
-      for (auto& g : rules_.layerGroups) {
-        x.open("LayerGroup", {{"name", g.name}});
-        for (auto& n : g.layers)
-          if (LayerId l = b.findLayer(n); l >= 0 && !layerName[l].empty()) x.empty("LayerRef", {{"name", layerName[l]}});
-        for (auto& k : g.groups) x.empty("LayerGroupRef", {{"name", k}});
         x.close();
       }
       x.close();
@@ -1152,7 +1153,7 @@ struct Writer {
     auto compObject = [&](const RuleComps& o) {
       switch (o.kind) {
         case RuleComps::Kind::All: x.empty("AllComps"); break;
-        case RuleComps::Kind::Comp: x.empty("CompInstanceRef", {{"name", o.name}}); break;
+        case RuleComps::Kind::Comp: x.empty("ComponentRef", {{"name", o.name}}); break;  // (so the format names it here)
         case RuleComps::Kind::Group: x.empty("CompGroupRef", {{"name", o.name}}); break;
       }
     };
@@ -1217,6 +1218,16 @@ struct Writer {
         x.close();
         x.close();
       }
+      x.close();
+    }
+    // The pads that take a wire at their corners (the last of the rules, as TopoR writes it).
+    const PadConnectSettings& pc = b.settings.padConnect;
+    const char* mode = pc.mode == PadConnectSettings::Mode::AllPads ? "AllPads" : "AutoConnect";
+    if (pc.padstacks.empty() && pc.pins.empty()) x.empty("PadConnectSettings", {{"mode", mode}});
+    else {
+      x.open("PadConnectSettings", {{"mode", mode}});
+      for (auto& n : pc.padstacks) x.empty("PadstackRef", {{"name", n}});
+      for (auto& p : pc.pins) x.empty("PinRef", {{"compName", p.comp}, {"pinName", p.pin}});
       x.close();
     }
     x.close();
@@ -1471,11 +1482,36 @@ struct Writer {
     x.blank();
     x.open("Settings", {{"version", "1.3"}});
     x.empty("Autoroute", {{"autoEqu", "None"}});
-    x.empty("Labels", {{"rotateWithComp", "on"}});
+    {
+      // (TopoR writes the one attribute while the rules of orientation are off)
+      const LabelSettings& l = b.settings.labels;
+      std::vector<std::pair<std::string, std::string>> at{{"rotateWithComp", onOff(l.rotateWithComp)}};
+      if (l.useOrientRules || l.topHorzRotate || l.topVertRotate || l.bottomHorzRotate || l.bottomVertRotate) {
+        at.emplace_back("useOrientRules", onOff(l.useOrientRules));
+        at.emplace_back("topHorzRotate", onOff(l.topHorzRotate));
+        at.emplace_back("topVertRotate", onOff(l.topVertRotate));
+        at.emplace_back("bottomHorzRotate", onOff(l.bottomHorzRotate));
+        at.emplace_back("bottomVertRotate", onOff(l.bottomVertRotate));
+      }
+      x.emptyList("Labels", at);
+    }
     x.close();
     if (b.display) {
       x.blank();
       writeDisplay(*b.display);
+    }
+    // The filter of messages, when it is not as a new design has it (the settings of DRC and of the exports,
+    // the other DialogSettings, are the program's).
+    if (const MessageFilter& f = b.settings.messages; f != MessageFilter{}) {
+      x.blank();
+      x.open("DialogSettings", {{"version", "1.2"}});
+      std::vector<std::pair<std::string, std::string>> at;
+      if (f.mode != MessageFilter::Mode::Checked) at.emplace_back("showWarnings", f.mode == MessageFilter::Mode::All ? "ShowAll" : "ShowNothing");
+      for (size_t i = 0; i < MessageFilter::kCodes.size(); ++i) at.emplace_back(std::format("W{}", MessageFilter::kCodes[i]), onOff(f.on[i]));
+      if (f.clearanceBetweenComps) at.emplace_back("WClrnBtwComps", "on");
+      if (f.clearanceInNet) at.emplace_back("WClrnBtwObjSameNet", "on");
+      x.emptyList("MessageFilter", at);
+      x.close();
     }
     x.close();
     std::string out = "\xEF\xBB\xBF" + std::move(x).str();
