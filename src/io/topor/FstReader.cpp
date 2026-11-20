@@ -123,6 +123,7 @@ struct Reader {
       else if (t == "Dielectric") continue;
       else kind = LayerKind::Other;  // Mechanical, Doc
       LayerId id = b.addLayer(name, kind, side);
+      b.layers[id].placement = kind != LayerKind::Copper && l.flag("compsOutline", false);
       if (t == "Plane") {
         planeLayers |= LayerMask(1) << id;
         b.layers[id].plane = true;
@@ -893,8 +894,29 @@ struct Reader {
   // --- groups ---
   std::map<std::string, std::vector<int>, std::less<>> netGroups;
   std::map<std::string, LayerMask, std::less<>> layerGroups;
+  // The groups of layers and of components as the file has them, for the rules (DesignRules).
+  std::vector<LayerGroup> layerGroupDefs;
+  std::vector<CompGroup> compGroupDefs;
 
   void readGroups(const Element& g) {
+    if (auto* lg = g.find("LayerGroups"))
+      for (auto* e : lg->findAll("LayerGroup")) {
+        LayerGroup d{std::string(e->attr("name")), {}, {}};
+        for (auto& k : e->kids) {
+          if (k.is("LayerRef")) d.layers.emplace_back(k.attr("name"));
+          else if (k.is("LayerGroupRef")) d.groups.emplace_back(k.attr("name"));
+        }
+        layerGroupDefs.push_back(std::move(d));
+      }
+    if (auto* cg = g.find("CompGroups"))
+      for (auto* e : cg->findAll("CompGroup")) {
+        CompGroup d{std::string(e->attr("name")), {}, {}};
+        for (auto& k : e->kids) {
+          if (k.is("CompInstanceRef") || k.is("ComponentRef")) d.comps.emplace_back(k.attr("name"));
+          else if (k.is("CompGroupRef")) d.groups.emplace_back(k.attr("name"));
+        }
+        compGroupDefs.push_back(std::move(d));
+      }
     // Groups may refer to groups defined later: resolve lazily with a recursion guard.
     std::map<std::string, const Element*, std::less<>> netDefs, layerDefs;
     if (auto* ng = g.find("NetGroups"))
@@ -933,10 +955,11 @@ struct Reader {
   }
 
   // --- rules ---
-  // LayersRef of a rule as a copper mask; nullopt = all layers.
-  std::optional<LayerMask> ruleLayers(const Element& rule) {
+  // LayersRef of a rule as a copper mask; nullopt = all layers. The layer groups the rule names go to `groups`
+  // and, with it given, stay out of the mask.
+  std::optional<LayerMask> ruleLayers(const Element& rule, std::vector<std::string>* groups = nullptr, LayerMask* ofGroups = nullptr) {
     auto cu = b.copperLayers();
-    LayerMask m = 0;
+    LayerMask m = 0, gm = 0;
     bool any = false;
     auto add = [&](auto pred) {
       for (size_t i = 0; i < cu.size(); ++i)
@@ -951,11 +974,17 @@ struct Reader {
       else if (k.is("LayerRef")) {
         if (LayerId l = b.findLayer(std::string(k.attr("name"))); l >= 0) m |= LayerMask(1) << l;
       } else if (k.is("LayerGroupRef")) {
-        if (auto it = layerGroups.find(k.attr("name")); it != layerGroups.end()) m |= it->second;
+        LayerMask of = 0;
+        if (auto it = layerGroups.find(k.attr("name")); it != layerGroups.end()) of = it->second;
+        if (groups) {
+          groups->emplace_back(k.attr("name"));
+          gm |= of;
+        } else m |= of;
       } else continue;
       any = true;
     }
-    if (!any || m == b.allCopperMask()) return std::nullopt;
+    if (ofGroups) *ofGroups = gm;
+    if (!any || (m == b.allCopperMask() && !gm)) return std::nullopt;
     return m;
   }
 
@@ -1082,6 +1111,8 @@ struct Reader {
       for (int n : nets) g.nets.push_back(b.nets[n].name);
       r.netGroups.push_back(std::move(g));
     }
+    r.layerGroups = layerGroupDefs;
+    r.compGroups = compGroupDefs;
     // The default type (a rule that allows every type uses it): the one the design's vias already use,
     // as TopoR does (its autorouter keeps the design's via on arz_2L, Arcs, MinVia, Placement rather
     // than the synthetic «(Default)» or the first listed); without any, the smallest; then the first.
@@ -1110,11 +1141,14 @@ struct Reader {
         for (auto& k : oa->kids) out.push_back(&k);
       return out;
     };
-    // Layers of a rule as names; nullopt when the rule applies to no layer of the design.
+    // Layers of a rule as names, its layer groups by name; nullopt when the rule applies to no layer of the design.
+    std::vector<std::string> groups;
     auto layers = [&](const Element& rule) -> std::optional<std::vector<std::string>> {
-      auto m = ruleLayers(rule);
+      groups.clear();
+      LayerMask ofGroups = 0;
+      auto m = ruleLayers(rule, &groups, &ofGroups);
       if (!m) return std::vector<std::string>{};
-      if (!*m) return std::nullopt;
+      if (!(*m | ofGroups)) return std::nullopt;
       std::vector<std::string> names;
       for (LayerId l : b.copperLayers())
         if ((*m >> l) & 1) names.push_back(b.layers[l].name);
@@ -1133,7 +1167,7 @@ struct Reader {
         auto ls = layers(*w);
         if (obj.empty() || !ls) continue;
         r.widths.push_back({w->flag("enabled", true), *ls, ruleNets(*obj[0]), len(w->num("widthMin", w->num("widthNom"))),
-                            len(w->num("widthNom", w->num("widthMin")))});
+                            len(w->num("widthNom", w->num("widthMin"))), groups});
       }
     if (auto* rc = rules.find("RulesClearancesNetToNet"))
       for (auto* c : rc->findAll("ClearanceNetToNet")) {
@@ -1142,7 +1176,7 @@ struct Reader {
         if (obj.empty() || !ls) continue;
         r.clearances.push_back({c->flag("enabled", true), *ls, ruleNets(*obj[0]),
                                 obj.size() > 1 ? ruleNets(*obj[1]) : RuleNets{}, len(c->num("clrnMin", c->num("clrnNom"))),
-                                len(c->num("clrnNom", c->num("clrnMin")))});
+                                len(c->num("clrnNom", c->num("clrnMin"))), groups});
       }
     if (auto* rb = rules.find("RulesClearancesToBoard")) {
       r.edgeWires = len(rb->num("wires"));

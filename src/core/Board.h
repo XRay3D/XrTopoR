@@ -36,6 +36,9 @@ struct Layer {
   int copperIndex = -1;  // 0 = top copper ... n-1 = bottom copper
   bool plane = false;    // plane (reference) layer: solid copper of planeNet, not routed on
   int planeNet = kNoNet;
+  // «Учитывать при размещении»: the components' graphics on the layer are their outlines — what the
+  // component clearance is kept between (Board::componentExtent).
+  bool placement = false;
 };
 
 struct NetClass {

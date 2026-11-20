@@ -44,17 +44,49 @@ std::optional<std::vector<int>> netsOf(const Board& b, const DesignRules& r, con
   return std::vector<int>{};
 }
 
-// Copper mask of a rule's layers; 0 = all layers.
-LayerMask layersOf(const Board& b, const std::vector<std::string>& names) {
+// Copper mask of a rule's layers and layer groups; 0 = all layers.
+LayerMask layersOf(const Board& b, const DesignRules& r, const auto& rule) {
   LayerMask m = 0;
-  for (auto& n : names)
+  auto add = [&](const std::string& n) {
     if (LayerId l = b.findLayer(n); l >= 0 && b.layers[l].kind == LayerKind::Copper) m |= LayerMask(1) << l;
+  };
+  for (auto& n : rule.layers) add(n);
+  for (auto& g : rule.layerGroups)
+    for (auto& n : r.layersOf(g)) add(n);
   return m == b.allCopperMask() ? 0 : m;
+}
+
+// The members of a group with those of the groups in it (`members`, `groups` of the group type), each once.
+template <class G>
+std::vector<std::string> membersOf(const std::vector<G>& all, std::string_view group, std::vector<std::string> G::* members) {
+  std::vector<std::string> out, busy;
+  auto walk = [&](this auto& self, std::string_view name) -> void {
+    auto g = r::find(all, name, &G::name);
+    if (g == all.end() || r::contains(busy, name)) return;
+    busy.emplace_back(name);
+    for (auto& m : (*g).*members)
+      if (!r::contains(out, m)) out.push_back(m);
+    for (auto& k : g->groups) self(k);
+  };
+  walk(group);
+  return out;
+}
+
+template <class G>
+std::string parentOf(const std::vector<G>& all, std::string_view group) {
+  for (auto& g : all)
+    if (r::contains(g.groups, group)) return g.name;
+  return {};
 }
 
 std::string mmText(Coord c) { return std::format("{:g}", c / double(kNmPerMm)); }
 
 }  // namespace
+
+std::vector<std::string> DesignRules::layersOf(std::string_view group) const { return membersOf(layerGroups, group, &LayerGroup::layers); }
+std::vector<std::string> DesignRules::compsOf(std::string_view group) const { return membersOf(compGroups, group, &CompGroup::comps); }
+std::string DesignRules::layerGroupParent(std::string_view group) const { return parentOf(layerGroups, group); }
+std::string DesignRules::compGroupParent(std::string_view group) const { return parentOf(compGroups, group); }
 
 Coord Board::minTrackWidth(int net, LayerId layer) const {
   const Board& b = *this;
@@ -73,7 +105,7 @@ Coord Board::minTrackWidth(int net, LayerId layer) const {
   Coord w = 0;
   for (auto& rule : r.widths) {
     if (!rule.enabled) continue;
-    if (LayerMask lm = layersOf(b, rule.layers); lm && !((lm >> layer) & 1)) continue;
+    if (LayerMask lm = layersOf(b, r, rule); lm && !((lm >> layer) & 1)) continue;
     auto nets = netsOf(b, r, rule.nets);
     if (nets && !r::contains(*nets, net)) continue;
     w = rule.min > 0 ? rule.min : rule.nom;
@@ -137,7 +169,7 @@ void compileRules(Board& b) {
     Coord width = w.nom > 0 ? w.nom : w.min;
     if (!w.enabled || width <= 0) continue;
     auto nets = netsOf(b, r, w.nets);
-    if (LayerMask lm = layersOf(b, w.layers)) {
+    if (LayerMask lm = layersOf(b, r, w)) {
       layerRules.push_back({nets.value_or(std::vector<int>{}), lm, width, 0});
       continue;
     }
@@ -156,16 +188,16 @@ void compileRules(Board& b) {
     // The nominal of the rule, for the nets it names (Board::clearanceNom): kept once any rule has one above
     // its minimum, so that a later rule without one takes it back for its nets.
     if (const Coord nom = std::max(c.nom, clr); nom > clr || !nominalRules.empty())
-      nominalRules.push_back({a.value_or(std::vector<int>{}), bn.value_or(std::vector<int>{}), layersOf(b, c.layers), nom});
+      nominalRules.push_back({a.value_or(std::vector<int>{}), bn.value_or(std::vector<int>{}), layersOf(b, r, c), nom});
     if (a && bn) {
-      pairRules.push_back({*a, *bn, layersOf(b, c.layers), clr});
+      pairRules.push_back({*a, *bn, layersOf(b, r, c), clr});
       continue;
     }
     // Later rules take priority: one for all nets or a set of them, after a pair rule, overrides it too.
-    if (!pairRules.empty()) pairRules.push_back({a.value_or(std::vector<int>{}), bn.value_or(std::vector<int>{}), layersOf(b, c.layers), clr});
+    if (!pairRules.empty()) pairRules.push_back({a.value_or(std::vector<int>{}), bn.value_or(std::vector<int>{}), layersOf(b, r, c), clr});
     std::optional<std::vector<int>> nets;
     if (a || bn) nets = a ? *a : *bn;
-    if (LayerMask lm = layersOf(b, c.layers)) {
+    if (LayerMask lm = layersOf(b, r, c)) {
       layerRules.push_back({nets.value_or(std::vector<int>{}), lm, 0, clr});
       continue;
     }
@@ -243,7 +275,7 @@ void compileRules(Board& b) {
   for (auto& rule : r.widths) {
     if (!rule.enabled) continue;
     Board::MinWidthRule mr;
-    mr.layers = layersOf(b, rule.layers);
+    mr.layers = layersOf(b, r, rule);
     auto nets = netsOf(b, r, rule.nets);
     mr.every = !nets;
     if (nets) {

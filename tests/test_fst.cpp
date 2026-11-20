@@ -478,6 +478,95 @@ TEST(FstIO, NetAndLayerRules) {
   EXPECT_EQ(c.clearance(gc, c.topCopper()), mmToNm(0.3));
 }
 
+// Groups of components and of layers are kept as the file has them, a group in a group too.
+TEST(FstIO, CompGroupsRoundTrip) {
+  auto r = io::loadBoard(data("topor/Example_02/Placement.fst"));
+  ASSERT_TRUE(r) << r.error();
+  Board& a = **r;
+  ASSERT_TRUE(a.rules);
+  ASSERT_GE(a.components.size(), 3u);
+  const std::string c0 = a.components[0].ref, c1 = a.components[1].ref, c2 = a.components[2].ref;
+  a.rules->compGroups = {{"Power", {c0, c1}, {"Inner"}}, {"Inner", {c2, c0}, {}}};
+  auto again = io::readFst(io::writeFst(a), "groups.fst");
+  ASSERT_TRUE(again) << again.error();
+  const Board& c = **again;
+  ASSERT_TRUE(c.rules);
+  EXPECT_EQ(c.rules->compGroups, a.rules->compGroups);
+  EXPECT_EQ(c.rules->compsOf("Power"), (std::vector<std::string>{c0, c1, c2}));
+  EXPECT_EQ(c.rules->compGroupParent("Inner"), "Power");
+  EXPECT_EQ(c.rules->compGroupParent("Power"), "");
+}
+
+TEST(FstIO, LayerGroupsRoundTrip) {
+  auto r = io::loadBoard(data("topor/Example_02/Placement.fst"));
+  ASSERT_TRUE(r) << r.error();
+  Board& a = **r;
+  ASSERT_TRUE(a.rules);
+  const std::string top = a.layers[a.topCopper()].name, bottom = a.layers[a.bottomCopper()].name;
+  a.rules->layerGroups = {{"Outer", {top}, {"Low"}}, {"Low", {bottom}, {}}};
+  auto again = io::readFst(io::writeFst(a), "groups.fst");
+  ASSERT_TRUE(again) << again.error();
+  const Board& c = **again;
+  ASSERT_TRUE(c.rules);
+  EXPECT_EQ(c.rules->layerGroups, a.rules->layerGroups);
+  EXPECT_EQ(c.rules->layersOf("Outer"), (std::vector<std::string>{top, bottom}));
+}
+
+// A rule over a layer group keeps the group: it is not spelt out as the group's layers.
+TEST(FstIO, RuleKeepsItsLayerGroup) {
+  auto r = io::loadBoard(data("topor/Example_02/Placement.fst"));
+  ASSERT_TRUE(r) << r.error();
+  Board& a = **r;
+  ASSERT_TRUE(a.rules);
+  const LayerId bottom = a.bottomCopper();
+  a.rules->layerGroups = {{"Low", {a.layers[bottom].name}, {}}};
+  RuleNets gnet{RuleNets::Kind::Net, "G"};
+  a.rules->widths.push_back({true, {}, gnet, mmToNm(0.6), mmToNm(0.6), {"Low"}});
+  a.rules->clearances.push_back({true, {}, gnet, {}, mmToNm(0.5), mmToNm(0.5), {"Low"}});
+  compileRules(a);
+  const int g = a.findNet("G");
+  EXPECT_EQ(a.trackWidth(g, bottom), mmToNm(0.6));
+  EXPECT_EQ(a.trackWidth(g, a.topCopper()), mmToNm(1.5));
+  EXPECT_EQ(a.minTrackWidth(g, bottom), mmToNm(0.6));
+  EXPECT_EQ(a.clearance(g, bottom), mmToNm(0.5));
+
+  auto again = io::readFst(io::writeFst(a), "rules.fst");
+  ASSERT_TRUE(again) << again.error();
+  const Board& c = **again;
+  ASSERT_TRUE(c.rules);
+  ASSERT_EQ(c.rules->widths.size(), a.rules->widths.size());
+  EXPECT_TRUE(c.rules->widths.back().layers.empty());
+  EXPECT_EQ(c.rules->widths.back().layerGroups, (std::vector<std::string>{"Low"}));
+  EXPECT_EQ(c.rules->clearances.back().layerGroups, (std::vector<std::string>{"Low"}));
+  const int gc = c.findNet("G");
+  EXPECT_EQ(c.trackWidth(gc, c.bottomCopper()), mmToNm(0.6));
+  EXPECT_EQ(c.trackWidth(gc, c.topCopper()), mmToNm(1.5));
+  EXPECT_EQ(c.clearance(gc, c.bottomCopper()), mmToNm(0.5));
+}
+
+// «Учитывать при размещении» of a layer (compsOutline) is read and written back.
+TEST(FstIO, PlacementLayersRoundTrip) {
+  auto r = io::loadBoard(data("topor/Example_02/Placement.fst"));
+  ASSERT_TRUE(r) << r.error();
+  Board& a = **r;
+  std::vector<std::pair<std::string, bool>> was;
+  int on = 0;
+  for (Layer& l : a.layers) {
+    if (l.kind == LayerKind::Copper) EXPECT_FALSE(l.placement) << l.name;
+    on += l.placement;
+  }
+  EXPECT_GT(on, 0);  // the Assy layers of the example
+  for (Layer& l : a.layers)
+    if (l.kind == LayerKind::Fab || l.kind == LayerKind::Other) l.placement = !l.placement;
+  for (Layer& l : a.layers) was.emplace_back(l.name, l.placement);
+  auto again = io::readFst(io::writeFst(a), "layers.fst");
+  ASSERT_TRUE(again) << again.error();
+  for (auto& [name, flag] : was) {
+    const LayerId l = (*again)->findLayer(name);
+    if (l >= 0) EXPECT_EQ((*again)->layers[l].placement, flag) << name;
+  }
+}
+
 // TopoR keeps a design's display settings in the file: they are read and written back.
 TEST(FstIO, DisplayControlRoundTrip) {
   auto r = io::loadBoard(data("topor/Example_05/MinVia_standard_routing.fst"));

@@ -127,7 +127,10 @@ struct Writer {
     x.open("StackUpLayers");
     auto emit = [&](LayerId i) {
       const Layer& l = b.layers[i];
-      if (l.kind == LayerKind::Fab) x.empty("Layer", {{"name", layerName[i]}, {"type", "Assy"}, {"compsOutline", "on"}});
+      if (l.kind == LayerKind::Fab && l.placement) x.empty("Layer", {{"name", layerName[i]}, {"type", "Assy"}, {"compsOutline", "on"}});
+      else if (l.kind == LayerKind::Fab) x.empty("Layer", {{"name", layerName[i]}, {"type", "Assy"}});
+      else if (l.kind != LayerKind::Copper && l.placement)
+        x.empty("Layer", {{"name", layerName[i]}, {"type", layerType(l.kind)}, {"compsOutline", "on"}, {"thickness", "0"}});
       else x.empty("Layer", {{"name", layerName[i]}, {"type", layerType(l.kind)}, {"thickness", "0"}});
     };
     // Top-side layers outside-in, copper top to bottom, bottom-side layers inside-out.
@@ -936,6 +939,27 @@ struct Writer {
       }
       x.close();
     }
+    if (!rules_.compGroups.empty()) {
+      x.open("CompGroups");
+      for (auto& g : rules_.compGroups) {
+        x.open("CompGroup", {{"name", g.name}});
+        for (auto& c : g.comps) x.empty("CompInstanceRef", {{"name", c}});
+        for (auto& k : g.groups) x.empty("CompGroupRef", {{"name", k}});
+        x.close();
+      }
+      x.close();
+    }
+    if (!rules_.layerGroups.empty()) {
+      x.open("LayerGroups");
+      for (auto& g : rules_.layerGroups) {
+        x.open("LayerGroup", {{"name", g.name}});
+        for (auto& n : g.layers)
+          if (LayerId l = b.findLayer(n); l >= 0 && !layerName[l].empty()) x.empty("LayerRef", {{"name", layerName[l]}});
+        for (auto& k : g.groups) x.empty("LayerGroupRef", {{"name", k}});
+        x.close();
+      }
+      x.close();
+    }
     x.close();
   }
 
@@ -1081,13 +1105,14 @@ struct Writer {
     x.close();
   }
 
-  void ruleLayers(const std::vector<std::string>& names) {
-    if (names.empty()) {
+  void ruleLayers(const std::vector<std::string>& names, const std::vector<std::string>& groups = {}) {
+    if (names.empty() && groups.empty()) {
       x.empty("AllLayers");
       return;
     }
     for (auto& n : names)
       if (LayerId l = b.findLayer(n); l >= 0 && !layerName[l].empty()) x.empty("LayerRef", {{"name", layerName[l]}});
+    for (auto& g : groups) x.empty("LayerGroupRef", {{"name", g}});
   }
 
   std::string viaTypeName(const std::string& type) {
@@ -1101,7 +1126,7 @@ struct Writer {
     x.open("RulesWidthOfWires");
     for (auto& w : rules_.widths) {
       x.open("WidthOfWires", {{"enabled", onOff(w.enabled)}, {"widthMin", mm(w.min)}, {"widthNom", mm(w.nom)}});
-      ruleLayers(w.layers);
+      ruleLayers(w.layers, w.layerGroups);
       x.open("ObjectsAffected");
       ruleObject(w.nets);
       x.close();
@@ -1111,7 +1136,7 @@ struct Writer {
     x.open("RulesClearancesNetToNet");
     for (auto& c : rules_.clearances) {
       x.open("ClearanceNetToNet", {{"enabled", onOff(c.enabled)}, {"clrnMin", mm(c.min)}, {"clrnNom", mm(c.nom)}});
-      ruleLayers(c.layers);
+      ruleLayers(c.layers, c.layerGroups);
       x.open("ObjectsAffected");
       ruleObject(c.a);
       ruleObject(c.b);

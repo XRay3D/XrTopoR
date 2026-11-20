@@ -142,6 +142,7 @@ LayerId Board::addLayer(const std::string& name, LayerKind kind, Side side) {
   l.kind = kind;
   l.side = side;
   if (kind == LayerKind::Copper) l.copperIndex = copperCount();
+  l.placement = kind == LayerKind::Fab || kind == LayerKind::Courtyard;
   layers.push_back(l);
   return LayerId(layers.size() - 1);
 }

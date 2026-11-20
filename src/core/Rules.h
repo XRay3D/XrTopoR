@@ -3,6 +3,7 @@
 // rule lists in which later rules take priority. The net classes and layer rules the router, DRC and
 // pour work with are compiled from them.
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "geom/Geometry.h"
@@ -24,6 +25,7 @@ struct WidthRule {
   std::vector<std::string> layers;  // empty: all layers
   RuleNets nets;
   Coord min = 0, nom = 0;
+  std::vector<std::string> layerGroups;  // layer groups beside `layers`; both empty: all layers
 };
 
 struct ClearanceRule {
@@ -31,6 +33,7 @@ struct ClearanceRule {
   std::vector<std::string> layers;
   RuleNets a, b;
   Coord min = 0, nom = 0;
+  std::vector<std::string> layerGroups;
 };
 
 // The pad of a via type on a class of layers («Signal», «Plane», «Mask»...) or on one layer by name.
@@ -72,8 +75,24 @@ struct NetGroup {
   std::vector<std::string> nets;
 };
 
+// «Группы компонентов», «Группы слоёв»: members by name and the groups put into the group (a group sits in
+// one group at most; an object may be in several).
+struct CompGroup {
+  std::string name;
+  std::vector<std::string> comps, groups;
+  bool operator==(const CompGroup&) const = default;
+};
+
+struct LayerGroup {
+  std::string name;
+  std::vector<std::string> layers, groups;
+  bool operator==(const LayerGroup&) const = default;
+};
+
 struct DesignRules {
   std::vector<NetGroup> netGroups;
+  std::vector<CompGroup> compGroups;
+  std::vector<LayerGroup> layerGroups;
   std::vector<ViaType> viaTypes;
   std::vector<WidthRule> widths;
   std::vector<ClearanceRule> clearances;
@@ -81,6 +100,13 @@ struct DesignRules {
   std::vector<PlaneRule> planes;
   std::vector<LayerNetsRule> layerNets;
   Coord edgeWires = 0, edgeComps = 0;  // «Зазор до края платы»
+
+  // The layers of a layer group and the components of a component group, with those of the groups in it.
+  std::vector<std::string> layersOf(std::string_view group) const;
+  std::vector<std::string> compsOf(std::string_view group) const;
+  // The group a group sits in; empty: none.
+  std::string layerGroupParent(std::string_view group) const;
+  std::string compGroupParent(std::string_view group) const;
 };
 
 // The diameter of a via type's pad on a layer of a class (`layerClass`) and name (`layer`): the layer's own
