@@ -62,7 +62,7 @@ void Document::setBoard(std::unique_ptr<Board> b, const QString& path) {
   undo_.clear();
   selection_.clear();
   selComponents_.clear();
-  highlightNet_ = kNoNet;
+  highlightNets_.clear();
   drc_.clear();
   delays_.clear();
   drcRun_ = false;
@@ -264,9 +264,12 @@ void Document::setSelectionFilter(uint32_t f) {
   emit selectionFilterChanged();
 }
 
-void Document::setHighlightedNet(int net) {
-  if (net == highlightNet_) return;
-  highlightNet_ = net;
+void Document::setHighlightedNet(int net) { setHighlightedNets(net == kNoNet ? std::vector<int>{} : std::vector<int>{net}); }
+
+void Document::setHighlightedNets(std::vector<int> nets) {
+  std::erase(nets, kNoNet);
+  if (nets == highlightNets_) return;
+  highlightNets_ = std::move(nets);
   emit selectionChanged();
 }
 

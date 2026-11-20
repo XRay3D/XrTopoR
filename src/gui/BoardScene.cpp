@@ -316,8 +316,13 @@ void BoardView::buildHighlightScene(gl::SceneData& out) const {
   const DisplayControl& d = doc_->display();
   auto items = doc_->selectedItems();
   auto comps = doc_->selectedComponents();
-  int hn = doc_->highlightedNet();
-  if (!items.empty() || !comps.empty() || hn != kNoNet) {
+  // The lit nets, by number.
+  std::vector<char> litNet(b.nets.size(), 0);
+  bool anyLit = false;
+  for (int n : doc_->highlightedNets())
+    if (n >= 0 && size_t(n) < litNet.size()) litNet[size_t(n)] = 1, anyLit = true;
+  auto isLit = [&](int n) { return n >= 0 && size_t(n) < litNet.size() && litNet[size_t(n)]; };
+  if (!items.empty() || !comps.empty() || anyLit) {
     if (d.darkRate > 0) {
       QColor dark = doc_->color("background", 0x030b10);
       dark.setAlpha(d.darkRate * 255 / 100);
@@ -335,13 +340,13 @@ void BoardView::buildHighlightScene(gl::SceneData& out) const {
     };
     const gl::Color viaLit = col(brighter(doc_->color("clrThroughVias", 0x949494), rate));
     std::vector<const Track*> tracks;
-    if (hn != kNoNet) {
+    if (anyLit) {
       for (auto& t : b.tracks)
-        if (t.net == hn && layerVisible(t.layer)) tracks.push_back(&t);
+        if (isLit(t.net) && layerVisible(t.layer)) tracks.push_back(&t);
       for (auto& v : b.vias)
-        if (v.net == hn) sb.disc(v.pos.v(), v.diameter / 2.0, viaLit);
+        if (isLit(v.net)) sb.disc(v.pos.v(), v.diameter / 2.0, viaLit);
       for (auto& pad : b.pads)
-        if (pad.net == hn) sb.shape(pad.shapeGeom(), col(litPad(pad)));
+        if (isLit(pad.net)) sb.shape(pad.shapeGeom(), col(litPad(pad)));
     }
     for (ItemRef r : items) {
       if (!doc_->itemExists(r)) continue;  // (a selection outliving its items is not drawn)

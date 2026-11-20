@@ -140,8 +140,11 @@ class Document : public QObject {
   void clearSelection() { setSelection({}, {}); }
   bool itemExists(ItemRef r) const;  // the item a reference names is there (its index within its list)
   void validateSelection();  // drops references to items that no longer exist (after undo/redo)
-  int highlightedNet() const { return highlightNet_; }
+  int highlightedNet() const { return highlightNets_.empty() ? kNoNet : highlightNets_.front(); }
+  // The nets lit on the board (a net found, a signal's nets «Подсветить»).
+  const std::vector<int>& highlightedNets() const { return highlightNets_; }
   void setHighlightedNet(int net);
+  void setHighlightedNets(std::vector<int> nets);
 
   // DRC results
   const std::vector<DrcViolation>& drc() const { return drc_; }
@@ -188,7 +191,7 @@ class Document : public QObject {
   bool syncModelFrom(const EditSnapshot& was);
   std::vector<ItemRef> selection_;
   std::vector<int> selComponents_;
-  int highlightNet_ = kNoNet;
+  std::vector<int> highlightNets_;
   std::vector<DrcViolation> drc_;
   std::vector<DelayViolation> delays_;
   bool drcRun_ = false;

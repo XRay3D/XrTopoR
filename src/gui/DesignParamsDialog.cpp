@@ -31,6 +31,7 @@
 #include "core/ZoneFill.h"
 #include "gui/GroupExplorer.h"
 #include "gui/ImpedanceModel.h"
+#include "gui/SignalsPage.h"
 #include "gui/PadstackDialogs.h"
 #include "gui/Schemes.h"
 #include "io/BoardIO.h"
@@ -162,7 +163,11 @@ DesignParamsDialog::DesignParamsDialog(Document* doc, QWidget* parent) : QDialog
           "застёгнутой пары проводников задаются только здесь. Правило — столбец: имя и Z сверху, ниже ширина "
           "(у дифференциального — ширина и зазор) на каждом сигнальном слое; двойной щелчок по ячейке — правка, "
           "крестик у имени удаляет правило, если на него не ссылаются сигналы."));
-  page(hs, tr("Сигналы"), [this] { return diffSignalsPage(); }, tr("Дифференциальные сигналы: пары цепей, правило и допустимый разброс длин."));
+  page(hs, tr("Сигналы"), [this] { return signalsPage(); },
+       tr("Сигналы, дифференциальные сигналы (ДС) и группы сигналов. Сигнал создаётся от контакта источника: в сигнальный "
+          "кластер попадают цепи, связанные с цепью источника через пассивные компоненты, приёмники — контакты активных "
+          "компонентов кластера. Сигналы и группы перетаскиваются на группу в дереве: перемещаются, с Ctrl — добавляются. "
+          "Волновое сопротивление одинаково для всех сигналов кластера."));
   const QString delayNote = tr(" Допуск и константу рекомендуется задавать во времени (пс): погонная задержка на наружных и "
                               "внутренних слоях разная. Задержка считается по длине проводников от источника сигнала до приёмника "
                               "(змейка — по своей длине, переходы не добавляют ничего); нарушения правил показываются в окне "
@@ -1331,28 +1336,7 @@ QWidget* DesignParamsDialog::impedancesPage() {
   return w;
 }
 
-// The differential signals (read only): the pair's nets, its rule and the allowed difference of lengths.
-QWidget* DesignParamsDialog::diffSignalsPage() {
-  const Board& b = *doc_->board();
-  auto* t = new QTableWidget;
-  t->setColumnCount(4);
-  t->setHorizontalHeaderLabels({tr("Дифф. сигнал"), tr("Цепи"), tr("Волновое сопротивление"), tr("Допустимый разброс")});
-  for (const DiffSignal& d : hispeed_.diffSignals) {
-    const int row = t->rowCount();
-    t->insertRow(row);
-    QStringList nets;
-    for (const std::string& n : hispeed_.netsOf({ObjectSignal::Kind::DiffSignal, d.name})) nets << QString::fromStdString(n);
-    const QString v[4] = {QString::fromStdString(d.name), nets.join(", "), QString::fromStdString(d.impedance),
-                          formatLength(double(d.mismatch), doc_->unit(), 3)};
-    for (int c = 0; c < 4; ++c) {
-      auto* it = new QTableWidgetItem(v[c]);
-      it->setFlags(it->flags() & ~Qt::ItemIsEditable);
-      t->setItem(row, c, it);
-    }
-  }
-  t->resizeColumnsToContents();
-  return t;
-}
+QWidget* DesignParamsDialog::signalsPage() { return new SignalsPage(doc_, hispeed_, rules_, [this] { changed(); }); }
 
 QWidget* DesignParamsDialog::edgePage() {
   auto* w = new QWidget;

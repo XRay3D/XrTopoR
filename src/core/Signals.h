@@ -1,5 +1,5 @@
 #pragma once
-// The making and editing of signals (HiSpeed) as TopoR's «High-speed правила > Сигналы» does it.
+// The making and editing of signals (HiSpeed; the namespace is `sig`: «signals» is a Qt keyword) as TopoR's «High-speed правила > Сигналы» does it.
 //
 // A signal cluster («сигнальный кластер») is the part of the circuit a signal goes through: the source pin's net
 // and the nets joined to it through passive components, but not the nets excluded from the search (the power
@@ -24,7 +24,7 @@
 
 #include "core/Board.h"
 
-namespace xr::signals {
+namespace xr::sig {
 
 // TopoR's naming rules of a pair's nets, highest priority first: «» / «#», «+» / «-», «P» / «N», «p» / «n», «H» /
 // «L», «» / «_B».
@@ -85,17 +85,17 @@ std::vector<ObjectSignal> listedObjects(const HiSpeed& h);
 
 struct Bus {
   std::string name;
-  std::vector<std::string> signals;
+  std::vector<std::string> members;  // its signals («signals» is a Qt keyword)
 };
-// Buses among `signals` (the names of signals not in a differential signal; empty: those in no group).
-std::vector<Bus> findBuses(const HiSpeed& h, std::vector<std::string> signals = {});
+// Buses among the signals `among` (the names of signals not in a differential signal; empty: those in no group).
+std::vector<Bus> findBuses(const HiSpeed& h, std::vector<std::string> among = {});
 // Makes a group of the bus's signals; its name.
 std::string addBusGroup(HiSpeed& h, const Bus& bus);
 
 struct DiffCandidate {
   std::string name, positive, negative;  // the name the pair would have; its two signals
 };
-std::vector<DiffCandidate> findDiffPairs(const Board& b, const HiSpeed& h, const SignalSearch& s, std::vector<std::string> signals = {});
+std::vector<DiffCandidate> findDiffPairs(const Board& b, const HiSpeed& h, const SignalSearch& s, std::vector<std::string> among = {});
 
 // «Объединить в дифф. сигнал» of two signals: of different clusters, as many nets each, alike links. The reason
 // when they cannot.
@@ -119,4 +119,4 @@ std::string impedanceOf(const HiSpeed& h, const ObjectSignal& o);
 // signal from the same source.
 void setImpedance(HiSpeed& h, const ObjectSignal& o, const std::string& impedance);
 
-}  // namespace xr::signals
+}  // namespace xr::sig

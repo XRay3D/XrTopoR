@@ -351,7 +351,9 @@ void WordsFilter::setWords(const QString& text) {
 }
 
 bool WordsFilter::filterAcceptsRow(int row, const QModelIndex& parent) const {
-  const QString text = sourceModel()->index(row, 0, parent).data().toString();
+  // (a word may be in any column: a pin's component and number, its net)
+  QString text;
+  for (int c = 0; c < sourceModel()->columnCount(parent); ++c) text += sourceModel()->index(row, c, parent).data().toString() + ' ';
   return r::all_of(words_, [&](const QString& w) { return text.contains(w, Qt::CaseInsensitive); });
 }
 
@@ -500,8 +502,7 @@ GroupExplorer::GroupExplorer(std::unique_ptr<GroupSource> source, QWidget* paren
 
 void GroupExplorer::showSide(int width) {
   split_->widget(2)->show();
-  const QList<int> was = split_->sizes();
-  split_->setSizes({was[0], std::max(100, was[1] + was[2] - width), width});
+  split_->setSizes({200, 600, width});
 }
 
 void GroupExplorer::refresh() {

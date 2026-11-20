@@ -6,7 +6,7 @@
 #include <map>
 #include <set>
 
-namespace xr::signals {
+namespace xr::sig {
 
 std::vector<DiffNamesRule> defaultDiffNames() {
   return {{true, "", "#"}, {true, "+", "-"}, {true, "P", "N"}, {true, "p", "n"}, {true, "H", "L"}, {true, "", "_B"}};
@@ -451,7 +451,7 @@ std::vector<Bus> findBuses(const HiSpeed& h, std::vector<std::string> signals) {
 
 std::string addBusGroup(HiSpeed& h, const Bus& bus) {
   SignalGroup g{uniqueGroupName(h, bus.name), {}};
-  for (const std::string& s : bus.signals) g.members.push_back({ObjectSignal::Kind::Signal, s});
+  for (const std::string& s : bus.members) g.members.push_back({ObjectSignal::Kind::Signal, s});
   h.groups.push_back(std::move(g));
   return h.groups.back().name;
 }
@@ -688,4 +688,4 @@ void setImpedance(HiSpeed& h, const ObjectSignal& o, const std::string& impedanc
   }
 }
 
-}  // namespace xr::signals
+}  // namespace xr::sig

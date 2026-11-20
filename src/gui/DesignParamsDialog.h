@@ -56,7 +56,7 @@ class DesignParamsDialog : public QDialog {
   QWidget* clearancesPage();
   QWidget* edgePage();
   QWidget* impedancesPage();
-  QWidget* diffSignalsPage();
+  QWidget* signalsPage();
   QWidget* viaRulesPage();
   QWidget* planesPage();
   QWidget* layerNetsPage();

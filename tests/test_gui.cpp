@@ -1,5 +1,6 @@
 // GUI smoke test: drives the board view with synthetic mouse/key events on the offscreen platform.
 #include <QCheckBox>
+#include <QTabWidget>
 #include <QMimeData>
 #include <QTreeView>
 #include <QListView>
@@ -46,6 +47,7 @@
 #include "core/Connectivity.h"
 #include "core/DiffPairs.h"
 #include "core/Edit.h"
+#include "core/Signals.h"
 #include "core/ZoneFill.h"
 #include "gui/AboutDialog.h"
 #include "gui/UpdateCheck.h"
@@ -68,6 +70,8 @@
 #include "gui/mcp/McpServer.h"
 #include "gui/mcp/McpTransports.h"
 #include "gui/MessagesPanel.h"
+#include "gui/SignalDialogs.h"
+#include "gui/SignalsPage.h"
 #include "gui/SettingsDialogs.h"
 #include "gui/PropertiesPanel.h"
 #include "gui/TextStylesDialog.h"
@@ -5246,4 +5250,281 @@ TEST(Gui, GroupExplorerLooksLikeTopoRs) {
   dlg.resize(1280, 640);
   dlg.showPage("Группы цепей");
   dlg.grab().save(QString(dir) + "/explorer-nets.png");
+}
+
+namespace {
+
+// The «Сигналы» page of the design parameters on TopoR's example of signals.
+struct SignalsFixture {
+  Fixture f{"topor/Example_06/Signals.fst"};
+  std::unique_ptr<DesignParamsDialog> dlg;
+  SignalsPage* page = nullptr;
+  explicit SignalsFixture(const std::function<void(Board&)>& before = {}) {
+    f.doc.setUnit(Unit::Mm);
+    if (before) before(*f.doc.board());
+    dlg = std::make_unique<DesignParamsDialog>(&f.doc);
+    dlg->resize(1280, 640);
+    dlg->showPage("Сигналы");
+    page = qobject_cast<SignalsPage*>(dlg->findChild<QStackedWidget*>()->currentWidget());
+  }
+  GroupExplorer* e() const { return page->explorer(); }
+  // Answers the next modal dialog (once it is up: an event loop may turn before it is shown).
+  template <class F>
+  static void answer(F act, int tries = 50) {
+    QTimer::singleShot(tries == 50 ? 0 : 10, [act, tries] {
+      auto* d = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+      if (!d && tries > 0) return answer(act, tries - 1);
+      ASSERT_TRUE(d);
+      act(d);
+    });
+  }
+  QToolButton* action(const char* name) const { return page->findChild<QToolButton*>(name); }
+};
+
+}  // namespace
+
+// The page as TopoR shows it: every signal, a pair's two as the pair, the ungrouped one, the three groups.
+TEST(Gui, SignalsPageListsSignalsAndDiffs) {
+  SignalsFixture s;
+  ASSERT_TRUE(s.page);
+  EXPECT_EQ(treeTexts(s.e()), (QStringList{"Все сигналы (40)", "Несгруппированные (1)", "Группы", "  ADD_DDR", "  CTRL_DDR", "  DATA_DDR"}));
+  const QStringList all = listTexts(s.e());
+  EXPECT_EQ(all.size(), 40);
+  EXPECT_TRUE(all.contains("SDCLK_U2"));
+  EXPECT_FALSE(all.contains("SDCLK"));
+  s.e()->choose({GroupNode::Kind::Ungrouped, {}});
+  EXPECT_EQ(listTexts(s.e()), QStringList{"SDCLK_U2"});
+  s.e()->choose({GroupNode::Kind::Group, "CTRL_DDR"});
+  EXPECT_EQ(listTexts(s.e()), (QStringList{"CAS_B", "RAS_B", "SDCKE0", "SDWE_B"}));
+  EXPECT_EQ(s.e()->findChild<QLabel*>("title")->text(), "Группа сигналов CTRL_DDR");
+  // The tasks are there; the actions, with nothing selected, are not.
+  for (const char* t : {"createSignal", "searchBuses", "searchPairs", "searchSettings"}) EXPECT_TRUE(s.action(t)->isVisibleTo(s.page)) << t;
+  EXPECT_FALSE(s.action("remove")->isVisibleTo(s.page));
+  s.e()->selectIds({"s:CAS_B"});
+  if (const char* dir = std::getenv("XR_SHOT_DIR")) s.dlg->grab().save(QString(dir) + "/signals-page.png");
+}
+
+// «Свойства» of a signal: its source and receiver; the impedance chosen is the whole cluster's.
+TEST(Gui, SignalPropertiesSetTheClustersImpedance) {
+  SignalsFixture s([](Board& b) { b.hispeed.impedances.push_back({"Z0_60", 60, false, {}}); });
+  s.e()->selectIds({"s:A0"});
+  auto labels = [&] {
+    QStringList out;
+    for (auto* l : s.page->findChildren<QLabel*>())
+      if (l->isVisibleTo(s.page)) out << l->text();
+    return out;
+  };
+  EXPECT_TRUE(labels().contains("U1-16"));
+  EXPECT_TRUE(labels().contains("U2-68"));
+  auto* z = s.page->findChild<QComboBox*>("impedance");
+  ASSERT_TRUE(z);
+  EXPECT_EQ(z->currentText(), "Z0_50");
+  EXPECT_EQ(z->findText("ZDiff_100"), -1);  // a signal takes a single-ended rule
+  z->setCurrentIndex(z->findText("Z0_60"));
+  emit z->activated(z->currentIndex());
+  applyParams(*s.dlg);
+  ASSERT_TRUE(s.f.b().hispeed.clusterOf("A0"));
+  EXPECT_EQ(s.f.b().hispeed.clusterOf("A0")->impedance, "Z0_60");
+}
+
+// A pair's «Допустимый разброс», in the design's units.
+TEST(Gui, DiffSignalMismatchIsEdited) {
+  SignalsFixture s;
+  s.e()->selectIds({"d:SDCLK_U2"});
+  auto* m = s.page->findChild<QDoubleSpinBox*>("mismatch");
+  ASSERT_TRUE(m);
+  EXPECT_NEAR(m->value(), 0.01, 1e-9);
+  m->setValue(0.05);
+  auto* z = s.page->findChild<QComboBox*>("impedance");
+  ASSERT_TRUE(z);
+  EXPECT_EQ(z->currentText(), "Rule0");
+  EXPECT_EQ(z->findText("Z0_50"), -1);  // a pair takes a differential rule
+  applyParams(*s.dlg);
+  EXPECT_EQ(s.f.b().hispeed.diffSignals[0].mismatch, mmToNm(0.05));
+}
+
+// «Разделить» and «Объединить в дифф. сигнал» from the page: the pair comes back under its name, the positive
+// signal by the naming rules.
+TEST(Gui, JoinAndSplitDiffFromThePage) {
+  SignalsFixture s;
+  s.e()->selectIds({"d:SDCLK_U2"});
+  ASSERT_TRUE(s.action("split")->isVisibleTo(s.page));
+  EXPECT_FALSE(s.action("join")->isVisibleTo(s.page));
+  s.action("split")->click();
+  auto two = s.e()->selectedIds();
+  r::sort(two);
+  EXPECT_EQ(two, (std::vector<std::string>{"s:SDCLK", "s:SDCLK_B"}));
+  EXPECT_EQ(listTexts(s.e()).size(), 41);
+  ASSERT_TRUE(s.action("join")->isVisibleTo(s.page));
+  s.action("join")->click();
+  EXPECT_EQ(s.e()->selectedIds(), std::vector<std::string>{"d:SDCLK_U2"});
+  // Two signals of one cluster cannot be joined: the reason is said.
+  s.e()->selectIds({"s:A0", "s:A1"});
+  bool told = false;
+  s.answer([&](QDialog* d) {
+    told = qobject_cast<QMessageBox*>(d) && qobject_cast<QMessageBox*>(d)->text().contains("Нельзя объединить");
+    d->accept();
+  });
+  s.page->joinSelected();
+  EXPECT_FALSE(told);  // A0 and A1 are of different clusters, as many nets, alike links: they can
+  applyParams(*s.dlg);
+  const HiSpeed& h = s.f.b().hispeed;
+  ASSERT_EQ(h.diffSignals.size(), 2u);
+  EXPECT_EQ(h.diffSignals[0].name, "SDCLK_U2");
+  EXPECT_EQ(h.diffSignals[0].signalA, "SDCLK");
+}
+
+// «Подсветить» lights the nets of what is selected on the board; «Удалить» takes it out of its groups too.
+TEST(Gui, SignalsAreHighlightedAndDeleted) {
+  SignalsFixture s;
+  s.e()->selectIds({"s:A0", "d:SDCLK_U2"});
+  s.action("highlight")->click();
+  std::vector<int> nets = s.f.doc.highlightedNets();
+  r::sort(nets);
+  std::vector<int> want{s.f.b().findNet("A0"), s.f.b().findNet("SDCLK"), s.f.b().findNet("SDCLK_B")};
+  r::sort(want);
+  EXPECT_EQ(nets, want);
+  s.e()->selectIds({"s:A0"});
+  s.action("remove")->click();
+  EXPECT_EQ(treeTexts(s.e())[0], "Все сигналы (39)");
+  applyParams(*s.dlg);
+  const HiSpeed& h = s.f.b().hispeed;
+  EXPECT_FALSE(h.clusterOf("A0"));
+  for (auto& g : h.groups) EXPECT_FALSE(r::contains(g.members, ObjectSignal{ObjectSignal::Kind::Signal, "A0"})) << g.name;
+}
+
+// «Создать сигнал»: the source chosen among the pins, the cluster made, the signal added.
+TEST(Gui, CreateSignalFromASource) {
+  SignalsFixture s([](Board& b) { sig::removeObjects(b.hispeed, &*b.rules, {{ObjectSignal::Kind::Signal, "A0"}}); });
+  // «Выбор источника сигнала»: by words; a pin of a net in a signal is greyed and not taken.
+  {
+    SourcePickerDialog picker(&s.f.doc, s.f.b().hispeed);
+    picker.setFilter("U1-78 A1");  // the source of A1
+    ASSERT_EQ(picker.rows(), 1);
+    picker.choose(0);
+    EXPECT_TRUE(picker.rowText(0, 1).contains("цепь сигнала")) << picker.rowText(0, 1).toStdString();
+    EXPECT_FALSE(picker.pad());
+    picker.setFilter("U1-16 A0");
+    ASSERT_EQ(picker.rows(), 1);
+    EXPECT_EQ(picker.rowText(0, 1), "A0");
+    picker.choose(0);
+    EXPECT_TRUE(picker.pad());
+  }
+  s.answer([](QDialog* d) {
+    auto* picker = qobject_cast<SourcePickerDialog*>(d);
+    ASSERT_TRUE(picker);
+    picker->setFilter("U1-16 A0");
+    picker->choose(0);
+    // «Создание сигналов»: the cluster's net and signal; «Создать».
+    SignalsFixture::answer([](QDialog* d) {
+      auto* c = qobject_cast<ClusterDialog*>(d);
+      ASSERT_TRUE(c);
+      EXPECT_EQ(c->cluster().nets, std::vector<std::string>{"A0"});
+      ASSERT_EQ(c->signalsModel()->rowCount(), 1);
+      EXPECT_EQ(c->signalsModel()->index(0, 0).data().toString(), "A0_U2");
+      EXPECT_EQ(c->signalsModel()->index(0, 2).data().toString(), "U2-68");
+      EXPECT_TRUE(c->signalsModel()->setData(c->signalsModel()->index(0, 0), "ADDR0"));
+      EXPECT_FALSE(c->signalsModel()->setData(c->signalsModel()->index(0, 0), "A1"));  // the name is taken
+      if (const char* dir = std::getenv("XR_SHOT_DIR")) c->grab().save(QString(dir) + "/create-signals.png");
+      c->accept();
+    });
+    picker->accept();
+  });
+  s.page->createSignal();
+  EXPECT_TRUE(listTexts(s.e()).contains("ADDR0"));
+  applyParams(*s.dlg);
+  const SignalCluster* c = s.f.b().hispeed.clusterOf("ADDR0");
+  ASSERT_TRUE(c);
+  EXPECT_EQ(c->source, (PinRef{"U1", "16"}));
+  EXPECT_EQ(c->impedance, "Z0_50");
+  EXPECT_EQ(c->pinPairs.size(), 1u);  // set automatically: the source to the receiver
+}
+
+// «Задать топологию»: the links of a net are added and removed; a cycle among them is said.
+TEST(Gui, ClusterDialogEditsLinks) {
+  Fixture f("topor/Example_06/Signals.fst");
+  const HiSpeed& h = f.b().hispeed;
+  const SignalCluster* c = h.clusterOf("A1");
+  ASSERT_TRUE(c);
+  ClusterDialog dlg(&f.doc, h, *c, ClusterDialog::Mode::Links);
+  LinksModel* links = dlg.cards()->links("A1");
+  ASSERT_TRUE(links);
+  ASSERT_EQ(links->rowCount(), 1);
+  EXPECT_EQ(links->index(0, 0).data().toString(), "U1-78");
+  EXPECT_EQ(links->index(0, 1).data().toString(), "U2-66");
+  EXPECT_TRUE(dlg.cycleMessage().isEmpty());
+  links->addLink();  // the net's two pins again: a cycle
+  EXPECT_EQ(links->rowCount(), 2);
+  EXPECT_EQ(dlg.cycleMessage(), "В цепи 'A1' имеется контур, необходимо исправить заданные связи");
+  links->removeLink(1);
+  EXPECT_TRUE(dlg.cycleMessage().isEmpty());
+  EXPECT_EQ(dlg.cluster().pinPairs.size(), 1u);
+  EXPECT_EQ(links->index(0, 0).data(LinksModel::ChoicesRole).toStringList(), (QStringList{"U1-78", "U2-66"}));
+}
+
+// «Настройки поиска сигналов»: the tabs, «Автозаполнение», «По умолчанию».
+TEST(Gui, SearchSettingsDialog) {
+  Fixture f("topor/Example_06/Signals.fst");
+  SignalSearch start = sig::searchOf(f.b().hispeed);
+  start.names = {{true, "x", "y"}};
+  start.excludedNets.clear();
+  SearchSettingsDialog dlg(&f.doc, start, nullptr);
+  EXPECT_EQ(dlg.tabs()->count(), 2);
+  EXPECT_EQ(dlg.tabs()->tabText(0), "Общие");
+  EXPECT_EQ(dlg.tabs()->tabText(1), "Дифф. сигналы");
+  dlg.autofill();
+  const SignalSearch s = dlg.settings();
+  EXPECT_TRUE(s.present);
+  EXPECT_TRUE(r::contains(s.excludedNets, std::string("GND")));  // the reference layer's, and many pins
+  for (auto& n : s.excludedNets) {
+    const int net = f.b().findNet(n);
+    int pins = 0;
+    for (auto& p : f.b().pads) pins += p.net == net;
+    const bool plane = r::any_of(f.b().layers, [&](const Layer& l) { return l.plane && l.planeNet == net; });
+    EXPECT_TRUE(pins >= 20 || plane) << n;
+  }
+  EXPECT_EQ(s.names.size(), 1u);
+  dlg.restoreDefaultNames();
+  EXPECT_EQ(dlg.settings().names.size(), 6u);
+  EXPECT_EQ(dlg.settings().names[5].neg, "_B");
+}
+
+// «Поиск шин»: the buses found among the ungrouped signals become groups, those ticked.
+TEST(Gui, BusesBecomeGroups) {
+  SignalsFixture s([](Board& b) { b.hispeed.groups.clear(); });
+  EXPECT_EQ(treeTexts(s.e()).size(), 3);
+  s.answer([](QDialog* d) {
+    auto* buses = qobject_cast<BusesDialog*>(d);
+    ASSERT_TRUE(buses);
+    ASSERT_EQ(buses->chosen().size(), 5u);
+    buses->setChecked(0, false);
+    d->accept();
+  });
+  s.page->searchBuses();
+  EXPECT_EQ(treeTexts(s.e()).size(), 3 + 4);
+  applyParams(*s.dlg);
+  EXPECT_EQ(s.f.b().hispeed.groups.size(), 4u);
+  EXPECT_EQ(s.f.b().hispeed.groups[0].name, "SignalNet_1");  // the first one unticked
+}
+
+// «Поиск дифф. сигналов»: the pair split is found and joined again; with none, the window says so.
+TEST(Gui, DiffPairsAreJoined) {
+  SignalsFixture s([](Board& b) { sig::splitDiff(b.hispeed, &*b.rules, "SDCLK_U2"); });
+  EXPECT_EQ(listTexts(s.e()).size(), 41);
+  s.answer([](QDialog* d) {
+    auto* pairs = qobject_cast<DiffPairsDialog*>(d);
+    ASSERT_TRUE(pairs);
+    ASSERT_EQ(pairs->chosen().size(), 1u);
+    EXPECT_EQ(pairs->chosen()[0].name, "SDCLK_U2");
+    d->accept();
+  });
+  s.page->searchDiffPairs();
+  EXPECT_EQ(listTexts(s.e()).size(), 40);
+  bool none = false;
+  s.answer([&](QDialog* d) {
+    none = d->findChild<QLabel*>("none") != nullptr;
+    d->reject();
+  });
+  s.page->searchDiffPairs();
+  EXPECT_TRUE(none);
 }

@@ -4,7 +4,7 @@
 #include "io/BoardIO.h"
 
 using namespace xr;
-namespace sg = xr::signals;
+namespace sg = xr::sig;
 
 namespace {
 
@@ -159,9 +159,9 @@ TEST(Signals, BusesAreFoundByIndex) {
   auto buses = sg::findBuses(h);
   ASSERT_EQ(buses.size(), 2u);
   EXPECT_EQ(buses[0].name, "SignalNet");
-  EXPECT_EQ(buses[0].signals, (std::vector<std::string>{"D[0]_U2", "D[1]_U2", "D[2]_U2"}));
+  EXPECT_EQ(buses[0].members, (std::vector<std::string>{"D[0]_U2", "D[1]_U2", "D[2]_U2"}));
   EXPECT_EQ(buses[1].name, "SignalNet_1");
-  EXPECT_EQ(buses[1].signals.size(), 2u);
+  EXPECT_EQ(buses[1].members.size(), 2u);
   EXPECT_EQ(sg::addBusGroup(h, buses[0]), "SignalNet");
   // The grouped ones are not looked at again.
   auto rest = sg::findBuses(h);
@@ -282,7 +282,7 @@ TEST(Signals, Example06) {
   h.groups.clear();
   auto buses = sg::findBuses(h);
   std::vector<size_t> sizes;
-  for (auto& bus : buses) sizes.push_back(bus.signals.size());
+  for (auto& bus : buses) sizes.push_back(bus.members.size());
   r::sort(sizes);
   // A0..A12 but A10 (MA10), SD0..SD15, DQM0/1, DQS0/1, SDBA0/1.
   EXPECT_EQ(sizes, (std::vector<size_t>{2, 2, 2, 12, 16}));
