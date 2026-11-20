@@ -396,6 +396,10 @@ OptimizeResult optimize(Board& b, const OptimizeOptions& o) {
     Board before = b;
     int viaMoves0 = r.viaMoves, componentMoves0 = r.componentMoves, junctionMoves0 = r.junctionMoves;
     int moves = 0;
+    // What the components take up, for their clearance (kept as they move); the widest of its rules.
+    std::vector<Board::ComponentExtent> compExtent;
+    Coord compClearance = 0;
+    for (const auto& c : b.compClearances) compClearance = std::max(compClearance, c.clrn);
     int total = (o2.vias ? int(b.vias.size()) : 0) + (o2.components ? int(b.components.size()) : 0);
     int done = 0;
 
@@ -672,6 +676,26 @@ OptimizeResult optimize(Board& b, const OptimizeOptions& o) {
         auto consider = [&](std::optional<Candidate> c) {
           if (c && c->gain > std::max(best ? best->gain : 0.0, 1000.0) && keepsConnectivity(c->board)) best = std::move(c);
         };
+        // The component keeps its clearance to the others and to the edge of the board (the «Зазор между
+        // компонентами» rules, «Зазор от компонентов до края платы»): a step that leaves it short of them is
+        // not tried — unless the component is short of them already and the step does not bring it nearer.
+        if (compExtent.size() != b.components.size()) {
+          compExtent.resize(b.components.size());
+          for (size_t k = 0; k < compExtent.size(); ++k) compExtent[k] = b.componentExtent(int(k));
+        }
+        auto margin = [&](const Board& x, const Board::ComponentExtent& e) {
+          double m = std::numeric_limits<double>::max();
+          if (!e.box.valid()) return m;
+          const BBox near = e.box.inflated(double(compClearance));
+          for (size_t k = 0; k < compExtent.size(); ++k) {
+            if (int(k) == ci || !compExtent[k].box.valid() || !near.intersects(compExtent[k].box)) continue;
+            if (auto g = x.componentGap(ci, e, int(k), compExtent[k])) m = std::min(m, g->margin);
+          }
+          if (!x.outline.empty())
+            if (auto g = x.componentEdgeGap(e)) m = std::min(m, g->margin);
+          return m;
+        };
+        const double marginWas = margin(b, compExtent[size_t(ci)]);
         for (Vec2 d : std::span(kDirs, 4)) {
           Vec2 delta = d * step;
           consider(tryMove(
@@ -682,11 +706,13 @@ OptimizeResult optimize(Board& b, const OptimizeOptions& o) {
                   dragEnds(c, p.shapeGeom(), p.copper, p.net, delta);
                 }
                 c.moveComponent(ci, c.components[ci].pos + Point(delta));
-                return true;
+                const double m = margin(c, c.componentExtent(ci));
+                return m >= 0 || m >= marginWas;
               },
               padsBox));
         }
         if (best) {
+          compExtent[size_t(ci)] = best->board.componentExtent(ci);
           b = std::move(best->board);
           ++moves;
           ++r.componentMoves;

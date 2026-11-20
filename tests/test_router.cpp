@@ -397,3 +397,120 @@ TEST(Router, FlexFixedNetIsLeftAsItIs) {
     EXPECT_EQ(unroutedOf(free, nb), 0);
   }
 }
+
+namespace {
+
+// Two components of two SMD pads on the top side, bodies of 1.6 × 0.8 mm on the assembly layer, `dx` mm apart; the
+// pads that face each other are of one net and a wire joins them. `clrn` mm between components by the rule.
+Board twoJoinedComponents(double dx, double clrn) {
+  Board b;
+  const LayerId top = b.addLayer("Top", LayerKind::Copper, Side::Top);
+  b.addLayer("Bottom", LayerKind::Copper, Side::Bottom);
+  const LayerId assy = b.addLayer("Assy", LayerKind::Fab, Side::Top);
+  auto mm = [](double x, double y) { return Vec2{x * kNmPerMm, y * kNmPerMm}; };
+  b.outline.push_back({mm(-10, -10), mm(20, -10), mm(20, 10), mm(-10, 10)});
+  const int joined = b.addNet("J");
+  for (int c = 0; c < 2; ++c) {
+    Component comp;
+    comp.ref = c == 0 ? "R1" : "R2";
+    const double x = c * dx;
+    comp.pos = Point(mm(x, 0));
+    for (int i = 0; i < 2; ++i) {
+      Pad p;
+      p.number = std::to_string(i + 1);
+      p.component = c;
+      p.pos = Point(mm(x + (i ? 0.5 : -0.5), 0));
+      p.localPos = Point(mm(i ? 0.5 : -0.5, 0));
+      p.shape.kind = PadShapeKind::Rect;
+      p.shape.w = mmToNm(0.5);  // (longer along the wire: it leaves through the pad's end)
+      p.shape.h = mmToNm(0.3);
+      p.copper = LayerMask(1) << top;
+      p.net = (c == 0) == (i == 1) ? joined : b.addNet(std::format("N{}", c));
+      comp.pads.push_back(int(b.pads.size()));
+      b.pads.push_back(p);
+    }
+    Graphic g;
+    g.kind = GraphicKind::Rect;
+    g.layer = assy;
+    g.a = mm(x - 0.8, -0.4);
+    g.b = mm(x + 0.8, 0.4);
+    comp.graphics.push_back(g);
+    b.components.push_back(std::move(comp));
+  }
+  Track t;
+  t.a = Point(mm(0.5, 0));
+  t.b = Point(mm(dx - 0.5, 0));
+  t.width = mmToNm(0.25);
+  t.layer = top;
+  t.net = joined;
+  b.tracks.push_back(t);
+  b.rules = rulesFromBoard(b);
+  if (clrn > 0) b.rules->compClearances.push_back({true, {}, {}, {}, {}, mmToNm(clrn)});
+  b.rules->edgeComps = mmToNm(1.0);
+  compileRules(b);
+  return b;
+}
+
+double bodyGap(const Board& b) {
+  auto g = b.componentGap(0, b.componentExtent(0), 1, b.componentExtent(1));
+  return g ? g->distance : 1e18;
+}
+
+}  // namespace
+
+// «Подвижка компонентов»: a wire pulls two components together; they stop at the clearance their rule asks for.
+TEST(Optimizer, ComponentNudgeKeepsTheComponentClearance) {
+  topo::OptimizeOptions o;
+  o.iterations = 4;
+  o.components = true;
+  Board free = twoJoinedComponents(3.0, 0);
+  auto r0 = topo::optimize(free, o);
+  EXPECT_GT(r0.componentMoves, 0);
+  EXPECT_LT(bodyGap(free), mmToNm(0.75));  // nothing but the copper holds them apart
+
+  Board b = twoJoinedComponents(3.0, 0.8);
+  ASSERT_NEAR(bodyGap(b), mmToNm(1.4), 2);
+  auto r = topo::optimize(b, o);
+  EXPECT_GT(r.componentMoves, 0);
+  EXPECT_LT(bodyGap(b), mmToNm(1.4));
+  EXPECT_GE(bodyGap(b), mmToNm(0.8) - 2);
+  EXPECT_EQ(Connectivity::compute(b).ratsnest.size(), 0u);
+}
+
+// A component short of its clearance already may move away, not nearer.
+TEST(Optimizer, ComponentInViolationMayOnlyMoveAway) {
+  topo::OptimizeOptions o;
+  o.iterations = 3;
+  o.components = true;
+  Board b = twoJoinedComponents(2.2, 1.0);  // 0.6 mm between the bodies, 1 mm asked for
+  const double was = bodyGap(b);
+  topo::optimize(b, o);
+  EXPECT_GE(bodyGap(b), was - 2);
+}
+
+// The edge of the board: a component is not moved nearer to it than «Зазор от компонентов до края платы». A slot
+// between the two bodies, beside the wire: 0.6 mm from each, 0.5 mm asked for.
+TEST(Optimizer, ComponentNudgeKeepsOffTheEdge) {
+  topo::OptimizeOptions o;
+  o.iterations = 4;
+  o.components = true;
+  auto slotted = [](Coord edgeComps) {
+    Board b = twoJoinedComponents(3.0, 0);
+    b.outline.push_back({{mmToNm(1.4), mmToNm(0.5)}, {mmToNm(1.6), mmToNm(0.5)}, {mmToNm(1.6), mmToNm(0.7)}, {mmToNm(1.4), mmToNm(0.7)}});
+    b.rules->edgeComps = edgeComps;
+    compileRules(b);
+    return b;
+  };
+  auto edgeGap = [](const Board& b) {
+    double d = 1e18;
+    for (int c = 0; c < 2; ++c) d = std::min(d, b.componentEdgeGap(b.componentExtent(c))->distance);
+    return d;
+  };
+  Board free = slotted(0);
+  topo::optimize(free, o);
+  EXPECT_LT(edgeGap(free), mmToNm(0.45));  // the wire has pulled them towards the slot
+  Board b = slotted(mmToNm(0.5));
+  ASSERT_GT(edgeGap(b), mmToNm(0.6));
+  topo::optimize(b, o);
+  EXPECT_GE(edgeGap(b), mmToNm(0.5) - 2);
+}
