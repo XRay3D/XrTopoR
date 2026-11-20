@@ -1,5 +1,6 @@
 // GUI smoke test: drives the board view with synthetic mouse/key events on the offscreen platform.
 #include <QCheckBox>
+#include <QGroupBox>
 #include <QInputDialog>
 #include <QApplication>
 #include <format>
@@ -4904,4 +4905,43 @@ TEST(Gui, MessageFilterHidesTheUntickedCategories) {
   auto again = io::readFst(io::writeFst(f.b()), "filter.fst");
   ASSERT_TRUE(again) << again.error();
   EXPECT_EQ((*again)->settings.messages, f.b().settings.messages);
+}
+
+// «Настройки редактирования»: the labels' settings are the design's, set in the dialog, undone as a step, and
+// saved with the design.
+TEST(Gui, EditSettingsDialogStoresLabelRules) {
+  Fixture f("topor/Example_02/Placement.fst");
+  EXPECT_EQ(f.b().settings.labels, LabelSettings{});
+  auto answer = [&](auto&& act) {
+    QTimer::singleShot(0, [&] {
+      auto* dlg = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+      ASSERT_TRUE(dlg);
+      act(dlg);
+      dlg->accept();
+    });
+    return editLabelSettings(nullptr, &f.doc);
+  };
+  EXPECT_FALSE(answer([](QDialog* dlg) {
+    EXPECT_TRUE(dlg->findChild<QRadioButton*>("rotateWithComp")->isChecked());
+    EXPECT_FALSE(dlg->findChild<QGroupBox*>("useOrientRules")->isChecked());
+  }));
+  EXPECT_TRUE(answer([](QDialog* dlg) {
+    dlg->findChild<QRadioButton*>("keepAngle")->setChecked(true);
+    dlg->findChild<QGroupBox*>("useOrientRules")->setChecked(true);
+    dlg->findChild<QComboBox*>("topVert")->setCurrentIndex(1);    // 270°
+    dlg->findChild<QComboBox*>("bottomHorz")->setCurrentIndex(1);  // 180°
+  }));
+  const LabelSettings want{false, true, false, true, true, false};
+  EXPECT_EQ(f.b().settings.labels, want);
+  auto again = io::readFst(io::writeFst(f.b()), "labels.fst");
+  ASSERT_TRUE(again) << again.error();
+  EXPECT_EQ((*again)->settings.labels, want);
+  // The dialog shows what the design has.
+  EXPECT_FALSE(answer([](QDialog* dlg) {
+    EXPECT_TRUE(dlg->findChild<QRadioButton*>("keepAngle")->isChecked());
+    EXPECT_EQ(dlg->findChild<QComboBox*>("topVert")->currentIndex(), 1);
+    EXPECT_EQ(dlg->findChild<QComboBox*>("topHorz")->currentIndex(), 0);
+  }));
+  f.doc.undoStack()->undo();
+  EXPECT_EQ(f.b().settings.labels, LabelSettings{});
 }

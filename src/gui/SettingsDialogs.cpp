@@ -4,6 +4,7 @@
 #include <QComboBox>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QGridLayout>
 #include <QGroupBox>
 #include <QLabel>
 #include <QListWidget>
@@ -106,7 +107,60 @@ bool editMessageFilter(QWidget* parent, Document* doc) {
   return true;
 }
 
-bool editLabelSettings(QWidget*, Document*) { return false; }
+bool editLabelSettings(QWidget* parent, Document* doc) {
+  if (!doc->hasBoard()) return false;
+  LabelSettings s = doc->board()->settings.labels;
+  QDialog dlg(parent);
+  dlg.setWindowTitle(QObject::tr("Настройки редактирования"));
+  auto* v = new QVBoxLayout(&dlg);
+  auto* turning = new QGroupBox(QObject::tr("Ярлыки: при вращении компонента"));
+  auto* tv = new QVBoxLayout(turning);
+  auto* with = new QRadioButton(QObject::tr("Вращать с компонентом"));
+  auto* keep = new QRadioButton(QObject::tr("Сохранять угол поворота"));
+  with->setObjectName("rotateWithComp");
+  keep->setObjectName("keepAngle");
+  (s.rotateWithComp ? with : keep)->setChecked(true);
+  tv->addWidget(with);
+  tv->addWidget(keep);
+  v->addWidget(turning);
+  auto* rules = new QGroupBox(QObject::tr("Использовать правила ориентации"));
+  rules->setObjectName("useOrientRules");
+  rules->setCheckable(true);
+  rules->setChecked(s.useOrientRules);
+  rules->setToolTip(QObject::tr("После поворота компонента или переноса на другую сторону его ярлык, оказавшийся горизонтальным\n"
+                                "или вертикальным, ставится под заданным для стороны углом. Ярлык под произвольным углом не меняется."));
+  auto* grid = new QGridLayout(rules);
+  grid->addWidget(new QLabel(QObject::tr("Горизонтальная")), 0, 1);
+  grid->addWidget(new QLabel(QObject::tr("Вертикальная")), 0, 2);
+  auto combo = [&](const char* name, bool turned, bool vertical, int row, int col) {
+    auto* c = new QComboBox;
+    c->setObjectName(name);
+    c->addItems(vertical ? QStringList{"90°", "270°"} : QStringList{"0°", "180°"});
+    c->setCurrentIndex(turned ? 1 : 0);
+    grid->addWidget(c, row, col);
+    return c;
+  };
+  grid->addWidget(new QLabel(QObject::tr("Верхняя сторона")), 1, 0);
+  auto* topHorz = combo("topHorz", s.topHorzRotate, false, 1, 1);
+  auto* topVert = combo("topVert", s.topVertRotate, true, 1, 2);
+  grid->addWidget(new QLabel(QObject::tr("Нижняя сторона")), 2, 0);
+  auto* bottomHorz = combo("bottomHorz", s.bottomHorzRotate, false, 2, 1);
+  auto* bottomVert = combo("bottomVert", s.bottomVertRotate, true, 2, 2);
+  v->addWidget(rules);
+  okCancel(&dlg, v);
+  if (dlg.exec() != QDialog::Accepted) return false;
+  s.rotateWithComp = with->isChecked();
+  s.useOrientRules = rules->isChecked();
+  s.topHorzRotate = topHorz->currentIndex() == 1;
+  s.topVertRotate = topVert->currentIndex() == 1;
+  s.bottomHorzRotate = bottomHorz->currentIndex() == 1;
+  s.bottomVertRotate = bottomVert->currentIndex() == 1;
+  if (s == doc->board()->settings.labels) return false;
+  auto before = doc->beginEdit();
+  doc->board()->settings.labels = s;
+  doc->commitEdit(before, QObject::tr("Настройки редактирования"));
+  return true;
+}
 bool editPadConnect(QWidget*, Document*) { return false; }
 
 }  // namespace xr::gui

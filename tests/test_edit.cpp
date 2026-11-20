@@ -1,5 +1,8 @@
 #include <gtest/gtest.h>
 
+#include <cmath>
+#include <numbers>
+
 #include <map>
 #include <tuple>
 
@@ -180,6 +183,112 @@ TEST(Edit, LabelsGoWithTheirComponent) {
   ASSERT_EQ(pasted.texts.size(), 1u);
   EXPECT_FALSE(fx.b.texts[size_t(pasted.texts[0])].isLabel());
   EXPECT_EQ(fx.b.labelOf(0, "RefDes"), ref);
+}
+
+// «Настройки редактирования», ярлыки: «сохранять угол поворота» — the label goes round with its component and
+// reads as it did.
+TEST(Edit, LabelKeepsItsAngleWhenTheComponentTurns) {
+  Fixture fx;
+  const int ref = fx.b.addLabel(0, "RefDes");
+  ASSERT_GE(ref, 0);
+  const double angle0 = fx.b.texts[size_t(ref)].angle;
+  const Vec2 off0 = fx.b.texts[size_t(ref)].pos - fx.b.components[0].pos.v();
+  // As a new design has it: the label turns with the component.
+  fx.b.rotateComponent(0, 90);
+  EXPECT_NEAR(std::fmod(fx.b.texts[size_t(ref)].angle - angle0 + 360.0, 360.0), 90, 1e-9);
+  fx.b.rotateComponent(0, -90);
+  EXPECT_NEAR(fx.b.texts[size_t(ref)].angle, angle0, 1e-9);
+  // Keeping its angle: the place turns, the angle does not.
+  fx.b.settings.labels.rotateWithComp = false;
+  fx.b.rotateComponent(0, 90);
+  EXPECT_NEAR(fx.b.texts[size_t(ref)].angle, angle0, 1e-9);
+  const Vec2 off = fx.b.texts[size_t(ref)].pos - fx.b.components[0].pos.v();
+  EXPECT_NEAR(off.len(), off0.len(), 2);
+  EXPECT_NEAR(off.x * off0.x + off.y * off0.y, 0, off0.len() * 2 + 4);  // a quarter of a turn round the origin
+  // The same by the editor's turn of the selection.
+  edit::Fragment f = components({0});
+  edit::Motion m;
+  m.pivot = edit::pivotOf(fx.b, f);
+  m.rotate = 90;
+  ASSERT_TRUE(edit::move(fx.b, f, m));
+  EXPECT_NEAR(fx.b.texts[size_t(ref)].angle, angle0, 1e-9);
+  // A label turned by itself turns.
+  edit::Fragment one;
+  one.texts = {ref};
+  m.pivot = fx.b.texts[size_t(ref)].pos;
+  ASSERT_TRUE(edit::move(fx.b, one, m));
+  EXPECT_NEAR(std::fmod(fx.b.texts[size_t(ref)].angle - angle0 + 360.0, 360.0), 90, 1e-9);
+}
+
+// The rules of orientation: after its component turns, a label that stands horizontal or vertical is put the way
+// its side asks, about the middle of its text; one at an angle of its own is left.
+TEST(Edit, LabelOrientationRuleBySide) {
+  Fixture fx;
+  const int ref = fx.b.addLabel(0, "RefDes");
+  ASSERT_GE(ref, 0);
+  Text& t = fx.b.texts[size_t(ref)];
+  t.angle = 0;
+  LabelSettings& s = fx.b.settings.labels;
+  s.useOrientRules = true;
+  auto middle = [&] {
+    const auto box = fx.b.textBox(t);
+    return (box[0] + box[1] + box[2] + box[3]) * 0.25;
+  };
+  auto turnedTo = [&](double by) {
+    // Where the middle of the text goes when the component turns: round the component's origin.
+    const Vec2 o = fx.b.components[0].pos.v(), d = middle() - o;
+    const double r = by * std::numbers::pi / 180.0;
+    return o + Vec2{d.x * std::cos(r) - d.y * std::sin(r), d.x * std::sin(r) + d.y * std::cos(r)};
+  };
+  // Half a turn: the label would read upside down; the rule keeps the top side's horizontal labels at 0°.
+  Vec2 want = turnedTo(180);
+  fx.b.rotateComponent(0, 180);
+  EXPECT_NEAR(t.angle, 0, 1e-9);
+  EXPECT_LT((middle() - want).len(), 10);  // where the turn took it, read the right way
+  // A quarter: vertical, 90° by default; with the top side's vertical labels turned, 270°.
+  fx.b.rotateComponent(0, 90);
+  EXPECT_NEAR(t.angle, 90, 1e-9);
+  s.topVertRotate = true;
+  want = turnedTo(180);
+  fx.b.rotateComponent(0, 180);
+  EXPECT_NEAR(t.angle, 270, 1e-9);
+  EXPECT_LT((middle() - want).len(), 10);
+  // The bottom side has its own: horizontal labels at 180° there.
+  s.bottomHorzRotate = true;
+  fx.b.rotateComponent(0, 90);  // horizontal again, still on top: 0°
+  EXPECT_NEAR(t.angle, 0, 1e-9);
+  edit::Fragment f = components({0});
+  edit::Motion m;
+  m.pivot = edit::pivotOf(fx.b, f);
+  m.mirror = true;
+  ASSERT_TRUE(edit::move(fx.b, f, m));
+  ASSERT_EQ(fx.b.components[0].side, Side::Bottom);
+  EXPECT_NEAR(t.angle, 180, 1e-9);
+}
+
+TEST(Edit, OrientationRuleSkipsArbitraryAngles) {
+  Fixture fx;
+  const int ref = fx.b.addLabel(0, "RefDes");
+  ASSERT_GE(ref, 0);
+  Text& t = fx.b.texts[size_t(ref)];
+  t.angle = 30;
+  fx.b.settings.labels.useOrientRules = true;
+  fx.b.rotateComponent(0, 180);
+  EXPECT_NEAR(t.angle, 210, 1e-9);  // not horizontal nor vertical: as the turn left it
+  fx.b.rotateComponent(0, 150);     // now at 0°: horizontal, and so it stays
+  EXPECT_NEAR(t.angle, 0, 1e-9);
+  fx.b.rotateComponent(0, 180);
+  EXPECT_NEAR(t.angle, 0, 1e-9);
+  // Without the rules a label reads as it is turned.
+  fx.b.settings.labels.useOrientRules = false;
+  fx.b.rotateComponent(0, 180);
+  EXPECT_NEAR(t.angle, 180, 1e-9);
+  // A move alone turns nothing.
+  fx.b.settings.labels.useOrientRules = true;
+  edit::Motion m;
+  m.shift = mm(1, 1).v();
+  ASSERT_TRUE(edit::move(fx.b, components({0}), m));
+  EXPECT_NEAR(t.angle, 180, 1e-9);
 }
 
 TEST(Edit, LockedWireGetsConnector) {

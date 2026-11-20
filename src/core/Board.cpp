@@ -621,9 +621,35 @@ void Board::rotateComponent(int comp, double deltaDeg) {
   for (Text& t : texts)
     if (t.component == comp) {
       t.pos = rotAround(t.pos, o, deltaDeg);
-      t.angle = std::fmod(t.angle + deltaDeg + 720.0, 360.0);
+      labelTurned(t, deltaDeg);
     }
   updatePadPositions(comp);
+}
+
+void Board::labelTurned(Text& t, double deltaDeg) const {
+  if (settings.labels.rotateWithComp) t.angle = std::fmod(t.angle + deltaDeg + 720.0, 360.0);
+  orientLabel(t);
+}
+
+void Board::orientLabel(Text& t) const {
+  const LabelSettings& s = settings.labels;
+  if (!s.useOrientRules || t.component < 0 || t.component >= int(components.size())) return;
+  const double a = std::fmod(t.angle + 720.0, 360.0);
+  const double quarter = std::round(a / 90.0);
+  if (std::abs(a - quarter * 90.0) > 1e-6) return;  // at an angle of its own: the rules are not for it
+  const bool bottom = components[size_t(t.component)].side == Side::Bottom;
+  const bool vertical = int(quarter) % 2 == 1;
+  const bool turned = vertical ? (bottom ? s.bottomVertRotate : s.topVertRotate) : (bottom ? s.bottomHorzRotate : s.topHorzRotate);
+  const double want = vertical ? (turned ? 270.0 : 90.0) : (turned ? 180.0 : 0.0);
+  if (std::abs(std::fmod(a, 360.0) - want) < 1e-6) return;
+  // About the middle of the text: it stays where it is, read the other way.
+  auto middle = [&] {
+    const auto box = textBox(t);
+    return (box[0] + box[1] + box[2] + box[3]) * 0.25;
+  };
+  const Vec2 was = middle();
+  t.angle = want;
+  t.pos = t.pos + (was - middle());
 }
 
 std::vector<Shape> Keepout::shapes() const {

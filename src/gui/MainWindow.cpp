@@ -319,6 +319,7 @@ void MainWindow::bindCommands() {
     });
     dlg.exec();
   });
+  c.bind("Cmd_EditSettings", [this] { editLabelSettings(this, doc_); });
   c.bind("Cmd_MsgFilter", [this] { editMessageFilter(this, doc_); });
   c.bind("Cmd_Summary", [this] { showSummary(); });
   c.bind("Cmd_CopperArea", [this] { showCopperArea(this, doc_); });

@@ -552,6 +552,13 @@ struct Board {
   Coord zoneClearance(const Zone& z) const;
   TextLayout textLayout(const Text& t) const;
   std::array<Vec2, 4> textBox(const Text& t) const;  // round the laid-out lines, on the board
+  // A label whose component has turned by `deltaDeg` (its place is the caller's): it turns with the component or
+  // keeps its angle (LabelSettings::rotateWithComp), and is then put as the rules of orientation ask.
+  void labelTurned(Text& t, double deltaDeg) const;
+  // The rules of orientation (LabelSettings::useOrientRules) on a label: one that stands horizontal or vertical is
+  // put at the angle its component's side asks for, turned about the middle of its text; at any other angle it is
+  // left as it is.
+  void orientLabel(Text& t) const;
   void rebuildNetIndex();  // fixes cached lookup after edits
   // The routing goes; the locked tracks and vias stay (when asked), and so does what belongs to the flexibly
   // fixed nets.

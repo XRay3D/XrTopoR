@@ -369,11 +369,16 @@ bool move(Board& b, const Fragment& f, const Motion& m) {
       texts.push_back(ti);
   for (int ti : texts) {
     Text& t = b.texts[ti];
+    // A label that goes with its component (not one moved by itself) turns as the design's settings say.
+    const bool carried = t.isLabel() && !r::contains(f.texts, ti);
     t.pos = m.apply(t.pos);
     if (m.mirror) {
       t.angle = normDeg(m.rotate - t.angle);
       t.mirror = !t.mirror;
       t.layer = mirrorLayer(b, t.layer);
+      if (carried) b.orientLabel(t);
+    } else if (carried && m.rotate != 0) {
+      b.labelTurned(t, m.rotate);
     } else {
       t.angle = normDeg(t.angle + m.rotate);
     }
