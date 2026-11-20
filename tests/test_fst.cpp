@@ -1155,3 +1155,23 @@ TEST(FstIO, NetPropertiesRoundTrip) {
     EXPECT_EQ(c.nets[size_t(j)].route, a.nets[i].route) << a.nets[i].name;
   }
 }
+
+// A group of nets in a group of nets is kept so, and a rule over the outer one holds for the inner one's nets.
+TEST(FstIO, NestedNetGroupsRoundTrip) {
+  auto r = io::loadBoard(data("topor/Example_02/Placement.fst"));
+  ASSERT_TRUE(r) << r.error();
+  Board& a = **r;
+  ASSERT_TRUE(a.rules);
+  a.rules->netGroups.push_back({"Inner", {"G"}, {}});
+  a.rules->netGroups.push_back({"Outer", {"UN000016"}, {"Inner"}});
+  EXPECT_EQ(a.rules->netsOf("Outer"), (std::vector<std::string>{"UN000016", "G"}));
+  EXPECT_EQ(a.rules->netGroupParent("Inner"), "Outer");
+  a.rules->widths.push_back({true, {}, {RuleNets::Kind::Group, "Outer"}, mmToNm(0.7), mmToNm(0.7)});
+  compileRules(a);
+  EXPECT_EQ(a.trackWidth(a.findNet("G"), a.topCopper()), mmToNm(0.7));
+  auto again = io::readFst(io::writeFst(a), "groups.fst");
+  ASSERT_TRUE(again) << again.error();
+  const Board& c = **again;
+  EXPECT_EQ(c.rules->netGroups, a.rules->netGroups);
+  EXPECT_EQ(c.trackWidth(c.findNet("G"), c.topCopper()), mmToNm(0.7));
+}

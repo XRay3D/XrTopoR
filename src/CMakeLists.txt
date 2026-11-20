@@ -15,6 +15,7 @@ add_library(xrcore STATIC
   core/HiSpeed.cpp
   core/Padstack.cpp
   core/Rules.cpp
+  core/Signals.cpp
   core/Runs.cpp
   core/SpatialIndex.cpp
   core/ZoneFill.cpp

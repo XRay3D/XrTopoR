@@ -947,6 +947,7 @@ struct Writer {
       for (auto& g : rules_.netGroups) {
         x.open("NetGroup", {{"name", g.name}});
         for (auto& n : g.nets) x.empty("NetRef", {{"name", n}});
+        for (auto& k : g.groups) x.empty("NetGroupRef", {{"name", k}});
         x.close();
       }
       x.close();

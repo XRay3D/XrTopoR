@@ -76,9 +76,7 @@ std::optional<Coord> askTrackWidth(QWidget* parent, Document* doc, const std::ve
   t->horizontalHeader()->setStretchLastSection(true);
   DesignRules rules = b.rules ? *b.rules : rulesFromBoard(b);
   auto groupHas = [&](const std::string& g, const std::string& net) {
-    for (auto& grp : rules.netGroups)
-      if (grp.name == g && r::contains(grp.nets, net)) return true;
-    return false;
+    return r::contains(rules.netsOf(g), net);
   };
   auto holdsFor = [&](const WidthRule& w, int n) {
     if (w.nets.kind == RuleNets::Kind::All) return true;

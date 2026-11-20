@@ -22,10 +22,8 @@ std::optional<std::vector<int>> netsOf(const Board& b, const DesignRules& r, con
     }
     case RuleNets::Kind::Group: {
       std::vector<int> out;
-      for (auto& g : r.netGroups)
-        if (g.name == o.name)
-          for (auto& name : g.nets)
-            if (int n = b.findNet(name); n >= 0) out.push_back(n);
+      for (auto& name : r.netsOf(o.name))
+        if (int n = b.findNet(name); n >= 0) out.push_back(n);
       return out;
     }
     case RuleNets::Kind::Signal:
@@ -87,6 +85,8 @@ std::vector<std::string> DesignRules::layersOf(std::string_view group) const { r
 std::vector<std::string> DesignRules::compsOf(std::string_view group) const { return membersOf(compGroups, group, &CompGroup::comps); }
 std::string DesignRules::layerGroupParent(std::string_view group) const { return parentOf(layerGroups, group); }
 std::string DesignRules::compGroupParent(std::string_view group) const { return parentOf(compGroups, group); }
+std::vector<std::string> DesignRules::netsOf(std::string_view group) const { return membersOf(netGroups, group, &NetGroup::nets); }
+std::string DesignRules::netGroupParent(std::string_view group) const { return parentOf(netGroups, group); }
 
 Coord Board::minTrackWidth(int net, LayerId layer) const {
   const Board& b = *this;

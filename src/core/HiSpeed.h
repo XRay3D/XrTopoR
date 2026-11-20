@@ -38,6 +38,7 @@ struct Impedance {
 
 struct PinRef {
   std::string comp, pin;
+  bool operator==(const PinRef&) const = default;
 };
 
 // A signal: from the cluster's source pin to this receiver, through passive components.
@@ -66,6 +67,7 @@ struct DiffSignal {
 struct ObjectSignal {
   enum class Kind { Signal, DiffSignal, SignalGroup } kind = Kind::Signal;
   std::string name;
+  bool operator==(const ObjectSignal&) const = default;
 };
 
 struct SignalGroup {

@@ -898,6 +898,7 @@ struct Reader {
   // The groups of layers and of components as the file has them, for the rules (DesignRules).
   std::vector<LayerGroup> layerGroupDefs;
   std::vector<CompGroup> compGroupDefs;
+  std::vector<NetGroup> netGroupDefs;
 
   void readGroups(const Element& g) {
     if (auto* lg = g.find("LayerGroups"))
@@ -917,6 +918,17 @@ struct Reader {
           else if (k.is("CompGroupRef")) d.groups.emplace_back(k.attr("name"));
         }
         compGroupDefs.push_back(std::move(d));
+      }
+    if (auto* ng = g.find("NetGroups"))
+      for (auto* e : ng->findAll("NetGroup")) {
+        NetGroup d{std::string(e->attr("name")), {}, {}};
+        for (auto& k : e->kids) {
+          if (k.is("NetRef")) {
+            d.nets.emplace_back(k.attr("name"));
+            b.addNet(d.nets.back());
+          } else if (k.is("NetGroupRef")) d.groups.emplace_back(k.attr("name"));
+        }
+        netGroupDefs.push_back(std::move(d));
       }
     // Groups may refer to groups defined later: resolve lazily with a recursion guard.
     std::map<std::string, const Element*, std::less<>> netDefs, layerDefs;
@@ -1109,11 +1121,7 @@ struct Reader {
 
   void readRules(const Element& rules) {
     DesignRules r;
-    for (auto& [name, nets] : netGroups) {
-      NetGroup g{name, {}};
-      for (int n : nets) g.nets.push_back(b.nets[n].name);
-      r.netGroups.push_back(std::move(g));
-    }
+    r.netGroups = netGroupDefs;
     r.layerGroups = layerGroupDefs;
     r.compGroups = compGroupDefs;
     // The default type (a rule that allows every type uses it): the one the design's vias already use,

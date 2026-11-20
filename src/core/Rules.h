@@ -89,6 +89,8 @@ struct LayerNetsRule {
 struct NetGroup {
   std::string name;
   std::vector<std::string> nets;
+  std::vector<std::string> groups = {};  // the groups put into this one (a group sits in one group at most)
+  bool operator==(const NetGroup&) const = default;
 };
 
 // «Группы компонентов», «Группы слоёв»: members by name and the groups put into the group (a group sits in
@@ -121,9 +123,11 @@ struct DesignRules {
   // The layers of a layer group and the components of a component group, with those of the groups in it.
   std::vector<std::string> layersOf(std::string_view group) const;
   std::vector<std::string> compsOf(std::string_view group) const;
+  std::vector<std::string> netsOf(std::string_view group) const;
   // The group a group sits in; empty: none.
   std::string layerGroupParent(std::string_view group) const;
   std::string compGroupParent(std::string_view group) const;
+  std::string netGroupParent(std::string_view group) const;
 };
 
 // The diameter of a via type's pad on a layer of a class (`layerClass`) and name (`layer`): the layer's own
