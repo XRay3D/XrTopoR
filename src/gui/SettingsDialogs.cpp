@@ -6,11 +6,14 @@
 #include <QDialogButtonBox>
 #include <QGridLayout>
 #include <QGroupBox>
+#include <QInputDialog>
 #include <QLabel>
 #include <QListWidget>
 #include <QPushButton>
 #include <QRadioButton>
 #include <QVBoxLayout>
+#include <algorithm>
+#include <functional>
 
 namespace xr::gui {
 
@@ -161,6 +164,97 @@ bool editLabelSettings(QWidget* parent, Document* doc) {
   doc->commitEdit(before, QObject::tr("Настройки редактирования"));
   return true;
 }
-bool editPadConnect(QWidget*, Document*) { return false; }
+bool editPadConnect(QWidget* parent, Document* doc) {
+  if (!doc->hasBoard()) return false;
+  const Board& b = *doc->board();
+  PadConnectSettings s = b.settings.padConnect;
+  QDialog dlg(parent);
+  dlg.setWindowTitle(QObject::tr("Подсоединение проводников к КП"));
+  dlg.resize(460, 420);
+  auto* v = new QVBoxLayout(&dlg);
+  auto* mode = new QComboBox;
+  mode->setObjectName("mode");
+  mode->addItems({QObject::tr("Определять автоматически"), QObject::tr("Разрешить для всех КП")});
+  mode->setCurrentIndex(s.mode == PadConnectSettings::Mode::AllPads ? 1 : 0);
+  mode->setToolTip(QObject::tr("Автоматически: подсоединение к углам разрешено прямоугольным КП со скруглёнными углами,\n"
+                               "если радиус скругления больше половины ширины подсоединяемого проводника,\n"
+                               "а также стекам КП и контактам из списка."));
+  v->addWidget(new QLabel(QObject::tr("Подсоединение проводника к углам прямоугольных КП:")));
+  v->addWidget(mode);
+  v->addWidget(new QLabel(QObject::tr("Стеки КП и контакты, к углам которых подсоединение разрешено:")));
+  auto* list = new QListWidget;
+  list->setObjectName("entries");
+  list->setSelectionMode(QAbstractItemView::ExtendedSelection);
+  v->addWidget(list, 1);
+  auto fill = [&] {
+    list->clear();
+    for (auto& n : s.padstacks) list->addItem(QObject::tr("Стек КП: %1").arg(QString::fromStdString(n)));
+    for (auto& p : s.pins) list->addItem(QObject::tr("Контакт: %1-%2").arg(QString::fromStdString(p.comp), QString::fromStdString(p.pin)));
+  };
+  fill();
+  auto* bar = new QHBoxLayout;
+  auto button = [&](const QString& text, const char* name) {
+    auto* x = new QPushButton(text);
+    x->setObjectName(name);
+    x->setAutoDefault(false);
+    bar->addWidget(x);
+    return x;
+  };
+  auto* addStack = button(QObject::tr("+ Стек КП…"), "addPadstack");
+  auto* addPins = button(QObject::tr("+ Выделенные контакты"), "addSelected");
+  auto* remove = button(QObject::tr("−"), "remove");
+  auto* clear = button(QObject::tr("Очистить"), "clear");
+  bar->addStretch(1);
+  v->addLayout(bar);
+  // The pads selected in the editor, by their components' pins.
+  std::vector<PadConnectSettings::Pin> selected;
+  for (ItemRef r : doc->selectedItems())
+    if (r.type == ItemType::Pad && b.pads[size_t(r.index)].component >= 0)
+      selected.push_back({b.components[size_t(b.pads[size_t(r.index)].component)].ref, b.pads[size_t(r.index)].number});
+  for (int c : doc->selectedComponents())
+    for (int pi : b.components[size_t(c)].pads) selected.push_back({b.components[size_t(c)].ref, b.pads[size_t(pi)].number});
+  addPins->setEnabled(!selected.empty());
+  addPins->setToolTip(QObject::tr("Контакты (и контакты компонентов), выделенные в редакторе."));
+  QObject::connect(addStack, &QPushButton::clicked, &dlg, [&] {
+    QStringList names;
+    for (auto& ps : b.padstacks)
+      if (!r::contains(s.padstacks, ps.name)) names << QString::fromStdString(ps.name);
+    if (names.isEmpty()) return;
+    bool ok = false;
+    const QString name = QInputDialog::getItem(&dlg, QObject::tr("Стек КП"), QObject::tr("Стек контактных площадок:"), names, 0, false, &ok);
+    if (!ok || name.isEmpty()) return;
+    s.padstacks.push_back(name.toStdString());
+    fill();
+  });
+  QObject::connect(addPins, &QPushButton::clicked, &dlg, [&] {
+    for (auto& p : selected)
+      if (!r::contains(s.pins, p)) s.pins.push_back(p);
+    fill();
+  });
+  QObject::connect(remove, &QPushButton::clicked, &dlg, [&] {
+    // (from the last row: the rows are the pad stacks, then the pins)
+    std::vector<int> rows;
+    for (auto* it : list->selectedItems()) rows.push_back(list->row(it));
+    r::sort(rows, std::greater{});
+    for (int row : rows) {
+      if (row < int(s.padstacks.size())) s.padstacks.erase(s.padstacks.begin() + row);
+      else s.pins.erase(s.pins.begin() + (row - int(s.padstacks.size())));
+    }
+    fill();
+  });
+  QObject::connect(clear, &QPushButton::clicked, &dlg, [&] {
+    s.padstacks.clear();
+    s.pins.clear();
+    fill();
+  });
+  okCancel(&dlg, v);
+  if (dlg.exec() != QDialog::Accepted) return false;
+  s.mode = mode->currentIndex() == 1 ? PadConnectSettings::Mode::AllPads : PadConnectSettings::Mode::Auto;
+  if (s == b.settings.padConnect) return false;
+  auto before = doc->beginEdit();
+  doc->board()->settings.padConnect = s;
+  doc->commitEdit(before, QObject::tr("Подсоединение проводников к КП"));
+  return true;
+}
 
 }  // namespace xr::gui

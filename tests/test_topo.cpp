@@ -25,6 +25,7 @@
 #include "topo/Chains.h"
 #include "topo/Flip.h"
 #include "topo/Move.h"
+#include "topo/PadExit.h"
 #include "topo/RelayStats.h"
 #include "topo/Sidecar.h"
 #include "router/topo/ModelRefine.h"
@@ -2742,6 +2743,109 @@ TEST(Topo, RectPadPattern) {
     EXPECT_EQ(p.b.tracks.size(), tracks) << "pass " << pass;
     EXPECT_NEAR(p.b.tracksLength(), length, 2000) << "pass " << pass;
     EXPECT_TRUE(p.vertexAt(12.65, 10.85)) << "pass " << pass;
+  }
+}
+
+// «Подсоединение проводников к КП»: which pads take a wire at their corners. Automatically — a rectangle whose
+// corners are rounded by more than half the wire's width; besides, the pad stacks and the pins listed; or all.
+TEST(Topo, CornerExitByTheDesignsSettings) {
+  PinBoard p;
+  p.pad("A", 10, 10, PadShapeKind::Rect, 5.6, 2);       // sharp corners
+  p.pad("B", 20, 10, PadShapeKind::RoundRect, 5.6, 2);  // rounded by 0.5 mm
+  p.b.pads[1].shape.rratio = 0.25;
+  p.pad("C", 30, 10, PadShapeKind::Oval, 3, 1);
+  auto takes = [&](int pad, double width) { return topo::cornerExit(p.b, pad, topo::padFrame(p.b.pads[size_t(pad)]), mmToNm(width)); };
+  EXPECT_FALSE(takes(0, 0.3));
+  EXPECT_TRUE(takes(1, 0.3));   // 0.5 > 0.15
+  EXPECT_TRUE(takes(1, 0.9));   // 0.5 > 0.45
+  EXPECT_FALSE(takes(1, 1.0));  // not more than half of 1.0
+  EXPECT_FALSE(takes(2, 0.3));  // an oval has ends, not corners
+  // The pin listed; the pad stack listed.
+  p.b.settings.padConnect.pins = {{"U1", "0"}};
+  EXPECT_TRUE(takes(0, 0.3));
+  EXPECT_FALSE(takes(1, 1.0));
+  p.b.settings.padConnect.pins.clear();
+  Padstack ps;
+  ps.name = "RECT";
+  p.b.padstacks.push_back(ps);
+  p.b.pads[0].padstack = 0;
+  EXPECT_FALSE(takes(0, 0.3));
+  p.b.settings.padConnect.padstacks = {"RECT"};
+  EXPECT_TRUE(takes(0, 0.3));
+  // Every pad.
+  p.b.settings.padConnect = {};
+  p.b.settings.padConnect.mode = PadConnectSettings::Mode::AllPads;
+  EXPECT_TRUE(takes(0, 0.3));
+  EXPECT_TRUE(takes(1, 1.0));
+  EXPECT_FALSE(takes(2, 0.3));
+}
+
+// A wire drawn out through the rounded corner of a rectangular pad is laid from the centre of the corner's
+// rounding — inside the copper whatever way it goes, as from the centre of an oval's end — and not pushed to
+// the end, where its inner point half a width in from both sides would stand out of the rounding. The next
+// F5 draws the same.
+TEST(Topo, WireLeavesARoundedCornerFromItsCentre) {
+  PinBoard p;
+  p.pad("A", 10, 10, PadShapeKind::RoundRect, 5.6, 2);
+  p.b.pads[0].shape.rratio = 0.25;  // 0.5 mm: the rounding's centre 0.5 in from both sides, at (12.3, 10.5)
+  p.pad("A", 30, 16, PadShapeKind::Circle, 1, 1);
+  // Through the middle of the corner's arc.
+  p.track("A", {{10, 10}, {17.96, 12.56}, {30, 16}}, 0.3);
+  p.f5();
+  EXPECT_TRUE(p.vertexAt(10, 10));
+  EXPECT_TRUE(p.vertexAt(12.3, 10.5)) << "the centre of the corner's rounding";
+  EXPECT_FALSE(p.vertexAt(12.65, 10.85)) << "not the end's inner point: out of the rounded copper";
+  EXPECT_EQ(p.violations(), 0);
+  const size_t tracks = p.b.tracks.size();
+  const double length = p.b.tracksLength();
+  for (int pass = 0; pass < 3; ++pass) {
+    p.f5();
+    EXPECT_EQ(p.b.tracks.size(), tracks) << "pass " << pass;
+    EXPECT_NEAR(p.b.tracksLength(), length, 2000) << "pass " << pass;
+    EXPECT_TRUE(p.vertexAt(12.3, 10.5)) << "pass " << pass;
+  }
+  // A wire wider than twice the rounding does not fit in the corner: through the end, as of a sharp one.
+  PinBoard wide;
+  wide.pad("A", 10, 10, PadShapeKind::RoundRect, 5.6, 2);
+  wide.b.pads[0].shape.rratio = 0.25;
+  wide.pad("A", 30, 16, PadShapeKind::Circle, 1.4, 1.4);
+  wide.track("A", {{10, 10}, {17.96, 12.56}, {30, 16}}, 1.2);
+  wide.f5();
+  EXPECT_FALSE(wide.vertexAt(12.3, 10.5));
+}
+
+// A sharp corner takes no wire unless the design's settings say so. Where it shows is a narrow pad (no wider than
+// the wire with its clearances): its wire goes on straight beyond the end before it turns; with the pin listed, a
+// wire drawn out beside the corner is laid from the corner — half a width in from both sides — the way it goes.
+// (Out of a wide rectangle a wire is laid from that very point whatever the settings.)
+TEST(Topo, SharpCornerStillLeavesThroughTheEnd) {
+  auto drawn = [](bool allowed) {
+    PinBoard p;
+    p.pad("A", 10, 10, PadShapeKind::Rect, 1.9, 0.3);  // its right end at x = 10.95
+    p.pad("A", 10.9, 16, PadShapeKind::Circle, 1, 1);
+    if (allowed) p.b.settings.padConnect.pins = {{"U1", "0"}};
+    p.track("A", {{10, 10}, {10.9, 10.1}, {10.9, 16}}, 0.2);  // out of the long side 0.05 mm from the corner
+    p.f5();
+    return p;
+  };
+  PinBoard end = drawn(false);
+  EXPECT_EQ(topo::relayStats(end.b).exitsSide, 0) << "through the end";
+  bool beyond = false;  // a vertex past the pad's end: the wire went on straight out of it
+  for (const Track& t : end.b.tracks) beyond |= t.a.x > mmToNm(10.96) || t.b.x > mmToNm(10.96);
+  EXPECT_TRUE(beyond);
+  EXPECT_EQ(end.violations(), 0);
+  PinBoard corner = drawn(true);
+  EXPECT_TRUE(corner.vertexAt(10.85, 10.05)) << "the corner's inner point";
+  for (const Track& t : corner.b.tracks) EXPECT_LT(std::max(t.a.x, t.b.x), mmToNm(10.96)) << "no way round beyond the end";
+  EXPECT_LT(corner.b.tracksLength(), end.b.tracksLength());
+  EXPECT_EQ(corner.violations(), 0);
+  const size_t tracks = corner.b.tracks.size();
+  const double length = corner.b.tracksLength();
+  for (int pass = 0; pass < 2; ++pass) {
+    corner.f5();
+    EXPECT_EQ(corner.b.tracks.size(), tracks) << "pass " << pass;
+    EXPECT_NEAR(corner.b.tracksLength(), length, 2000) << "pass " << pass;
+    EXPECT_TRUE(corner.vertexAt(10.85, 10.05)) << "pass " << pass;
   }
 }
 

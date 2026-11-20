@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 
 namespace xr::topo {
 
@@ -68,6 +69,38 @@ Vec2 PadFrame::edgePoint(int sign, double width, double v) const {
   if (kind == Kind::Oval) return world(sign * L, 0);
   const double room = std::max(0.0, W - width / 2);
   return world(sign * L, std::clamp(v, -room, room));
+}
+
+std::optional<std::pair<int, int>> PadFrame::cornerAt(Vec2 boundaryPoint, double width) const {
+  if (kind != Kind::Rect) return std::nullopt;
+  const Vec2 l = local(boundaryPoint);
+  const double reach = std::max(r, width / 2);
+  if (std::abs(l.x) <= L - reach + 1 || std::abs(l.y) <= W - reach + 1) return std::nullopt;
+  return std::pair{l.x >= 0 ? 1 : -1, l.y >= 0 ? 1 : -1};
+}
+
+Vec2 PadFrame::cornerInner(int su, int sv, double width) const {
+  const double in = std::max(r, width / 2);
+  return world(su * std::max(0.0, L - in), sv * std::max(0.0, W - in));
+}
+
+std::optional<Vec2> PadFrame::cornerHeld(Vec2 q, double width) const {
+  if (kind != Kind::Rect) return std::nullopt;
+  const Vec2 l = local(q);
+  const Vec2 at = cornerInner(l.x >= 0 ? 1 : -1, l.y >= 0 ? 1 : -1, width);
+  if ((at - q).len() > 1000 || (at - c).len() <= 1000) return std::nullopt;
+  return at;
+}
+
+bool cornerExit(const Board& b, int pad, const PadFrame& f, double width) {
+  static const bool off = std::getenv("XR_NO_CORNER_EXIT") != nullptr;  // (for the comparison: every wire through an end)
+  if (off || f.kind != PadFrame::Kind::Rect) return false;
+  const PadConnectSettings& s = b.settings.padConnect;
+  if (s.mode == PadConnectSettings::Mode::AllPads || f.r > width / 2) return true;
+  if (s.padstacks.empty() && s.pins.empty()) return false;
+  const Pad& p = b.pads[size_t(pad)];
+  if (p.padstack >= 0 && size_t(p.padstack) < b.padstacks.size() && r::contains(s.padstacks, b.padstacks[size_t(p.padstack)].name)) return true;
+  return p.component >= 0 && r::contains(s.pins, PadConnectSettings::Pin{b.components[size_t(p.component)].ref, p.number});
 }
 
 PadFrame PadFrame::turned() const {

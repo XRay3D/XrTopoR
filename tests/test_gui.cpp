@@ -4945,3 +4945,71 @@ TEST(Gui, EditSettingsDialogStoresLabelRules) {
   f.doc.undoStack()->undo();
   EXPECT_EQ(f.b().settings.labels, LabelSettings{});
 }
+
+// «Настройки подсоединения проводников к КП»: the mode and the list of pad stacks and pins that take a wire at
+// their corners; the pins come from the selection.
+TEST(Gui, PadConnectDialogEditsTheList) {
+  Fixture f("topor/Example_02/Placement.fst");
+  const Board& b = f.b();
+  ASSERT_FALSE(b.padstacks.empty());
+  const int pad = b.components[0].pads[0];
+  f.doc.setSelection({{ItemType::Pad, pad}}, {});
+  auto answer = [&](auto&& act) {
+    QTimer::singleShot(0, [&] {
+      auto* dlg = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+      ASSERT_TRUE(dlg);
+      act(dlg);
+      dlg->accept();
+    });
+    return editPadConnect(nullptr, &f.doc);
+  };
+  // As a new design has it: automatically, nothing listed. The selected pin is added, and the first pad stack.
+  EXPECT_TRUE(answer([&](QDialog* dlg) {
+    EXPECT_EQ(dlg->findChild<QComboBox*>("mode")->currentIndex(), 0);
+    auto* list = dlg->findChild<QListWidget*>("entries");
+    EXPECT_EQ(list->count(), 0);
+    auto* add = dlg->findChild<QPushButton*>("addSelected");
+    ASSERT_TRUE(add->isEnabled());
+    add->click();
+    add->click();  // once is enough: no second row
+    EXPECT_EQ(list->count(), 1);
+    QTimer::singleShot(0, [] {
+      auto* pick = qobject_cast<QInputDialog*>(QApplication::activeModalWidget());
+      ASSERT_TRUE(pick);
+      pick->accept();  // the first pad stack offered
+    });
+    dlg->findChild<QPushButton*>("addPadstack")->click();
+    EXPECT_EQ(list->count(), 2);
+    EXPECT_TRUE(list->item(0)->text().startsWith("Стек КП: "));
+    EXPECT_TRUE(list->item(1)->text().startsWith("Контакт: "));
+  }));
+  const PadConnectSettings& s = f.b().settings.padConnect;
+  ASSERT_EQ(s.pins.size(), 1u);
+  EXPECT_EQ(s.pins[0], (PadConnectSettings::Pin{b.components[0].ref, b.pads[size_t(pad)].number}));
+  ASSERT_EQ(s.padstacks.size(), 1u);
+  EXPECT_EQ(s.padstacks[0], b.padstacks[0].name);
+  auto again = io::readFst(io::writeFst(f.b()), "padconnect.fst");
+  ASSERT_TRUE(again) << again.error();
+  EXPECT_EQ((*again)->settings.padConnect, s);
+  // The pin's row removed, every pad allowed.
+  EXPECT_TRUE(answer([](QDialog* dlg) {
+    auto* list = dlg->findChild<QListWidget*>("entries");
+    ASSERT_EQ(list->count(), 2);
+    list->item(1)->setSelected(true);
+    dlg->findChild<QPushButton*>("remove")->click();
+    EXPECT_EQ(list->count(), 1);
+    dlg->findChild<QComboBox*>("mode")->setCurrentIndex(1);
+  }));
+  EXPECT_TRUE(f.b().settings.padConnect.pins.empty());
+  EXPECT_EQ(f.b().settings.padConnect.padstacks.size(), 1u);
+  EXPECT_EQ(f.b().settings.padConnect.mode, PadConnectSettings::Mode::AllPads);
+  // «Очистить», and back to the automatic mode: as a new design.
+  EXPECT_TRUE(answer([](QDialog* dlg) {
+    dlg->findChild<QPushButton*>("clear")->click();
+    EXPECT_EQ(dlg->findChild<QListWidget*>("entries")->count(), 0);
+    dlg->findChild<QComboBox*>("mode")->setCurrentIndex(0);
+  }));
+  EXPECT_EQ(f.b().settings.padConnect, PadConnectSettings{});
+  f.doc.undoStack()->undo();
+  EXPECT_EQ(f.b().settings.padConnect.mode, PadConnectSettings::Mode::AllPads);
+}

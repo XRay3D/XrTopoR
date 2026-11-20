@@ -7,6 +7,9 @@
 // - a rectangle: half a wire's width short of the end, at the lateral offset of the wire outside, kept
 //   within the copper (5.6 x 2 — centre, (2.65, v), (2.8, v) with |v| <= 0.85 for 0.3 and 0.6 for 0.8);
 // - a round pad: straight from the centre.
+#include <optional>
+#include <utility>
+
 #include "core/Board.h"
 
 namespace xr::topo {
@@ -38,8 +41,24 @@ struct PadFrame {
   Vec2 edgePoint(int sign, double width, double v) const;
   // The frame of a pad that is not elongated, for a wire leaving across its axis: the axes exchanged.
   PadFrame turned() const;
+
+  // A rectangle's corners, for the pads that take a wire at them (cornerExit below). The corner a point of the
+  // boundary lies on, as the signs of its place along n and t: on the corner's rounding, or (a sharp corner, a
+  // rounding narrower than the wire) within half the wire's width of the corner along both sides. None: on a side.
+  std::optional<std::pair<int, int>> cornerAt(Vec2 boundaryPoint, double width) const;
+  // The inner point of a wire laid from the corner: the centre of its rounding when the wire fits there (the wire
+  // leaves it in any direction and stays in the copper, as from the centre of an oval's end); else half a width in
+  // from both sides.
+  Vec2 cornerInner(int su, int sv, double width) const;
+  // `q` is a corner's inner point (to a micrometre): that point.
+  std::optional<Vec2> cornerHeld(Vec2 q, double width) const;
 };
 
 PadFrame padFrame(const Pad& p);
+
+// Whether the pad takes a wire of the width at its corners («Настройки подсоединения проводников к КП»,
+// PadConnectSettings): a rectangle, and every pad does (AllPads), or its corners are rounded by more than half
+// the wire's width (what TopoR's automatic mode allows), or its pad stack or the pin itself is listed.
+bool cornerExit(const Board& b, int pad, const PadFrame& f, double width);
 
 }  // namespace xr::topo

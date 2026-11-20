@@ -580,62 +580,90 @@ void prepareStubs(const Board& b, const std::vector<RealWire>& wires, const Real
               Vec2 m = (pin + pout) * 0.5;
               (pad->distance(m) <= 0 ? pin : pout) = m;
             }
-            Vec2 l = f.local(pout);
-            bool throughEnd = f.onEnd(pout);
-            // A pad that is not elongated is left through the side the wire is drawn through: the frame turned.
-            if (!throughEnd && !f.elongated()) {
-              f = f.turned();
-              l = f.local(pout);
-              throughEnd = true;
+            // A corner that takes a wire (topo/PadExit.h, cornerExit). A wire an earlier pass laid from a corner
+            // stays there: from the corner's inner point — the centre of its rounding — in any direction, as from
+            // the centre of an oval's end.
+            const bool cornerOk = cornerExit(b, padIndex, f, double(w.width));
+            std::optional<Vec2> cornerI;
+            if (cornerOk) {
+              if (const auto& hint = w.inner[end]) cornerI = f.cornerHeld(*hint, double(w.width));
+              for (size_t i = 0; i < k && !cornerI; ++i) cornerI = f.cornerHeld(sk[i], double(w.width));
             }
-            // Where the wire goes: the drawn wire a few of the end's widths on from the copper.
-            Vec2 goes = pout;
-            {
-              const double far = 4 * f.W + reach;
-              double run = 0;
-              for (size_t i = k; i < sk.size() && run < far; ++i) {
-                const double step = (sk[i] - goes).len();
-                goes = run + step > far ? goes + (sk[i] - goes) * ((far - run) / step) : sk[i];
-                run += step;
-              }
-            }
-            // The inner point of an earlier pass stays (RealWire::inner, or the wire's first vertex if that
-            // lies in an end already): the wire that begins there crosses the edge a little aside, and both
-            // the end and the offset would creep with every pass.
-            const double depth = (f.innerPoint(1, double(w.width), 0) - f.c).dot(f.n);
-            std::optional<Vec2> was;
-            if (const auto& hint = w.inner[end]; hint && std::abs(f.local(*hint).x) >= depth - 1000) was = *hint;
-            else if (std::abs(f.local(sk[0]).x) >= depth - 1000 && depth > 1000) was = sk[0];
-            // Else the end the wire is drawn through; drawn through the long side of an elongated pad — the
-            // end nearer to where the wire goes (straight aside: to where it ends).
-            double along = was ? f.local(*was).x : throughEnd ? l.x : f.local(goes).x;
-            if (!was && !throughEnd && std::abs(along) < 1000) along = f.local(sk.back()).x;
-            const int sign = along >= 0 ? 1 : -1;
-            const Vec2 n = f.n * double(sign);
-            // The lateral offset (a rectangle's): the side the wire goes to; the wire is laid taut from the
-            // inner point, and one that started on the other side would wrap its own pad's corner.
-            const double v = was ? f.local(*was).y : f.local(goes).y;
-            const Vec2 I = f.innerPoint(sign, double(w.width), v), X = f.edgePoint(sign, double(w.width), v);
-            // A narrow end (no wider than the wire and its clearances): the wire goes on straight beyond it
-            // by its envelope, so that the first tangent leaves the pads beside it their room; the stub's
-            // points keep the other wires off it. Out of a wider end the wire is laid from the inner point
-            // (its first bend begins there, inside the copper, as TopoR's does): the pad itself keeps the
-            // others off, and the triangulation is the pads' alone.
-            const bool narrow = 2 * f.W < w.width + 2.0 * double(w.clearance);
-            Vec2 E = narrow ? X + n * reach : I;
-            size_t drop = 1;
-            while (drop + 1 < sk.size() && pad->distance(sk[drop]) < (narrow ? reach : 1.0)) ++drop;
-            leads[wi][end].dropped.assign(sk.begin(), sk.begin() + drop);
-            sk.erase(sk.begin(), sk.begin() + drop);
-            // A via right in front of the end (a fanout site): the stub ends at it, no exit point beyond.
-            Vec2 d = sk.front() - X;
-            if (narrow && d.dot(n) < (E - X).dot(n) && std::abs(d.cross(n)) <= w.width / 2.0) E = sk.front();
-            else {
-              sk.insert(sk.begin(), E);
+            if (cornerI) {
+              size_t drop = 1;
+              while (drop + 1 < sk.size() && pad->distance(sk[drop]) < 1.0) ++drop;
+              leads[wi][end].dropped.assign(sk.begin(), sk.begin() + drop);
+              sk.erase(sk.begin(), sk.begin() + drop);
+              sk.insert(sk.begin(), *cornerI);
               leads[wi][end].inserted = true;
+              stubs[wi][end] = {f.c, *cornerI, *cornerI, true, 0.0, false, padIndex};
+              on = true;
             }
-            stubs[wi][end] = {f.c, I, E, true, (E - I).len(), narrow, padIndex};
-            on = true;
+            if (!on) {
+              Vec2 l = f.local(pout);
+              bool throughEnd = f.onEnd(pout);
+              // A pad that is not elongated is left through the side the wire is drawn through: the frame turned.
+              if (!throughEnd && !f.elongated()) {
+                f = f.turned();
+                l = f.local(pout);
+                throughEnd = true;
+              }
+              // Where the wire goes: the drawn wire a few of the end's widths on from the copper.
+              Vec2 goes = pout;
+              {
+                const double far = 4 * f.W + reach;
+                double run = 0;
+                for (size_t i = k; i < sk.size() && run < far; ++i) {
+                  const double step = (sk[i] - goes).len();
+                  goes = run + step > far ? goes + (sk[i] - goes) * ((far - run) / step) : sk[i];
+                  run += step;
+                }
+              }
+              // The inner point of an earlier pass stays (RealWire::inner, or the wire's first vertex if that
+              // lies in an end already): the wire that begins there crosses the edge a little aside, and both
+              // the end and the offset would creep with every pass.
+              const double depth = (f.innerPoint(1, double(w.width), 0) - f.c).dot(f.n);
+              std::optional<Vec2> was;
+              if (const auto& hint = w.inner[end]; hint && std::abs(f.local(*hint).x) >= depth - 1000) was = *hint;
+              else if (std::abs(f.local(sk[0]).x) >= depth - 1000 && depth > 1000) was = sk[0];
+              // Else the end the wire is drawn through; drawn through the long side of an elongated pad — the
+              // end nearer to where the wire goes (straight aside: to where it ends).
+              double along = was ? f.local(*was).x : throughEnd ? l.x : f.local(goes).x;
+              if (!was && !throughEnd && std::abs(along) < 1000) along = f.local(sk.back()).x;
+              const int sign = along >= 0 ? 1 : -1;
+              const Vec2 n = f.n * double(sign);
+              // The lateral offset (a rectangle's): the side the wire goes to; the wire is laid taut from the
+              // inner point, and one that started on the other side would wrap its own pad's corner.
+              const double v = was ? f.local(*was).y : f.local(goes).y;
+              Vec2 I = f.innerPoint(sign, double(w.width), v);
+              const Vec2 X = f.edgePoint(sign, double(w.width), v);
+              // A narrow end (no wider than the wire and its clearances): the wire goes on straight beyond it
+              // by its envelope, so that the first tangent leaves the pads beside it their room; the stub's
+              // points keep the other wires off it. Out of a wider end the wire is laid from the inner point
+              // (its first bend begins there, inside the copper, as TopoR's does): the pad itself keeps the
+              // others off, and the triangulation is the pads' alone.
+              bool narrow = 2 * f.W < w.width + 2.0 * double(w.clearance);
+              // ... and a wire that goes aside as far as the corner — where its inner point would be the end's
+              // last, or out of the corner's rounding — is laid from the corner, not straight on beyond the end.
+              if (cornerOk && std::abs(v) >= f.W - std::max(f.r, w.width / 2.0) - 1000) {
+                I = f.cornerInner(sign, v >= 0 ? 1 : -1, double(w.width));
+                narrow = false;
+              }
+              Vec2 E = narrow ? X + n * reach : I;
+              size_t drop = 1;
+              while (drop + 1 < sk.size() && pad->distance(sk[drop]) < (narrow ? reach : 1.0)) ++drop;
+              leads[wi][end].dropped.assign(sk.begin(), sk.begin() + drop);
+              sk.erase(sk.begin(), sk.begin() + drop);
+              // A via right in front of the end (a fanout site): the stub ends at it, no exit point beyond.
+              Vec2 d = sk.front() - X;
+              if (narrow && d.dot(n) < (E - X).dot(n) && std::abs(d.cross(n)) <= w.width / 2.0) E = sk.front();
+              else {
+                sk.insert(sk.begin(), E);
+                leads[wi][end].inserted = true;
+              }
+              stubs[wi][end] = {f.c, I, E, true, (E - I).len(), narrow, padIndex};
+              on = true;
+            }
           }
         }
         if (std::getenv("XR_DEBUG_STUB") && pad) {
