@@ -120,9 +120,15 @@ const Connectivity& Document::connectivity() {
   return *conn_;
 }
 
+const std::vector<Teardrop>& Document::teardrops() {
+  if (!drops_) drops_ = xr::teardrops(*board_);
+  return *drops_;
+}
+
 void Document::invalidate() {
   index_.reset();
   conn_.reset();
+  drops_.reset();
 }
 
 EditSnapshot Document::beginEdit() {

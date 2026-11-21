@@ -6,6 +6,7 @@ add_executable(xrtests
   test_fst.cpp
   test_padstack.cpp
   test_delay.cpp
+  test_teardrops.cpp
   test_drc.cpp
   test_signals.cpp
   test_edit.cpp

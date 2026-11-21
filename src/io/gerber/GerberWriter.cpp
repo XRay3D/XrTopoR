@@ -1,6 +1,7 @@
 #include "io/gerber/GerberWriter.h"
 
 #include "core/Padstack.h"
+#include "core/Teardrops.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -229,6 +230,7 @@ std::vector<GerberFile> makeGerbers(const Board& b, const GerberOptions& opt) {
   std::vector<GerberFile> files;
   std::string base = safe(b.name.empty() ? "board" : b.name);
   auto cu = b.copperLayers();
+  const std::vector<Teardrop> drops = teardrops(b);
 
   for (LayerId l : cu) {
     Gerber g(layerFn(b, l));
@@ -249,6 +251,12 @@ std::vector<GerberFile> makeGerbers(const Board& b, const GerberOptions& opt) {
       if (t.layer != l) continue;
       if (t.isArc()) g.arc(t.a.v(), t.mid->v(), t.b.v(), double(t.width));
       else g.stroke({t.a.v(), t.b.v()}, double(t.width));
+    }
+    // «Капельки»: the quadrilateral and its contour drawn with the wire's pen.
+    for (const Teardrop& d : drops) {
+      if (d.layer != l) continue;
+      g.region(Polyline{d.quad[0], d.quad[1], d.quad[2], d.quad[3]});
+      g.stroke({d.quad[0], d.quad[1], d.quad[2], d.quad[3], d.quad[0]}, double(d.width));
     }
     files.push_back({base + "-" + safe(b.layers[l].name) + ".gbr", g.str()});
   }

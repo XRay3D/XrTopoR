@@ -5,6 +5,7 @@
 // DialogSettings/MessageFilter.
 #include <array>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace xr {
@@ -53,7 +54,16 @@ struct MessageFilter {
   bool operator==(const MessageFilter&) const = default;
 };
 
+// TopoR's Settings/Autoroute: «Капельки» (the button of the autoprocedures' panel: the design keeps it), and the
+// rest of what the tag has — the mode, the wires' shape, the use of equivalent pins... — kept as read.
+struct RouteSettings {
+  bool teardrops = false;
+  std::vector<std::pair<std::string, std::string>> other;
+  bool operator==(const RouteSettings&) const = default;
+};
+
 struct DesignSettings {
+  RouteSettings route;
   LabelSettings labels;
   PadConnectSettings padConnect;
   MessageFilter messages;

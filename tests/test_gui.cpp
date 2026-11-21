@@ -621,6 +621,42 @@ TEST(Gui, RulerMeasuresPoints) {
 // A conductor of a zipped pair (Signals.fst, the pair SDCLK_U2 on Int 1): X takes the whole section, both
 // conductors; «Свойства» shows the section (TopoR's «Свойства застёгнутой пары проводников»), its button swaps
 // the nets as one undoable step; «Расстегнуть» takes the section away, the conductors stay, undo brings it back.
+// «Капельки»: the button of the autoprocedures' panel shows the design's flag and switches it — one step of undo,
+// the teardrops following.
+TEST(Gui, TeardropsToggleIsKeptAndUndone) {
+  app();
+  MainWindow w;
+  QAction* drops = (*w.commands())["Cmd_Teardrops"];
+  ASSERT_TRUE(drops->isCheckable());
+  EXPECT_FALSE(drops->isEnabled()) << "no board";
+  QTemporaryDir dir;
+  ASSERT_TRUE(QFile::copy(QString::fromStdString(data("topor/Example_04/Arcs_master_f5f7.fst")), dir.filePath("Arcs.fst")));
+  ASSERT_TRUE(QFile::copy(QString::fromStdString(data("topor/AMK310/AMK310_MCU_V2.fst")), dir.filePath("AMK.fst")));
+  ASSERT_TRUE(w.openFile(dir.filePath("Arcs.fst")));
+  Document& doc = *w.document();
+  EXPECT_TRUE(drops->isEnabled());
+  EXPECT_FALSE(drops->isChecked());
+  const size_t off = doc.teardrops().size();
+  EXPECT_EQ(off, 9u) << "where a wire runs into a wider one";
+  drops->trigger();
+  EXPECT_TRUE(doc.board()->settings.route.teardrops);
+  EXPECT_TRUE(drops->isChecked());
+  EXPECT_GT(doc.teardrops().size(), off + 100) << "at the vias and the round pads too";
+  doc.undoStack()->undo();
+  EXPECT_FALSE(doc.board()->settings.route.teardrops);
+  EXPECT_FALSE(drops->isChecked());
+  EXPECT_EQ(doc.teardrops().size(), off);
+  doc.undoStack()->redo();
+  EXPECT_TRUE(drops->isChecked());
+  drops->trigger();
+  EXPECT_FALSE(doc.board()->settings.route.teardrops);
+  EXPECT_FALSE(drops->isChecked());
+  // A design saved with them on opens so.
+  ASSERT_TRUE(w.openFile(dir.filePath("AMK.fst")));
+  EXPECT_TRUE(drops->isChecked());
+  EXPECT_GT(w.document()->teardrops().size(), 400u);
+}
+
 // «Инструменты > Восстановить дифф. пары проводников» with TopoR's three messages: no differential signals; none
 // to restore (all zipped already); the pairs found — one step of undo.
 TEST(Gui, RestoreDiffPairsReports) {
@@ -2913,6 +2949,39 @@ TEST(Gui, ArcsAreDrawnAsArcs) {
   EXPECT_TRUE(like(img.pixelColor(f.at(end + past * (half * 0.7) + Vec2{0, half * 0.7 + 3 * px})), back)) << "the corner of a square end";
   img = look(centre - Vec2{radius, 0});
   EXPECT_TRUE(like(img.pixelColor(f.at(centre - Vec2{radius, 0})), back));
+}
+
+// «Капельки» are drawn as copper of their wire: the flank between the via's edge and the wire is filled with them on,
+// the background with them off.
+TEST(Gui, TeardropsAreDrawn) {
+  RouteBoard f;
+  XR_NEEDS_GL(f.view);
+  f.wire(RouteBoard::mm(10, 10), RouteBoard::mm(20, 10));
+  f.b->settings.route.teardrops = true;
+  f.doc.invalidate();
+  ASSERT_EQ(f.doc.teardrops().size(), 1u);
+  const Teardrop d = f.doc.teardrops()[0];
+  // Half way along a flank: just within the copper's edge and just beyond it (both clear of the via and of the wire).
+  const Vec2 m = (d.quad[1] + d.quad[2]) * 0.5, out = (d.quad[1] - d.quad[0]).normalized();
+  const Vec2 within = m + out * (d.width / 2.0 - 30000), beyond = m + out * (d.width / 2.0 + 30000);
+  ASSERT_GT((within - d.quad[0]).len(), 0.5 * kNmPerMm + 50000);
+  const QColor copper = f.doc.layerColor(f.top), back = f.doc.color("background", 0x030b10);
+  auto like = [](QColor a, QColor b) { return std::abs(a.red() - b.red()) <= 2 && std::abs(a.green() - b.green()) <= 2 && std::abs(a.blue() - b.blue()) <= 2; };
+  f.c = RouteBoard::mm(10.5, 10);
+  f.scale = 800.0 / (2 * double(kNmPerMm));
+  auto picture = [&] {
+    f.view.centerOn(f.c, 2);
+    f.view.refresh();
+    return f.view.picture();
+  };
+  QImage img = picture();
+  if (const char* dir = std::getenv("XR_SHOT_DIR")) img.save(QString(dir) + "/teardrop.png");
+  EXPECT_TRUE(like(img.pixelColor(f.at(within)), copper));
+  EXPECT_TRUE(like(img.pixelColor(f.at(beyond)), back));
+  f.b->settings.route.teardrops = false;
+  f.doc.invalidate();
+  img = picture();
+  EXPECT_TRUE(like(img.pixelColor(f.at(within)), back)) << "off: no copper there";
 }
 
 // «Прозрачность меди»: a setting of the program. The copper layers are laid over one another that transparent, the

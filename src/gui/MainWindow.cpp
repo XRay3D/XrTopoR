@@ -148,6 +148,10 @@ MainWindow::MainWindow()
     updateCursor({});
   });
   connect(doc_, &Document::boardChanged, this, &MainWindow::updateStatus);
+  // «Капельки» is the design's: the button shows what the board has (after an undo too).
+  auto teardropsShown = [this] { (*cmds_)["Cmd_Teardrops"]->setChecked(doc_->hasBoard() && doc_->board()->settings.route.teardrops); };
+  connect(doc_, &Document::boardChanged, this, teardropsShown);
+  connect(doc_, &Document::boardReplaced, this, teardropsShown);
   connect(doc_, &Document::drcChanged, this, &MainWindow::updateStatus);
   connect(doc_, &Document::unitChanged, this, [this] {
     updateStatus();
@@ -343,6 +347,13 @@ void MainWindow::bindCommands() {
 
   // Инструменты
   c.bind("Accel_DRC", [this] { runDrc(); });
+  c.bind("Cmd_Teardrops", [this] {
+    auto before = doc_->beginEdit();
+    RouteSettings& rs = doc_->board()->settings.route;
+    rs.teardrops = !rs.teardrops;
+    doc_->commitEdit(before, tr("Капельки"), false);
+    showHint(rs.teardrops ? tr("Капельки включены: %1").arg(doc_->teardrops().size()) : tr("Капельки выключены"), 4000);
+  });
   c.bind("Cmd_RestoreDiff", [this] {
     if (doc_->board()->hispeed.diffSignals.empty()) {
       showHint(tr("Нет заданных дифф. сигналов"));

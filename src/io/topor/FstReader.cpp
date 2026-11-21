@@ -1257,6 +1257,11 @@ struct Reader {
 
   // Settings: how labels turn with their components. (The settings of the autorouter are the program's.)
   void readSettings(const Element& st) {
+    if (auto* a = st.find("Autoroute")) {
+      b.settings.route.teardrops = a->flag("teardrops", false);
+      for (const auto& [name, value] : a->attrs)
+        if (name != "teardrops") b.settings.route.other.emplace_back(name, value);
+    }
     if (auto* l = st.find("Labels")) {
       LabelSettings& s = b.settings.labels;
       s.rotateWithComp = l->flag("rotateWithComp", true);

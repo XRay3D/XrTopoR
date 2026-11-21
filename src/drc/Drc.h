@@ -32,6 +32,9 @@ struct DrcOptions {
   // rules, «Зазор от компонентов до края платы»); two fixed components are not checked against each other.
   // Off unless asked for: the counts the tools steer by are of the copper.
   bool components = false;
+  // «Капельки» (core/Teardrops.h) are copper of their wires. Off unless asked for, as the components are: the
+  // tools judge their drawings by the wires themselves.
+  bool teardrops = false;
   double tolerance = 2000;   // nm: smaller shortfalls are rounding
   size_t maxViolations = 5000;
 };

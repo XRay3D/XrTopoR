@@ -102,6 +102,7 @@ int cmdInfo(const Board& b) {
 int cmdDrc(const Board& b, size_t maxShow, bool components) {
   DrcOptions opt;
   opt.components = components;
+  opt.teardrops = true;
   auto v = runDrc(b, opt);
   std::flat_map<DrcViolation::Type, int> counts;
   for (auto& x : v) counts[x.type]++;

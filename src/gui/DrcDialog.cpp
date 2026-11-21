@@ -185,6 +185,7 @@ int DrcDialog::run(Document* doc, QWidget* parent) {
   o.edge = o.clearance && s.value(pairKey(6, 2), true).toBool();
   o.tolerance = s.value("drc/tolerance", 2000.0).toDouble();
   o.maxViolations = s.value("drc/limit", true).toBool() ? size_t(s.value("drc/limitCount", 5000).toInt()) : size_t(-1);
+  o.teardrops = true;
   auto v = runDrc(*doc->board(), o);
   // Pairs switched off in the matrix are dropped.
   std::erase_if(v, [&](const DrcViolation& x) {

@@ -667,7 +667,10 @@ TEST(FstIO, DesignSettingsRoundTrip) {
   auto r = io::loadBoard(data("topor/Example_02/Placement.fst"));
   ASSERT_TRUE(r) << r.error();
   Board& a = **r;
-  EXPECT_EQ(a.settings, DesignSettings{});  // the example's: rotateWithComp on, AutoConnect, every warning on
+  // The example's: rotateWithComp on, AutoConnect, every warning on; of the autorouter's, weakCheck (kept as read).
+  DesignSettings examples;
+  examples.route.other = {{"weakCheck", "on"}};
+  EXPECT_EQ(a.settings, examples);
   std::string text = io::writeFst(a);
   EXPECT_NE(text.find("<Labels rotateWithComp=\"on\"/>"), std::string::npos);
   EXPECT_NE(text.find("<PadConnectSettings mode=\"AutoConnect\"/>"), std::string::npos);

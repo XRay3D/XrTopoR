@@ -11,6 +11,7 @@
 
 #include "core/Padstack.h"
 #include "core/Runs.h"
+#include "core/Teardrops.h"
 #include "core/ZoneFill.h"
 #include "io/topor/Fst.h"
 #include "io/xml/Xml.h"
@@ -1311,6 +1312,9 @@ struct Writer {
   void writeWires() {
     std::map<std::pair<LayerId, int>, std::vector<const Run*>> groups;
     const std::vector<Run> runs = buildRuns(b, {.exact = true, .atCopper = true});
+    // «Капельки» of each piece (TopoR writes them with the wire; reading, it makes them anew).
+    std::multimap<int, Teardrop> drops;
+    for (const Teardrop& d : teardrops(b)) drops.emplace(d.track, d);
     for (const Run& r : runs)
       if (r.layer >= 0 && r.layer < int(b.layers.size()) && !layerName[r.layer].empty()) groups[{r.layer, r.net}].push_back(&r);
     for (auto& [key, list] : groups)
@@ -1323,6 +1327,16 @@ struct Writer {
         attrs.push_back({"width", mm(r->width)});
         if (r->zip >= 0 && r->zip < int(b.zips.size())) attrs.push_back({"zipwireRef", zipId(r->zip)});
         x.openList("Subwire", attrs);
+        bool any = false;
+        for (const ChainStep& sg : r->steps)
+          for (auto [it, last] = drops.equal_range(sg.track); it != last; ++it) {
+            if (!any) x.open("Teardrops");
+            any = true;
+            x.open("Teardrop");
+            for (Vec2 q : it->second.quad) xy("Dot", toFst(q));
+            x.close();
+          }
+        if (any) x.close();
         xy("Start", toFst(r->start(b)));
         for (const ChainStep& sg : r->steps) writeTrackPiece(b.tracks[size_t(sg.track)], sg.reversed);
         x.close();
@@ -1482,7 +1496,12 @@ struct Writer {
     writeConnectivity();
     x.blank();
     x.open("Settings", {{"version", "1.3"}});
-    x.empty("Autoroute", {{"autoEqu", "None"}});
+    {
+      const RouteSettings& rs = b.settings.route;
+      std::vector<std::pair<std::string, std::string>> at = rs.other;  // (none: TopoR's own <Autoroute/>)
+      if (rs.teardrops) at.emplace_back("teardrops", "on");
+      x.emptyList("Autoroute", at);
+    }
     {
       // (TopoR writes the one attribute while the rules of orientation are off)
       const LabelSettings& l = b.settings.labels;

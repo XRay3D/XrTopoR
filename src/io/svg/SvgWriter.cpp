@@ -4,6 +4,7 @@
 #include <ranges>
 
 #include "core/Connectivity.h"
+#include "core/Teardrops.h"
 
 namespace xr::io {
 
@@ -31,6 +32,7 @@ std::string writeSvg(const Board& b, const SvgOptions& opt) {
     out += std::format("<path d=\"{}\" fill=\"#1b2430\" stroke=\"#e8e0a0\" stroke-width=\"0.1\"/>\n", pathOf(loop, true));
 
   auto cu = b.copperLayers();
+  const std::vector<Teardrop> drops = teardrops(b);
   // Bottom layers first so the top copper is drawn last.
   for (auto [ci, l] : v::enumerate(cu) | v::reverse) {
     const char* col = kCopperColors[ci % std::size(kCopperColors)];
@@ -43,6 +45,10 @@ std::string writeSvg(const Board& b, const SvgOptions& opt) {
       out += std::format("<path d=\"{}\" fill=\"none\" stroke-width=\"{:.4f}\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/>\n",
                          pathOf(t.path(5000), false), t.width / 1e6);
     }
+    for (const Teardrop& d : drops)
+      if (d.layer == l)
+        out += std::format("<path d=\"{}\" stroke-width=\"{:.4f}\" stroke-linejoin=\"round\"/>\n", pathOf(Polyline{d.quad[0], d.quad[1], d.quad[2], d.quad[3]}, true),
+                           d.width / 1e6);
     for (auto& p : b.pads)
       if (p.onLayer(l)) out += std::format("<path d=\"{}\" stroke=\"none\"/>\n", pathOf(p.shapeGeom().outline(5000), true));
     out += "</g>\n";

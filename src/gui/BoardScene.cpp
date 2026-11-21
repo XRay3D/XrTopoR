@@ -126,6 +126,13 @@ void BoardView::sceneLayer(gl::SceneBuilder& sb, LayerId l) const {
       ProfScope ps("scene.tracks");
       for (auto& t : shownTracks())
         if (t.layer == l) sceneTrack(sb, t, netColor(t.net, d.colorizeWire).value_or(t.locked ? fixColor : details));
+      // «Капельки» of the board's own wires (not of a drawing being tried), in the colour of their wire.
+      if (!sketch_)
+        for (const Teardrop& td : doc_->teardrops()) {
+          if (td.layer != l || td.track >= int(b.tracks.size())) continue;
+          const Track& t = b.tracks[size_t(td.track)];
+          sb.shape(td.shape(), col(netColor(t.net, d.colorizeWire).value_or(t.locked ? fixColor : details)));
+        }
       sb.flush();
       for (auto& t : shownTracks())
         if (t.layer == l) sceneFlexFix(sb, t);

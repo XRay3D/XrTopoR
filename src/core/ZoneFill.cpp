@@ -1,3 +1,4 @@
+#include "core/Teardrops.h"
 #include "core/ZoneFill.h"
 
 #include <boost/geometry.hpp>
@@ -260,6 +261,7 @@ ZoneFillStats fillZones(Board& b, const ZoneFillOptions& opt) {
   }
   SpatialIndex idx;
   idx.build(b);
+  const std::vector<Teardrop> drops = teardrops(b);
 
   // The board: every contour that lies in no other (a design may hold several boards side by side) with the
   // contours inside it cut out, and a contour inside a cutout a piece of board again — by how deep each is nested.
@@ -350,6 +352,13 @@ ZoneFillStats fillZones(Board& b, const ZoneFillOptions& opt) {
       // crystal has 1 mm on Top and 1.5 on Bottom, and the pour of Bottom came 0.05 mm from it.)
       for (auto& s : itemShapes(b, r, 0, z.layer)) holes.push_back(toMulti(s.inflated(clr).outline(opt.arcTolerance)));
     });
+    // «Капельки» of the other nets' wires are their copper.
+    for (const Teardrop& d : drops) {
+      if (d.layer != z.layer || d.net == z.net) continue;
+      const Shape s = d.shape();
+      if (!s.bbox().intersects(zb.inflated(maxClr))) continue;
+      holes.push_back(toMulti(s.inflated(double(b.zoneClearance(z, d.net)) + opt.arcTolerance).outline(opt.arcTolerance)));
+    }
     // Already poured zones (higher priority) of other nets on this layer, and the copper of the areas that are
     // always copper.
     for (int oz : order) {

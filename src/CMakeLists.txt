@@ -18,6 +18,7 @@ add_library(xrcore STATIC
   core/Signals.cpp
   core/Runs.cpp
   core/SpatialIndex.cpp
+  core/Teardrops.cpp
   core/ZoneFill.cpp
   io/sexpr/SExpr.cpp
 )

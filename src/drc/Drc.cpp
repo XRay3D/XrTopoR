@@ -1,3 +1,4 @@
+#include "core/Teardrops.h"
 #include "core/BoxGrid.h"
 #include "drc/Drc.h"
 
@@ -380,9 +381,16 @@ std::vector<DrcViolation> check(const Board& b, const DrcOptions& opt, const Drc
     std::vector<BBox> itemBox(nItems);
     std::vector<LayerMask> itemMask(nItems);
     std::optional<ProfScope> ps(std::in_place, "drc.shapes");
+    std::vector<std::vector<Shape>> dropsOf;  // per track: its teardrops
+    if (opt.teardrops) {
+      dropsOf.resize(b.tracks.size());
+      for (const Teardrop& d : teardrops(b)) dropsOf[size_t(d.track)].push_back(d.shape());
+    }
     parallelFor(nItems, [&](size_t k) {
       const ItemRef r = refOf(k);
       shapeCache[slot(r.type)][size_t(r.index)] = itemShapesExact(b, r);  // (an arc track is one shape: no chords)
+      if (r.type == ItemType::Track && !dropsOf.empty())
+        for (const Shape& d : dropsOf[size_t(r.index)]) shapeCache[slot(r.type)][size_t(r.index)].push_back(d);
       boxCache[slot(r.type)][size_t(r.index)] = boxesFor(shapeCache[slot(r.type)][size_t(r.index)]);
       for (const BBox& sb : boxCache[slot(r.type)][size_t(r.index)]) itemBox[k].add(sb);
       itemMask[k] = itemLayers(b, r);

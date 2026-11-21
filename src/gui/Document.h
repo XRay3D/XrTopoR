@@ -10,6 +10,7 @@
 
 #include "core/Connectivity.h"
 #include "core/Delay.h"
+#include "core/Teardrops.h"
 #include "drc/Drc.h"
 #include "gui/Units.h"
 #include "topo/Topology.h"
@@ -115,6 +116,7 @@ class Document : public QObject {
   // Derived data, rebuilt lazily after edits.
   const SpatialIndex& index();
   const Connectivity& connectivity();
+  const std::vector<Teardrop>& teardrops();  // «Капельки» of the wires as they lie (core/Teardrops.h)
   void invalidate();  // call after any board edit (the index and the connections; the model follows commitEdit)
   void invalidateModel() { topoStale_ = true; }
   bool topologyFresh() const { return topo_ && !topoStale_; }  // the model followed the edits (not to be built anew)  // a change the model cannot follow (the rules, the stack)
@@ -186,6 +188,7 @@ class Document : public QObject {
   Unit unit_ = Unit::Mm;
   std::optional<SpatialIndex> index_;
   std::optional<Connectivity> conn_;
+  std::optional<std::vector<Teardrop>> drops_;
   std::unique_ptr<topo::Topology> topo_;
   bool topoStale_ = true;  // the model is not the board's (built anew when asked for)
   bool syncModelFrom(const EditSnapshot& was);
