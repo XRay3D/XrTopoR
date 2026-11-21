@@ -621,6 +621,46 @@ TEST(Gui, RulerMeasuresPoints) {
 // A conductor of a zipped pair (Signals.fst, the pair SDCLK_U2 on Int 1): X takes the whole section, both
 // conductors; «Свойства» shows the section (TopoR's «Свойства застёгнутой пары проводников»), its button swaps
 // the nets as one undoable step; «Расстегнуть» takes the section away, the conductors stay, undo brings it back.
+// «Инструменты > Восстановить дифф. пары проводников» with TopoR's three messages: no differential signals; none
+// to restore (all zipped already); the pairs found — one step of undo.
+TEST(Gui, RestoreDiffPairsReports) {
+  app();
+  MainWindow w;
+  auto hinted = [&](const QString& part) {
+    for (QLabel* l : w.findChildren<QLabel*>())
+      if (l->text().contains(part)) return true;
+    return false;
+  };
+  QAction* restore = (*w.commands())["Cmd_RestoreDiff"];
+  EXPECT_FALSE(restore->isEnabled()) << "no board";
+  ASSERT_TRUE(w.openFile(QString::fromStdString(data("astable.kicad_pcb"))));
+  ASSERT_TRUE(restore->isEnabled());
+  restore->trigger();
+  EXPECT_TRUE(hinted("Нет заданных дифф. сигналов"));
+  QTemporaryDir dir;  // (a copy: opened beside its project file, the design is marked open in it)
+  ASSERT_TRUE(QFile::copy(QString::fromStdString(data("topor/Example_06/Signals.fst")), dir.filePath("Signals.fst")));
+  ASSERT_TRUE(w.openFile(dir.filePath("Signals.fst")));
+  Document& doc = *w.document();
+  ASSERT_EQ(doc.board()->zips.size(), 1u);
+  restore->trigger();
+  EXPECT_TRUE(hinted("Дифф. пар, подходящих для восстановления, не обнаружено"));
+  EXPECT_FALSE(doc.undoStack()->canUndo());
+  {
+    auto before = doc.beginEdit();
+    unzip(*doc.board(), 0);
+    doc.commitEdit(before, "unzip", false);
+  }
+  ASSERT_TRUE(doc.board()->zips.empty());
+  restore->trigger();
+  EXPECT_TRUE(hinted("Обнаружены и застёгнуты дифф. пары проводников для 1 дифф. сигналов"));
+  EXPECT_EQ(doc.board()->zips.size(), 1u);
+  doc.undoStack()->undo();
+  EXPECT_TRUE(doc.board()->zips.empty());
+  for (const Track& t : doc.board()->tracks) EXPECT_EQ(t.zip, -1);
+  doc.undoStack()->redo();
+  EXPECT_EQ(doc.board()->zips.size(), 1u);
+}
+
 TEST(Gui, ZippedPairSelectionAndProperties) {
   Fixture f("topor/Example_06/Signals.fst");
   PropertiesPanel props(&f.doc);

@@ -2187,6 +2187,143 @@ TEST(Topo, ZipSwapUnzip) {
   EXPECT_EQ(Connectivity::compute(p.b).ratsnest.size(), 0u);
 }
 
+// TopoR's «Восстановить дифф. пары проводников»: the conductors of a pair lying as its rule has them are zipped
+// again over the whole board, nothing moving; a piece reaching past its neighbour is cut where the neighbour ends;
+// what lies at another gap, is of another width, zipped already or fixed stays.
+TEST(DiffPairs, RestoreZipsWhatLiesByTheRule) {
+  PinBoard p;
+  p.b.netClasses[0].clearance = mmToNm(0.2);
+  p.pad("P", 4, 9, PadShapeKind::Circle, 1, 1);
+  p.pad("N", 4, 11, PadShapeKind::Circle, 1, 1);
+  p.pad("P", 36, 9, PadShapeKind::Circle, 1, 1);
+  p.pad("N", 36, 11, PadShapeKind::Circle, 1, 1);
+  p.pair("P", "N", 0.3, 0.2);
+  // P runs on past the place where N turns away to its pad: only the part beside N is the pair.
+  p.track("P", {{4, 9}, {8, 9.75}, {34, 9.75}, {36, 9}}, 0.3);
+  p.track("N", {{4, 11}, {8, 10.25}, {30, 10.25}, {36, 11}}, 0.3);
+  const std::vector<Track> was = p.b.tracks;
+  const RestoreResult r = restoreDiffPairs(p.b);
+  EXPECT_EQ(r.pairs, 1);
+  EXPECT_EQ(r.sections, 1);
+  ASSERT_EQ(p.b.zips.size(), 1u);
+  int conductors = 0;
+  for (const Track& t : p.b.tracks)
+    if (t.zip == 0) {
+      ++conductors;
+      EXPECT_NEAR(t.a.v().x, PinBoard::at(8, 0).x, 1000);
+      EXPECT_NEAR(t.b.v().x, PinBoard::at(30, 0).x, 1000) << "the pair ends where N turns away";
+    }
+  EXPECT_EQ(conductors, 2);
+  EXPECT_TRUE(p.vertexAt(34, 9.75)) << "P's own piece past the pair stays";
+  // Nothing moved: every piece lies on a piece of its net as it was.
+  for (const Track& t : p.b.tracks) {
+    double d = 1e300;
+    for (const Track& o : was)
+      if (o.net == t.net) d = std::min({d, distPointSegment(t.a.v(), o.a.v(), o.b.v()) + distPointSegment(t.b.v(), o.a.v(), o.b.v())});
+    EXPECT_LT(d, 2000);
+  }
+  EXPECT_EQ(Connectivity::compute(p.b).ratsnest.size(), 0u);
+  EXPECT_EQ(p.violations(), 0);
+  // Once more: nothing left to zip.
+  const RestoreResult again = restoreDiffPairs(p.b);
+  EXPECT_EQ(again.sections, 0);
+  EXPECT_EQ(p.b.zips.size(), 1u);
+}
+
+TEST(DiffPairs, RestoreLeavesWhatIsNotByTheRule) {
+  auto board = [](double gap, double width, bool locked) {
+    PinBoard p;
+    p.b.netClasses[0].clearance = mmToNm(0.2);
+    p.pad("P", 4, 9, PadShapeKind::Circle, 1, 1);
+    p.pad("N", 4, 11, PadShapeKind::Circle, 1, 1);
+    p.pad("P", 36, 9, PadShapeKind::Circle, 1, 1);
+    p.pad("N", 36, 11, PadShapeKind::Circle, 1, 1);
+    p.pair("P", "N", 0.3, 0.2);
+    const double h = (width + gap) / 2;
+    p.track("P", {{4, 9}, {8, 10 - h}, {32, 10 - h}, {36, 9}}, width);
+    p.track("N", {{4, 11}, {8, 10 + h}, {32, 10 + h}, {36, 11}}, width);
+    for (Track& t : p.b.tracks) t.locked = locked;
+    return p;
+  };
+  {
+    PinBoard p = board(0.2, 0.3, false);
+    EXPECT_EQ(restoreDiffPairs(p.b).sections, 1) << "by the rule";
+  }
+  {
+    PinBoard p = board(0.4, 0.3, false);
+    EXPECT_EQ(restoreDiffPairs(p.b).sections, 0) << "another gap";
+    EXPECT_TRUE(p.b.zips.empty());
+  }
+  {
+    PinBoard p = board(0.2, 0.25, false);
+    EXPECT_EQ(restoreDiffPairs(p.b).sections, 0) << "another width";
+  }
+  {
+    PinBoard p = board(0.2, 0.3, true);
+    const size_t n = p.b.tracks.size();
+    EXPECT_EQ(restoreDiffPairs(p.b).sections, 0) << "fixed";
+    EXPECT_EQ(p.b.tracks.size(), n);
+  }
+  {
+    PinBoard p;  // no differential signal at all
+    p.pad("P", 4, 9, PadShapeKind::Circle, 1, 1);
+    p.pad("P", 36, 9, PadShapeKind::Circle, 1, 1);
+    p.track("P", {{4, 9}, {36, 9}}, 0.3);
+    const RestoreResult r = restoreDiffPairs(p.b);
+    EXPECT_EQ(r.pairs, 0);
+    EXPECT_EQ(r.sections, 0);
+  }
+}
+
+// Signals.fst (Example_06): its zipped sections unzipped are found again, section for section, the conductors
+// where they lay.
+TEST(DiffPairs, RestoreFindsWhatWasUnzipped) {
+  auto r = io::loadBoard(data("topor/Example_06/Signals.fst"));
+  ASSERT_TRUE(r) << r.error();
+  Board& b = **r;
+  const size_t sections = b.zips.size();
+  ASSERT_GT(sections, 0u);
+  std::vector<Track> zipped;
+  for (const Track& t : b.tracks)
+    if (t.zip >= 0) zipped.push_back(t);
+  EXPECT_EQ(restoreDiffPairs(b).sections, 0) << "all zipped already";
+  const ZippedWire was = b.zips[0];
+  while (!b.zips.empty()) unzip(b, 0);
+  for (const Track& t : b.tracks) ASSERT_EQ(t.zip, -1);
+  const size_t ratsnest = Connectivity::compute(b).ratsnest.size();
+  const RestoreResult res = restoreDiffPairs(b);
+  EXPECT_EQ(res.pairs, 1);
+  EXPECT_EQ(size_t(res.sections), sections);
+  EXPECT_EQ(b.zips.size(), sections);
+  // The conductors are the very pieces that were.
+  size_t now = 0;
+  for (const Track& t : b.tracks) {
+    if (t.zip < 0) continue;
+    ++now;
+    EXPECT_TRUE(r::any_of(zipped, [&](const Track& o) { return o.net == t.net && o.a == t.a && o.b == t.b && o.mid == t.mid; }));
+  }
+  EXPECT_EQ(now, zipped.size());
+  EXPECT_EQ(Connectivity::compute(b).ratsnest.size(), ratsnest);
+  // The section as TopoR had it: its nets, the rule's widths, the axis between the conductors (either way round:
+  // the side of the positive conductor is told from the axis's travel).
+  const ZippedWire& z = b.zips[0];
+  EXPECT_EQ(z.pair, was.pair);
+  EXPECT_EQ(z.layer, was.layer);
+  EXPECT_EQ(z.netP, was.netP);
+  EXPECT_EQ(z.netN, was.netN);
+  EXPECT_EQ(z.condWidth, was.condWidth);
+  EXPECT_EQ(z.gap, was.gap);
+  ASSERT_FALSE(z.axis.empty());
+  const bool sameWay = (z.axis.front().a.v() - was.axis.front().a.v()).len() < (z.axis.front().a.v() - was.axis.back().b.v()).len();
+  EXPECT_EQ(z.pSide, sameWay ? was.pSide : -was.pSide);
+  for (const Track& t : was.axis)
+    for (Vec2 q : {t.a.v(), t.b.v()}) {
+      double d = 1e300;
+      for (const Track& a : z.axis) d = std::min(d, distPointSegment(q, a.a.v(), a.b.v()));
+      EXPECT_LT(d, 5000) << "the axis as it was";
+    }
+}
+
 namespace {
 
 // How far each conductor piece's middle lies from the section's axis (the nearest piece of it), the worst

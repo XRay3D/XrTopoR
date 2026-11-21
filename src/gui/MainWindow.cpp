@@ -28,6 +28,7 @@
 #include <QVBoxLayout>
 #include <QtConcurrent/QtConcurrent>
 
+#include "core/DiffPairs.h"
 #include "core/Edit.h"
 #include "topo/Sidecar.h"
 #include "core/ZoneFill.h"
@@ -342,6 +343,21 @@ void MainWindow::bindCommands() {
 
   // Инструменты
   c.bind("Accel_DRC", [this] { runDrc(); });
+  c.bind("Cmd_RestoreDiff", [this] {
+    if (doc_->board()->hispeed.diffSignals.empty()) {
+      showHint(tr("Нет заданных дифф. сигналов"));
+      return;
+    }
+    auto before = doc_->beginEdit();
+    const RestoreResult r = restoreDiffPairs(*doc_->board());
+    if (!r.sections) {
+      showHint(tr("Дифф. пар, подходящих для восстановления, не обнаружено"));
+      return;
+    }
+    doc_->clearSelection();
+    doc_->commitEdit(before, tr("Восстановить дифф. пары проводников"), false);
+    showHint(tr("Обнаружены и застёгнуты дифф. пары проводников для %1 дифф. сигналов").arg(r.pairs));
+  });
   c.bind("Cmd_RemoveExcessVias", [this] {
     auto before = doc_->beginEdit();
     int n = edit::removeExcessVias(*doc_->board());

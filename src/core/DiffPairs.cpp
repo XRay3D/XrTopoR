@@ -2,7 +2,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <array>
+#include <optional>
 #include <set>
+#include <tuple>
 
 #include "core/Edit.h"
 
@@ -401,6 +404,296 @@ std::expected<int, std::string> zipTracks(Board& b, const std::vector<int>& sel)
     }
   }
   return zi;
+}
+
+namespace {
+
+double lengthOf(const Track& t) {
+  if (t.mid)
+    if (const ArcGeom g = ArcGeom::fromThreePoints(t.a.v(), t.mid->v(), t.b.v()); g.valid) return g.length();
+  return (t.b.v() - t.a.v()).len();
+}
+
+// The part of t (lengths along it from its start) that u runs beside, their centrelines d apart; nullopt when it
+// does not.
+std::optional<std::pair<double, double>> facing(const Track& t, const Track& u, double d, double tol) {
+  if (t.isArc() != u.isArc()) return std::nullopt;
+  const double len = lengthOf(t);
+  double sa = 0, sb = 0;
+  if (!t.isArc()) {
+    const Vec2 e = (t.b.v() - t.a.v()).normalized();
+    const double oa = e.cross(u.a.v() - t.a.v()), ob = e.cross(u.b.v() - t.a.v());
+    if ((oa > 0) != (ob > 0) || std::abs(std::abs(oa) - d) > tol || std::abs(std::abs(ob) - d) > tol) return std::nullopt;
+    sa = e.dot(u.a.v() - t.a.v());
+    sb = e.dot(u.b.v() - t.a.v());
+  } else {
+    const ArcGeom g = ArcGeom::fromThreePoints(t.a.v(), t.mid->v(), t.b.v());
+    const ArcGeom h = ArcGeom::fromThreePoints(u.a.v(), u.mid->v(), u.b.v());
+    if (!g.valid || !h.valid) return std::nullopt;
+    if ((g.center - h.center).len() > tol || std::abs(std::abs(g.radius - h.radius) - d) > tol) return std::nullopt;
+    const double sw = std::abs(g.sweep);
+    auto along = [&](Vec2 q) {
+      double a = (std::atan2(q.y - g.center.y, q.x - g.center.x) - g.startAngle) * (g.sweep > 0 ? 1.0 : -1.0);
+      while (a > sw / 2 + M_PI) a -= 2 * M_PI;
+      while (a <= sw / 2 - M_PI) a += 2 * M_PI;
+      return a * g.radius;
+    };
+    sa = along(u.a.v());
+    sb = along(u.b.v());
+  }
+  const double lo = std::max(0.0, std::min(sa, sb)), hi = std::min(len, std::max(sa, sb));
+  if (hi - lo < 10 * tol) return std::nullopt;
+  return std::pair{lo, hi};
+}
+
+// The piece of t between the lengths s0 and s1 along it.
+Track pieceOf(const Track& t, double s0, double s1) {
+  const double len = lengthOf(t);
+  Track p = t;
+  p.id = 0;
+  if (t.mid) {
+    const ArcGeom g = ArcGeom::fromThreePoints(t.a.v(), t.mid->v(), t.b.v());
+    if (s0 > 0) p.a = Point(g.pointAt(s0 / len));
+    if (s1 < len) p.b = Point(g.pointAt(s1 / len));
+    p.mid = Point(g.pointAt((s0 + s1) / 2 / len));
+  } else {
+    const Vec2 e = (t.b.v() - t.a.v()).normalized();
+    if (s0 > 0) p.a = Point(t.a.v() + e * s0);
+    if (s1 < len) p.b = Point(t.a.v() + e * s1);
+  }
+  return p;
+}
+
+double distToTrack(Vec2 p, const Track& t) {
+  const Polyline pl = t.path(200);
+  double d = 1e300;
+  for (size_t i = 0; i + 1 < pl.size(); ++i) d = std::min(d, distPointSegment(p, pl[i], pl[i + 1]));
+  return d;
+}
+
+// A conductor of a section to be: the pieces of one net in the order of travel (`rev`: a piece run from its end
+// to its start), the first cut at `lo` and the last at `hi` (lengths along them from their starts). `beside`:
+// the pieces that run beside the other net (the others are the short ones TopoR rounds an outer corner with).
+struct SideRun {
+  int net = kNoNet;
+  std::vector<int> tracks;
+  std::vector<char> rev, beside;
+  double lo = 0, hi = 0;
+};
+
+struct Section {
+  SideRun side[2];
+};
+
+std::vector<Section> sectionsBeside(const Board& b, int pair, LayerId layer, Coord w, Coord gap) {
+  const double d = double(w + gap), tol = 2000, bridge = 2.0 * double(2 * w + gap);
+  std::vector<int> cand;
+  for (int i = 0; i < int(b.tracks.size()); ++i) {
+    const Track& t = b.tracks[size_t(i)];
+    if (t.layer == layer && t.zip < 0 && t.serp < 0 && !t.locked && b.pairOfNet(t.net) == pair && std::llabs(t.width - w) <= 1000)
+      cand.push_back(i);
+  }
+  const size_t n = cand.size();
+  auto tr = [&](size_t c) -> const Track& { return b.tracks[size_t(cand[c])]; };
+  // What of each piece runs beside the other net, and beside which pieces.
+  std::vector<std::optional<std::pair<double, double>>> part(n);
+  std::vector<std::pair<size_t, size_t>> faces;
+  for (size_t i = 0; i < n; ++i)
+    for (size_t j = 0; j < n; ++j) {
+      if (tr(i).net == tr(j).net) continue;
+      auto f = facing(tr(i), tr(j), d, tol);
+      if (!f) continue;
+      part[i] = part[i] ? std::pair{std::min(part[i]->first, f->first), std::max(part[i]->second, f->second)} : *f;
+      if (i < j) faces.push_back({i, j});
+    }
+  // The pieces of a net end to end: the one piece that shares an end (a branch is where a chain stops).
+  std::vector<std::array<std::pair<int, int>, 2>> nb(n, {std::pair{-1, 0}, std::pair{-1, 0}});
+  for (size_t i = 0; i < n; ++i)
+    for (int e = 0; e < 2; ++e) {
+      int count = 0;
+      for (size_t j = 0; j < n; ++j) {
+        if (j == i || tr(j).net != tr(i).net) continue;
+        for (int g = 0; g < 2; ++g)
+          if (((e ? tr(i).b : tr(i).a).v() - (g ? tr(j).b : tr(j).a).v()).len() <= edit::kJoinTol) {
+            ++count;
+            nb[i][size_t(e)] = {int(j), g};
+          }
+      }
+      if (count != 1) nb[i][size_t(e)] = {-1, 0};
+    }
+  std::vector<SideRun> runs;
+  std::vector<int> runOf(n, -1);
+  std::vector<char> seen(n, 0);
+  for (size_t i = 0; i < n; ++i) {
+    if (seen[i] || !part[i]) continue;
+    // The chain through i, in the order of travel.
+    std::vector<std::pair<size_t, bool>> chain{{i, false}};
+    seen[i] = 1;
+    for (int way = 0; way < 2; ++way) {
+      size_t c = i;
+      int out = way ? 0 : 1;  // the end the walk leaves the piece by
+      for (;;) {
+        auto [j, g] = nb[c][size_t(out)];
+        if (j < 0 || seen[size_t(j)] || nb[size_t(j)][size_t(g)].first != int(c)) break;
+        seen[size_t(j)] = 1;
+        // Forwards a piece entered by its end is run backwards; backwards it is one left by that end.
+        if (way == 0) chain.push_back({size_t(j), g == 1});
+        else chain.insert(chain.begin(), {size_t(j), g == 0});
+        c = size_t(j);
+        out = 1 - g;
+      }
+    }
+    // Its runs beside the other net: from a piece beside it to the last one, over short pieces that are not.
+    size_t k = 0;
+    while (k < chain.size()) {
+      if (!part[chain[k].first]) {
+        ++k;
+        continue;
+      }
+      size_t last = k;
+      double loose = 0;
+      for (size_t m = k + 1; m < chain.size(); ++m) {
+        if (part[chain[m].first]) {
+          last = m;
+          loose = 0;
+        } else if ((loose += lengthOf(tr(chain[m].first))) > bridge) {
+          break;
+        }
+      }
+      SideRun r;
+      r.net = tr(chain[k].first).net;
+      for (size_t m = k; m <= last; ++m) {
+        r.tracks.push_back(cand[chain[m].first]);
+        r.rev.push_back(chain[m].second);
+        r.beside.push_back(part[chain[m].first].has_value());
+        runOf[chain[m].first] = int(runs.size());
+      }
+      const auto& first = *part[chain[k].first];
+      const auto& end = *part[chain[last].first];
+      r.lo = chain[k].second ? lengthOf(tr(chain[k].first)) - first.second : first.first;
+      r.hi = chain[last].second ? lengthOf(tr(chain[last].first)) - end.first : end.second;
+      if (k == last && chain[k].second) r.lo = first.first, r.hi = first.second, r.rev[0] = 0;  // (one piece: as it lies)
+      runs.push_back(std::move(r));
+      k = last + 1;
+    }
+  }
+  // A section: two runs, one of each net, beside each other and no third.
+  std::vector<std::set<int>> mates(runs.size());
+  for (auto [i, j] : faces) {
+    if (runOf[i] < 0 || runOf[j] < 0) continue;
+    mates[size_t(runOf[i])].insert(runOf[j]);
+    mates[size_t(runOf[j])].insert(runOf[i]);
+  }
+  std::vector<Section> out;
+  for (size_t a = 0; a < runs.size(); ++a) {
+    if (mates[a].size() != 1) continue;
+    const size_t c = size_t(*mates[a].begin());
+    if (c < a || mates[c].size() != 1) continue;
+    out.push_back({{runs[a], runs[c]}});
+  }
+  return out;
+}
+
+// A run's pieces as they are travelled, the first and the last cut to the run.
+std::vector<Track> travelled(const Board& b, const SideRun& r, bool besideOnly) {
+  std::vector<Track> out;
+  for (size_t k = 0; k < r.tracks.size(); ++k) {
+    Track t = b.tracks[size_t(r.tracks[k])];
+    if (r.rev[k]) std::swap(t.a, t.b);
+    const double len = lengthOf(t);
+    const double lo = k == 0 ? r.lo : 0, hi = k + 1 == r.tracks.size() ? r.hi : len;
+    if (lo > 0 || hi < len) t = pieceOf(t, lo, hi);
+    if (!besideOnly || r.beside[k]) out.push_back(t);
+  }
+  return out;
+}
+
+}  // namespace
+
+RestoreResult restoreDiffPairs(Board& b) {
+  RestoreResult res;
+  std::set<int> done;  // the differential signals with a section zipped
+  for (int pair = 0; pair < int(b.hispeed.diffSignals.size()); ++pair)
+    for (LayerId layer : b.copperLayers()) {
+      Coord w = 0, gap = 0;
+      if (!b.pairRule(pair, layer, w, gap)) continue;
+      const double off = double(w + gap) / 2.0, pairWidth = double(2 * w + gap);
+      for (const Section& sec : sectionsBeside(b, pair, layer, w, gap)) {
+        // The axis: half way from the first run to the second, by the pieces that run beside it.
+        const std::vector<Track> base = travelled(b, sec.side[0], true), other = travelled(b, sec.side[1], false);
+        if (base.empty() || other.empty()) continue;
+        auto air = [](const std::vector<Track>& r) { return (r.back().b.v() - r.front().a.v()).len(); };
+        if (air(travelled(b, sec.side[0], false)) < 3 * pairWidth || air(other) < 3 * pairWidth) continue;
+        const Track& b0 = base.front();
+        Vec2 om = other.front().a.v();
+        double od = 1e300;
+        for (const Track& t : other)
+          for (Vec2 q : {t.a.v(), t.b.v()})
+            if (double dd = distToTrack(q, b0); dd < od) od = dd, om = q;
+        const double side = tangentAt(b0, b0.a.v()).cross(om - b0.a.v()) > 0 ? 1.0 : -1.0;
+        std::vector<Track> axis = offsetRun(base, side * off, 4 * pairWidth);
+        if (axis.empty()) continue;
+        // Both conductors lie half the pair's pitch from it where they run beside each other.
+        bool fits = true;
+        for (const SideRun& r : sec.side) {
+          const std::vector<Track> ps = travelled(b, r, true);
+          for (const Track& t : ps) {
+            const Vec2 m = t.mid ? t.mid->v() : (t.a.v() + t.b.v()) * 0.5;
+            double dd = 1e300;
+            for (const Track& a : axis) dd = std::min(dd, distToTrack(m, a));
+            fits = fits && std::abs(dd - off) <= 3000;
+          }
+        }
+        if (!fits) continue;
+        ZippedWire z;
+        z.layer = layer;
+        z.pair = pair;
+        z.netP = sec.side[0].net;
+        z.netN = sec.side[1].net;
+        bool baseIsP = true;  // the positive net: the one of the pair's first signal's cluster
+        if (const SignalCluster* c = b.hispeed.clusterOf(b.hispeed.diffSignals[size_t(pair)].signalA))
+          for (const std::string& name : c->nets)
+            if (b.findNet(name) == sec.side[1].net) baseIsP = false;
+        if (!baseIsP) std::swap(z.netP, z.netN);
+        z.condWidth = w;
+        z.gap = gap;
+        z.pSide = baseIsP ? -int(side) : int(side);
+        for (Track& t : axis) {
+          t.width = z.width();
+          t.net = kNoNet;
+          t.zip = -1;
+          t.serp = -1;
+          t.id = 0;
+          t.locked = t.edited = false;
+        }
+        z.axis = std::move(axis);
+        const int zi = int(b.zips.size());
+        b.zips.push_back(std::move(z));
+        // The conductors are the pieces as they lie; what of the first and the last reaches past the run is cut off.
+        for (const SideRun& r : sec.side)
+          for (size_t k = 0; k < r.tracks.size(); ++k) {
+            const Track t = b.tracks[size_t(r.tracks[k])];
+            const double len = lengthOf(t), cut = 2 * edit::kJoinTol;
+            // (the run's cuts are along its travel: a piece run backwards has them from its end)
+            double lo = k == 0 ? r.lo : 0, hi = k + 1 == r.tracks.size() ? r.hi : len;
+            if (r.rev[k]) std::tie(lo, hi) = std::pair{len - hi, len - lo};
+            if (lo <= cut) lo = 0;
+            if (hi >= len - cut) hi = len;
+            if (lo > 0) b.tracks.push_back(pieceOf(t, 0, lo));
+            if (hi < len) b.tracks.push_back(pieceOf(t, hi, len));
+            Track& in = b.tracks[size_t(r.tracks[k])];
+            if (lo > 0 || hi < len) {
+              in = pieceOf(t, lo, hi);
+              in.id = t.id;
+            }
+            in.zip = zi;
+          }
+        ++res.sections;
+        done.insert(pair);
+      }
+    }
+  res.pairs = int(done.size());
+  return res;
 }
 
 }  // namespace xr

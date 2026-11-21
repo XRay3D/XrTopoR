@@ -50,4 +50,16 @@ bool moveAxisPiece(Board& b, int zip, int k, Vec2 d);
 // a clasp).
 void swapZipNets(Board& b, int zip);
 
+// TopoR's «Восстановить дифф. пары проводников»: over the whole board, the conductors of the two nets of a
+// differential signal that run beside each other as the pair's rule on their layer has them (each as wide as the
+// rule, their centrelines a width and a gap apart: lines parallel, arcs about one centre) are zipped, run by run
+// (zipTracks: a run shorter than three widths of the pair stays). A piece longer than its neighbour of the other
+// net is cut where the neighbour ends; nothing moves: a run that would not come out as it lay is left alone. Not
+// the zipped, the fixed, nor the pieces of serpents.
+struct RestoreResult {
+  int pairs = 0;     // the differential signals with a section zipped
+  int sections = 0;  // the sections made
+};
+RestoreResult restoreDiffPairs(Board& b);
+
 }  // namespace xr
