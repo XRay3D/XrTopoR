@@ -2,7 +2,7 @@
 
 #include <QApplication>
 #include <QDialogButtonBox>
-#include <QGridLayout>
+#include <QHBoxLayout>
 #include <QListView>
 #include <QMenu>
 #include <QPushButton>
@@ -17,93 +17,104 @@ namespace xr::gui {
 
 WiresToCopperDialog::WiresToCopperDialog(Document* doc, QWidget* parent) : QDialog(parent), doc_(doc) {
   setWindowTitle(tr("Преобразование проводников в полигоны"));
-  resize(420, 460);
+  resize(420, 400);
   const Board& b = *doc_->board();
   auto* v = new QVBoxLayout(this);
-  auto list = [&](const char* name, QStringListModel*& model) {
-    model = new QStringListModel(this);
-    auto* view = new QListView;
-    view->setObjectName(name);
-    view->setModel(model);
-    view->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    view->setSelectionMode(QAbstractItemView::ExtendedSelection);
-    return view;
-  };
-  auto tool = [&](const char* name, const QString& text) {
-    auto* t = new QToolButton;
-    t->setObjectName(name);
-    t->setText(text);
-    return t;
-  };
-  auto block = [&](QRadioButton* radio, QListView* view, QToolButton* plus, QToolButton* minus) {
-    auto* g = new QGridLayout;
-    g->addWidget(radio, 0, 0);
-    g->addWidget(plus, 0, 1);
-    g->addWidget(minus, 0, 2);
-    g->addWidget(view, 1, 0, 1, 3);
-    g->setColumnStretch(0, 1);
-    v->addLayout(g, 1);
-  };
-
+  // The two choices on top, one list under them for the one in force (each keeps its own names), and one row of
+  // buttons at the bottom: «+» with the menu of that choice, «−», «Преобразовать», «Отмена».
   byNets_ = new QRadioButton(tr("Цепи:"));
   byNets_->setObjectName("byNets");
   byNets_->setChecked(true);
-  netsView_ = list("nets", nets_);
-  addNet_ = tool("addNet", "+");
-  addNet_->setPopupMode(QToolButton::InstantPopup);
-  auto* netMenu = new QMenu(addNet_);
-  netMenu->addAction(tr("Цепи..."), this, [this, &b] {
+  byLayers_ = new QRadioButton(tr("Все проводники на слое:"));
+  byLayers_->setObjectName("byLayers");
+  auto* choice = new QHBoxLayout;
+  choice->addWidget(byNets_);
+  choice->addWidget(byLayers_);
+  choice->addStretch(1);
+  v->addLayout(choice);
+  nets_ = new QStringListModel(this);
+  layers_ = new QStringListModel(this);
+  list_ = new QListView;
+  list_->setObjectName("items");
+  list_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+  list_->setSelectionMode(QAbstractItemView::ExtendedSelection);
+  v->addWidget(list_, 1);
+  add_ = new QToolButton;
+  add_->setObjectName("add");
+  add_->setText("+");
+  add_->setPopupMode(QToolButton::InstantPopup);
+  remove_ = new QToolButton;
+  remove_->setObjectName("remove");
+  remove_->setText(QString::fromUtf8("\u2212"));
+  connect(remove_, &QToolButton::clicked, this, [this] { removeSelected(list_, current()); });
+
+  netMenu_ = new QMenu(add_);
+  netMenu_->setObjectName("netMenu");
+  netMenu_->addAction(tr("Цепи..."), this, [this, &b] {
     std::vector<std::string> rest;
     for (const Net& n : b.nets)
       if (!nets_->stringList().contains(QString::fromStdString(n.name))) rest.push_back(n.name);
-    add(nets_, pickNamesToTick(this, tr("Цепи"), rest));
+    add(nets_, pickNamesToTick(this, tr("Выберите цепи"), rest));
   });
-  netMenu->addAction(tr("Группы цепей..."), this, [this, &b] {
+  netMenu_->addAction(tr("Группы цепей..."), this, [this, &b] {
     if (!b.rules) return;
     std::vector<std::string> groups;
     for (const NetGroup& g : b.rules->netGroups) groups.push_back(g.name);
-    for (const std::string& g : pickNamesToTick(this, tr("Группы цепей"), groups)) add(nets_, b.rules->netsOf(g));
+    for (const std::string& g : pickNamesToTick(this, tr("Выберите группы цепей"), groups)) add(nets_, b.rules->netsOf(g));
   });
-  netMenu->addAction(tr("Все цепи"), this, [this, &b] {
+  netMenu_->addAction(tr("Все цепи"), this, [this, &b] {
     std::vector<std::string> names;
     for (const Net& n : b.nets) names.push_back(n.name);
     add(nets_, names);
   });
-  addNet_->setMenu(netMenu);
-  removeNet_ = tool("removeNet", QString::fromUtf8("\u2212"));
-  connect(removeNet_, &QToolButton::clicked, this, [this] { removeSelected(netsView_, nets_); });
-  block(byNets_, netsView_, addNet_, removeNet_);
 
-  byLayers_ = new QRadioButton(tr("Все проводники на слое:"));
-  byLayers_->setObjectName("byLayers");
-  layersView_ = list("layers", layers_);
-  addLayer_ = tool("addLayer", "+");
-  addLayer_->setPopupMode(QToolButton::InstantPopup);
-  auto* layerMenu = new QMenu(addLayer_);
-  for (LayerId l : b.copperLayers()) {
-    const std::string name = b.layers[size_t(l)].name;
-    layerMenu->addAction(QString::fromStdString(name), this, [this, name] { add(layers_, {name}); });
-  }
-  addLayer_->setMenu(layerMenu);
-  removeLayer_ = tool("removeLayer", QString::fromUtf8("\u2212"));
-  connect(removeLayer_, &QToolButton::clicked, this, [this] { removeSelected(layersView_, layers_); });
-  block(byLayers_, layersView_, addLayer_, removeLayer_);
+  layerMenu_ = new QMenu(add_);
+  layerMenu_->setObjectName("layerMenu");
+  std::vector<std::string> copper;
+  for (LayerId l : b.copperLayers()) copper.push_back(b.layers[size_t(l)].name);
+  layerMenu_->addAction(tr("Все слои"), this, [this, copper] { add(layers_, copper); });
+  layerMenu_->addAction(tr("Внешние слои"), this, [this, copper] {
+    if (!copper.empty()) add(layers_, copper.size() > 1 ? std::vector<std::string>{copper.front(), copper.back()} : copper);
+  });
+  layerMenu_->addSeparator();
+  for (const std::string& name : copper) layerMenu_->addAction(QString::fromStdString(name), this, [this, name] { add(layers_, {name}); });
+  layerMenu_->addSeparator();
+  layerMenu_->addAction(tr("Набор слоев..."), this, [this, copper] {
+    std::vector<std::string> rest;
+    for (const std::string& n : copper)
+      if (!layers_->stringList().contains(QString::fromStdString(n))) rest.push_back(n);
+    add(layers_, pickNamesToTick(this, tr("Выберите слои"), rest, false));
+  });
 
+  // One row at the bottom: «+» and «−» of the list, then «Преобразовать» and «Отмена».
   auto* box = new QDialogButtonBox;
-  QPushButton* go = box->addButton(tr("Преобразовать"), QDialogButtonBox::AcceptRole);
-  go->setObjectName("convert");
+  convert_ = box->addButton(tr("Преобразовать"), QDialogButtonBox::AcceptRole);
+  convert_->setObjectName("convert");
   box->addButton(tr("Отмена"), QDialogButtonBox::RejectRole);
   connect(box, &QDialogButtonBox::accepted, this, &QDialog::accept);
   connect(box, &QDialogButtonBox::rejected, this, &QDialog::reject);
-  v->addWidget(box);
+  auto* bar = new QHBoxLayout;
+  bar->addWidget(add_);
+  bar->addWidget(remove_);
+  bar->addStretch(1);
+  bar->addWidget(box);
+  v->addLayout(bar);
   connect(byNets_, &QRadioButton::toggled, this, &WiresToCopperDialog::sync);
+  for (QStringListModel* m : {nets_, layers_}) {
+    connect(m, &QAbstractItemModel::modelReset, this, &WiresToCopperDialog::sync);
+    connect(m, &QAbstractItemModel::rowsInserted, this, &WiresToCopperDialog::sync);
+    connect(m, &QAbstractItemModel::rowsRemoved, this, &WiresToCopperDialog::sync);
+  }
   sync();
 }
 
+QStringListModel* WiresToCopperDialog::current() const { return byLayers_->isChecked() ? layers_ : nets_; }
+
 void WiresToCopperDialog::sync() {
-  const bool layers = byLayers_->isChecked();
-  for (QWidget* w : std::initializer_list<QWidget*>{netsView_, addNet_, removeNet_}) w->setEnabled(!layers);
-  for (QWidget* w : std::initializer_list<QWidget*>{layersView_, addLayer_, removeLayer_}) w->setEnabled(layers);
+  if (list_->model() != current()) list_->setModel(current());
+  add_->setMenu(byLayers_->isChecked() ? layerMenu_ : netMenu_);
+  remove_->setEnabled(current()->rowCount() > 0);
+  convert_->setEnabled(current()->rowCount() > 0);  // (nothing chosen: nothing to convert)
 }
 
 void WiresToCopperDialog::add(QStringListModel* m, const std::vector<std::string>& names) {
@@ -148,20 +159,12 @@ bool WiresToCopperDialog::convert() {
   const WiresToCopperResult r = wiresToCopper(*doc_->board(), w);
   QApplication::restoreOverrideCursor();
   doc_->clearLog(group);
-  if (!r.wires && r.kept.empty()) {
-    doc_->addLog({LogMessage::Kind::Info, group, tr("У выбранных цепей и слоёв нет проводников для преобразования")});
+  if (!r.areas) {
+    doc_->addLog({LogMessage::Kind::Info, group, tr("У выбранных цепей и слоёв нет проводников, вокруг которых есть место для области")});
     return false;
   }
-  doc_->addLog({LogMessage::Kind::Info, group, tr("Преобразовано проводников: %1, областей металлизации: %2").arg(r.wires).arg(r.areas)});
-  if (!r.kept.empty()) {
-    QStringList names;
-    for (int n : r.kept) names << QString::fromStdString(doc_->board()->nets[size_t(n)].name);
-    doc_->addLog({LogMessage::Kind::Warning, group,
-                  tr("Оставлены проводниками (область не удержала бы соединение): %1").arg(names.join(", "))});
-  }
-  if (!r.wires) return false;
+  doc_->addLog({LogMessage::Kind::Info, group, tr("Создано областей металлизации: %1, для цепей: %2").arg(r.areas).arg(r.nets)});
   doc_->clearSelection();
-  doc_->invalidateModel();
   doc_->commitEdit(before, tr("Преобразовать проводники в области металлизации"), false);
   return true;
 }

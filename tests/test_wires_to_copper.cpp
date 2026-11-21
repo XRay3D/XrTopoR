@@ -73,24 +73,26 @@ struct TwoWires {
 
 }  // namespace
 
-// One net's wire made an area: it takes the room to half way to the neighbour's wire less half the clearance, and
-// to the board's edge; the neighbour stays a wire; nothing is nearer than the clearance, nothing is unconnected.
-TEST(WiresToCopper, AWireTakesItsCell) {
+// One net gets an area round its wire: it takes the room to half way to the neighbour's wire (less half the
+// clearance) and to the board's edge. The wires stay, as TopoR leaves them; nothing comes nearer than the
+// clearance, nothing gets unconnected.
+TEST(WiresToCopper, ANetTakesItsCell) {
   TwoWires s;
   const WiresToCopperResult r = wiresToCopper(s.b, {.nets = {s.netA}, .layers = {}});
-  EXPECT_EQ(r.wires, 1);
   EXPECT_EQ(r.areas, 1);
-  EXPECT_TRUE(r.kept.empty());
-  ASSERT_EQ(s.b.tracks.size(), 1u);
-  EXPECT_EQ(s.b.tracks[0].net, s.netB);
+  EXPECT_EQ(r.nets, 1);
+  EXPECT_EQ(s.b.tracks.size(), 2u) << "the wires are not touched";
   ASSERT_EQ(s.b.zones.size(), 1u);
   const Zone& z = s.b.zones[0];
   EXPECT_EQ(z.net, s.netA);
   EXPECT_EQ(z.layer, s.top);
   EXPECT_FALSE(z.solid);
+  // As TopoR makes them: the line as wide as the wires, priority 50, the pads joined solid.
+  EXPECT_EQ(z.lineWidth, mmToNm(0.3));
+  EXPECT_EQ(z.priority, 50);
   EXPECT_EQ(z.pads.connection, PadConnection::Solid);
   EXPECT_FALSE(z.filled.empty());
-  EXPECT_TRUE(s.copperAt(s.netA, 15, 4)) << "where the wire was";
+  EXPECT_TRUE(s.copperAt(s.netA, 15, 4)) << "round the wire";
   EXPECT_TRUE(s.copperAt(s.netA, 15, 5.8)) << "up to the middle between the wires (y = 6) less 0.1";
   EXPECT_FALSE(s.copperAt(s.netA, 15, 6.0));
   EXPECT_TRUE(s.copperAt(s.netA, 15, 1.5)) << "towards the board's edge";
@@ -99,33 +101,34 @@ TEST(WiresToCopper, AWireTakesItsCell) {
   EXPECT_EQ(Connectivity::compute(s.b).ratsnest.size(), 0u);
 }
 
-// Both nets: two areas, the clearance apart along the middle.
+// Both nets (every net of the layer): two areas, the clearance apart along the middle.
 TEST(WiresToCopper, NeighboursShareTheRoom) {
   TwoWires s;
   const WiresToCopperResult r = wiresToCopper(s.b, {.nets = {}, .layers = {s.top}});
-  EXPECT_EQ(r.wires, 2);
   EXPECT_EQ(r.areas, 2);
-  EXPECT_TRUE(s.b.tracks.empty());
+  EXPECT_EQ(r.nets, 2);
+  EXPECT_EQ(s.b.tracks.size(), 2u);
   EXPECT_TRUE(s.copperAt(s.netA, 15, 5.85));
   EXPECT_TRUE(s.copperAt(s.netB, 15, 6.15));
   EXPECT_FALSE(s.copperAt(s.netA, 15, 6.0));
   EXPECT_FALSE(s.copperAt(s.netB, 15, 6.0));
   EXPECT_TRUE(s.copperAt(s.netB, 15, 10.5));
   EXPECT_EQ(s.violations(), 0u);
-  EXPECT_EQ(Connectivity::compute(s.b).ratsnest.size(), 0u);
+  // The copper of the two is the clearance apart, not more than a few hundredths over.
+  double gap = 1e300;
+  for (const auto& f : s.b.zones[0].filled)
+    for (const auto& g : s.b.zones[1].filled) gap = std::min(gap, Shape::polygon(f).distance(Shape::polygon(g)));
+  EXPECT_GE(gap, mmToNm(0.2) - 2000);
+  EXPECT_LE(gap, mmToNm(0.26));
 }
 
-// What stays: a fixed wire; a net whose area would not hold its connection (its wire lies between two neighbours,
-// nearer each than the clearance: the pour, keeping off both, cuts it through) — its wires are back as they were,
-// and it is named. Too near one neighbour only, the area gives way on that side and holds.
-TEST(WiresToCopper, WhatStaysWires) {
+// Nothing to do: nothing chosen, a net without wires. A wire nearer its neighbour than the clearance: the area
+// gives way there, and the check finds nothing against it.
+TEST(WiresToCopper, EdgeCases) {
   {
     TwoWires s;
-    s.b.tracks[0].locked = true;
-    const WiresToCopperResult r = wiresToCopper(s.b, {.nets = {s.netA}, .layers = {}});
-    EXPECT_EQ(r.wires, 0);
-    EXPECT_EQ(r.areas, 0);
-    EXPECT_EQ(s.b.tracks.size(), 2u);
+    EXPECT_EQ(wiresToCopper(s.b, {}).areas, 0);
+    EXPECT_EQ(wiresToCopper(s.b, {.nets = {s.b.addNet("C")}, .layers = {}}).areas, 0);
     EXPECT_TRUE(s.b.zones.empty());
   }
   {
@@ -133,40 +136,18 @@ TEST(WiresToCopper, WhatStaysWires) {
     const size_t was = s.violations();
     const WiresToCopperResult r = wiresToCopper(s.b, {.nets = {s.netA}, .layers = {}});
     EXPECT_EQ(r.areas, 1);
-    EXPECT_TRUE(r.kept.empty());
     DrcOptions o;
     o.unconnected = false;
     o.widths = false;
     const auto now = runDrc(s.b, o);
-    EXPECT_LT(now.size(), was) << "the wire's own violation is gone";
+    EXPECT_EQ(now.size(), was) << "the wires' own violations, as they were";
     for (const DrcViolation& v : now) EXPECT_TRUE(v.a.type != ItemType::Zone && (!v.hasB || v.b.type != ItemType::Zone)) << "the area keeps the clearance: " << v.message;
-    EXPECT_EQ(Connectivity::compute(s.b).ratsnest.size(), 0u);
-  }
-  {
-    TwoWires s(4.4);
-    s.wire(s.b.addNet("C"), 3.6);  // and 0.1 on the other side
-    const std::vector<Track> was = s.b.tracks;
-    const WiresToCopperResult r = wiresToCopper(s.b, {.nets = {s.netA}, .layers = {}});
-    EXPECT_EQ(r.wires, 0);
-    EXPECT_EQ(r.areas, 0);
-    ASSERT_EQ(r.kept.size(), 1u);
-    EXPECT_EQ(r.kept[0], s.netA);
-    EXPECT_TRUE(s.b.zones.empty());
-    ASSERT_EQ(s.b.tracks.size(), was.size());
-    for (const Track& t : was) EXPECT_TRUE(r::any_of(s.b.tracks, [&](const Track& o) { return o.net == t.net && o.a == t.a && o.b == t.b; }));
-    EXPECT_EQ(Connectivity::compute(s.b).ratsnest.size(), 0u);
-  }
-  {
-    TwoWires s;  // nothing chosen, a net without wires
-    EXPECT_EQ(wiresToCopper(s.b, {}).wires, 0);
-    EXPECT_EQ(wiresToCopper(s.b, {.nets = {s.b.addNet("C")}, .layers = {}}).wires, 0);
-    EXPECT_EQ(s.b.tracks.size(), 2u);
+    EXPECT_TRUE(s.copperAt(s.netA, 15, 2.5)) << "on the free side";
   }
 }
 
-// A routed board of TopoR's (Example_04, 2 layers): every wire of the top layer made an area — no violation of the
-// clearances comes of it and nothing gets unconnected; the bottom layer is as it was. Two nets only: theirs go,
-// the rest stay.
+// A routed board of TopoR's (Example_04, 2 layers): every net of the top layer gets its areas — no violation of the
+// clearances comes of it, no wire is touched, the bottom layer has none. Two nets only: areas of those two.
 TEST(WiresToCopper, ALayerOfARoutedBoard) {
   auto load = [] {
     auto r = io::loadBoard(data("topor/Example_04/Arcs_master_f5f7.fst"));
@@ -179,27 +160,25 @@ TEST(WiresToCopper, ALayerOfARoutedBoard) {
   {
     auto bp = load();
     Board& b = *bp;
-    const LayerId top = b.findLayer("Top"), bottom = b.findLayer("Bottom");
+    const LayerId top = b.findLayer("Top");
     ASSERT_GE(top, 0);
-    const auto onLayer = [&](LayerId l) { return r::count(b.tracks, l, &Track::layer); };
-    const auto topWas = onLayer(top), bottomWas = onLayer(bottom);
-    const size_t zonesWas = b.zones.size(), drcWas = runDrc(b, o).size(), unroutedWas = Connectivity::compute(b).ratsnest.size();
+    const std::vector<Track> tracksWas = b.tracks;
+    const size_t zonesWas = b.zones.size(), drcWas = runDrc(b, o).size();
     const WiresToCopperResult r = wiresToCopper(b, {.nets = {}, .layers = {top}});
-    std::println("Arcs, Top: {} wires -> {} areas, {} nets kept", r.wires, r.areas, r.kept.size());
-    EXPECT_TRUE(r.kept.empty());
+    std::println("Arcs, Top: {} areas of {} nets", r.areas, r.nets);
     EXPECT_GT(r.areas, 100);
+    EXPECT_GT(r.nets, 80);
     EXPECT_EQ(size_t(r.areas), b.zones.size() - zonesWas);
-    EXPECT_EQ(onLayer(bottom), bottomWas);
-    EXPECT_EQ(onLayer(top), topWas - r.wires);
-    for (const Track& t : b.tracks)
-      if (t.layer == top) EXPECT_TRUE(t.locked || t.zip >= 0 || t.serp >= 0) << "only what is not to be touched";
+    ASSERT_EQ(b.tracks.size(), tracksWas.size());
+    for (size_t i = 0; i < b.tracks.size(); ++i) EXPECT_TRUE(b.tracks[i].a == tracksWas[i].a && b.tracks[i].b == tracksWas[i].b);
     for (size_t z = zonesWas; z < b.zones.size(); ++z) {
       EXPECT_EQ(b.zones[z].layer, top);
       EXPECT_GE(b.zones[z].net, 0);
       EXPECT_FALSE(b.zones[z].filled.empty());
+      EXPECT_GT(b.zones[z].lineWidth, 0);
     }
     EXPECT_EQ(runDrc(b, o).size(), drcWas);
-    EXPECT_EQ(Connectivity::compute(b).ratsnest.size(), unroutedWas);
+    EXPECT_EQ(Connectivity::compute(b).ratsnest.size(), 0u);
   }
   {
     auto bp = load();
@@ -207,14 +186,41 @@ TEST(WiresToCopper, ALayerOfARoutedBoard) {
     const int n0 = b.findNet("0B"), n1 = b.findNet("+5B");
     ASSERT_GE(n0, 0);
     ASSERT_GE(n1, 0);
-    const auto others = r::count_if(b.tracks, [&](const Track& t) { return t.net != n0 && t.net != n1; });
+    const size_t tracksWas = b.tracks.size();
     const WiresToCopperResult r = wiresToCopper(b, {.nets = {n0, n1}, .layers = {}});
-    EXPECT_GT(r.wires, 100);
-    EXPECT_TRUE(r.kept.empty());
-    EXPECT_EQ(r::count_if(b.tracks, [&](const Track& t) { return t.net != n0 && t.net != n1; }), others);
-    EXPECT_EQ(r::count_if(b.tracks, [&](const Track& t) { return (t.net == n0 || t.net == n1) && !t.locked; }), 0);
-    for (const Zone& z : b.zones) EXPECT_TRUE(z.net == n0 || z.net == n1 || z.filled.empty() || true);
+    EXPECT_EQ(r.nets, 2);
+    EXPECT_GT(r.areas, 1);
+    EXPECT_EQ(b.tracks.size(), tracksWas);
+    for (const Zone& z : b.zones) EXPECT_TRUE(z.net == n0 || z.net == n1);
     EXPECT_EQ(runDrc(b, o).size(), 0u);
-    EXPECT_EQ(Connectivity::compute(b).ratsnest.size(), 0u);
   }
+}
+
+// TopoR's own conversion of Example_01 (saved by TopoR Lite 7.0: 13 nets, 13 areas, the wires all there): the same
+// board without its areas, converted by us, gets an area for every net as well, and the areas keep the clearances.
+TEST(WiresToCopper, LikeTopoRsOwn) {
+  auto r = io::loadBoard(data("topor/Example_01/SingleLayer_polygons.fst"));
+  ASSERT_TRUE(r) << r.error();
+  Board& b = **r;
+  ASSERT_EQ(b.zones.size(), 13u);
+  for (const Zone& z : b.zones) {
+    EXPECT_EQ(z.priority, 50);
+    EXPECT_EQ(z.lineWidth, mmToNm(0.4));
+    EXPECT_EQ(z.pads.connection, PadConnection::Solid);
+  }
+  const size_t tracks = b.tracks.size();
+  b.zones.clear();
+  DrcOptions o;
+  o.unconnected = false;
+  o.widths = false;
+  const size_t drcWas = runDrc(b, o).size();
+  const WiresToCopperResult res = wiresToCopper(b, {.nets = {}, .layers = {b.findLayer("Top")}});
+  std::println("Example_01: {} areas of {} nets (TopoR: 13 of 13)", res.areas, res.nets);
+  EXPECT_EQ(res.nets, 13);
+  EXPECT_EQ(b.tracks.size(), tracks);
+  for (const Zone& z : b.zones) {
+    EXPECT_EQ(z.priority, 50);
+    EXPECT_EQ(z.lineWidth, mmToNm(0.4));
+  }
+  EXPECT_EQ(runDrc(b, o).size(), drcWas);
 }

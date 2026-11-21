@@ -33,8 +33,9 @@ class WordsFilter;
 
 // «Выбор источника сигнала»: the pad chosen, or none.
 std::optional<int> pickSignalSource(QWidget* parent, Document* doc, const HiSpeed& h);
-// A list of names to tick, with a search (the nets, the groups of nets...): the ticked ones; none when cancelled.
-std::vector<std::string> pickNamesToTick(QWidget* parent, const QString& title, const std::vector<std::string>& names);
+// TopoR's «Выберите цепи» / «Выберите группы цепей» / «Выберите слои»: a list of names to tick, with a search (the
+// layers' has none); OK once something is ticked. The ticked ones; none when cancelled.
+std::vector<std::string> pickNamesToTick(QWidget* parent, const QString& title, const std::vector<std::string>& names, bool withSearch = true);
 
 class SourcePickerDialog : public QDialog {
   Q_OBJECT

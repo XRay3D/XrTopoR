@@ -77,16 +77,13 @@ QTableView* compactTable(QWidget* parent = nullptr) {
   return t;
 }
 
-// A plain list of the names given, to tick (the nets to exclude, the groups of nets).
-std::vector<std::string> pickNames(QWidget* parent, const QString& title, const std::vector<std::string>& names) {
+// A list of the names given, to tick, as TopoR's «Выберите цепи» / «Выберите группы цепей» / «Выберите слои»: with a
+// search (not for the layers); OK once something is ticked.
+std::vector<std::string> pickNames(QWidget* parent, const QString& title, const std::vector<std::string>& names, bool withSearch = true) {
   QDialog dlg(parent);
   dlg.setWindowTitle(title);
   dlg.resize(320, 420);
   auto* v = new QVBoxLayout(&dlg);
-  auto* search = new QLineEdit;
-  search->setPlaceholderText(QObject::tr("Поиск"));
-  search->setClearButtonEnabled(true);
-  v->addWidget(search);
   auto* model = new QStandardItemModel(&dlg);
   for (auto& n : names) {
     auto* it = new QStandardItem(QString::fromStdString(n));
@@ -96,12 +93,25 @@ std::vector<std::string> pickNames(QWidget* parent, const QString& title, const 
   }
   auto* filter = new WordsFilter(&dlg);
   filter->setSourceModel(model);
+  if (withSearch) {
+    auto* search = new QLineEdit;
+    search->setObjectName("search");
+    search->setClearButtonEnabled(true);
+    search->addAction(QIcon::fromTheme("edit-find"), QLineEdit::LeadingPosition);
+    v->addWidget(search);
+    QObject::connect(search, &QLineEdit::textChanged, filter, &WordsFilter::setWords);
+  }
   auto* view = new QListView;
   view->setObjectName("names");
   view->setModel(filter);
   v->addWidget(view, 1);
-  QObject::connect(search, &QLineEdit::textChanged, filter, &WordsFilter::setWords);
-  buttons(&dlg, v);
+  QPushButton* ok = buttons(&dlg, v)->button(QDialogButtonBox::Ok);
+  ok->setEnabled(false);
+  QObject::connect(model, &QStandardItemModel::itemChanged, &dlg, [model, ok] {
+    bool any = false;
+    for (int r = 0; r < model->rowCount() && !any; ++r) any = model->item(r)->checkState() == Qt::Checked;
+    ok->setEnabled(any);
+  });
   std::vector<std::string> out;
   if (dlg.exec() != QDialog::Accepted) return out;
   for (int r = 0; r < model->rowCount(); ++r)
@@ -111,8 +121,8 @@ std::vector<std::string> pickNames(QWidget* parent, const QString& title, const 
 
 }  // namespace
 
-std::vector<std::string> pickNamesToTick(QWidget* parent, const QString& title, const std::vector<std::string>& names) {
-  return pickNames(parent, title, names);
+std::vector<std::string> pickNamesToTick(QWidget* parent, const QString& title, const std::vector<std::string>& names, bool withSearch) {
+  return pickNames(parent, title, names, withSearch);
 }
 
 // ---------------------------------------------------------------- the source
@@ -1052,13 +1062,13 @@ SearchSettingsDialog::SearchSettingsDialog(Document* doc, const SignalSearch& s,
     std::vector<std::string> nets;
     for (auto& n : b.nets)
       if (!r::contains(s_.excludedNets, n.name)) nets.push_back(n.name);
-    addNets(pickNames(this, tr("Цепи"), nets));
+    addNets(pickNames(this, tr("Выберите цепи"), nets));
   });
   menu->addAction(tr("Группы цепей..."), this, [this] {
     if (!rules_) return;
     std::vector<std::string> groups;
     for (auto& g : rules_->netGroups) groups.push_back(g.name);
-    for (auto& g : pickNames(this, tr("Группы цепей"), groups)) addNets(rules_->netsOf(g));
+    for (auto& g : pickNames(this, tr("Выберите группы цепей"), groups)) addNets(rules_->netsOf(g));
   });
   menu->addAction(tr("Все цепи"), this, [this, &b] {
     std::vector<std::string> nets;

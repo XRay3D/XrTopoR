@@ -1,5 +1,6 @@
 // GUI smoke test: drives the board view with synthetic mouse/key events on the offscreen platform.
 #include <QCheckBox>
+#include <QLayout>
 #include <QTabWidget>
 #include <QMimeData>
 #include <QTreeView>
@@ -622,8 +623,10 @@ TEST(Gui, RulerMeasuresPoints) {
 // A conductor of a zipped pair (Signals.fst, the pair SDCLK_U2 on Int 1): X takes the whole section, both
 // conductors; «Свойства» shows the section (TopoR's «Свойства застёгнутой пары проводников»), its button swaps
 // the nets as one undoable step; «Расстегнуть» takes the section away, the conductors stay, undo brings it back.
-// «Преобразование проводников в полигоны»: nets (the list filled, emptied) or «Все проводники на слое»; the
-// conversion is one step of undo, and what came of it is in the message window.
+// «Преобразование проводников в полигоны»: the two choices on top — the nets, or «Все проводники на слое» —, one
+// list for the one in force (each keeps its own names), one «−», and «+» with the menu of that choice (TopoR's
+// items). «Преобразовать» once the list has something. The areas come in one step of undo, the wires stay, and what
+// came of it is in the message window.
 TEST(Gui, WiresToCopperDialog) {
   Fixture f("topor/Example_04/Arcs_master_f5f7.fst");
   const Board& b = f.b();
@@ -631,51 +634,97 @@ TEST(Gui, WiresToCopperDialog) {
   EXPECT_EQ(d.windowTitle(), "Преобразование проводников в полигоны");
   auto* byNets = d.findChild<QRadioButton*>("byNets");
   auto* byLayers = d.findChild<QRadioButton*>("byLayers");
-  auto* nets = d.findChild<QListView*>("nets");
-  auto* layers = d.findChild<QListView*>("layers");
-  ASSERT_TRUE(byNets && byLayers && nets && layers);
+  auto* list = d.findChild<QListView*>("items");
+  auto* plus = d.findChild<QToolButton*>("add");
+  auto* minus = d.findChild<QToolButton*>("remove");
+  auto* go = d.findChild<QPushButton*>("convert");
+  ASSERT_TRUE(byNets && byLayers && list && plus && minus && go);
+  EXPECT_EQ(d.findChildren<QListView*>().size(), 1) << "one list for both";
+  EXPECT_EQ(byNets->text(), "Цепи:");
+  EXPECT_EQ(byLayers->text(), "Все проводники на слое:");
+  EXPECT_EQ(byNets->geometry().center().y(), byLayers->geometry().center().y()) << "both on top, side by side";
+  d.resize(d.sizeHint());
+  d.layout()->activate();
+  EXPECT_LT(std::abs(plus->mapTo(&d, plus->rect().center()).y() - go->mapTo(&d, go->rect().center()).y()), 6) << "the buttons in one row at the bottom";
+  EXPECT_TRUE(d.findChildren<QFrame*>(Qt::FindDirectChildrenOnly).size() == 1) << "no rule: the list alone is a frame";
+  EXPECT_EQ(go->text(), "Преобразовать");
   EXPECT_TRUE(byNets->isChecked());
-  EXPECT_TRUE(nets->isEnabled());
-  EXPECT_FALSE(layers->isEnabled());
-  EXPECT_FALSE(d.findChild<QToolButton*>("addLayer")->isEnabled());
-  EXPECT_FALSE(d.convert()) << "nothing chosen";
+  EXPECT_FALSE(go->isEnabled()) << "nothing chosen";
+  EXPECT_FALSE(minus->isEnabled());
+  EXPECT_FALSE(d.convert());
   EXPECT_FALSE(f.doc.undoStack()->canUndo());
   // «+» offers the nets, their groups, all of them; «−» takes the selected ones off the list.
-  QStringList offered;
-  for (QAction* a : d.findChild<QToolButton*>("addNet")->menu()->actions()) offered << a->text();
-  EXPECT_EQ(offered, (QStringList{"Цепи...", "Группы цепей...", "Все цепи"}));
-  d.findChild<QToolButton*>("addNet")->menu()->actions()[2]->trigger();
+  auto texts = [](QMenu* m) {
+    QStringList out;
+    for (QAction* a : m->actions()) out << (a->isSeparator() ? "-" : a->text());
+    return out;
+  };
+  QMenu* netMenu = plus->menu();
+  EXPECT_EQ(texts(netMenu), (QStringList{"Цепи...", "Группы цепей...", "Все цепи"}));
+  netMenu->actions()[2]->trigger();
   EXPECT_EQ(d.nets().size(), int(b.nets.size()));
-  nets->selectAll();
-  d.findChild<QToolButton*>("removeNet")->click();
+  EXPECT_EQ(list->model()->rowCount(), int(b.nets.size()));
+  EXPECT_TRUE(go->isEnabled());
+  list->selectAll();
+  minus->click();
   EXPECT_TRUE(d.nets().isEmpty());
+  EXPECT_FALSE(go->isEnabled());
+  // «Цепи...»: TopoR's «Выберите цепи» — a search, the names to tick, OK once one is ticked.
+  QTimer::singleShot(0, [&] {
+    auto* pick = qobject_cast<QDialog*>(QApplication::activeModalWidget());
+    ASSERT_TRUE(pick);
+    EXPECT_EQ(pick->windowTitle(), "Выберите цепи");
+    auto* names = pick->findChild<QListView*>("names");
+    auto* ok = pick->findChild<QDialogButtonBox*>()->button(QDialogButtonBox::Ok);
+    ASSERT_TRUE(names && pick->findChild<QLineEdit*>("search"));
+    EXPECT_FALSE(ok->isEnabled());
+    pick->findChild<QLineEdit*>("search")->setText("+5B");
+    ASSERT_EQ(names->model()->rowCount(), 1);
+    names->model()->setData(names->model()->index(0, 0), Qt::Checked, Qt::CheckStateRole);
+    EXPECT_TRUE(ok->isEnabled());
+    ok->click();
+  });
+  netMenu->actions()[0]->trigger();
+  EXPECT_EQ(d.nets(), QStringList{"+5B"});
   d.setNets({"0B", "+5B"});
   EXPECT_EQ(d.what().nets.size(), 2u);
   EXPECT_TRUE(d.what().layers.empty());
+  // The layers: the same list shows theirs, «+» has their menu; the nets' names wait.
   byLayers->setChecked(true);
-  EXPECT_FALSE(nets->isEnabled());
-  EXPECT_TRUE(layers->isEnabled());
-  QStringList copper;
-  for (QAction* a : d.findChild<QToolButton*>("addLayer")->menu()->actions()) copper << a->text();
-  EXPECT_EQ(copper, (QStringList{"Top", "Bottom"}));
-  d.findChild<QToolButton*>("addLayer")->menu()->actions()[0]->trigger();
+  EXPECT_EQ(list->model()->rowCount(), 0);
+  EXPECT_FALSE(go->isEnabled()) << "no layer yet";
+  QMenu* layerMenu = plus->menu();
+  EXPECT_NE(layerMenu, netMenu);
+  EXPECT_EQ(texts(layerMenu), (QStringList{"Все слои", "Внешние слои", "-", "Top", "Bottom", "-", "Набор слоев..."}));
+  layerMenu->actions()[3]->trigger();
   EXPECT_EQ(d.layers(), QStringList{"Top"});
+  EXPECT_EQ(list->model()->index(0, 0).data().toString(), "Top");
+  EXPECT_TRUE(go->isEnabled());
+  layerMenu->actions()[0]->trigger();
+  EXPECT_EQ(d.layers(), (QStringList{"Top", "Bottom"}));
   EXPECT_TRUE(d.what().nets.empty());
-  EXPECT_EQ(d.what().layers.size(), 1u);
-  // The two nets: their wires become areas, in one step.
+  EXPECT_EQ(d.what().layers.size(), 2u);
+  list->selectAll();
+  minus->click();
+  EXPECT_TRUE(d.layers().isEmpty());
+  layerMenu->actions()[1]->trigger();
+  EXPECT_EQ(d.layers(), (QStringList{"Top", "Bottom"})) << "the outer ones";
   byNets->setChecked(true);
+  EXPECT_EQ(plus->menu(), netMenu);
+  EXPECT_EQ(list->model()->rowCount(), 2) << "the nets' names again";
+  EXPECT_EQ(d.nets(), (QStringList{"0B", "+5B"}));
+  // The two nets get their areas, in one step; the wires stay.
   const size_t tracksWas = b.tracks.size(), zonesWas = b.zones.size();
   ASSERT_TRUE(d.convert());
-  EXPECT_LT(f.b().tracks.size(), tracksWas - 100);
+  EXPECT_EQ(f.b().tracks.size(), tracksWas);
   EXPECT_GT(f.b().zones.size(), zonesWas);
-  EXPECT_EQ(f.doc.connectivity().ratsnest.size(), 0u);
+  for (const Zone& z : f.b().zones) EXPECT_TRUE(f.b().nets[size_t(z.net)].name == "0B" || f.b().nets[size_t(z.net)].name == "+5B");
   bool told = false;
-  for (const LogMessage& m : f.doc.log()) told = told || m.text.contains("Преобразовано проводников");
+  for (const LogMessage& m : f.doc.log()) told = told || m.text.contains("Создано областей металлизации");
   EXPECT_TRUE(told);
   ASSERT_TRUE(f.doc.undoStack()->canUndo());
   EXPECT_EQ(f.doc.undoStack()->undoText(), "Преобразовать проводники в области металлизации");
   f.doc.undoStack()->undo();
-  EXPECT_EQ(f.b().tracks.size(), tracksWas);
   EXPECT_EQ(f.b().zones.size(), zonesWas);
   f.doc.undoStack()->redo();
   EXPECT_GT(f.b().zones.size(), zonesWas);
@@ -685,6 +734,31 @@ TEST(Gui, WiresToCopperDialog) {
     f.view.refresh();
     if (const QImage img = f.view.picture(); f.view.drawable()) img.save(QString(dir) + "/wires-to-copper-board.png");
   }
+}
+
+// The same on TopoR's Example_01 (the board TopoR's own conversion was looked at on): every net of the layer.
+TEST(Gui, WiresToCopperOnExample01) {
+  Fixture f("topor/Example_01/SingleLayer_polygons.fst");
+  auto shot = [&](const char* name) {
+    if (const char* dir = std::getenv("XR_SHOT_DIR")) {
+      f.look(Vec2{13.97 * double(kNmPerMm), -14.13 * double(kNmPerMm)}, 32);
+      f.view.refresh();
+      if (const QImage img = f.view.picture(); f.view.drawable()) img.save(QString(dir) + "/" + name);
+    }
+  };
+  ASSERT_EQ(f.b().zones.size(), 13u) << "TopoR's";
+  shot("example01-topor.png");
+  {
+    auto before = f.doc.beginEdit();
+    f.doc.board()->zones.clear();
+    f.doc.commitEdit(before, "no areas", false);
+  }
+  WiresToCopperDialog d(&f.doc);
+  d.setByLayers(true);
+  d.setLayers({"Top"});
+  ASSERT_TRUE(d.convert());
+  EXPECT_EQ(f.b().zones.size(), 13u);
+  shot("example01-ours.png");
 }
 
 // «Капельки»: the button of the autoprocedures' panel shows the design's flag and switches it — one step of undo,

@@ -9,7 +9,6 @@
 #include <set>
 
 #include "core/BoostGeom.h"
-#include "core/Connectivity.h"
 #include "core/Padstack.h"
 #include "core/SpatialIndex.h"
 #include "core/Teardrops.h"
@@ -130,23 +129,13 @@ std::map<int, std::vector<Polyline>> cellsOf(const std::map<int, BMulti>& bodies
 
 WiresToCopperResult wiresToCopper(Board& b, const WiresToCopper& what) {
   WiresToCopperResult res;
-  auto chosen = [&](const Track& t) {
-    if (t.locked || t.zip >= 0 || t.serp >= 0 || t.net == kNoNet) return false;
-    return r::contains(what.nets, t.net) || r::contains(what.layers, t.layer);
-  };
+  auto chosen = [&](const Track& t) { return t.net != kNoNet && (r::contains(what.nets, t.net) || r::contains(what.layers, t.layer)); };
   std::map<LayerId, std::set<int>> netsOn;  // per layer: the nets whose wires go
   for (const Track& t : b.tracks)
     if (chosen(t)) netsOn[t.layer].insert(t.net);
   if (netsOn.empty()) return res;
 
-  const std::vector<Track> tracksWas = b.tracks;
   const size_t zonesWas = b.zones.size();
-  auto unrouted = [](const Board& x) {
-    std::map<int, int> n;
-    for (const RatsLine& l : Connectivity::compute(x).ratsnest) ++n[l.net];
-    return n;
-  };
-  const std::map<int, int> unroutedWas = unrouted(b);
 
   SpatialIndex idx;
   idx.build(b);
@@ -163,11 +152,7 @@ WiresToCopperResult wiresToCopper(Board& b, const WiresToCopper& what) {
     if (best) inside = toMulti(*best);
   }
 
-  struct Made {
-    Zone zone;
-    Coord wire;  // the narrowest wire it stands for
-  };
-  std::vector<Made> made;
+  std::vector<Zone> made;
   for (const auto& [layer, nets] : netsOn) {
     // The copper of the layer by body: a net's all in one, each thing of no net its own.
     std::map<int, std::vector<BMulti>> parts;
@@ -247,88 +232,66 @@ WiresToCopperResult wiresToCopper(Board& b, const WiresToCopper& what) {
     std::set<int> wanted;
     for (int net : nets) wanted.insert(net + 1);
     const auto cells = cellsOf(bodies, wanted, all);
-    // A net's area is its cell drawn in by half its clearance: two areas side by side are a clearance apart (where a
-    // pair of nets asks for more, the pour of the second keeps it from the first), and the wires' own copper is in
-    // it whatever the cell came to.
+    // A net's area is its cell drawn in by half its clearance and half its line (TopoR draws the area with a line as
+    // wide as the wires: the copper goes that half past the outline) — two areas side by side are then a
+    // clearance apart; where a pair of nets asks for more, the pour of the second keeps it from the first.
     for (int net : nets) {
       auto it = cells.find(net + 1);
       if (it == cells.end()) continue;
       const Coord clr = b.clearance(net, layer);
-      Coord narrowest = 0;
+      Coord line = 0;
       std::vector<Vec2> wirePoints;
-      std::vector<BMulti> wireParts;
-      for (int i = 0; i < int(b.tracks.size()); ++i) {
-        const Track& t = b.tracks[size_t(i)];
-        if (t.layer != layer || t.net != net || !chosen(t)) continue;
-        narrowest = narrowest ? std::min(narrowest, t.width) : t.width;
+      for (const Track& t : b.tracks) {
+        if (t.layer != layer || t.net != net) continue;
+        line = line ? std::min(line, t.width) : t.width;
         const Polyline path = t.path(50000);
         wirePoints.push_back(path[path.size() / 2]);
         wirePoints.push_back(t.a.v());
-        for (const Shape& sh : itemShapes(b, {ItemType::Track, i})) wireParts.push_back(toMulti(sh.outline(kChord)));
       }
-      // The cells drawn in, with the wires' own copper, within the board.
       std::vector<BMulti> parts;
-      for (const Polyline& cell : it->second) parts.push_back(grow(toMulti(cell), -(double(clr) / 2 + kChord)));
-      parts.push_back(unionAll(std::move(wireParts)));
+      for (const Polyline& cell : it->second) parts.push_back(grow(toMulti(cell), -(double(clr) / 2 + double(line) / 2 + kChord)));
       BMulti area = unionAll(std::move(parts));
       if (!inside.empty()) {
         BMulti within;
         bg::intersection(area, inside, within);
         area = std::move(within);
       }
-      {
-        for (const BPoly& piece : area) {
-          // (a piece with none of the wires in it is the room round a pad the wires did not reach on this layer)
-          if (r::none_of(wirePoints, [&](Vec2 p) { return bg::within(BPt{p.x, p.y}, piece); })) continue;
-          bg::model::ring<BPt> outer;
-          bg::simplify(piece.outer(), outer, kChord);
-          Polyline outline = ringToPolyline(outer);
-          if (outline.size() < 3) continue;
-          Made m;
-          m.zone.net = net;
-          m.zone.layer = layer;
-          m.zone.outline = std::move(outline);
-          m.zone.pads.connection = PadConnection::Solid;
-          m.zone.vias.connection = PadConnection::Solid;
-          m.zone.minWidth = std::max<Coord>(1000, narrowest * 8 / 10);
-          m.zone.minIslandArea = 0;  // (a short wire's area is as small as the wire)
-          m.wire = narrowest;
-          made.push_back(std::move(m));
-        }
+      for (const BPoly& piece : area) {
+        // (a piece with none of the wires at it is the room round a pad the wires did not reach on this layer; a wire
+        // squeezed by a neighbour lies just outside its own cell drawn in)
+        const double reach = double(clr) / 2 + double(line) / 2 + 2 * kChord;
+        if (r::none_of(wirePoints, [&](Vec2 p) { return bg::distance(BPt{p.x, p.y}, piece) <= reach; })) continue;
+        bg::model::ring<BPt> outer;
+        bg::simplify(piece.outer(), outer, kChord);
+        Polyline outline = ringToPolyline(outer);
+        if (outline.size() < 3) continue;
+        Zone z;  // as TopoR makes them: the line of the wires' width, priority 50, pads and vias joined solid
+        z.net = net;
+        z.layer = layer;
+        z.outline = std::move(outline);
+        z.lineWidth = line;
+        z.priority = 50;
+        z.pads.connection = PadConnection::Solid;
+        z.vias.connection = PadConnection::Solid;
+        z.minIslandArea = 0;
+        made.push_back(std::move(z));
       }
     }
   }
   if (made.empty()) return res;
 
-  // The wires go, the areas come and are poured.
-  std::set<std::pair<int, LayerId>> gone;
-  for (const Made& m : made) gone.insert({m.zone.net, m.zone.layer});
-  auto replaced = [&](const Track& t) { return chosen(t) && gone.contains({t.net, t.layer}); };
-  std::erase_if(b.tracks, replaced);
+  // The areas are poured; one the pour left nothing of is not kept.
   ZoneFillOptions fo;
-  for (Made& m : made) {
+  for (Zone& z : made) {
     fo.only.push_back(int(b.zones.size()));
-    b.zones.push_back(std::move(m.zone));
+    b.zones.push_back(std::move(z));
   }
   fillZones(b, fo);
-  // A net that lost a connection by it stays wires.
-  const std::map<int, int> unroutedNow = unrouted(b);
-  std::set<int> lost;
-  for (const auto& [net, n] : unroutedNow)
-    if (auto was = unroutedWas.find(net); n > (was == unroutedWas.end() ? 0 : was->second)) lost.insert(net);
-  for (size_t z = zonesWas; z < b.zones.size(); ++z)
-    if (b.zones[z].filled.empty()) lost.insert(b.zones[z].net);
-  if (!lost.empty()) {
-    std::vector<Zone> keep(b.zones.begin(), b.zones.begin() + long(zonesWas));
-    for (size_t z = zonesWas; z < b.zones.size(); ++z)
-      if (!lost.contains(b.zones[z].net)) keep.push_back(std::move(b.zones[z]));
-    b.zones = std::move(keep);
-    for (const Track& t : tracksWas)
-      if (lost.contains(t.net) && replaced(t)) b.tracks.push_back(t);
-    res.kept.assign(lost.begin(), lost.end());
-  }
+  b.zones.erase(std::remove_if(b.zones.begin() + long(zonesWas), b.zones.end(), [](const Zone& z) { return z.filled.empty(); }), b.zones.end());
+  std::set<int> given;
+  for (size_t z = zonesWas; z < b.zones.size(); ++z) given.insert(b.zones[z].net);
   res.areas = int(b.zones.size() - zonesWas);
-  for (const Track& t : tracksWas) res.wires += replaced(t) && !lost.contains(t.net);
+  res.nets = int(given.size());
   return res;
 }
 
