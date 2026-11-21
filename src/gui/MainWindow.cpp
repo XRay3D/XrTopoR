@@ -48,6 +48,7 @@
 #include "gui/SearchPanel.h"
 #include "gui/SettingsDialogs.h"
 #include "gui/SmallDialogs.h"
+#include "gui/WiresToCopperDialog.h"
 #include "gui/ModeBar.h"
 #include "gui/ProgramSettingsDialog.h"
 #include "gui/ProjectPanel.h"
@@ -347,6 +348,7 @@ void MainWindow::bindCommands() {
 
   // Инструменты
   c.bind("Accel_DRC", [this] { runDrc(); });
+  c.bind("Cmd_WiresToCopper", [this] { WiresToCopperDialog::run(doc_, this); });
   c.bind("Cmd_Teardrops", [this] {
     auto before = doc_->beginEdit();
     RouteSettings& rs = doc_->board()->settings.route;

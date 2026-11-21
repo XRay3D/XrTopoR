@@ -1,11 +1,7 @@
 #include "core/Teardrops.h"
 #include "core/ZoneFill.h"
 
-#include <boost/geometry.hpp>
-#include <boost/geometry/geometries/linestring.hpp>
-#include <boost/geometry/geometries/multi_polygon.hpp>
-#include <boost/geometry/geometries/point_xy.hpp>
-#include <boost/geometry/geometries/polygon.hpp>
+#include "core/BoostGeom.h"
 
 #include <algorithm>
 #include <map>
@@ -19,61 +15,7 @@ namespace bg = boost::geometry;
 
 namespace xr {
 
-namespace {
-
-using BPt = bg::model::d2::point_xy<double>;
-using BPoly = bg::model::polygon<BPt>;  // clockwise outer, closed
-using BMulti = bg::model::multi_polygon<BPoly>;
-
-BPoly toPoly(const Polyline& pl) {
-  BPoly p;
-  for (auto& v : pl) p.outer().push_back({v.x, v.y});
-  if (!pl.empty()) p.outer().push_back({pl.front().x, pl.front().y});
-  bg::correct(p);
-  return p;
-}
-
-BMulti toMulti(const Polyline& pl) {
-  BMulti m;
-  if (pl.size() >= 3) m.push_back(toPoly(pl));
-  return m;
-}
-
-// Union of many polygons by pairwise merging (much faster than folding one by one).
-BMulti unionAll(std::vector<BMulti> parts) {
-  if (parts.empty()) return {};
-  while (parts.size() > 1) {
-    std::vector<BMulti> next;
-    for (size_t i = 0; i + 1 < parts.size(); i += 2) {
-      BMulti u;
-      bg::union_(parts[i], parts[i + 1], u);
-      next.push_back(std::move(u));
-    }
-    if (parts.size() % 2) next.push_back(std::move(parts.back()));
-    parts = std::move(next);
-  }
-  return std::move(parts.front());
-}
-
-BMulti grow(const BMulti& m, double d) {
-  if (m.empty() || d == 0) return m;
-  BMulti out;
-  bg::strategy::buffer::distance_symmetric<double> dist(d);
-  bg::strategy::buffer::join_round join(16);
-  bg::strategy::buffer::end_round end(16);
-  bg::strategy::buffer::point_circle circle(16);
-  bg::strategy::buffer::side_straight side;
-  bg::buffer(m, out, dist, side, join, end, circle);
-  return out;
-}
-
-Polyline ringToPolyline(const bg::model::ring<BPt>& r) {
-  Polyline pl;
-  for (size_t i = 0; i + 1 < r.size(); ++i) pl.push_back({r[i].x(), r[i].y()});
-  return pl;
-}
-
-}  // namespace
+using namespace bgeo;  // (this file's own: the polygons of the pours)
 
 void clearZoneFills(Board& b) {
   for (auto& z : b.zones)
@@ -365,6 +307,10 @@ ZoneFillStats fillZones(Board& b, const ZoneFillOptions& opt) {
       const Zone& o = b.zones[oz];
       if (oz == zi || (!o.alwaysCopper() && rank[size_t(oz)] > rank[size_t(zi)])) continue;
       if (o.layer != z.layer || o.net == z.net) continue;
+      // (only the ones near: a layer of hundreds of areas — wires made areas — had every one grown for every other)
+      BBox ob;
+      for (Vec2 p : o.outline) ob.add(p);
+      if (!ob.inflated(double(o.lineWidth) / 2 + maxClr).intersects(zb)) continue;
       double clr = double(b.zoneClearance(z, o.net)) + opt.arcTolerance;
       // (The pour as polygons, grown: a fill is kept as one contour with its holes on seams, and that contour
       // inflated as a shape crossed itself at every seam — the union of the obstacles came out invalid and the

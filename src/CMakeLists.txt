@@ -19,6 +19,7 @@ add_library(xrcore STATIC
   core/Runs.cpp
   core/SpatialIndex.cpp
   core/Teardrops.cpp
+  core/WiresToCopper.cpp
   core/ZoneFill.cpp
   io/sexpr/SExpr.cpp
 )
@@ -117,6 +118,7 @@ if(XR_BUILD_GUI)
     gui/SignalDialogs.cpp
     gui/SignalsPage.cpp
     gui/SmallDialogs.cpp
+    gui/WiresToCopperDialog.cpp
     gui/TextFont.cpp
     gui/TextStylesDialog.cpp
     gui/ToporConfig.cpp

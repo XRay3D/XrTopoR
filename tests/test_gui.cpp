@@ -57,6 +57,7 @@
 #include "router/topo/ModelTools.h"
 #include "gui/Document.h"
 #include "gui/AutorouteWindow.h"
+#include "gui/WiresToCopperDialog.h"
 #include "gui/DesignParamsDialog.h"
 #include "gui/GroupExplorer.h"
 #include "gui/ImpedanceModel.h"
@@ -621,6 +622,71 @@ TEST(Gui, RulerMeasuresPoints) {
 // A conductor of a zipped pair (Signals.fst, the pair SDCLK_U2 on Int 1): X takes the whole section, both
 // conductors; «Свойства» shows the section (TopoR's «Свойства застёгнутой пары проводников»), its button swaps
 // the nets as one undoable step; «Расстегнуть» takes the section away, the conductors stay, undo brings it back.
+// «Преобразование проводников в полигоны»: nets (the list filled, emptied) or «Все проводники на слое»; the
+// conversion is one step of undo, and what came of it is in the message window.
+TEST(Gui, WiresToCopperDialog) {
+  Fixture f("topor/Example_04/Arcs_master_f5f7.fst");
+  const Board& b = f.b();
+  WiresToCopperDialog d(&f.doc);
+  EXPECT_EQ(d.windowTitle(), "Преобразование проводников в полигоны");
+  auto* byNets = d.findChild<QRadioButton*>("byNets");
+  auto* byLayers = d.findChild<QRadioButton*>("byLayers");
+  auto* nets = d.findChild<QListView*>("nets");
+  auto* layers = d.findChild<QListView*>("layers");
+  ASSERT_TRUE(byNets && byLayers && nets && layers);
+  EXPECT_TRUE(byNets->isChecked());
+  EXPECT_TRUE(nets->isEnabled());
+  EXPECT_FALSE(layers->isEnabled());
+  EXPECT_FALSE(d.findChild<QToolButton*>("addLayer")->isEnabled());
+  EXPECT_FALSE(d.convert()) << "nothing chosen";
+  EXPECT_FALSE(f.doc.undoStack()->canUndo());
+  // «+» offers the nets, their groups, all of them; «−» takes the selected ones off the list.
+  QStringList offered;
+  for (QAction* a : d.findChild<QToolButton*>("addNet")->menu()->actions()) offered << a->text();
+  EXPECT_EQ(offered, (QStringList{"Цепи...", "Группы цепей...", "Все цепи"}));
+  d.findChild<QToolButton*>("addNet")->menu()->actions()[2]->trigger();
+  EXPECT_EQ(d.nets().size(), int(b.nets.size()));
+  nets->selectAll();
+  d.findChild<QToolButton*>("removeNet")->click();
+  EXPECT_TRUE(d.nets().isEmpty());
+  d.setNets({"0B", "+5B"});
+  EXPECT_EQ(d.what().nets.size(), 2u);
+  EXPECT_TRUE(d.what().layers.empty());
+  byLayers->setChecked(true);
+  EXPECT_FALSE(nets->isEnabled());
+  EXPECT_TRUE(layers->isEnabled());
+  QStringList copper;
+  for (QAction* a : d.findChild<QToolButton*>("addLayer")->menu()->actions()) copper << a->text();
+  EXPECT_EQ(copper, (QStringList{"Top", "Bottom"}));
+  d.findChild<QToolButton*>("addLayer")->menu()->actions()[0]->trigger();
+  EXPECT_EQ(d.layers(), QStringList{"Top"});
+  EXPECT_TRUE(d.what().nets.empty());
+  EXPECT_EQ(d.what().layers.size(), 1u);
+  // The two nets: their wires become areas, in one step.
+  byNets->setChecked(true);
+  const size_t tracksWas = b.tracks.size(), zonesWas = b.zones.size();
+  ASSERT_TRUE(d.convert());
+  EXPECT_LT(f.b().tracks.size(), tracksWas - 100);
+  EXPECT_GT(f.b().zones.size(), zonesWas);
+  EXPECT_EQ(f.doc.connectivity().ratsnest.size(), 0u);
+  bool told = false;
+  for (const LogMessage& m : f.doc.log()) told = told || m.text.contains("Преобразовано проводников");
+  EXPECT_TRUE(told);
+  ASSERT_TRUE(f.doc.undoStack()->canUndo());
+  EXPECT_EQ(f.doc.undoStack()->undoText(), "Преобразовать проводники в области металлизации");
+  f.doc.undoStack()->undo();
+  EXPECT_EQ(f.b().tracks.size(), tracksWas);
+  EXPECT_EQ(f.b().zones.size(), zonesWas);
+  f.doc.undoStack()->redo();
+  EXPECT_GT(f.b().zones.size(), zonesWas);
+  if (const char* dir = std::getenv("XR_SHOT_DIR")) {
+    d.grab().save(QString(dir) + "/wires-to-copper-dialog.png");
+    f.look(Vec2{181 * double(kNmPerMm), -61 * double(kNmPerMm)}, 34);
+    f.view.refresh();
+    if (const QImage img = f.view.picture(); f.view.drawable()) img.save(QString(dir) + "/wires-to-copper-board.png");
+  }
+}
+
 // «Капельки»: the button of the autoprocedures' panel shows the design's flag and switches it — one step of undo,
 // the teardrops following.
 TEST(Gui, TeardropsToggleIsKeptAndUndone) {

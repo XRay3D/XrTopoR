@@ -111,6 +111,10 @@ std::vector<std::string> pickNames(QWidget* parent, const QString& title, const 
 
 }  // namespace
 
+std::vector<std::string> pickNamesToTick(QWidget* parent, const QString& title, const std::vector<std::string>& names) {
+  return pickNames(parent, title, names);
+}
+
 // ---------------------------------------------------------------- the source
 
 SourcePickerDialog::SourcePickerDialog(Document* doc, const HiSpeed& h, QWidget* parent) : QDialog(parent), doc_(doc), h_(h) {

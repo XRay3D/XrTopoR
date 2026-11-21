@@ -138,7 +138,7 @@ const QStringList kBlocked{"Cmd_NewProject",   "Accel_FileOpen",  "Cmd_ImportDes
                            "Cmd_ExportBom",    "Cmd_Gerber",      "Cmd_Drill",        "Cmd_Exit",         "Accel_ChangeNet",
                            "Accel_Width",      "Cmd_RotateAngle", "Accel_ShowDPE",    "Cmd_TextStyles",   "Accel_DRC",
                            "Cmd_HotkeysHelp",  "Cmd_Settings",    "Cmd_About",        "Accel_Layer",      "Accel_Paste",
-                           "Cmd_Summary",      "Cmd_CopperArea"};
+                           "Cmd_Summary",      "Cmd_CopperArea",  "Cmd_WiresToCopper"};
 
 int intArg(const QJsonObject& a, const char* k, int def) { return a.contains(k) ? a.value(k).toInt(def) : def; }
 
