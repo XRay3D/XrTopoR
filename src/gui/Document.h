@@ -12,6 +12,7 @@
 #include "core/Delay.h"
 #include "core/Teardrops.h"
 #include "drc/Drc.h"
+#include "geom/Ranges.h"
 #include "gui/Units.h"
 #include "topo/Topology.h"
 
@@ -50,9 +51,14 @@ struct EditSnapshot {
   std::vector<TextStyle> textStyles;
   std::vector<ZippedWire> zips;  // the differential pairs' zipped sections (their conductors are tracks)
   DesignSettings settings;       // labels, pad corners, the warnings shown: changed by their dialogs
+  // What names nets and pins: a net taken out, pins swapped, a serpent made change these too. (The parameters'
+  // dialog, which edits them as well, clears the history.)
+  std::vector<Serpent> serpents;
+  HiSpeed hispeed;
+  std::optional<DesignRules> rules;
   static EditSnapshot take(const Board& b) {
     return {b.components, b.pads, b.tracks, b.vias, b.zones, b.keepouts, b.texts, b.graphics, b.outline, b.nets,
-            b.padstacks, b.textStyles, b.zips, b.settings};
+            b.padstacks, b.textStyles, b.zips, b.settings, b.serpents, b.hispeed, b.rules};
   }
   void apply(Board& b) const {
     b.components = components;
@@ -69,6 +75,13 @@ struct EditSnapshot {
     b.textStyles = textStyles;
     b.settings = settings;
     b.zips = zips;
+    b.serpents = serpents;
+    b.hispeed = hispeed;
+    b.rules = rules;
+  }
+  // The compiled rules are other with this one: the nets' numbers or names, the rules or the signals differ.
+  bool rulesDiffer(const EditSnapshot& o) const {
+    return !r::equal(nets, o.nets, {}, &Net::name, &Net::name) || !(rules == o.rules) || !(hispeed == o.hispeed);
   }
 };
 

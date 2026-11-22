@@ -21,6 +21,7 @@ struct RuleNets {
 };
 
 struct WidthRule {
+  bool operator==(const WidthRule&) const = default;
   bool enabled = true;
   std::vector<std::string> layers;  // empty: all layers
   RuleNets nets;
@@ -29,6 +30,7 @@ struct WidthRule {
 };
 
 struct ClearanceRule {
+  bool operator==(const ClearanceRule&) const = default;
   bool enabled = true;
   std::vector<std::string> layers;
   RuleNets a, b;
@@ -60,6 +62,7 @@ struct ViaPadSize {
 };
 
 struct ViaType {
+  bool operator==(const ViaType&) const = default;
   std::string name;
   Coord diameter = 0, drill = 0;  // diameter: of the pad on the copper layers (the largest)
   std::string from, to;           // «Начальный / Конечный слой» (LayerRange); empty: all layers
@@ -68,12 +71,14 @@ struct ViaType {
 };
 
 struct ViaRule {
+  bool operator==(const ViaRule&) const = default;
   bool enabled = true;
   RuleNets nets;
   std::string viaType;  // empty: all types
 };
 
 struct PlaneRule {
+  bool operator==(const PlaneRule&) const = default;
   bool enabled = true;
   std::string layer, net;
 };
@@ -81,6 +86,7 @@ struct PlaneRule {
 // «Назначение цепей на слои»: nets meant to be routed on a layer (a net may have several); routing
 // elsewhere is TopoR's warning 5047, the autorouter avoids it.
 struct LayerNetsRule {
+  bool operator==(const LayerNetsRule&) const = default;
   bool enabled = true;
   std::string layer;
   std::vector<RuleNets> nets;
@@ -108,6 +114,7 @@ struct LayerGroup {
 };
 
 struct DesignRules {
+  bool operator==(const DesignRules&) const = default;
   std::vector<NetGroup> netGroups;
   std::vector<CompGroup> compGroups;
   std::vector<LayerGroup> layerGroups;

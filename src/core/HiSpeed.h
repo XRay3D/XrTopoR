@@ -18,6 +18,7 @@ using LayerId = int;        // (Board.h takes these from here)
 constexpr int kNoNet = -1;
 
 struct ImpedanceLayerRule {
+  bool operator==(const ImpedanceLayerRule&) const = default;
   std::string layer;  // the layer's name, as the file names it
   Coord width = 0;
   Coord gap = 0;      // a differential pair only: between the two conductors
@@ -25,6 +26,7 @@ struct ImpedanceLayerRule {
 
 // «Волновое сопротивление»: a named set of widths per layer (and gaps for a pair).
 struct Impedance {
+  bool operator==(const Impedance&) const = default;
   std::string name;
   double z0 = 0;  // Ohm, informative
   bool diff = false;
@@ -43,12 +45,14 @@ struct PinRef {
 
 // A signal: from the cluster's source pin to this receiver, through passive components.
 struct Signal {
+  bool operator==(const Signal&) const = default;
   std::string name;
   PinRef receiver;
   std::vector<std::string> components;
 };
 
 struct SignalCluster {
+  bool operator==(const SignalCluster&) const = default;
   std::string impedance;
   PinRef source;
   std::vector<std::string> nets;
@@ -58,6 +62,7 @@ struct SignalCluster {
 
 // «Дифференциальный сигнал»: a pair of signals, the first positive.
 struct DiffSignal {
+  bool operator==(const DiffSignal&) const = default;
   std::string name;
   Coord mismatch = 0;  // the allowed difference of the two conductors' lengths
   std::string impedance;
@@ -71,6 +76,7 @@ struct ObjectSignal {
 };
 
 struct SignalGroup {
+  bool operator==(const SignalGroup&) const = default;
   std::string name;
   std::vector<ObjectSignal> members;
 };
@@ -79,6 +85,7 @@ struct SignalGroup {
 // a constant within the tolerances), DelayRelation (the difference of left and right). The values: a time in
 // ps, or a length in nm.
 struct DelayRule {
+  bool operator==(const DelayRule&) const = default;
   enum class Kind { Equal, Constant, Relation } kind = Kind::Equal;
   bool enabled = true;
   bool time = false;  // valueType Time (else Dist)
@@ -87,11 +94,13 @@ struct DelayRule {
 };
 
 struct DiffNamesRule {
+  bool operator==(const DiffNamesRule&) const = default;
   bool enabled = true;
   std::string pos, neg;
 };
 
 struct SignalSearch {
+  bool operator==(const SignalSearch&) const = default;
   bool present = false;
   int maxNetsInCluster = 5;
   bool createPinPairs = true;
@@ -101,6 +110,7 @@ struct SignalSearch {
 };
 
 struct HiSpeed {
+  bool operator==(const HiSpeed&) const = default;
   std::vector<Impedance> impedances;
   std::vector<SignalCluster> clusters;
   std::vector<DiffSignal> diffSignals;
@@ -117,6 +127,7 @@ struct HiSpeed {
 
 // «Змейка»: kept as the file has it, its tracks locked.
 struct Serpent {
+  bool operator==(const Serpent&) const = default;
   std::string id;
   double length = 0, gap = 0, h1 = 0, h2 = 0, h3 = 0, h4 = 0;
 };

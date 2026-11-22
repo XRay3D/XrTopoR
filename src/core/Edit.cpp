@@ -810,16 +810,32 @@ void changeNet(Board& b, const Fragment& f, const std::vector<int>& pads, int ne
   if (net == kNoNet) removeNetless(b);  // (a wire given no net goes)
 }
 
-std::string removeNet(Board& b, int net) {
-  if (net < 0 || net >= int(b.nets.size())) return "no such net";
-  if (r::any_of(b.layers, [&](const Layer& l) { return l.plane && l.planeNet == net; })) return "the net of a plane layer";
+std::string removeNet(Board& b, int net) { return removeNets(b, {net}); }
+
+std::string removeNets(Board& b, std::vector<int> nets) {
+  r::sort(nets);
+  nets.erase(r::unique(nets).begin(), nets.end());
+  if (nets.empty()) return {};
+  if (nets.front() < 0 || nets.back() >= int(b.nets.size())) return "no such net";
+  if (r::any_of(b.layers, [&](const Layer& l) { return l.plane && r::binary_search(nets, l.planeNet); })) return "the net of a plane layer";
   const bool numbered = r::any_of(b.layerRules, [](const LayerRule& x) { return !x.nets.empty(); }) ||
                         r::any_of(b.pairRules, [](const ClearancePair& x) { return !x.netsA.empty() || !x.netsB.empty(); }) ||
                         r::any_of(b.nominalRules, [](const ClearancePair& x) { return !x.netsA.empty() || !x.netsB.empty(); });
   if (!b.rules && numbered) return "the design's rules name nets by number";
+  // The number of every net after: kNoNet for one taken out, else less by the taken ones before it.
+  std::vector<int> after(b.nets.size());
+  std::vector<std::string> names;
+  for (int n = 0, gone = 0; n < int(b.nets.size()); ++n) {
+    if (r::binary_search(nets, n)) {
+      after[size_t(n)] = kNoNet;
+      names.push_back(b.nets[size_t(n)].name);
+      ++gone;
+    } else {
+      after[size_t(n)] = n - gone;
+    }
+  }
   auto fix = [&](int& n) {
-    if (n == net) n = kNoNet;
-    else if (n > net) --n;
+    if (n >= 0) n = after[size_t(n)];
   };
   for (Pad& p : b.pads) fix(p.net);
   for (Track& t : b.tracks) fix(t.net);
@@ -830,11 +846,53 @@ std::string removeNet(Board& b, int net) {
     fix(z.netP);
     fix(z.netN);
   }
-  b.nets.erase(b.nets.begin() + net);
+  for (int n = int(b.nets.size()) - 1; n >= 0; --n)
+    if (after[size_t(n)] == kNoNet) b.nets.erase(b.nets.begin() + n);
+  // What names a net by its name: a rule of the one net goes, a list loses the name.
+  r::sort(names);
+  auto gone = [&](const std::string& name) { return r::binary_search(names, name); };
+  auto ofGone = [&](const RuleNets& x) { return x.kind == RuleNets::Kind::Net && gone(x.name); };
+  if (b.rules) {
+    DesignRules& d = *b.rules;
+    std::erase_if(d.widths, [&](const WidthRule& x) { return ofGone(x.nets); });
+    std::erase_if(d.clearances, [&](const ClearanceRule& x) { return ofGone(x.a) || ofGone(x.b); });
+    std::erase_if(d.vias, [&](const ViaRule& x) { return ofGone(x.nets); });
+    for (LayerNetsRule& x : d.layerNets) std::erase_if(x.nets, ofGone);
+    std::erase_if(d.layerNets, [](const LayerNetsRule& x) { return x.nets.empty(); });
+    for (NetGroup& g : d.netGroups) std::erase_if(g.nets, gone);
+  }
+  std::erase_if(b.hispeed.search.excludedNets, gone);
   b.rebuildNetIndex();  // (the names' numbers moved: a net looked up by name was found under the old one)
   removeNetless(b);     // (its wires go with it: there are no wires of no net)
   if (b.rules) compileRules(b);
   return {};
+}
+
+SinglePinNets removeSinglePinNets(Board& b) {
+  SinglePinNets out;
+  const size_t n = b.nets.size();
+  std::vector<int> pins(n, 0);
+  std::vector<char> held(n, 0);  // copper of its own, or a signal through it
+  auto hold = [&](int net) {
+    if (net >= 0 && net < int(n)) held[size_t(net)] = 1;
+  };
+  for (const Pad& p : b.pads)
+    if (p.net >= 0 && p.net < int(n)) ++pins[size_t(p.net)];
+  for (const Track& t : b.tracks) hold(t.net);
+  for (const Via& v : b.vias) hold(v.net);
+  for (const Zone& z : b.zones) hold(z.net);
+  for (const Layer& l : b.layers)
+    if (l.plane) hold(l.planeNet);
+  for (const SignalCluster& c : b.hispeed.clusters)
+    for (const std::string& name : c.nets) hold(b.findNet(name));
+  std::vector<int> nets;
+  for (int net = 0; net < int(n); ++net) {
+    if (pins[size_t(net)] != 1) continue;
+    if (held[size_t(net)]) out.skipped.push_back(b.nets[size_t(net)].name);
+    else nets.push_back(net);
+  }
+  if (!nets.empty() && removeNets(b, nets).empty()) out.removed = int(nets.size());
+  return out;
 }
 
 std::string renameNet(Board& b, int net, const std::string& name) {

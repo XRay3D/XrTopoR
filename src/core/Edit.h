@@ -126,6 +126,17 @@ void changeNet(Board& b, const Fragment& f, const std::vector<int>& pads, int ne
 // numbered one less everywhere, the rules are compiled again. Empty: done; else why not (a plane's net; a design
 // whose rules name nets by number and cannot be compiled again).
 std::string removeNet(Board& b, int net);
+// ... several at once, the rules compiled once. The nets' names go out of what names nets by name too: the rules
+// of one net, the net groups, the nets assigned to layers, the nets left out of the search of signals.
+std::string removeNets(Board& b, std::vector<int> nets);
+// «Удалить одноконтактные цепи»: the nets of one pin are taken out of the design, the pin left of no net. A net
+// with copper of its own (wires, vias, areas, a plane layer) or one a signal goes through stays: `skipped` names
+// those.
+struct SinglePinNets {
+  int removed = 0;
+  std::vector<std::string> skipped;
+};
+SinglePinNets removeSinglePinNets(Board& b);
 // A net named anew. Empty: done; else why not (the name is taken; the net's rules name it — width, clearance, pair
 // or layers would be other with the new name).
 std::string renameNet(Board& b, int net, const std::string& name);

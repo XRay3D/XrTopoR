@@ -378,6 +378,25 @@ void MainWindow::bindCommands() {
     doc_->commitEdit(before, tr("Удалить избыточные переходы"));
     showHint(tr("Удалено избыточных переходов: %1").arg(n));
   });
+  c.bind("Cmd_RemoveSinglePinNets", [this] {
+    const QString group = tr("Удаление одноконтактных цепей");
+    auto before = doc_->beginEdit();
+    const edit::SinglePinNets r = edit::removeSinglePinNets(*doc_->board());
+    doc_->clearLog(group);
+    for (const std::string& name : r.skipped)
+      doc_->addLog({LogMessage::Kind::Info, group,
+                    tr("Цепь %1 оставлена: у неё есть проводники, переходы, области металлизации или через неё идёт сигнал")
+                        .arg(QString::fromStdString(name))});
+    if (!r.removed) {
+      showHint(tr("Одноконтактные цепи не обнаружены."));
+      return;
+    }
+    doc_->clearSelection();
+    doc_->invalidateModel();  // (the nets are numbered anew)
+    doc_->commitEdit(before, tr("Удалить одноконтактные цепи"), false);
+    doc_->addLog({LogMessage::Kind::Info, group, tr("Выполнено успешно. Удалено %1 цепей.").arg(r.removed)});
+    showHint(tr("Выполнено успешно. Удалено %1 цепей.").arg(r.removed));
+  });
   c.bind("Accel_PourAllPoly", [this] { pour(true, false, tr("Залить все")); });
   c.bind("Accel_UnPourAllPoly", [this] { pour(false, true, tr("Удалить заливку у всех")); });
   c.bind("Accel_RePourAllPoly", [this] { pour(true, true, tr("Перезалить все")); });

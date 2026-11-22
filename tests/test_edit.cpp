@@ -1139,3 +1139,61 @@ TEST(Edit, ANetIsTakenOutAndNamedAnew) {
     EXPECT_EQ(b.nets[5].name, old) << why;
   }
 }
+
+// «Удалить одноконтактные цепи»: the nets of one pin go, the pin is left of no net; a net with copper of its own, a
+// plane's net or one a signal goes through stays. What names nets by name loses the names; the rest of the design
+// — the other nets' objects, the signals, the violations — is as it was, and the file is read back.
+TEST(Edit, RemoveSinglePinNets) {
+  auto pinsOf = [](const Board& b) {
+    std::vector<int> pins(b.nets.size(), 0);
+    for (const Pad& p : b.pads)
+      if (p.net >= 0) ++pins[size_t(p.net)];
+    return pins;
+  };
+  for (auto [file, single, removed] : {std::tuple{"topor/Example_06/Signals.fst", 39, 39}, std::tuple{"topor/AMK310/AMK310_MCU_V2.fst", 5, 5}}) {
+    auto lb = io::loadBoard(data(file));
+    ASSERT_TRUE(lb) << file;
+    Board& b = **lb;
+    const size_t nets = b.nets.size(), tracks = b.tracks.size();
+    EXPECT_EQ(r::count(pinsOf(b), 1), single) << file;
+    const size_t violations = runDrc(b, {}).size();
+    const edit::SinglePinNets res = edit::removeSinglePinNets(b);
+    EXPECT_EQ(res.removed, removed) << file;
+    EXPECT_EQ(res.removed + int(res.skipped.size()), single) << file;
+    EXPECT_EQ(b.nets.size(), nets - size_t(removed)) << file;
+    EXPECT_EQ(b.tracks.size(), tracks) << file;
+    EXPECT_EQ(r::count(pinsOf(b), 1), int(res.skipped.size())) << file;
+    EXPECT_EQ(runDrc(b, {}).size(), violations) << file;
+    // Nothing names a net that is not there.
+    if (b.rules) {
+      auto named = [&](const RuleNets& x) { return x.kind != RuleNets::Kind::Net || b.findNet(x.name) >= 0; };
+      for (const WidthRule& w : b.rules->widths) EXPECT_TRUE(named(w.nets)) << w.nets.name;
+      for (const ClearanceRule& c : b.rules->clearances) EXPECT_TRUE(named(c.a) && named(c.b));
+      for (const NetGroup& g : b.rules->netGroups)
+        for (const std::string& n : g.nets) EXPECT_GE(b.findNet(n), 0) << n;
+    }
+    for (const std::string& n : b.hispeed.search.excludedNets) EXPECT_GE(b.findNet(n), 0) << n;
+    const std::string path = testing::TempDir() + "/single_pin_nets.fst";
+    ASSERT_TRUE(io::saveBoard(b, path)) << file;
+    auto back = io::loadBoard(path);
+    ASSERT_TRUE(back) << file;
+    EXPECT_EQ((*back)->nets.size(), b.nets.size()) << file;
+    EXPECT_EQ((*back)->tracks.size(), b.tracks.size()) << file;
+    EXPECT_EQ(edit::removeSinglePinNets(b).removed, 0) << "nothing the second time";
+  }
+  // A net of one pin with a wire of its own stays; so does a plane's net.
+  Fixture fx;
+  const edit::SinglePinNets kept = edit::removeSinglePinNets(fx.b);
+  EXPECT_EQ(kept.removed, 0);
+  EXPECT_EQ(kept.skipped.size(), 3u);
+  fx.b.tracks.clear();
+  fx.b.layers[fx.bot].plane = true;
+  fx.b.layers[fx.bot].planeNet = fx.netC;
+  const edit::SinglePinNets two = edit::removeSinglePinNets(fx.b);
+  EXPECT_EQ(two.removed, 2);
+  ASSERT_EQ(two.skipped.size(), 1u);
+  EXPECT_EQ(two.skipped[0], "C");
+  ASSERT_EQ(fx.b.nets.size(), 1u);
+  EXPECT_EQ(fx.b.layers[fx.bot].planeNet, 0);
+  for (const Pad& p : fx.b.pads) EXPECT_EQ(p.net, p.number == "3" ? 0 : kNoNet);
+}

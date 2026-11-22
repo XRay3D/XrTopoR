@@ -914,13 +914,15 @@ struct Writer {
                          {"colorizePad", onOff(d.colorizePad)}, {"colorizeCopper", onOff(d.colorizeCopper)},
                          {"colorizeVia", onOff(d.colorizeVia)}, {"colorizeNetline", onOff(d.colorizeNetline)}});
     for (auto& nc : d.netColors) {
+      if (b.findNet(nc.net) < 0) continue;  // (a net taken out of the design: its colour waits for an undo)
       x.open("SetColor", {{"color", hexColor(nc.color)}});
       x.empty("NetRef", {{"name", nc.net}});
       x.close();
     }
     x.close();
     x.open("FilterNetlines", {{"enabled", onOff(d.filterNetlines)}});
-    for (auto& n : d.netlineNets) x.empty("NetRef", {{"name", n}});
+    for (auto& n : d.netlineNets)
+      if (b.findNet(n) >= 0) x.empty("NetRef", {{"name", n}});
     x.close();
     x.close();
   }

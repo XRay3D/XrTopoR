@@ -837,6 +837,43 @@ TEST(Gui, RestoreDiffPairsReports) {
   EXPECT_EQ(doc.board()->zips.size(), 1u);
 }
 
+// «Удалить одноконтактные цепи»: TopoR's two messages, one step of undo that brings the nets back with what named
+// them (the rules, the nets left out of the search of signals).
+TEST(Gui, RemoveSinglePinNetsReports) {
+  app();
+  MainWindow w;
+  auto hinted = [&](const QString& part) {
+    for (QLabel* l : w.findChildren<QLabel*>())
+      if (l->text().contains(part)) return true;
+    return false;
+  };
+  QAction* remove = (*w.commands())["Cmd_RemoveSinglePinNets"];
+  EXPECT_FALSE(remove->isEnabled()) << "no board";
+  QTemporaryDir dir;  // (a copy: opened beside its project file, the design is marked open in it)
+  ASSERT_TRUE(QFile::copy(QString::fromStdString(data("topor/Example_06/Signals.fst")), dir.filePath("Signals.fst")));
+  ASSERT_TRUE(w.openFile(dir.filePath("Signals.fst")));
+  ASSERT_TRUE(remove->isEnabled());
+  Document& doc = *w.document();
+  const size_t nets = doc.board()->nets.size();
+  const auto rules = doc.board()->rules;
+  const HiSpeed hispeed = doc.board()->hispeed;
+  const size_t delays = signalDelays(*doc.board()).size();
+  remove->trigger();
+  EXPECT_TRUE(hinted("Выполнено успешно. Удалено 39 цепей."));
+  EXPECT_EQ(doc.board()->nets.size(), nets - 39);
+  EXPECT_EQ(signalDelays(*doc.board()).size(), delays);
+  ASSERT_TRUE(doc.undoStack()->canUndo());
+  remove->trigger();
+  EXPECT_TRUE(hinted("Одноконтактные цепи не обнаружены."));
+  EXPECT_EQ(doc.undoStack()->count(), 1) << "nothing done: no step";
+  doc.undoStack()->undo();
+  EXPECT_EQ(doc.board()->nets.size(), nets);
+  EXPECT_TRUE(doc.board()->rules == rules);
+  EXPECT_TRUE(doc.board()->hispeed == hispeed);
+  doc.undoStack()->redo();
+  EXPECT_EQ(doc.board()->nets.size(), nets - 39);
+}
+
 TEST(Gui, ZippedPairSelectionAndProperties) {
   Fixture f("topor/Example_06/Signals.fst");
   PropertiesPanel props(&f.doc);
