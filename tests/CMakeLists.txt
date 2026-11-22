@@ -10,6 +10,7 @@ add_executable(xrtests
   test_wires_to_copper.cpp
   test_swap.cpp
   test_eco.cpp
+  test_serpents.cpp
   test_drc.cpp
   test_signals.cpp
   test_edit.cpp

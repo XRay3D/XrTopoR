@@ -4,9 +4,9 @@
 // allowed difference of a differential signal's two conductors.
 //
 // A signal's way is the shortest one along the tracks of its cluster's nets from the source pin to the receiver,
-// through the passive components the signal names (from pin to pin of one at no length). A serpent counts by the
-// length the design gives it, whatever its pieces are drawn as; a zipped pair's serpent is on its axis and adds
-// what it adds there to each conductor. The delay of a track is its length by the delay per length of its layer; a
+// through the passive components the signal names (from pin to pin of one at no length). A serpent on a single
+// wire counts as its pieces are drawn; a zipped pair's serpent is on its axis — a straight line there — and adds
+// what the design says it adds to each conductor. The delay of a track is its length by the delay per length of its layer; a
 // via adds nothing.
 //
 // The delays per length are TopoR's, measured on its own example of matched signals (Example_06/Signals.fst: of

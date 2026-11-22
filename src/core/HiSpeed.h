@@ -125,7 +125,11 @@ struct HiSpeed {
   int diffSignal(std::string_view name) const;
 };
 
-// «Змейка»: kept as the file has it, its tracks locked.
+// «Змейка»: a run of a wire's pieces (Track::serp) bent to and fro inside a trapezoid to make the wire longer.
+// The trapezoid stands on the chord — from the run's first point to its last —: `h1` and `h4` are its heights
+// over the chord at the run's start and end on one side, `h2` and `h3` on the other (core/Serpents.h says
+// which); they bound the bends' centreline. `length` is the length asked of the run, `gap` the clearance between
+// neighbouring bends. All in nm. (On the axis of a zipped pair: kept as the file has it.)
 struct Serpent {
   bool operator==(const Serpent&) const = default;
   std::string id;

@@ -21,6 +21,7 @@ add_library(xrcore STATIC
   core/Teardrops.cpp
   core/WiresToCopper.cpp
   core/Swap.cpp
+  core/Serpents.cpp
   core/ZoneFill.cpp
   io/sexpr/SExpr.cpp
 )

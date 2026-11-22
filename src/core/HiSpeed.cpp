@@ -71,4 +71,16 @@ void Board::removeZip(int z) {
   }
 }
 
+void Board::removeSerpent(int s) {
+  if (s < 0 || s >= int(serpents.size())) return;
+  serpents.erase(serpents.begin() + s);
+  auto fix = [&](Track& t) {
+    if (t.serp == s) t.serp = -1;
+    else if (t.serp > s) --t.serp;
+  };
+  for (Track& t : tracks) fix(t);
+  for (ZippedWire& z : zips)
+    for (Track& t : z.axis) fix(t);
+}
+
 }  // namespace xr

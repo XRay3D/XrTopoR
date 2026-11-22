@@ -1453,12 +1453,12 @@ struct Reader {
       for (auto* sp : ss->findAll("Serpent")) {
         Serpent x;
         x.id = sp->attr("id");
-        x.length = sp->num("length");
-        x.gap = sp->num("gap");
-        x.h1 = sp->num("h1");
-        x.h2 = sp->num("h2");
-        x.h3 = sp->num("h3");
-        x.h4 = sp->num("h4");
+        x.length = sp->num("length") * this->s;  // (to nm, as everything of the board)
+        x.gap = sp->num("gap") * this->s;
+        x.h1 = sp->num("h1") * this->s;
+        x.h2 = sp->num("h2") * this->s;
+        x.h3 = sp->num("h3") * this->s;
+        x.h4 = sp->num("h4") * this->s;
         serpentIndex[x.id] = int(b.serpents.size());
         b.serpents.push_back(std::move(x));
       }
@@ -1538,7 +1538,7 @@ struct Reader {
       if (seg.has("serpRef"))
         if (auto it = serpentIndex.find(seg.attr("serpRef")); it != serpentIndex.end()) {
           t.serp = it->second;
-          t.locked = true;  // a serpent is kept as drawn
+          t.locked = true;  // a serpent is kept as drawn: its pieces are fixed tracks to all that works on wires
         }
       cur = end;
       if (t.a != t.b || t.mid.has_value()) out.push_back(t);

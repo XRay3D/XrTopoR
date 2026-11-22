@@ -1280,7 +1280,15 @@ struct Writer {
       x.open("Serpents");
       for (size_t i = 0; i < b.serpents.size(); ++i) {
         const Serpent& sp = b.serpents[i];
-        x.empty("Serpent", {{"id", serpentId(int(i))}, {"length", num(sp.length, 8)}, {"gap", num(sp.gap)}, {"h1", num(sp.h1, 8)}, {"h2", num(sp.h2, 8)}, {"h3", num(sp.h3, 8)}, {"h4", num(sp.h4, 8)}});
+        auto u = [](double nm) { return num(nm / kNmPerMm, 8); };
+        // The heights are told from the start of the serpent as the wire is written: a wire written from its other
+        // end has the serpent's sides and ends the other way round.
+        double h1 = sp.h1, h2 = sp.h2, h3 = sp.h3, h4 = sp.h4;
+        if (serpentReversed(int(i))) {
+          std::swap(h1, h3);
+          std::swap(h2, h4);
+        }
+        x.empty("Serpent", {{"id", serpentId(int(i))}, {"length", u(sp.length)}, {"gap", num(sp.gap / kNmPerMm)}, {"h1", u(h1)}, {"h2", u(h2)}, {"h3", u(h3)}, {"h4", u(h4)}});
       }
       x.close();
     }
@@ -1338,9 +1346,23 @@ struct Writer {
   // The runs of the tracks (core/Runs.h: equal ends, one width, fixation and section, ended on a via of the net,
   // at a pad's centre and at branch points, as TopoR ends its wires), each a Wire of one Subwire as TopoR writes
   // them; by layer and net.
+  // The wires as they are written: the runs of tracks, once for the serpents and the wires.
+  std::optional<std::vector<Run>> runs_;
+  const std::vector<Run>& wireRuns() {
+    if (!runs_) runs_ = buildRuns(b, {.exact = true, .atCopper = true});
+    return *runs_;
+  }
+  // Whether the wire of a serpent is written against the order of the serpent's pieces.
+  bool serpentReversed(int serp) {
+    for (const Run& r : wireRuns())
+      for (const ChainStep& sg : r.steps)
+        if (b.tracks[size_t(sg.track)].serp == serp) return sg.reversed;
+    return false;
+  }
+
   void writeWires() {
     std::map<std::pair<LayerId, int>, std::vector<const Run*>> groups;
-    const std::vector<Run> runs = buildRuns(b, {.exact = true, .atCopper = true});
+    const std::vector<Run>& runs = wireRuns();
     // «Капельки» of each piece (TopoR writes them with the wire; reading, it makes them anew).
     std::multimap<int, Teardrop> drops;
     for (const Teardrop& d : teardrops(b)) drops.emplace(d.track, d);

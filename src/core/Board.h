@@ -272,7 +272,7 @@ struct Track {
   bool edited = false;  // changed by hand since the last shape computation (F5 re-lays these first)
   uint32_t id = 0;      // stable identity across edits and undo (0: not assigned yet); see topo::Topology
   int zip = -1;         // the zipped pair (Board::zips) this track is a conductor of
-  int serp = -1;        // the serpent (Board::serpents) this track is a piece of: kept as drawn
+  int serp = -1;        // the serpent (Board::serpents) this track is a piece of: kept as drawn (and locked)
   bool isArc() const { return mid.has_value(); }
   Polyline path(double tol = 2000) const;  // centreline points
   double length() const;                   // along the centreline, nm
@@ -485,6 +485,8 @@ struct Board {
   Coord pairWidth(int net, LayerId layer) const;
   // Takes a zipped section away: its conductors stay as tracks, renumbered.
   void removeZip(int z);
+  // Takes a serpent away: its pieces stay as plain tracks, the serpents after it renumbered.
+  void removeSerpent(int s);
   std::vector<TextStyle> textStyles{TextStyle{}};
   std::vector<Text> texts;
   std::vector<std::vector<Vec2>> outline;  // closed board contours (first = outer)

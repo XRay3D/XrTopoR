@@ -68,11 +68,12 @@ Graph graphOf(const Board& b, const std::set<int>& nets, const std::vector<std::
     for (int ti : tracksOf[size_t(n)]) {
       const Track& t = b.tracks[size_t(ti)];
       double len = t.length();
-      // A piece of a serpent: the serpent's length is what the design says it is — the pieces may be its drawn
-      // bends, or (a zipped pair's) the straight line the bends are to be on.
-      if (t.serp >= 0 && size_t(t.serp) < b.serpents.size())
+      // A piece of a serpent on a single wire counts as it is drawn (the length asked of the serpent may be more
+      // than its trapezoid has room for). A zipped pair's conductor that carries a serpent: the serpent's length
+      // is what the design says it is — the pieces are the straight line the bends are to be on.
+      if (t.serp >= 0 && t.zip >= 0 && size_t(t.serp) < b.serpents.size())
         if (auto it = serpentDrawn.find({t.serp, t.net}); it != serpentDrawn.end() && it->second > 0 && b.serpents[size_t(t.serp)].length > 0)
-          len *= b.serpents[size_t(t.serp)].length * b.designUnitNm / it->second;
+          len *= b.serpents[size_t(t.serp)].length / it->second;
       // A conductor of a zipped pair: with what the pair's serpents add.
       if (auto it = zipScale.find({t.zip, t.net}); t.zip >= 0 && it != zipScale.end()) len *= it->second;
       const int a = endOf(t.a, t.layer), c = endOf(t.b, t.layer);
@@ -152,7 +153,7 @@ std::vector<SignalDelay> signalDelays(const Board& b) {
     for (const Track& t : b.zips[size_t(key.first)].axis)
       if (t.serp >= 0 && size_t(t.serp) < b.serpents.size()) serpents[t.serp] += t.length();
     double extra = 0;
-    for (auto& [sp, len] : serpents) extra += std::max(0.0, b.serpents[size_t(sp)].length * b.designUnitNm - len);
+    for (auto& [sp, len] : serpents) extra += std::max(0.0, b.serpents[size_t(sp)].length - len);
     drawn = drawn > 0 ? (drawn + extra) / drawn : 1.0;
   }
 
