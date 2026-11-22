@@ -33,6 +33,8 @@ struct EcoChange {
 // told: P-CAD's line for it is not known).
 std::vector<EcoChange> netlistDiff(const Board& base, const Board& now);
 
+// A swap is written as P-CAD itself writes one (its schematic, a gate moved to other pins: Untitled1.ECO of the
+// user, 2026-11-22): the pins taken out of their nets by NetNodeDelete, then put into the others by NetNodeAdd.
 // The text of a P-CAD ECO file with the lines of the changes: CP1251, CRLF, a comment line first as P-CAD writes
 // it — «; program [file]--date».
 std::string pcadEcoText(const std::vector<EcoChange>& changes, const std::string& program, const std::string& file, std::time_t when);

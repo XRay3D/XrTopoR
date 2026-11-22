@@ -95,7 +95,9 @@ std::vector<EcoChange> netlistDiff(const Board& base, const Board& now) {
           any = any || had(a) != has(a) || had(c) != has(c);
         }
         if (!all || !any) continue;
+        // As P-CAD's schematic writes a gate moved: the pins taken out of their nets first, then put into the new.
         EcoChange ch{Kind::GateSwap, {}, {}, {}, {}, {}};
+        std::vector<std::string> added;
         for (auto [pa, pb] : pairs) {
           const std::string a = name(pa), c = name(pb);
           ch.a += (ch.a.empty() ? "" : ", ") + a;
@@ -105,9 +107,10 @@ std::vector<EcoChange> netlistDiff(const Board& base, const Board& now) {
           if (had(a) == has(a)) continue;  // (the two pins are of one net)
           move(ch.lines, a, had(a), {});
           move(ch.lines, c, had(c), {});
-          move(ch.lines, a, {}, has(a));
-          move(ch.lines, c, {}, has(c));
+          move(added, a, {}, has(a));
+          move(added, c, {}, has(c));
         }
+        ch.lines.insert(ch.lines.end(), added.begin(), added.end());
         out.push_back(std::move(ch));
       }
   // Pins exchanged within their group: the permutation as swaps of two.

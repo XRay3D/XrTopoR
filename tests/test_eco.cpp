@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <map>
 #include <regex>
 #include <set>
@@ -114,6 +115,12 @@ TEST(Eco, SwapsAreSingleChanges) {
     if (c.kind == EcoChange::Kind::GateSwap) {
       EXPECT_EQ(c.a, "D3-1, D3-2, D3-3");
       EXPECT_EQ(c.b, "D3-5, D3-6, D3-4");
+      // As P-CAD writes a gate moved: every pin out of its net first, then into the new one.
+      const auto firstAdd = r::find_if(c.lines, [](const std::string& l) { return l.starts_with("NetNodeAdd "); });
+      ASSERT_NE(firstAdd, c.lines.end());
+      EXPECT_TRUE(std::all_of(c.lines.begin(), firstAdd, [](const std::string& l) { return l.starts_with("NetNodeDelete "); }));
+      EXPECT_TRUE(std::all_of(firstAdd, c.lines.end(), [](const std::string& l) { return l.starts_with("NetNodeAdd "); }));
+      EXPECT_EQ(firstAdd - c.lines.begin(), c.lines.end() - firstAdd);
     }
   expectLeadsTo(base, now, changes);
   // Swapped back: nothing again.
