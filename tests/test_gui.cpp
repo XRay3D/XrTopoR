@@ -48,6 +48,7 @@
 #include "core/Connectivity.h"
 #include "core/DiffPairs.h"
 #include "core/Edit.h"
+#include "core/Swap.h"
 #include "core/Signals.h"
 #include "core/ZoneFill.h"
 #include "gui/AboutDialog.h"
@@ -58,6 +59,7 @@
 #include "router/topo/ModelTools.h"
 #include "gui/Document.h"
 #include "gui/AutorouteWindow.h"
+#include "gui/EcoDialog.h"
 #include "gui/WiresToCopperDialog.h"
 #include "gui/DesignParamsDialog.h"
 #include "gui/GroupExplorer.h"
@@ -969,6 +971,82 @@ TEST(Gui, SwapToolClicks) {
   EXPECT_EQ(w.view()->swapKind(), SwapKind::Gates);
   (*w.commands())["Cmd_SwapPins"]->trigger();
   EXPECT_EQ(w.view()->swapKind(), SwapKind::Pins);
+}
+
+// «Создание ECO-файла для обратной синхронизации»: the design against its own file is no change; after a swap of
+// gates and a value changed the window lists them with ticks, writes the ticked ones as a P-CAD ECO file and
+// remembers the base for the design.
+TEST(Gui, EcoDialog) {
+  app();
+  QTemporaryDir dir;
+  const QString file = dir.filePath("Placement.fst");
+  ASSERT_TRUE(QFile::copy(QString::fromStdString(data("topor/Example_02/Placement_standard_routing.fst")), file));
+  Document doc;
+  {
+    auto r = io::loadBoard(file.toStdString());
+    ASSERT_TRUE(r) << r.error();
+    doc.setBoard(std::move(*r), file);
+  }
+  {
+    EcoDialog d(&doc);
+    EXPECT_EQ(d.windowTitle(), "Создание ECO-файла для обратной синхронизации");
+    EXPECT_TRUE(d.changes().empty());
+    EXPECT_EQ(QDir::fromNativeSeparators(d.findChild<QLineEdit*>("base")->text()), file) << "the design's own file by default";
+    EXPECT_EQ(d.output(), dir.filePath("Placement.eco"));
+    EXPECT_FALSE(d.findChild<QPushButton*>("create")->isEnabled());
+    EXPECT_TRUE(d.findChild<QLabel*>("state")->text().contains("Изменений относительно базового файла нет"));
+  }
+  Board& b = *doc.board();
+  auto padOf = [&](const char* ref, const char* number) {
+    for (int pi : b.components[size_t(b.findComponent(ref))].pads)
+      if (b.pads[size_t(pi)].number == number) return pi;
+    return -1;
+  };
+  ASSERT_TRUE(swapGates(b, padOf("D3", "1"), padOf("D3", "5")) == SwapRefusal::None);
+  b.components[size_t(b.findComponent("R1"))].value = "4,7 кОм";
+  EcoDialog d(&doc);
+  auto* list = d.findChild<QListWidget*>("changes");
+  auto* create = d.findChild<QPushButton*>("create");
+  ASSERT_TRUE(list && create);
+  ASSERT_EQ(d.changes().size(), 2u);
+  ASSERT_EQ(list->count(), 2);
+  EXPECT_TRUE(list->item(0)->text().startsWith("Переназначить эквивалентные вентили")) << list->item(0)->text().toStdString();
+  EXPECT_TRUE(list->item(1)->text().contains("R1") && list->item(1)->text().contains("4,7 кОм")) << list->item(1)->text().toStdString();
+  EXPECT_TRUE(list->item(0)->toolTip().contains("NetNodeAdd")) << "the lines of the file in the tip";
+  EXPECT_TRUE(create->isEnabled());
+  if (const char* shots = std::getenv("XR_SHOT_DIR")) {
+    d.show();
+    QTest::qWait(50);
+    d.grab().save(QString(shots) + "/eco-dialog.png");
+  }
+  // Unticked, a change is not written; with none ticked there is nothing to write.
+  list->item(1)->setCheckState(Qt::Unchecked);
+  EXPECT_TRUE(create->isEnabled());
+  list->item(0)->setCheckState(Qt::Unchecked);
+  EXPECT_FALSE(create->isEnabled());
+  list->item(0)->setCheckState(Qt::Checked);
+  const QString out = dir.filePath("out/../swapped.eco");
+  d.setOutput(out);
+  create->click();
+  QFile f(dir.filePath("swapped.eco"));
+  ASSERT_TRUE(f.open(QIODevice::ReadOnly));
+  const QByteArray text = f.readAll();
+  EXPECT_TRUE(text.startsWith("; XrTopoR ")) << text.left(60).toStdString();
+  EXPECT_TRUE(text.contains("NetNodeDelete \"")) << text.toStdString();
+  EXPECT_FALSE(text.contains("CompAttr")) << "the unticked change";
+  EXPECT_TRUE(text.endsWith("\r\n"));
+  EXPECT_TRUE(d.findChild<QLabel*>("written")->text().contains("Показать в папке"));
+  ASSERT_FALSE(doc.log().empty());
+  EXPECT_TRUE(doc.log().back().text.contains("ECO-файл"));
+  // A base that is not there is said; another base is compared at once and remembered for the design.
+  EXPECT_FALSE(d.setBase(dir.filePath("nothing.fst")));
+  EXPECT_FALSE(create->isEnabled());
+  const QString other = dir.filePath("base.fst");
+  ASSERT_TRUE(io::saveBoard(b, other.toStdString()));
+  EXPECT_TRUE(d.setBase(other));
+  EXPECT_TRUE(d.changes().empty()) << "saved as it is now: no change against it";
+  EcoDialog again(&doc);
+  EXPECT_EQ(QDir::fromNativeSeparators(again.findChild<QLineEdit*>("base")->text()), other);
 }
 
 TEST(Gui, ZippedPairSelectionAndProperties) {
@@ -4705,6 +4783,48 @@ TEST(Mcp, RoutingTools) {
   // A command that opens a dialog is refused: the call would wait for someone to close it.
   mcpCall(s, "command", {{"id", "Accel_DRC"}}, &error);
   EXPECT_TRUE(error);
+}
+
+// The swap tool of the server: the groups, an exchange of pins and of gates in one step of undo each, a refusal
+// for pins that are not equivalent.
+TEST(Mcp, SwapTool) {
+  app();
+  QTemporaryDir dir;
+  const QString file = dir.filePath("Placement.fst");
+  ASSERT_TRUE(QFile::copy(QString::fromStdString(data("topor/Example_02/Placement_standard_routing.fst")), file));
+  MainWindow w;
+  mcp::Server* s = w.mcpServer();
+  bool error = false;
+  mcpCall(s, "open", {{"path", file}}, &error);
+  ASSERT_FALSE(error);
+  const QJsonArray groups = mcpCall(s, "swap", {{"gates", true}})["groups"].toArray();
+  ASSERT_FALSE(groups.isEmpty());
+  bool d3 = false;
+  for (const QJsonValue& g : groups)
+    if (g["component"].toString() == "D3") d3 = g["gates"].toArray().size() == 4 && g["gates"].toArray()[0].toArray().size() == 3;
+  EXPECT_TRUE(d3);
+  EXPECT_FALSE(mcpCall(s, "swap")["groups"].toArray().isEmpty());
+  const Board& b = *w.document()->board();
+  auto net = [&](const char* number) {
+    for (int pi : b.components[size_t(b.findComponent("D3"))].pads)
+      if (b.pads[size_t(pi)].number == number) return b.pads[size_t(pi)].net;
+    return -2;
+  };
+  const int o1 = net("3"), o2 = net("4");
+  ASSERT_NE(o1, o2);
+  const QJsonObject done = mcpCall(s, "swap", {{"a", "D3.1"}, {"b", "D3.5"}, {"gates", true}}, &error);
+  ASSERT_FALSE(error) << done["text"].toString().toStdString();
+  EXPECT_EQ(done["swapped"].toArray().size(), 3);
+  EXPECT_EQ(net("3"), o2);
+  EXPECT_EQ(net("4"), o1);
+  EXPECT_EQ(w.document()->undoStack()->undoText(), QObject::tr("Переназначение вентилей"));
+  mcpCall(s, "undo");
+  EXPECT_EQ(net("3"), o1);
+  mcpCall(s, "swap", {{"a", "D3.1"}, {"b", "D3.5"}}, &error);
+  EXPECT_TRUE(error) << "inputs of different gates are not equivalent pins";
+  mcpCall(s, "swap", {{"a", "D3.1"}, {"b", "D3.99"}}, &error);
+  EXPECT_TRUE(error);
+  EXPECT_EQ(net("3"), o1);
 }
 
 // ---------------------------------------------------------------- «Прокладка» (R) as in TopoR

@@ -126,6 +126,10 @@ SwapRefusal exchange(Board& b, const SwappedPads& pairs) {
 
 }  // namespace
 
+SwappedPads gatePinPairs(const Board& b, const std::vector<int>& gateA, const std::vector<int>& gateB) {
+  return gatePairs(b, gateA, gateB);
+}
+
 std::vector<SwapGroup> pinGroups(const Board& b) {
   std::vector<SwapGroup> out;
   for (int ci = 0; ci < int(b.components.size()); ++ci) {

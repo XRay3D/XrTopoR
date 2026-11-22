@@ -902,6 +902,7 @@ std::string renameNet(Board& b, int net, const std::string& name) {
   if (r::contains(b.nets, name, &Net::name)) return "the name is taken";
   if (!b.rules) {
     b.nets[size_t(net)].name = name;
+    b.rebuildNetIndex();  // (the net is looked up by its new name)
     return {};
   }
   // The rules name nets by their names: what they give the net must be the same under the new one.
@@ -920,6 +921,7 @@ std::string renameNet(Board& b, int net, const std::string& name) {
   compileRules(trial);
   if (given(trial) != given(b)) return "the design's rules name the net";
   b = std::move(trial);
+  b.rebuildNetIndex();
   return {};
 }
 

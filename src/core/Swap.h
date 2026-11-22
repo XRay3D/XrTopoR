@@ -40,5 +40,7 @@ SwapRefusal swapPins(Board& b, int padA, int padB, SwappedPads* done = nullptr);
 // The same for two equivalent gates, `padA` and `padB` being any pins of theirs: every pin of the one with its
 // pin of the other — by the pins' names in the symbol when both gates have the same distinct names, else in order.
 SwapRefusal swapGates(Board& b, int padA, int padB, SwappedPads* done = nullptr);
+// The pins of two gates (the pads of each), pin for pin, as swapGates pairs them; empty: the gates do not match.
+SwappedPads gatePinPairs(const Board& b, const std::vector<int>& gateA, const std::vector<int>& gateB);
 
 }  // namespace xr

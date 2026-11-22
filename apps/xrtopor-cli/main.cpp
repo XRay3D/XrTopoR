@@ -22,6 +22,7 @@
 #include "topo/RelayStats.h"
 #include "core/Edit.h"
 #include "topo/Sidecar.h"
+#include "io/eco/PcadEco.h"
 #include "xr/Version.h"
 #include <boost/version.hpp>
 #include <CGAL/version.h>
@@ -56,6 +57,8 @@ void usage() {
       "  report     <board> [--bom out.csv]          routing statistics per layer and net, BOM\n"
       "  padstats   <board>                         how the wires meet the pads: widths, exits, runs inside copper, joints\n"
       "  flexfix    <board> -o <out> --nets a,b [--off]  set (or take off) the flexible fixation of nets\n"
+      "  eco        <base> <board> -o <out.eco>    what changed in the netlist and the components' attributes of <board> against\n"
+      "                                            <base>, as a P-CAD ECO file (pins and gates swapped, nets taken out or named anew)\n"
       "boards: .kicad_pcb, .dsn, P-CAD ASCII .pcb");
 }
 
@@ -465,6 +468,17 @@ int main(int argc, char** argv) {
     std::string out(a.opt("-o"));
     if (auto r = io::saveBoard(b, out); !r) return fail(r.error());
     std::println("written {} ({} tracks, {} vias)", out, b.tracks.size(), b.vias.size());
+    return 0;
+  }
+  if (cmd == "eco" && !second().empty() && !a.opt("-o").empty()) {
+    auto now = io::loadBoard(second());
+    if (!now) return fail(now.error());
+    const auto changes = io::netlistDiff(b, **now);
+    size_t lines = 0;
+    for (const io::EcoChange& c : changes) lines += c.lines.size();
+    const std::string out(a.opt("-o"));
+    if (auto r = io::writePcadEco(out, changes, std::string("XrTopoR ") + XR_VERSION_FULL, second()); !r) return fail(r.error());
+    std::println("written {}: {} change(s), {} line(s)", out, changes.size(), lines);
     return 0;
   }
   usage();

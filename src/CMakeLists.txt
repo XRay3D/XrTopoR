@@ -40,6 +40,7 @@ add_library(xrio STATIC
   io/pcad/PcadWriter.cpp
   io/gerber/GerberWriter.cpp
   io/svg/SvgWriter.cpp
+  io/eco/PcadEco.cpp
   io/xml/Xml.cpp
   io/topor/FsProj.cpp
   io/topor/FstReader.cpp
@@ -120,6 +121,7 @@ if(XR_BUILD_GUI)
     gui/SignalsPage.cpp
     gui/SmallDialogs.cpp
     gui/WiresToCopperDialog.cpp
+    gui/EcoDialog.cpp
     gui/TextFont.cpp
     gui/TextStylesDialog.cpp
     gui/ToporConfig.cpp

@@ -1,10 +1,14 @@
 #include <gtest/gtest.h>
+#include <map>
+#include <fstream>
 
 #include <algorithm>
 #include <filesystem>
 
 #include "core/Connectivity.h"
 #include "core/ZoneFill.h"
+#include "core/Swap.h"
+#include "core/Edit.h"
 #include "io/BoardIO.h"
 #include "io/sexpr/SExpr.h"
 
@@ -271,6 +275,62 @@ TEST(PcadIO, WriterRoundTripAndRouting) {
   ASSERT_NE(it, (*b2)->tracks.end());
   EXPECT_NEAR(double(it->mid->x), double(arc.mid->x), 1000);
   EXPECT_NEAR(double(it->mid->y), double(arc.mid->y), 1000);
+}
+
+// The netlist of a P-CAD file follows the board: untouched, it is written as the file has it; gates swapped, a
+// net taken out, a net named anew — the pins are of the same nets when the file is read back.
+TEST(PcadIO, NetlistIsWrittenAfterSwap) {
+  auto lb = io::loadBoard(data("topor/Example_02/Placement_master.pcb"));
+  ASSERT_TRUE(lb) << lb.error();
+  Board& b = **lb;
+  auto netlistOf = [](const std::string& text) {
+    const size_t from = text.find("(netlist "), to = text.find("(pcbDesign ");
+    return from != std::string::npos && to != std::string::npos ? text.substr(from, to - from) : std::string();
+  };
+  auto pinNets = [](const Board& x) {
+    std::map<std::pair<std::string, std::string>, std::string> out;
+    for (const Pad& p : x.pads)
+      if (p.component >= 0) out[{x.components[size_t(p.component)].ref, p.number}] = p.net >= 0 ? x.nets[size_t(p.net)].name : std::string();
+    return out;
+  };
+  auto first = io::writePcad(b);
+  ASSERT_TRUE(first) << first.error();
+  const std::string untouched = netlistOf(*first);
+  ASSERT_FALSE(untouched.empty());
+  {
+    std::ifstream in(data("topor/Example_02/Placement_master.pcb"), std::ios::binary);
+    const std::string file((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    auto asRead = io::readPcad(file, "m.pcb");
+    ASSERT_TRUE(asRead);
+    EXPECT_EQ(pinNets(**asRead), pinNets(b));
+  }
+  auto padOf = [&](const char* ref, const char* number) {
+    for (int pi : b.components[size_t(b.findComponent(ref))].pads)
+      if (b.pads[size_t(pi)].number == number) return pi;
+    return -1;
+  };
+  // Two gates of D3 swapped; a net taken out; a net named anew.
+  ASSERT_TRUE(swapGates(b, padOf("D3", "1"), padOf("D3", "5")) == SwapRefusal::None);
+  const std::string gone = b.nets[2].name;
+  ASSERT_EQ(edit::removeNet(b, 2), "");
+  int renamed = -1;
+  for (int n = 0; n < int(b.nets.size()) && renamed < 0; ++n)
+    if (edit::renameNet(b, n, "NAMED_ANEW").empty()) renamed = n;
+  ASSERT_GE(renamed, 0);
+  EXPECT_EQ(b.findNet("NAMED_ANEW"), renamed) << "found by its new name";
+  auto text = io::writePcad(b);
+  ASSERT_TRUE(text) << text.error();
+  EXPECT_TRUE(netlistOf(*text) != untouched);
+  EXPECT_EQ(text->find("(net \"" + gone + "\""), std::string::npos);
+  EXPECT_NE(text->find("(net \"NAMED_ANEW\""), std::string::npos);
+  auto again = io::readPcad(*text, "swapped.pcb");
+  ASSERT_TRUE(again) << again.error();
+  EXPECT_EQ(pinNets(**again), pinNets(b));
+  EXPECT_EQ((*again)->nets.size(), b.nets.size());
+  // Written again from what was read: the same netlist.
+  auto third = io::writePcad(**again);
+  ASSERT_TRUE(third);
+  EXPECT_TRUE(netlistOf(*third) == netlistOf(*text));
 }
 
 // What P-CAD has on a signal layer besides wires and pours (pcad_shapes.pcb, drawn in P-CAD 2002): line keepouts,

@@ -184,6 +184,8 @@ struct Pad {
   // of one gate with the same non-zero pinEqual may exchange their nets, and so may the gates of a component with
   // the same non-zero gateEqual, pin for pin. gate 0: of no gate (power).
   std::string symName;  // the pin's name in the schematic symbol; empty: the pad's number
+  std::string pin;      // the pin's designator in its component, as the netlist names it; empty: the pad's number
+  const std::string& designator() const { return pin.empty() ? number : pin; }
   int pinEqual = 0;
   int gate = 1;
   int gateEqual = 0;

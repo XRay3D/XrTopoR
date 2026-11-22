@@ -700,7 +700,10 @@ struct Reader {
         p.pinEqual = pin->second.pinEqual;
         p.gate = pin->second.gate;
         p.gateEqual = pin->second.gateEqual;
-        if (!pin->second.name.empty()) pinToPad[key(c.ref, '\x01', pin->second.name)] = pi->second;
+        if (!pin->second.name.empty()) {
+          pinToPad[key(c.ref, '\x01', pin->second.name)] = pi->second;
+          if (pin->second.name != p.number) p.pin = pin->second.name;
+        }
       }
     }
     for (FpGraphic fg : fp.graphics) {

@@ -407,6 +407,7 @@ struct Reader {
           for (int pi : b.components[size_t(c)].pads) {
             Pad& p = b.pads[size_t(pi)];
             if (p.number != padNum) continue;
+            if (cp.des != p.number) p.pin = cp.des;
             p.symName = cp.symName;
             p.pinEqual = cp.pinEqual;
             p.gate = cp.gate;

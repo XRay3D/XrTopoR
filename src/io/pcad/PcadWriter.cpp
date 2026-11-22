@@ -1,10 +1,12 @@
-// P-CAD 2002 ASCII writer: the source file is patched (placement, routing and vias replaced,
-// pours written from the copper areas), so libraries, netlist, layers, text and everything else round-trip unchanged.
+// P-CAD 2002 ASCII writer: the source file is patched (placement, routing and vias replaced, pours written from the
+// copper areas, the nets of the netlist whose pins are other rewritten), so libraries, layers, text and everything
+// else round-trip unchanged.
 #include <cmath>
 #include <cstdio>
 #include <map>
 
 #include "core/ZoneFill.h"
+#include "geom/Ranges.h"
 #include "io/BoardIO.h"
 #include "io/Encoding.h"
 #include "io/sexpr/SExpr.h"
@@ -331,6 +333,96 @@ void writeAttributes(const Board& b, int ci, Node& inst) {
   }
 }
 
+// The netlist of the file brought to the board's: a net whose pins are other gets the board's nodes, a net that
+// is gone goes, a net that is new is added (one of the same pins under another name is the old one named anew).
+// A net as it was stays as the file has it. The file names a pin by its designator in the component, the board
+// by the pad's number: the components' padPinMap is between them.
+void writeNetlist(const Board& b, Node& tree, const Node& library) {
+  Node* nl = findChild(tree, "netlist");
+  if (!nl) return;
+  std::map<std::string, std::map<std::string, std::string>> padToPin;  // compDef -> padNum -> pin designator
+  for (const Node* cd : library.findAll("compDef")) {
+    auto& m = padToPin[toUtf8(cd->arg(0))];
+    if (const Node* ap = cd->find("attachedPattern"))
+      if (const Node* ppm = ap->find("padPinMap")) {
+        const Node* lastPad = nullptr;
+        for (const Node& k : ppm->kids) {
+          if (k.is("padNum")) lastPad = &k;
+          else if (k.is("compPinRef") && lastPad) m.emplace(lastPad->arg(0), toUtf8(k.arg(0)));
+        }
+      }
+  }
+  std::map<std::string, std::string> defOf;  // refdes -> compDef
+  for (const Node* ci : nl->findAll("compInst"))
+    if (const Node* cr = ci->find("compRef")) defOf[toUtf8(ci->arg(0))] = toUtf8(cr->arg(0));
+  using Pin = std::pair<std::string, std::string>;  // refdes, pin designator
+  std::vector<std::vector<Pin>> pinsOf(b.nets.size());
+  for (const Pad& p : b.pads) {
+    if (p.net < 0 || p.component < 0) continue;
+    const std::string& ref = b.components[size_t(p.component)].ref;
+    std::string pin = p.number;
+    if (auto d = defOf.find(ref); d != defOf.end())
+      if (auto m = padToPin.find(d->second); m != padToPin.end())
+        if (auto it = m->second.find(p.number); it != m->second.end()) pin = it->second;
+    pinsOf[size_t(p.net)].push_back({ref, pin});
+  }
+  auto sorted = [](std::vector<Pin> v) {
+    r::sort(v);
+    return v;
+  };
+  auto nodesOf = [](const Node& net) {
+    std::vector<Pin> out;
+    for (const Node& k : net.kids)
+      if (k.is("node")) out.push_back({toUtf8(k.arg(0)), toUtf8(k.arg(1))});
+    return out;
+  };
+  auto setNodes = [&](Node& net, const std::vector<Pin>& pins) {
+    auto first = r::find_if(net.kids, [](const Node& k) { return k.is("node"); });
+    size_t at = first == net.kids.end() ? std::min<size_t>(2, net.kids.size()) : size_t(first - net.kids.begin());
+    std::erase_if(net.kids, [](const Node& k) { return k.is("node"); });
+    at = std::min(at, net.kids.size());
+    std::vector<Node> nodes;
+    for (const Pin& pin : pins) {
+      Node n = Node::list("node");
+      n.addAtom(utf8ToCp1251(pin.first), true);
+      n.addAtom(utf8ToCp1251(pin.second), true);
+      nodes.push_back(std::move(n));
+    }
+    net.kids.insert(net.kids.begin() + long(at), nodes.begin(), nodes.end());
+  };
+  std::vector<char> written(b.nets.size(), 0);
+  // The nets the file has under their names.
+  for (Node& k : nl->kids) {
+    if (!k.is("net")) continue;
+    const int net = b.findNet(toUtf8(k.arg(0)));
+    if (net < 0) continue;
+    written[size_t(net)] = 1;
+    if (sorted(nodesOf(k)) != sorted(pinsOf[size_t(net)])) setNodes(k, pinsOf[size_t(net)]);
+  }
+  // Those the board has no more: named anew when a new net has the very pins, else gone.
+  for (Node& k : nl->kids) {
+    if (!k.is("net") || b.findNet(toUtf8(k.arg(0))) >= 0) continue;
+    const std::vector<Pin> pins = sorted(nodesOf(k));
+    for (int net = 0; net < int(b.nets.size()) && !pins.empty(); ++net)
+      if (!written[size_t(net)] && sorted(pinsOf[size_t(net)]) == pins) {
+        k.kids[1] = Node::atom(utf8ToCp1251(b.nets[size_t(net)].name), true);
+        written[size_t(net)] = 1;
+        break;
+      }
+  }
+  std::erase_if(nl->kids, [&](const Node& k) { return k.is("net") && b.findNet(toUtf8(k.arg(0))) < 0; });
+  // The new ones, after the last net of the file.
+  auto last = r::find_if(nl->kids | v::reverse, [](const Node& k) { return k.is("net"); });
+  size_t at = last == (nl->kids | v::reverse).end() ? nl->kids.size() : size_t(last.base() - nl->kids.begin());
+  for (int net = 0; net < int(b.nets.size()); ++net) {
+    if (written[size_t(net)]) continue;
+    Node n = Node::list("net");
+    n.addAtom(utf8ToCp1251(b.nets[size_t(net)].name), true);
+    setNodes(n, pinsOf[size_t(net)]);
+    nl->kids.insert(nl->kids.begin() + long(at++), std::move(n));
+  }
+}
+
 }  // namespace
 
 Result<std::string> writePcad(const Board& b) {
@@ -507,6 +599,9 @@ Result<std::string> writePcad(const Board& b) {
     if (v.net >= 0) n.add(strNode("netNameRef", netName(v.net)));
     ml->add(std::move(n));
   }
+
+  // The netlist: the pins' nets as the board has them (pins swapped, nets taken out, named anew or added).
+  writeNetlist(b, tree, *library);
 
   // Serialise: first line is the bare header (ACCEL_ASCII "file"), then the sections.
   std::string out;

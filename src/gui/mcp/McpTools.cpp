@@ -19,6 +19,7 @@
 #include <optional>
 #include <set>
 
+#include "core/Swap.h"
 #include "core/Edit.h"
 #include "drc/Drc.h"
 #include "gui/AutorouteWindow.h"
@@ -138,7 +139,7 @@ const QStringList kBlocked{"Cmd_NewProject",   "Accel_FileOpen",  "Cmd_ImportDes
                            "Cmd_ExportBom",    "Cmd_Gerber",      "Cmd_Drill",        "Cmd_Exit",         "Accel_ChangeNet",
                            "Accel_Width",      "Cmd_RotateAngle", "Accel_ShowDPE",    "Cmd_TextStyles",   "Accel_DRC",
                            "Cmd_HotkeysHelp",  "Cmd_Settings",    "Cmd_About",        "Accel_Layer",      "Accel_Paste",
-                           "Cmd_Summary",      "Cmd_CopperArea",  "Cmd_WiresToCopper"};
+                           "Cmd_Summary",      "Cmd_CopperArea",  "Cmd_WiresToCopper", "Cmd_Eco"};
 
 int intArg(const QJsonObject& a, const char* k, int def) { return a.contains(k) ? a.value(k).toInt(def) : def; }
 
@@ -833,6 +834,55 @@ void Tools::addEditTools() {
                   QJsonObject o{{"via", QString("via:%1").arg(made.id)}, {"diameter_mm", mm(made.diameter)}};
                   if (worst < 1e299) o["clearance_margin_mm"] = mm(worst);
                   reply(Result::json(o));
+                }});
+
+  server_->add({"swap",
+                "Exchanges the nets of two functionally equivalent pins of a component, or of two equivalent gates (all "
+                "their pins at once): the wires that came to the pins go to the other pin. The pins must be of one group "
+                "(the pads of `component` give pin_equal, gate, gate_equal). Without `a` and `b`: lists the groups. One "
+                "undo step.",
+                schemaOf({{"a", "string", "A pin, as REF.number (D3.1)"}, {"b", "string", "The other pin (for gates: any pin of the other gate)"},
+                          {"gates", "boolean", "Exchange the gates of the two pins (default: the two pins)"}}),
+                [this](const QJsonObject& a, Reply reply) {
+                  NEED_BOARD;
+                  const bool gates = a.value("gates").toBool();
+                  if (!a.contains("a") && !a.contains("b")) {
+                    QJsonArray groups;
+                    for (const SwapGroup& g : gates ? gateGroups(b) : pinGroups(b)) {
+                      QJsonArray members;
+                      for (const auto& m : g.members) {
+                        QJsonArray pads;
+                        for (int pi : m) pads.append(padRef(b, pi));
+                        if (gates) members.append(pads);
+                        else members.append(pads.at(0));
+                      }
+                      groups.append(QJsonObject{{"component", qs(b.components[size_t(g.component)].ref)}, {gates ? "gates" : "pins", members}});
+                    }
+                    reply(Result::json(QJsonObject{{"groups", groups}}));
+                    return;
+                  }
+                  const int pa = findPad(b, a.value("a").toString()), pb = findPad(b, a.value("b").toString());
+                  if (pa < 0 || pb < 0) {
+                    reply(Result::fail("No such pin: name both as REF.number"));
+                    return;
+                  }
+                  Document* doc = w_->document();
+                  auto before = doc->beginEdit();
+                  SwappedPads done;
+                  const SwapRefusal why = gates ? swapGates(b, pa, pb, &done) : swapPins(b, pa, pb, &done);
+                  if (why != SwapRefusal::None) {
+                    reply(Result::fail(why == SwapRefusal::Locked ? "A fixed wire or via stands on one of the pins"
+                                                                  : gates ? "The pins are not of two equivalent gates of one component"
+                                                                          : "The pins are not functionally equivalent (one component, one gate, the same non-zero pin_equal)"));
+                    return;
+                  }
+                  doc->invalidateModel();
+                  doc->commitEdit(before, gates ? tr("Переназначение вентилей") : tr("Переназначение выводов"));
+                  QJsonArray swapped;
+                  for (auto [x, y] : done)
+                    swapped.append(QJsonObject{{"a", padRef(b, x)}, {"net_a", netName(b, b.pads[size_t(x)].net)},
+                                               {"b", padRef(b, y)}, {"net_b", netName(b, b.pads[size_t(y)].net)}});
+                  reply(Result::json(QJsonObject{{"swapped", swapped}}));
                 }});
 
   server_->add({"delete",
