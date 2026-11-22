@@ -929,8 +929,11 @@ std::string renameNet(Board& b, int net, const std::string& name) {
 
 LayerMask viaHeldBy(const Board& b, const Via& v) {
   LayerMask used = 0;
+  // (A pad of the net the via's copper touches: the two are joined, as the connectivity has it — a via pulled up
+  // to its pad holds on to it though its centre is off the pad.)
+  const Shape copper = Shape::circle(v.pos.v(), v.diameter / 2.0);
   for (const Pad& p : b.pads)
-    if (p.net == v.net && p.shapeGeom().contains(v.pos.v())) used |= p.copper;
+    if (p.net == v.net && (p.copper & v.layers) && (p.shapeGeom().contains(v.pos.v()) || p.shapeGeom().distance(copper, 1.0) < 1.0)) used |= p.copper;
   for (const Zone& z : b.zones)
     if (z.net == v.net && v.onLayer(z.layer) &&
         (z.open() ? r::any_of(z.filled, [&](const Polyline& f) { return pointInPolygon(v.pos.v(), f); })  // (a stripe: its copper)

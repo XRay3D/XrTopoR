@@ -143,8 +143,8 @@ std::string renameNet(Board& b, int net, const std::string& name);
 // «Удалить избыточные переходы»: unlocked vias connecting nothing or one layer only. Returns the count. A fanout
 // (core/Fanouts.h) of a net that is not routed yet stays: its wire is to come.
 int removeExcessVias(Board& b);
-// The copper layers a via is needed on by what is not a track: a pad of its net it stands on, a copper area or
-// a plane of its net.
+// The copper layers a via is needed on by what is not a track: a pad of its net its copper touches, a copper area
+// or a plane of its net.
 LayerMask viaHeldBy(const Board& b, const Via& v);
 // ... and the layers of the tracks of its net that end on it.
 LayerMask viaTrackLayers(const Board& b, const Via& v);

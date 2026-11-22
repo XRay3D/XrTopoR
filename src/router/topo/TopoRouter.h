@@ -27,6 +27,9 @@ struct RouterOptions {
   double viaCost = 3.0;              // in mm of equivalent track length
   bool useVias = true;
   bool ripupExisting = true;         // remove unlocked routing before routing
+  // The fanouts that stand unused (core/Fanouts.h: a via beside a planar pad, joined to it alone) are kept through
+  // the rip-up, and a wire of the pad may begin or end on the via, on any layer.
+  bool useFanouts = true;
   bool softPlanarity = false;        // early passes may cross other nets' routes at a growing cost
   int optimizeIterations = 2;        // final via optimisation (TopoR F7), 0 = off
   bool refine = true;                // final F6: wires in violation re-laid around the copper as it lies

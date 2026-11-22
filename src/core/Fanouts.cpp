@@ -436,6 +436,44 @@ FanoutResult placeFanouts(Board& b) {
   return m.out;
 }
 
+std::vector<FanoutRef> findFanouts(const Board& b) {
+  std::vector<FanoutRef> out;
+  if (b.vias.empty() || b.tracks.empty()) return out;
+  SpatialIndex idx;
+  idx.build(b, false, false);  // pads and vias
+  auto at = [&](Vec2 p, LayerId layer, ItemType type, auto&& take) {
+    idx.query(BBox{p.x - 1, p.y - 1, p.x + 1, p.y + 1}, LayerMask(1) << layer, [&](ItemRef r) {
+      if (r.type == type) take(r.index);
+    });
+  };
+  // The tracks that end on each via, with the pad their other end stands on (-1: none).
+  std::vector<std::vector<std::pair<int, int>>> ends(b.vias.size());
+  for (int ti = 0; ti < int(b.tracks.size()); ++ti) {
+    const Track& t = b.tracks[size_t(ti)];
+    for (int e : {0, 1}) {
+      const Vec2 here = e ? t.b.v() : t.a.v(), far = e ? t.a.v() : t.b.v();
+      at(here, t.layer, ItemType::Via, [&](int vi) {
+        const Via& v = b.vias[size_t(vi)];
+        if (v.net != t.net || (v.pos.v() - here).len() > kJoin) return;
+        int pad = -1;
+        at(far, t.layer, ItemType::Pad, [&](int pi) {
+          const Pad& p = b.pads[size_t(pi)];
+          if (pad < 0 && p.net == t.net && planar(p) && p.shapeGeom().contains(far) && !p.shapeGeom().contains(v.pos.v())) pad = pi;
+        });
+        ends[size_t(vi)].push_back({ti, pad});
+      });
+    }
+  }
+  for (int vi = 0; vi < int(b.vias.size()); ++vi) {
+    const auto& list = ends[size_t(vi)];
+    if (list.empty() || list.front().second < 0 || r::any_of(list, [&](const auto& x) { return x.second != list.front().second; })) continue;
+    FanoutRef f{list.front().second, vi, {}};
+    for (auto& [ti, pad] : list) f.tracks.push_back(ti);
+    out.push_back(std::move(f));
+  }
+  return out;
+}
+
 int fanoutViaOf(const Board& b, int pad) {
   if (pad < 0 || pad >= int(b.pads.size())) return -1;
   const Pad& p = b.pads[size_t(pad)];

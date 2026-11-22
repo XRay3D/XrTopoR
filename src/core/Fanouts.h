@@ -28,6 +28,14 @@ struct FanoutResult {
 };
 FanoutResult placeFanouts(Board& b);
 
+// The fanouts that stand on the board unused: a via off a planar pad whose tracks — one, as a rule — all run from
+// that pad to it and nothing else comes to the via. The whole board at once.
+struct FanoutRef {
+  int pad = -1, via = -1;
+  std::vector<int> tracks;
+};
+std::vector<FanoutRef> findFanouts(const Board& b);
+
 // Whether a component is a BGA by the above.
 bool isBga(const Board& b, int component);
 // The via of a pad's fanout: a track of the pad's net runs from the planar pad, on its layer, to the via. -1: none.

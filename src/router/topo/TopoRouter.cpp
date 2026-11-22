@@ -25,6 +25,7 @@
 #include <ranges>
 #include <unordered_map>
 
+#include "core/Fanouts.h"
 #include "core/Connectivity.h"
 #include "core/ZoneFill.h"
 #include "drc/Drc.h"
@@ -264,6 +265,7 @@ class Router {
   int startPad_ = -1;
   bool relaxed_ = false;
   bool keptRouting_ = false;  // tracks or vias left on the board when the routing began
+  std::vector<std::vector<int>> fanVerts_;  // per pad: the vertices of the vias of its fanouts (useFanouts)
 
   bool cancelled() const { return o_.cancel && o_.cancel->load(); }
   Vec2 P(int v) const { return m_.verts[v].p; }
@@ -615,6 +617,16 @@ void Router::setup() {
     r::stable_partition(jobs_, [&](const NetJob& j) { return busLayerOf_[size_t(j.net)] >= 0; });
   }
   s_.failed.assign(jobs_.size(), {});
+  // The vias of the pads' fanouts: vertices of the mesh a wire of the pad may begin and end on.
+  fanVerts_.assign(b_.pads.size(), {});
+  if (o_.useFanouts && !b_.vias.empty()) {
+    std::vector<int> vertOf(b_.vias.size(), -1);
+    for (int v = 0; v < int(m_.verts.size()); ++v)
+      if (m_.verts[size_t(v)].kind == VKind::FixedVia && m_.verts[size_t(v)].fixedVia >= 0 && m_.verts[size_t(v)].fixedVia < int(vertOf.size()))
+        vertOf[size_t(m_.verts[size_t(v)].fixedVia)] = v;
+    for (const FanoutRef& f : findFanouts(b_))
+      if (vertOf[size_t(f.via)] >= 0) fanVerts_[size_t(f.pad)].push_back(vertOf[size_t(f.via)]);
+  }
   padCluster_ = Connectivity::compute(b_).padCluster;
   copperIdx_.build(b_);
   for (auto& j : jobs_) res_.connections += int(j.pads.size()) - 1;
@@ -1413,6 +1425,9 @@ void Router::addVertexToTree(int v) {
 void Router::addPadToTree(int pad) {
   for (int v : m_.padVerts[pad])
     if (m_.verts[v].kind != VKind::PadCorner || cornerOk_[pad]) addVertexToTree(v);
+  // The via of the pad's fanout is the pad's on every layer: a wire to the pad may end on it.
+  if (pad < int(fanVerts_.size()))
+    for (int v : fanVerts_[size_t(pad)]) addVertexToTree(v);
 }
 
 double Router::heuristic(Vec2 p) const {
@@ -1458,6 +1473,18 @@ std::optional<std::vector<SNode>> Router::search(int pad) {
       n.pt = n.cpt = P(v);
       push(n, keyVertex(li, v));
     }
+  // ... and from the via of the pad's fanout, on every layer the via is on.
+  if (pad < int(fanVerts_.size()))
+    for (int v : fanVerts_[size_t(pad)])
+      for (int li = 0; li < NL_; ++li) {
+        if (!b_.vias[size_t(m_.verts[size_t(v)].fixedVia)].onLayer(layers_[li])) continue;
+        SNode n;
+        n.li = li;
+        n.atVertex = true;
+        n.vtx = v;
+        n.pt = n.cpt = P(v);
+        push(n, keyVertex(li, v));
+      }
 
   size_t nNoNb = 0, nBlocked = 0, nNoGap = 0, nPushed = 0;
   // `geom`: the chord starts at the node's point inside t (a via placed there), so crossings are told
@@ -2417,8 +2444,16 @@ RouterResult Router::run() {
   // «Трассировать» is off.
   auto stays = [&](int net) { return net >= 0 && (b_.nets[size_t(net)].flexFixed || !b_.nets[size_t(net)].route); };
   if (o_.ripupExisting) {
-    std::erase_if(b_.tracks, [&](const Track& t) { return !t.locked && !stays(t.net); });
-    std::erase_if(b_.vias, [&](const Via& v) { return !v.locked && !stays(v.net); });
+    // The fanouts that stand unused are not routing to be made anew: they are what the routing is to start from.
+    std::vector<char> fanTrack(b_.tracks.size(), 0), fanVia(b_.vias.size(), 0);
+    if (o_.useFanouts)
+      for (const FanoutRef& f : findFanouts(b_)) {
+        fanVia[size_t(f.via)] = 1;
+        for (int ti : f.tracks) fanTrack[size_t(ti)] = 1;
+      }
+    size_t ti = 0, vi = 0;
+    std::erase_if(b_.tracks, [&](const Track& t) { return !fanTrack[ti++] && !t.locked && !stays(t.net); });
+    std::erase_if(b_.vias, [&](const Via& v) { return !fanVia[vi++] && !v.locked && !stays(v.net); });
   }
   keptRouting_ = !b_.tracks.empty() || !b_.vias.empty();
   int clearedZones = 0;

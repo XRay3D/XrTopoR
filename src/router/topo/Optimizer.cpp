@@ -11,6 +11,7 @@
 #include <optional>
 #include <print>
 
+#include "core/Padstack.h"
 #include "core/Connectivity.h"
 #include "core/Parallel.h"
 #include "core/Prof.h"
@@ -479,6 +480,24 @@ OptimizeResult optimize(Board& b, const OptimizeOptions& o) {
           // the later, finer ones. (The push away from the crowding, TopoR's move_refine, never won a trial
           // on the test boards against the compass sweep and is left out.)
           for (Vec2 d : std::span(kDirs, it == 0 ? 8 : 4)) deltas.push_back(d * step);
+          // A via is not moved onto a planar pad of its own net — TopoR's «ПО на контакте», off unless the via's
+          // type has it —: where its copper is clear of the pad it stays clear (a fanout stays beside its pad).
+          if (const ViaType* type = viaTypeOf(b, v); type && !type->viaOnPin) {
+            const Shape was = Shape::circle(v.pos.v(), v.diameter / 2.0);
+            std::erase_if(deltas, [&](Vec2 d) {
+              if (d.len2() == 0) return false;
+              const Shape now = Shape::circle(v.pos.v() + d, v.diameter / 2.0);
+              bool onto = false;
+              idx.query(now.bbox(), v.layers, [&](ItemRef r) {
+                if (onto || r.type != ItemType::Pad) return;
+                const Pad& p = b.pads[size_t(r.index)];
+                if (p.net != v.net || p.drill > 0) return;
+                const Shape ps = p.shapeGeom();
+                onto = now.distance(ps, 1.0) < 1.0 && was.distance(ps, 1.0) >= 1.0;
+              });
+              return onto;
+            });
+          }
           auto moveBy = [&](Vec2 delta) {
             return [&, delta](Board& c) {
               Via& cv = c.vias[j.vi];

@@ -3,12 +3,14 @@
 #include <cmath>
 #include <map>
 
+#include "core/Connectivity.h"
 #include "core/Edit.h"
 #include "core/Fanouts.h"
 #include "core/ZoneFill.h"
 #include "drc/Drc.h"
 #include "geom/Ranges.h"
 #include "io/BoardIO.h"
+#include "router/topo/TopoRouter.h"
 
 using namespace xr;
 
@@ -273,4 +275,61 @@ TEST(Fanout, KeptWhileNetIsOpen) {
   b.tracks.push_back(w);
   EXPECT_EQ(edit::removeExcessVias(b), 1);
   EXPECT_TRUE(b.vias.empty());
+}
+
+// The autorouter and fanouts. Unused fanouts stand through the rip-up and the wires of their pads begin on their
+// vias: the inner balls of a BGA are led out on the other layer from the vias in their cells. Told not to use them
+// (RouterOptions::useFanouts off) it takes them off with the rest of the routing.
+TEST(Fanout, AutorouterStartsFromThem) {
+  auto make = [](Bed& t, std::vector<int>& inner) {
+    const int u = t.bga("U1", mm(14, 20), 8);
+    // The 4 × 4 inner balls go to the pins of a connector (through pads) at the right edge.
+    const int x = t.component("X1", mm(34, 20));
+    int k = 0;
+    for (int pi : t.b.components[size_t(u)].pads) {
+      const Vec2 local = t.b.components[size_t(u)].toLocal(t.b.pads[size_t(pi)].pos.v());
+      if (std::abs(local.x) > 1.6 * kNmPerMm || std::abs(local.y) > 1.6 * kNmPerMm) {
+        t.b.pads[size_t(pi)].net = kNoNet;  // (the outer balls are not used)
+        continue;
+      }
+      inner.push_back(pi);
+      const int pin = t.pad(x, mm(k % 2 ? 1.27 : 0, (k / 2 - 3.5) * 1.27), 0.9, 0.9, t.top, t.b.nets[size_t(t.b.pads[size_t(pi)].net)].name);
+      t.b.pads[size_t(pin)].drill = mmToNm(0.5);
+      t.b.pads[size_t(pin)].copper = t.b.allCopperMask();
+      ++k;
+    }
+  };
+  Bed t;
+  std::vector<int> inner;
+  make(t, inner);
+  Board& b = t.b;
+  ASSERT_EQ(inner.size(), 16u);
+  ASSERT_EQ(placeFanouts(b).vias, 16);
+  ASSERT_EQ(findFanouts(b).size(), 16u);
+  std::vector<Vec2> sites;
+  for (const Via& v : b.vias) sites.push_back(v.pos.v());
+  Board plain = b;
+  topo::RouterOptions o;
+  o.optimizeIterations = 0;
+  o.refine = false;
+  const topo::RouterResult res = topo::routeBoard(b, o);
+  EXPECT_EQ(res.routed, res.connections);
+  EXPECT_EQ(Connectivity::compute(b).ratsnest.size(), 0u);
+  // The fanouts are where they were, their tracks with them; wires begin on their vias on the other layer.
+  int stood = 0, begun = 0;
+  for (Vec2 at : sites) {
+    const bool there = r::any_of(b.vias, [&](const Via& v) { return (v.pos.v() - at).len() < 2; });
+    stood += there;
+    begun += there && r::any_of(b.tracks, [&](const Track& w) { return w.layer == t.bot && ((w.a.v() - at).len() < 2000 || (w.b.v() - at).len() < 2000); });
+  }
+  EXPECT_EQ(stood, 16);
+  EXPECT_GE(begun, 8) << "most of the inner balls go out underneath, from their fanouts";
+  for (int pi : inner) EXPECT_GE(fanoutViaOf(b, pi), 0);
+  // Not to use them: they go with the rip-up, the board is routed as if they had not been placed.
+  o.useFanouts = false;
+  const topo::RouterResult without = topo::routeBoard(plain, o);
+  EXPECT_EQ(without.routed, without.connections);
+  int left = 0;
+  for (Vec2 at : sites) left += r::any_of(plain.vias, [&](const Via& v) { return (v.pos.v() - at).len() < 2; });
+  EXPECT_LT(left, 16);
 }

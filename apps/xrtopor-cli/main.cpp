@@ -7,6 +7,7 @@
 #include <string_view>
 #include <vector>
 
+#include "core/Fanouts.h"
 #include "core/Connectivity.h"
 #include "core/ZoneFill.h"
 #include "drc/Drc.h"
@@ -42,7 +43,7 @@ void usage() {
       "  convert    <board> <out.kicad_pcb|.dsn|.ses>\n"
       "  drc        <board> [--max N] [--nominal] [--components]   design rule check (--nominal: against the nominal\n"
       "             clearances; --components: the clearance between components and from them to the board's edge too)\n"
-      "  route      <board> [-o out] [--passes N] [--via-cost MM] [--no-vias] [--layers 0,1] [--nets a,b] [--keep] [--soft] [--buses] [--no-optimize] [--no-refine] [--no-fill] [--svg out.svg]\n"
+      "  route      <board> [-o out] [--passes N] [--via-cost MM] [--no-vias] [--layers 0,1] [--nets a,b] [--keep] [--no-fanouts] [--soft] [--buses] [--no-optimize] [--no-refine] [--no-fill] [--svg out.svg]\n"
       "  import-ses <board> <routes.ses> -o <out>\n"
       "  gerber     <board> <outdir>\n"
       "  svg        <board> <out.svg>\n"
@@ -57,6 +58,8 @@ void usage() {
       "  report     <board> [--bom out.csv]          routing statistics per layer and net, BOM\n"
       "  padstats   <board>                         how the wires meet the pads: widths, exits, runs inside copper, joints\n"
       "  flexfix    <board> -o <out> --nets a,b [--off]  set (or take off) the flexible fixation of nets\n"
+      "  fanouts    <board> -o <out> [--strip]    vias beside the planar pads of BGAs and of the plane layers' nets\n"
+      "                                            (--strip: all the routing taken off first)\n"
       "  eco        <base> <board> -o <out.eco>    what changed in the netlist and the components' attributes of <board> against\n"
       "                                            <base>, as a P-CAD ECO file (pins and gates swapped, nets taken out or named anew)\n"
       "boards: .kicad_pcb, .dsn, P-CAD ASCII .pcb");
@@ -134,6 +137,7 @@ int cmdRoute(Board& b, const Args& a) {
   if (auto p = a.opt("--layers"); !p.empty())  // copper indices, 0 = top
     for (auto part : v::split(p, ',')) ro.copperIndices.push_back(std::stoi(std::string(part.begin(), part.end())));
   ro.ripupExisting = !a.flag("--keep");
+  ro.useFanouts = !a.flag("--no-fanouts");
   ro.softPlanarity = a.flag("--soft");
   ro.buses = a.flag("--buses");
   if (a.flag("--no-optimize")) ro.optimizeIterations = 0;
@@ -468,6 +472,22 @@ int main(int argc, char** argv) {
     std::string out(a.opt("-o"));
     if (auto r = io::saveBoard(b, out); !r) return fail(r.error());
     std::println("written {} ({} tracks, {} vias)", out, b.tracks.size(), b.vias.size());
+    return 0;
+  }
+  if (cmd == "fanouts" && !a.opt("-o").empty()) {
+    if (a.flag("--strip")) {
+      b.tracks.clear();
+      b.vias.clear();
+      b.zips.clear();
+      b.serpents.clear();
+    }
+    const FanoutResult r = placeFanouts(b);
+    ZoneFillOptions pour;
+    for (int z = 0; z < int(b.zones.size()); ++z)
+      if (!b.zones[size_t(z)].filled.empty() && !b.zones[size_t(z)].alwaysCopper()) pour.only.push_back(z);
+    if (!pour.only.empty()) fillZones(b, pour);
+    std::println("fanouts: {} via(s), {} pad(s) joined, {} BGA(s), {} pad(s) without a place", r.vias, r.pads, r.components, r.blocked.size());
+    if (auto w = io::saveBoard(b, std::string(a.opt("-o"))); !w) return fail(w.error());
     return 0;
   }
   if (cmd == "eco" && !second().empty() && !a.opt("-o").empty()) {
