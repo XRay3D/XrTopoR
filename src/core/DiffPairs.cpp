@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <numbers>
 #include <array>
 #include <optional>
 #include <set>
@@ -434,8 +435,8 @@ std::optional<std::pair<double, double>> facing(const Track& t, const Track& u, 
     const double sw = std::abs(g.sweep);
     auto along = [&](Vec2 q) {
       double a = (std::atan2(q.y - g.center.y, q.x - g.center.x) - g.startAngle) * (g.sweep > 0 ? 1.0 : -1.0);
-      while (a > sw / 2 + M_PI) a -= 2 * M_PI;
-      while (a <= sw / 2 - M_PI) a += 2 * M_PI;
+      while (a > sw / 2 + std::numbers::pi) a -= 2 * std::numbers::pi;
+      while (a <= sw / 2 - std::numbers::pi) a += 2 * std::numbers::pi;
       return a * g.radius;
     };
     sa = along(u.a.v());
