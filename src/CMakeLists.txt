@@ -20,6 +20,7 @@ add_library(xrcore STATIC
   core/SpatialIndex.cpp
   core/Teardrops.cpp
   core/WiresToCopper.cpp
+  core/Swap.cpp
   core/ZoneFill.cpp
   io/sexpr/SExpr.cpp
 )

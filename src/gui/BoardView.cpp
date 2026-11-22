@@ -54,7 +54,10 @@ BoardView::BoardView(Document* doc, QWidget* parent) : QOpenGLWidget(parent), do
     fitBoard();
     autoFit_ = true;
   });
-  connect(doc_, &Document::boardChanged, this, &BoardView::refresh);
+  connect(doc_, &Document::boardChanged, this, [this] {
+    if (mode_ == Mode::Swap) swapMarks();  // (pads and their nets may be other)
+    refresh();
+  });
   // The selection and the DRC's marks are a scene of their own: the board's stays as it is.
   connect(doc_, &Document::selectionChanged, this, &BoardView::refreshMarks);
   connect(doc_, &Document::appearanceChanged, this, qOverload<>(&QWidget::update));
@@ -461,6 +464,7 @@ BBox BoardView::viewBox(double marginPx) const {
 
 void BoardView::drawTools(QPainter& p) {
   if (mode_ == Mode::Draw) drawDrawing(p);
+  if (mode_ == Mode::Swap) drawSwap(p);
   if (mode_ == Mode::Via && viaStart_) {
     double r = px(doc_->board()->classOf(viaNet_).viaDiameter / 2.0);
     p.setPen(QPen(QColor(0xff, 0xff, 0x60), 1));
@@ -809,6 +813,7 @@ void BoardView::mousePressEvent(QMouseEvent* e) {
       break;
     }
     case Mode::Measure: measureClick(pk, w); break;
+    case Mode::Swap: swapClick(swapPadAt(toWorld(e->position()))); break;
     case Mode::Draw: drawClick(drawPts_.empty() ? w : constrained(drawPts_.back(), w)); break;
     case Mode::Text: {
       Board& b = *doc_->board();
@@ -1342,6 +1347,12 @@ void BoardView::setMode(Mode m) {
       break;
     }
     case Mode::Text: emit status(tr("Создание надписи: щёлкните место надписи")); break;
+    case Mode::Swap:
+      emit status(swapGroups_.empty() ? (swapKind_ == SwapKind::Pins ? tr("Переназначение выводов: в дизайне нет функционально эквивалентных выводов")
+                                                                      : tr("Переназначение вентилей: в дизайне нет функционально эквивалентных вентилей"))
+                  : swapKind_ == SwapKind::Pins ? tr("Переназначение выводов: щёлкните контакт, затем эквивалентный ему контакт той же группы")
+                                                : tr("Переназначение вентилей: щёлкните контакт вентиля, затем контакт эквивалентного вентиля"));
+      break;
   }
   refresh();
 }
@@ -1835,6 +1846,117 @@ void BoardView::startDraw(DrawTarget target, DrawShape shape) {
   drawTarget_ = target;
   drawShape_ = shape;
   setMode(Mode::Draw);
+}
+
+// ---------------------------------------------------------------- the swap tool
+
+void BoardView::startSwap(SwapKind kind) {
+  if (!doc_->hasBoard()) return;
+  swapKind_ = kind;
+  swapMarks();
+  setMode(Mode::Swap);
+}
+
+void BoardView::swapMarks() {
+  const Board& b = *doc_->board();
+  swapGroups_ = swapKind_ == SwapKind::Pins ? pinGroups(b) : gateGroups(b);
+  swapPlace_ = swapPlaces(b, swapGroups_);
+  if (swapPicked_ >= int(swapPlace_.size()) || (swapPicked_ >= 0 && swapPlace_[size_t(swapPicked_)].group < 0)) swapPicked_ = -1;
+}
+
+// As TopoR: a letter [A–Z, a–z] and one of six colours; the colours go round, then the letter changes.
+QChar BoardView::swapLetter(int group) {
+  const int n = (group / 6) % 52;
+  return QChar(n < 26 ? 'A' + n : 'a' + (n - 26));
+}
+
+QColor BoardView::swapColor(int group) {
+  static const QRgb six[] = {0xd040c0, 0x30a8d8, 0xd8a020, 0x40b050, 0xd85040, 0x7868e0};
+  return QColor::fromRgb(six[((group % 6) + 6) % 6]);
+}
+
+int BoardView::swapPadAt(Vec2 w) const {
+  const Board& b = *doc_->board();
+  const LayerMask vis = visibleCopper();
+  for (int pi = 0; pi < int(b.pads.size()) && pi < int(swapPlace_.size()); ++pi) {
+    const Pad& p = b.pads[size_t(pi)];
+    if (swapPlace_[size_t(pi)].group < 0 || !(p.copper & vis)) continue;
+    if (p.component >= 0 && !componentVisible(p.component)) continue;
+    if (p.shapeGeom().contains(w)) return pi;
+  }
+  return -1;
+}
+
+void BoardView::swapClick(int pad) {
+  Board& b = *doc_->board();
+  auto name = [&](int pi) {
+    const Pad& p = b.pads[size_t(pi)];
+    return QString("%1-%2").arg(QString::fromStdString(b.components[size_t(p.component)].ref), QString::fromStdString(p.number));
+  };
+  const int picked = swapPicked_;
+  swapPicked_ = -1;
+  if (pad >= 0 && picked < 0) {  // the first click picks
+    swapPicked_ = pad;
+    emit status(swapKind_ == SwapKind::Pins ? tr("Выбран контакт %1: щёлкните эквивалентный ему контакт").arg(name(pad))
+                                            : tr("Выбран вентиль контакта %1: щёлкните контакт эквивалентного вентиля").arg(name(pad)));
+    refresh();
+    return;
+  }
+  // The second on one of the same group exchanges; elsewhere it lets the first go, as TopoR does.
+  const SwapPlace a = picked >= 0 ? swapPlace_[size_t(picked)] : SwapPlace{}, c = pad >= 0 ? swapPlace_[size_t(pad)] : SwapPlace{};
+  if (picked < 0 || pad < 0 || a.group != c.group || a.member == c.member) {
+    refresh();
+    return;
+  }
+  auto before = doc_->beginEdit();
+  auto netName = [&](int n) { return n >= 0 ? QString::fromStdString(b.nets[size_t(n)].name) : QString(); };
+  SwappedPads done;
+  const SwapRefusal why = swapKind_ == SwapKind::Pins ? swapPins(b, picked, pad, &done) : swapGates(b, picked, pad, &done);
+  if (why != SwapRefusal::None) {
+    emit status(why == SwapRefusal::Locked ? tr("К контактам подходят зафиксированные проводники или переходы: переназначение запрещено")
+                                            : tr("Контакты не эквивалентны"));
+    refresh();
+    return;
+  }
+  doc_->invalidateModel();  // (the pins' nets are other)
+  doc_->commitEdit(before, swapKind_ == SwapKind::Pins ? tr("Переназначение выводов") : tr("Переназначение вентилей"));
+  const QString group = tr("Переназначение");
+  for (auto [pa, pb] : done)  // (the nets after the exchange: the first pin has the second's)
+    doc_->addLog({LogMessage::Kind::Info, group,
+                  tr("Переназначены цепи эквивалентных контактов ‘%1’ и ‘%2’. Цепи: ‘%3’, ‘%4’")
+                      .arg(name(pa), name(pb), netName(b.pads[size_t(pb)].net), netName(b.pads[size_t(pa)].net))});
+  emit status(swapKind_ == SwapKind::Pins ? tr("Переназначены выводы %1 и %2").arg(name(picked), name(pad))
+                                          : tr("Переназначены вентили контактов %1 и %2").arg(name(picked), name(pad)));
+}
+
+// The letters of the groups, in the pads (the colours are the overlay scene's).
+void BoardView::drawSwap(QPainter& p) {
+  const Board& b = *doc_->board();
+  const LayerMask vis = visibleCopper();
+  const BBox view = viewBox(64);
+  QFont f = font();
+  f.setBold(true);
+  int fontSize = -1;
+  for (int pi = 0; pi < int(b.pads.size()) && pi < int(swapPlace_.size()); ++pi) {
+    const Pad& pad = b.pads[size_t(pi)];
+    const int g = swapPlace_[size_t(pi)].group;
+    if (g < 0 || !(pad.copper & vis) || !view.intersects(padBox(pad))) continue;
+    if (pad.component >= 0 && !componentVisible(pad.component)) continue;
+    const double size = px(double(std::min(pad.shape.w, pad.shape.h)));
+    if (size < 9) continue;
+    // Gates: the gate's number within its group after the letter (ours: which pins are of one gate).
+    const bool gates = swapKind_ == SwapKind::Gates;
+    const int fs = std::clamp(int(size * (gates ? 0.5 : 0.7)), 7, 22);
+    if (fs != fontSize) {
+      f.setPixelSize(fontSize = fs);
+      p.setFont(f);
+    }
+    p.setPen(Qt::white);
+    const QPointF at = toScreen(pad.pos.v());
+    QString text(swapLetter(g));
+    if (gates) text += QString::number(swapPlace_[size_t(pi)].member + 1);
+    p.drawText(QRectF(at.x() - size, at.y() - size, 2 * size, 2 * size), Qt::AlignCenter, text);
+  }
 }
 
 void BoardView::startVias(ViaKind kind) {
@@ -2443,6 +2565,11 @@ void BoardView::cancelTool() {
   }
   if (mode_ == Mode::Via && viaStart_) {
     viaStart_.reset();
+    refresh();
+    return;
+  }
+  if (mode_ == Mode::Swap && swapPicked_ >= 0) {  // the pin picked first is let go
+    swapPicked_ = -1;
     refresh();
     return;
   }

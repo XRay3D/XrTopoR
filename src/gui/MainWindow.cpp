@@ -427,6 +427,8 @@ void MainWindow::bindCommands() {
     }
   c.bind("Accel_InsertText", [this] { view_->startText(); });
   c.bind("Cmd_ViaRow", [this] { view_->startVias(ViaKind::Row); });
+  c.bind("Cmd_SwapPins", [this] { view_->startSwap(SwapKind::Pins); });
+  c.bind("Cmd_SwapGates", [this] { view_->startSwap(SwapKind::Gates); });
   c.bind("Cmd_ViaMatrix", [this] { view_->startVias(ViaKind::Matrix); });
   c.bind("Cmd_FmNoPush", [this] { view_->startFreestyle(topo::Push::None); });
   c.bind("Cmd_FmPushVias", [this] { view_->startFreestyle(topo::Push::Vias); });
@@ -777,6 +779,7 @@ void MainWindow::updateModeButtons() {
     case Mode::Route: modeBar_->setActiveMode("Accel_RouteMode"); break;
     case Mode::Via: modeBar_->setActiveMode("Cmd_ModeVia"); break;
     case Mode::Measure: modeBar_->setActiveMode("Accel_Measure"); break;
+    case Mode::Swap: modeBar_->setActiveMode("Cmd_ModeSwap"); break;
   }
 }
 

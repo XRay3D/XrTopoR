@@ -408,6 +408,20 @@ void BoardView::buildOverlayScene(gl::SceneData& out) const {
   if (mode_ == Mode::Select)
     for (int z : selectedZips())
       for (const Track& t : b.zips[size_t(z)].axis) sb.track(t, kHair, {255, 255, 255, 255});
+  // The swap tool: the pins of every group in the group's colour, what is picked lighter (a pin, or its gate).
+  if (mode_ == Mode::Swap) {
+    const LayerMask vis = visibleCopper();
+    const SwapPlace picked = swapPicked_ >= 0 && swapPicked_ < int(swapPlace_.size()) ? swapPlace_[size_t(swapPicked_)] : SwapPlace{};
+    for (int pi = 0; pi < int(b.pads.size()) && pi < int(swapPlace_.size()); ++pi) {
+      const SwapPlace at = swapPlace_[size_t(pi)];
+      const Pad& pad = b.pads[size_t(pi)];
+      if (at.group < 0 || !(pad.copper & vis)) continue;
+      if (pad.component >= 0 && !componentVisible(pad.component)) continue;
+      const bool lit = picked.group >= 0 && at.group == picked.group && at.member == picked.member;
+      sb.shape(pad.shapeGeom(), col(lit ? swapColor(at.group).lighter(170) : swapColor(at.group)));
+    }
+    sb.flush();
+  }
   if (mode_ == Mode::Draw && !drawPts_.empty()) {
     std::vector<Vec2> pts = drawPts_;
     pts.push_back(constrained(drawPts_.back(), snapped(cursor_)));

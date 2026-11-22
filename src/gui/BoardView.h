@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "core/Edit.h"
+#include "core/Swap.h"
 #include "gui/Document.h"
 #include "gui/gl/Renderer.h"
 #include "gui/gl/Scene.h"
@@ -23,12 +24,13 @@
 
 namespace xr::gui {
 
-enum class Mode { Select, Freestyle, Route, Via, Measure, Draw, Text };
+enum class Mode { Select, Freestyle, Route, Via, Measure, Draw, Text, Swap };
 // Creation tools of the «Вставка» menu: what is drawn and with which figure.
 enum class DrawTarget { Board, Keepout, Copper, Detail };
 enum class DrawShape { Poly, Rect, Disk, Circle, Line, ArcC, ArcP };
 enum class ViaKind { Single, Row, Matrix };
 enum class MeasureKind { Points, Objects };
+enum class SwapKind { Pins, Gates };
 enum class RouteAngle { Free, Deg45, Arc };
 
 // The figure a drawing tool makes of the points clicked so far.
@@ -78,6 +80,15 @@ class BoardView : public QOpenGLWidget {
   void startDraw(DrawTarget target, DrawShape shape);
   void startText();
   void startVias(ViaKind kind);  // «Ряд переходов» / «Матрица переходов»: two clicks
+  // «Переназначение выводов» / «Переназначение вентилей»: the pins of every group of equivalent ones are filled
+  // with the group's colour and lettered; a click picks a pin, a click on another of its group exchanges them.
+  void startSwap(SwapKind kind);
+  SwapKind swapKind() const { return swapKind_; }
+  // The groups shown, the pad's place among them, the pad picked (-1 none), a group's letter and colour.
+  const std::vector<SwapGroup>& swapGroups() const { return swapGroups_; }
+  int swapPicked() const { return swapPicked_; }
+  static QChar swapLetter(int group);
+  static QColor swapColor(int group);
   DrawTarget drawTarget() const { return drawTarget_; }
   void finishShape();  // Enter / double click / right click: the polygon or line drawn so far
   void setRouteAngle(RouteAngle a);
@@ -308,6 +319,15 @@ class BoardView : public QOpenGLWidget {
   void cycleTook(const Pick& pk);
   bool placing_ = false;                // a pasted fragment follows the cursor
   // vias: a single one, or a row / matrix between two clicks
+  // the swap tool: the groups of the board as it is, each pad's place, the pad picked first
+  SwapKind swapKind_ = SwapKind::Pins;
+  std::vector<SwapGroup> swapGroups_;
+  std::vector<SwapPlace> swapPlace_;
+  int swapPicked_ = -1;
+  void swapMarks();              // the groups anew (the mode entered, the board changed)
+  int swapPadAt(Vec2 w) const;   // the pad of a group under a point; -1 none
+  void swapClick(int pad);
+  void drawSwap(QPainter& p);    // the letters
   ViaKind viaKind_ = ViaKind::Single;
   std::optional<Vec2> viaStart_;
   int viaNet_ = kNoNet;

@@ -874,6 +874,103 @@ TEST(Gui, RemoveSinglePinNetsReports) {
   EXPECT_EQ(doc.board()->nets.size(), nets - 39);
 }
 
+// «Переназначение выводов» and «Переназначение вентилей»: the pins of the groups are lettered and coloured as TopoR
+// does it; a click picks a pin, a click on another of its group exchanges the nets in one step of undo and tells
+// it in the messages; a click elsewhere, or Esc, lets the picked pin go; the tool stays until Esc.
+TEST(Gui, SwapToolClicks) {
+  // The letter changes after the six colours, the colours go round; lower case after Z.
+  EXPECT_EQ(BoardView::swapLetter(0), QChar('A'));
+  EXPECT_EQ(BoardView::swapLetter(5), QChar('A'));
+  EXPECT_EQ(BoardView::swapLetter(6), QChar('B'));
+  EXPECT_EQ(BoardView::swapLetter(26 * 6), QChar('a'));
+  EXPECT_EQ(BoardView::swapColor(0), BoardView::swapColor(6));
+  EXPECT_NE(BoardView::swapColor(0), BoardView::swapColor(1));
+
+  Fixture f("topor/Example_02/Placement_standard_routing.fst");
+  f.view.show();
+  auto padOf = [&](const char* ref, const char* number) {
+    for (int pi : f.b().components[size_t(f.b().findComponent(ref))].pads)
+      if (f.b().pads[size_t(pi)].number == number) return pi;
+    return -1;
+  };
+  auto net = [&](int pad) { return f.b().pads[size_t(pad)].net; };
+  auto click = [&](int pad) { QTest::mouseClick(&f.view, Qt::LeftButton, {}, f.at(f.b().pads[size_t(pad)].pos.v())); };
+  f.view.startSwap(SwapKind::Pins);
+  EXPECT_EQ(f.view.mode(), Mode::Swap);
+  ASSERT_FALSE(f.view.swapGroups().empty());
+  // Two pins of one group with different nets.
+  int p1 = -1, p2 = -1, other = -1;
+  for (const SwapGroup& g : f.view.swapGroups()) {
+    if (p1 < 0 && net(g.members[0][0]) != net(g.members[1][0])) p1 = g.members[0][0], p2 = g.members[1][0];
+    else if (other < 0) other = g.members[0][0];
+  }
+  ASSERT_GE(p1, 0);
+  ASSERT_GE(other, 0);
+  const Vec2 a = f.b().pads[size_t(p1)].pos.v(), c = f.b().pads[size_t(p2)].pos.v();
+  f.look((a + c) * 0.5, std::max(20.0, 3 * (a - c).len() / kNmPerMm));
+  const int n1 = net(p1), n2 = net(p2);
+  click(p1);
+  EXPECT_EQ(f.view.swapPicked(), p1);
+  EXPECT_FALSE(f.doc.undoStack()->canUndo());
+  if (const char* dir = std::getenv("XR_SHOT_DIR")) {
+    f.view.refresh();
+    if (const QImage img = f.view.picture(); f.view.drawable()) img.save(QString(dir) + "/swap-pins.png");
+  }
+  click(p2);
+  EXPECT_EQ(f.view.swapPicked(), -1);
+  EXPECT_EQ(net(p1), n2);
+  EXPECT_EQ(net(p2), n1);
+  EXPECT_EQ(f.doc.undoStack()->count(), 1);
+  EXPECT_EQ(f.view.mode(), Mode::Swap) << "the tool stays";
+  ASSERT_FALSE(f.doc.log().empty());
+  EXPECT_TRUE(f.doc.log().back().text.contains("Переназначены цепи эквивалентных контактов")) << f.doc.log().back().text.toStdString();
+  f.doc.undoStack()->undo();
+  EXPECT_EQ(net(p1), n1);
+  EXPECT_EQ(net(p2), n2);
+  // A second click that is not on the group lets the first go: nothing is exchanged.
+  click(p1);
+  EXPECT_EQ(f.view.swapPicked(), p1);
+  QTest::mouseClick(&f.view, Qt::LeftButton, {}, QPoint(3, 3));
+  EXPECT_EQ(f.view.swapPicked(), -1);
+  EXPECT_EQ(net(p1), n1);
+  // Esc lets the picked pin go, then leaves the tool.
+  click(p1);
+  f.view.cancelTool();
+  EXPECT_EQ(f.view.swapPicked(), -1);
+  EXPECT_EQ(f.view.mode(), Mode::Swap);
+  f.view.cancelTool();
+  EXPECT_EQ(f.view.mode(), Mode::Select);
+
+  // Gates: a pin of one gate, then a pin of another — the three pins of each go at once.
+  f.view.startSwap(SwapKind::Gates);
+  const int g1 = padOf("D3", "2"), g2 = padOf("D3", "4");
+  const Vec2 ga = f.b().pads[size_t(g1)].pos.v(), gb = f.b().pads[size_t(g2)].pos.v();
+  f.look((ga + gb) * 0.5, 30);
+  const std::vector<int> was{net(padOf("D3", "1")), net(padOf("D3", "2")), net(padOf("D3", "3"))};
+  const std::vector<int> wasOther{net(padOf("D3", "5")), net(padOf("D3", "6")), net(padOf("D3", "4"))};
+  const int steps = f.doc.undoStack()->index();
+  click(g1);
+  if (const char* dir = std::getenv("XR_SHOT_DIR")) {
+    f.view.refresh();
+    if (const QImage img = f.view.picture(); f.view.drawable()) img.save(QString(dir) + "/swap-gates.png");
+  }
+  click(g2);
+  EXPECT_EQ((std::vector<int>{net(padOf("D3", "1")), net(padOf("D3", "2")), net(padOf("D3", "3"))}), wasOther);
+  EXPECT_EQ((std::vector<int>{net(padOf("D3", "5")), net(padOf("D3", "6")), net(padOf("D3", "4"))}), was);
+  EXPECT_EQ(f.doc.undoStack()->index(), steps + 1) << "one step for the whole gate";
+
+  // The commands of the main window start the tool in its two kinds.
+  MainWindow w;
+  QTemporaryDir dir;
+  ASSERT_TRUE(QFile::copy(QString::fromStdString(data("topor/Example_02/Placement.fst")), dir.filePath("Placement.fst")));
+  ASSERT_TRUE(w.openFile(dir.filePath("Placement.fst")));
+  (*w.commands())["Cmd_SwapGates"]->trigger();
+  EXPECT_EQ(w.view()->mode(), Mode::Swap);
+  EXPECT_EQ(w.view()->swapKind(), SwapKind::Gates);
+  (*w.commands())["Cmd_SwapPins"]->trigger();
+  EXPECT_EQ(w.view()->swapKind(), SwapKind::Pins);
+}
+
 TEST(Gui, ZippedPairSelectionAndProperties) {
   Fixture f("topor/Example_06/Signals.fst");
   PropertiesPanel props(&f.doc);
