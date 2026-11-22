@@ -7,6 +7,7 @@
 #include <tuple>
 
 #include "core/Connectivity.h"
+#include "core/Delay.h"
 #include "core/Edit.h"
 #include "core/ZoneFill.h"
 #include "drc/Drc.h"
@@ -1159,6 +1160,18 @@ TEST(Edit, RemoveSinglePinNets) {
     const size_t violations = runDrc(b, {}).size();
     const edit::SinglePinNets res = edit::removeSinglePinNets(b);
     EXPECT_EQ(res.removed, removed) << file;
+    // The signals' delays are what they were: the nets that are left keep their wires.
+    {
+      auto fresh = io::loadBoard(data(file));
+      ASSERT_TRUE(fresh);
+      const auto was = signalDelays(**fresh), now = signalDelays(b);
+      ASSERT_EQ(was.size(), now.size()) << file;
+      for (size_t i = 0; i < was.size(); ++i) {
+        EXPECT_EQ(was[i].routed, now[i].routed) << file << " " << was[i].signal;
+        EXPECT_NEAR(was[i].ps, now[i].ps, 1e-6) << file << " " << was[i].signal;
+      }
+      EXPECT_EQ(checkDelays(b).size(), checkDelays(**fresh).size()) << file;
+    }
     EXPECT_EQ(res.removed + int(res.skipped.size()), single) << file;
     EXPECT_EQ(b.nets.size(), nets - size_t(removed)) << file;
     EXPECT_EQ(b.tracks.size(), tracks) << file;
