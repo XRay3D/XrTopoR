@@ -792,16 +792,26 @@ QWidget* PropertiesPanel::componentPage(const std::vector<int>& comps) {
   tabs->addTab(general, tr("Общие"));
   if (comps.size() == 1) {
     const Component& c = b.components[comps[0]];
-    auto* pins = new QTableWidget(int(c.pads.size()), 3);
-    pins->setHorizontalHeaderLabels({"#", tr("Имя"), tr("Цепь")});
+    // As TopoR's: the equivalence of the pin within its gate (ЭК), the gate (В) and the gate's equivalence (ЭВ) are
+    // the library's, shown and not edited.
+    auto* pins = new QTableWidget(int(c.pads.size()), 6);
+    pins->setObjectName("pins");
+    pins->setHorizontalHeaderLabels({"#", tr("Имя"), tr("Цепь"), tr("ЭК"), tr("В"), tr("ЭВ")});
+    pins->horizontalHeaderItem(3)->setToolTip(tr("Эквивалентность контакта"));
+    pins->horizontalHeaderItem(4)->setToolTip(tr("Вентиль"));
+    pins->horizontalHeaderItem(5)->setToolTip(tr("Эквивалентность вентиля"));
     pins->verticalHeader()->hide();
     pins->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    pins->horizontalHeader()->setStretchLastSection(true);
+    pins->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
+    for (int col : {0, 3, 4, 5}) pins->horizontalHeader()->setSectionResizeMode(col, QHeaderView::ResizeToContents);
     for (int i = 0; i < int(c.pads.size()); ++i) {
       const Pad& p = b.pads[c.pads[i]];
       pins->setItem(i, 0, new QTableWidgetItem(QString::number(i + 1)));
       pins->setItem(i, 1, new QTableWidgetItem(QString::fromStdString(p.number)));
       pins->setItem(i, 2, new QTableWidgetItem(p.net >= 0 ? QString::fromStdString(b.nets[p.net].name) : QString()));
+      pins->setItem(i, 3, new QTableWidgetItem(QString::number(p.pinEqual)));
+      pins->setItem(i, 4, new QTableWidgetItem(QString::number(p.gate)));
+      pins->setItem(i, 5, new QTableWidgetItem(QString::number(p.gateEqual)));
     }
     tabs->addTab(pins, tr("Контакты"));
     // The attributes; the flag puts the attribute's label on the board or takes it away.

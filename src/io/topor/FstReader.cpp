@@ -77,6 +77,12 @@ struct Reader {
   std::map<std::string, ViastackDef> viastacks;
   std::map<std::string, FootprintDef> footprints;
   std::map<std::string, std::string> componentValues;  // schematic component -> value attribute
+  struct LibPin {
+    std::string name, symName;
+    int pinEqual = 0, gate = 1, gateEqual = 0;
+  };
+  std::map<std::string, std::map<int, LibPin>> libPins;                            // schematic component -> pinNum -> its pin
+  std::map<std::pair<std::string, std::string>, std::map<int, int>> pinpacks;  // (component, footprint) -> padNum -> pinNum
   std::map<std::string, int> pinToPad;                 // "comp\x01pinName" and "comp\x02padNum"
   std::string firstViastack;
   std::string preferredViastack;  // the type the design's own vias use (TopoR routes with it when any type is allowed)
@@ -546,6 +552,21 @@ struct Reader {
       for (auto* c : e->findAll("Component")) {
         std::string v = valueAttribute(c->find("Attributes"));
         if (!v.empty()) componentValues[std::string(c->attr("name"))] = v;
+        if (auto* pins = c->find("Pins")) {
+          auto& of = libPins[std::string(c->attr("name"))];
+          auto n = [](std::string_view v) { return std::atoi(std::string(v).c_str()); };
+          for (auto* p : pins->findAll("Pin"))
+            of[int(p->num("pinNum"))] = {std::string(p->attr("name")), std::string(p->attr("pinSymName")), n(p->attr("pinEqual", "0")),
+                                         n(p->attr("gate", "1")), n(p->attr("gateEqual", "0"))};
+        }
+      }
+    if (auto* e = lib.find("Packages"))
+      for (auto* pk : e->findAll("Package")) {
+        auto* cr = pk->find("ComponentRef");
+        auto* fr = pk->find("FootprintRef");
+        if (!cr || !fr) continue;
+        auto& of = pinpacks[{std::string(cr->attr("name")), std::string(fr->attr("name"))}];
+        for (auto* pp : pk->findAll("Pinpack")) of[int(pp->num("padNum"))] = int(pp->num("pinNum"));
       }
   }
 
@@ -658,6 +679,29 @@ struct Reader {
       int pi = int(b.pads.size() - 1);
       pinToPad[key(c.ref, '\x01', fpad.name)] = pi;
       pinToPad[key(c.ref, '\x02', std::to_string(fpad.padNum))] = pi;
+    }
+    // The pins of the schematic component on these pads: their equivalence, and their names — the netlist names
+    // a pin by its name, which need not be the pad's.
+    if (auto lp = libPins.find(compRef); lp != libPins.end()) {
+      const auto pack = pinpacks.find({compRef, c.footprint});
+      for (auto& fpad : fp.pads) {
+        auto pi = pinToPad.find(key(c.ref, '\x02', std::to_string(fpad.padNum)));
+        if (pi == pinToPad.end()) continue;
+        int pinNum = fpad.padNum;
+        if (pack != pinpacks.end()) {
+          auto pn = pack->second.find(fpad.padNum);
+          if (pn == pack->second.end()) continue;  // (a pad of no pin)
+          pinNum = pn->second;
+        }
+        auto pin = lp->second.find(pinNum);
+        if (pin == lp->second.end()) continue;
+        Pad& p = b.pads[size_t(pi->second)];
+        p.symName = pin->second.symName;
+        p.pinEqual = pin->second.pinEqual;
+        p.gate = pin->second.gate;
+        p.gateEqual = pin->second.gateEqual;
+        if (!pin->second.name.empty()) pinToPad[key(c.ref, '\x01', pin->second.name)] = pi->second;
+      }
     }
     for (FpGraphic fg : fp.graphics) {
       LayerId l = detailLayer(fg.layer, bottom);

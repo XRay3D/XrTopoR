@@ -487,6 +487,11 @@ void Tools::addQueryTools() {
                                   {"size_mm", QJsonArray{mm(double(pad.shape.w)), mm(double(pad.shape.h))}}, {"angle", pad.angle},
                                   {"layers", layerNames(b, pad.copper)}};
                     if (pad.drill > 0) o["drill_mm"] = mm(double(pad.drill));
+                    if (pad.pinEqual) o["pin_equal"] = pad.pinEqual;  // (swappable with the pins of its gate of the same value)
+                    if (pad.gateEqual) {  // (its gate swappable with the gates of the same value)
+                      o["gate"] = pad.gate;
+                      o["gate_equal"] = pad.gateEqual;
+                    }
                     pads.append(o);
                   }
                   reply(Result::json(QJsonObject{{"ref", qs(c.ref)}, {"value", qs(c.value)}, {"footprint", qs(c.footprint)},

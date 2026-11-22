@@ -661,6 +661,51 @@ TEST(FstIO, DelayRulesRoundTrip) {
   EXPECT_EQ(now[7].right[0].kind, ObjectSignal::Kind::DiffSignal);
 }
 
+// The functional equivalence of pins and gates (pinEqual, gate, gateEqual, the pin's name in the symbol) is read
+// from the library onto the pads and written as read; the P-CAD master of the design gives the same.
+TEST(FstIO, PinEquivalenceRoundTrip) {
+  using Eq = std::tuple<std::string, int, int, int>;
+  auto census = [](const Board& b) {
+    std::map<std::pair<std::string, std::string>, Eq> out;
+    for (const Pad& p : b.pads)
+      if (p.component >= 0) out[{b.components[size_t(p.component)].ref, p.number}] = {p.symbolName(), p.pinEqual, p.gate, p.gateEqual};
+    return out;
+  };
+  auto swappable = [](const Board& b) { return r::count_if(b.pads, [](const Pad& p) { return p.pinEqual != 0; }); };
+  for (auto [file, some] : {std::pair{"topor/Example_02/Placement.fst", true}, std::pair{"topor/Example_04/Arcs.fst", true},
+                            std::pair{"topor/AMK310/AMK310_MCU_V2.fst", true}, std::pair{"topor/Example_06/Signals.fst", false}}) {
+    auto r = io::loadBoard(data(file));
+    ASSERT_TRUE(r) << file << ": " << r.error();
+    const Board& a = **r;
+    EXPECT_EQ(swappable(a) > 0, some) << file;
+    const std::string text = io::writeFst(a);
+    auto again = io::readFst(text, "equivalence.fst");
+    ASSERT_TRUE(again) << file << ": " << again.error();
+    EXPECT_EQ(census(**again), census(a)) << file;
+    for (size_t i = 0; i < a.pads.size(); ++i) EXPECT_EQ((*again)->pads[i].net, a.pads[i].net) << file << " pad " << i;
+    // The schematic components and their packages are written the same the second time.
+    auto parts = [](const std::string& t) {
+      const size_t from = t.find("<Components>"), to = t.find("</Packages>");
+      return from != std::string::npos && to != std::string::npos ? t.substr(from, to - from) : std::string();
+    };
+    EXPECT_FALSE(parts(text).empty()) << file;
+    EXPECT_TRUE(parts(io::writeFst(**again)) == parts(text)) << file << ": the library differs the second time";
+  }
+  // 561ЛА7: four gates of two equivalent inputs and an output, the gates equivalent; the power pins of no gate.
+  auto r = io::loadBoard(data("topor/Example_02/Placement.fst"));
+  ASSERT_TRUE(r);
+  const auto fst = census(**r);
+  EXPECT_EQ(fst.at({"D3", "1"}), (Eq{"I1", 1, 1, 1}));
+  EXPECT_EQ(fst.at({"D3", "2"}), (Eq{"I2", 1, 1, 1}));
+  EXPECT_EQ(fst.at({"D3", "3"}), (Eq{"O", 0, 1, 1}));
+  EXPECT_EQ(fst.at({"D3", "5"}), (Eq{"I1", 2, 2, 1}));
+  EXPECT_EQ(fst.at({"D3", "4"}), (Eq{"O", 0, 2, 1}));
+  EXPECT_EQ(fst.at({"D3", "14"}), (Eq{"14", 0, 0, 0}));
+  auto master = io::loadBoard(data("topor/Example_02/Placement_master.pcb"));
+  ASSERT_TRUE(master) << master.error();
+  EXPECT_EQ(census(**master), fst);
+}
+
 // The settings of a design: how labels turn, which pads take a wire at their corners, which warnings are shown.
 // A design that has them as a new one does is written as TopoR writes it.
 TEST(FstIO, DesignSettingsRoundTrip) {

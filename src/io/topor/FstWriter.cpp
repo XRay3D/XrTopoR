@@ -8,6 +8,7 @@
 #include <iterator>
 #include <map>
 #include <set>
+#include <tuple>
 
 #include "core/Padstack.h"
 #include "core/Runs.h"
@@ -70,6 +71,7 @@ struct Writer {
   std::vector<std::pair<Coord, Coord>> viastackOrder;  // the first one is the design's default
   std::map<FpKey, std::string> footprints;
   std::vector<std::string> compFootprint;  // per component
+  std::vector<std::string> compPart;       // per component: its schematic component
   std::set<std::string> fpNames;
   std::string defaultVia;
 
@@ -495,6 +497,28 @@ struct Writer {
       }
       compFootprint[i] = it->second;
     }
+    // The schematic components: one per footprint and equivalence of its pins. The first of a footprint is named
+    // as the footprint, the others with a number.
+    using Signature = std::vector<std::tuple<std::string, int, int, int>>;
+    std::map<std::pair<std::string, Signature>, std::string> partOf;
+    std::set<std::string> partNames;
+    compPart.resize(b.components.size());
+    for (size_t i = 0; i < b.components.size(); ++i) {
+      Signature sig;
+      for (int pi : b.components[i].pads) {
+        const Pad& p = b.pads[size_t(pi)];
+        sig.emplace_back(p.symbolName(), p.pinEqual, p.gate, p.gateEqual);
+      }
+      auto [it, fresh] = partOf.try_emplace({compFootprint[i], std::move(sig)});
+      if (fresh) {
+        std::string name = compFootprint[i];
+        for (int n = 2; partNames.count(name) || (name != compFootprint[i] && fpNames.count(name)); ++n)
+          name = compFootprint[i] + "_" + std::to_string(n);
+        partNames.insert(name);
+        it->second = name;
+      }
+      compPart[i] = it->second;
+    }
   }
 
   void writeFigure(const Graphic& g) {
@@ -604,26 +628,29 @@ struct Writer {
       x.close();
     }
     x.close();
-    // Schematic components and packages: one per footprint, pins named after the pads.
+    // Schematic components and packages: one per footprint and equivalence of its pins, pins named after the pads.
+    std::map<std::string, int> parts;
+    for (size_t i = 0; i < b.components.size(); ++i) parts.emplace(compPart[i], int(i));
     x.open("Components");
-    for (auto& [name, ci] : rep) {
+    for (auto& [name, ci] : parts) {
       x.open("Component", {{"name", name}});
       x.open("Pins");
       const Component& c = b.components[ci];
       for (size_t i = 0; i < c.pads.size(); ++i) {
         std::string n = std::to_string(i + 1);
-        x.empty("Pin", {{"pinNum", n}, {"name", b.pads[c.pads[i]].number}, {"pinSymName", b.pads[c.pads[i]].number},
-                        {"pinEqual", "0"}, {"gate", "1"}, {"gateEqual", "0"}});
+        const Pad& p = b.pads[c.pads[i]];
+        x.empty("Pin", {{"pinNum", n}, {"name", p.number}, {"pinSymName", p.symbolName()}, {"pinEqual", std::to_string(p.pinEqual)},
+                        {"gate", std::to_string(p.gate)}, {"gateEqual", std::to_string(p.gateEqual)}});
       }
       x.close();
       x.close();
     }
     x.close();
     x.open("Packages");
-    for (auto& [name, ci] : rep) {
+    for (auto& [name, ci] : parts) {
       x.open("Package");
       x.empty("ComponentRef", {{"name", name}});
-      x.empty("FootprintRef", {{"name", name}});
+      x.empty("FootprintRef", {{"name", compFootprint[size_t(ci)]}});
       for (size_t i = 0; i < b.components[ci].pads.size(); ++i) {
         std::string n = std::to_string(i + 1);
         x.empty("Pinpack", {{"pinNum", n}, {"padNum", n}});
@@ -835,7 +862,7 @@ struct Writer {
           x.open("CompInstance", {{"name", c.ref}, {"uniqueId", uniqueId(i)}, {"side", side}, {"angle", angle}, {"fixed", "on"}});
         else x.open("CompInstance", {{"name", c.ref}, {"uniqueId", uniqueId(i)}, {"side", side}, {"angle", angle}});
       }
-      x.empty("ComponentRef", {{"name", compFootprint[i]}});
+      x.empty("ComponentRef", {{"name", compPart[i]}});
       x.empty("FootprintRef", {{"name", compFootprint[i]}});
       xy("Org", toFst(c.pos));
       writeAttributes(int(i));

@@ -54,6 +54,11 @@ struct Reader {
   std::map<std::string, int> textStyleIndex;
   std::map<std::string, std::map<std::string, std::string>> compPinToPad;  // compDef -> pin -> padNum
   std::map<std::string, std::string> instToCompDef;                          // refdes -> compDef
+  struct CompPin {
+    std::string des, symName;
+    int pinEqual = 0, gate = 1, gateEqual = 0;
+  };
+  std::map<std::string, std::vector<CompPin>> compPins;  // compDef -> its pins (the functional equivalence)
   std::map<int, LayerId> layerMap;                                           // P-CAD layer number -> board layer
   int topNum = 1, bottomNum = 2, boardNum = 3;
 
@@ -173,6 +178,14 @@ struct Reader {
     }
     for (auto* cd : lib.findAll("compDef")) {
       auto& m = compPinToPad[toUtf8(cd->arg(0))];
+      auto& pins = compPins[toUtf8(cd->arg(0))];
+      for (auto* cp : cd->findAll("compPin")) {
+        auto n = [&](const char* head, int def) {
+          const Node* k = cp->find(head);
+          return k ? int(k->num(0, def)) : def;
+        };
+        pins.push_back({toUtf8(cp->arg(0)), str(cp->find("pinName")), n("pinEq", 0), n("partNum", 1), n("gateEq", 0)});
+      }
       if (const Node* ap = cd->find("attachedPattern"))
         if (const Node* ppm = ap->find("padPinMap")) {
           const Node* lastPad = nullptr;
@@ -384,6 +397,22 @@ struct Reader {
       instToCompDef[toUtf8(ci->arg(0))] = str(ci->find("compRef"));
       if (int c = b.findComponent(toUtf8(ci->arg(0))); c >= 0 && b.components[size_t(c)].value.empty())
         b.components[size_t(c)].value = str(ci->find("compValue"));
+      // The functional equivalence of the component's pins, on their pads.
+      const std::string def = str(ci->find("compRef"));
+      if (int c = b.findComponent(toUtf8(ci->arg(0))); c >= 0)
+        for (const CompPin& cp : compPins[def]) {
+          auto& m = compPinToPad[def];
+          auto pm = m.find(cp.des);
+          const std::string& padNum = pm != m.end() ? pm->second : cp.des;
+          for (int pi : b.components[size_t(c)].pads) {
+            Pad& p = b.pads[size_t(pi)];
+            if (p.number != padNum) continue;
+            p.symName = cp.symName;
+            p.pinEqual = cp.pinEqual;
+            p.gate = cp.gate;
+            p.gateEqual = cp.gateEqual;
+          }
+        }
     }
     for (auto* n : nl.findAll("net")) {
       int net = b.addNet(toUtf8(n->arg(0)));

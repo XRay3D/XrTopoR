@@ -180,6 +180,14 @@ struct Pad {
   bool mirror = false;    // the stack's geometry mirrored (a pad of a bottom-side component)
   bool bottomSide = false;  // the stack's named layers mirrored: «Top» means the bottom copper
   bool uniform = true;    // the same shape on all its copper layers (Pad::shape); else see padShapeOn()
+  // Functional equivalence, as the library has it (TopoR's ЭК, В, ЭВ; P-CAD's pinEq, partNum, gateEq): the pins
+  // of one gate with the same non-zero pinEqual may exchange their nets, and so may the gates of a component with
+  // the same non-zero gateEqual, pin for pin. gate 0: of no gate (power).
+  std::string symName;  // the pin's name in the schematic symbol; empty: the pad's number
+  int pinEqual = 0;
+  int gate = 1;
+  int gateEqual = 0;
+  const std::string& symbolName() const { return symName.empty() ? number : symName; }
 
   bool isThrough() const { return drill > 0; }
   bool onLayer(LayerId l) const { return (copper >> l) & 1; }
