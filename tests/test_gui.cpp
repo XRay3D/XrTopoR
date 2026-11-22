@@ -49,6 +49,7 @@
 #include "core/DiffPairs.h"
 #include "core/Edit.h"
 #include "core/Swap.h"
+#include "core/Serpents.h"
 #include "core/Signals.h"
 #include "core/ZoneFill.h"
 #include "gui/AboutDialog.h"
@@ -1047,6 +1048,167 @@ TEST(Gui, EcoDialog) {
   EXPECT_TRUE(d.changes().empty()) << "saved as it is now: no change against it";
   EcoDialog again(&doc);
   EXPECT_EQ(QDir::fromNativeSeparators(again.findChild<QLineEdit*>("base")->text()), other);
+}
+
+// A serpent in the editor. «Преобразовать в змейку» makes one of a selected straight piece; a click on a piece of
+// it selects it whole; its page has TopoR's «Задержка» tab — the least and the greatest length, the length asked
+// for, the gap —; the markers of its trapezoid change it: a corner its height there (Shift: on both sides of the
+// chord), the middle of a base both heights of the side, an end slides along the wire. Every change is one step
+// of undo. «Преобразовать в проводник» leaves plain pieces.
+TEST(Gui, SerpentPropertiesAndMarkers) {
+  Fixture f("astable.kicad_pcb");
+  {
+    auto board = std::make_unique<Board>();
+    Board& b = *board;
+    const LayerId top = b.addLayer("Top", LayerKind::Copper, Side::Top);
+    b.layers[top].copperIndex = 0;
+    auto at = [](double x, double y) { return Vec2{x * kNmPerMm, y * kNmPerMm}; };
+    b.outline.push_back({at(0, 0), at(30, 0), at(30, 10), at(0, 10)});
+    Track t;
+    t.a = Point(at(2, 5));
+    t.b = Point(at(28, 5));
+    t.width = mmToNm(0.2);
+    t.layer = top;
+    t.net = b.addNet("N");
+    b.tracks.push_back(t);
+    f.doc.setBoard(std::move(board), "serpent");
+  }
+  const Board& b = f.b();
+  PropertiesPanel props(&f.doc);
+  f.view.show();
+  f.look(Vec2{15.0 * kNmPerMm, 5.0 * kNmPerMm}, 40);  // 20 px a mm
+  const double mm = double(kNmPerMm), px = mm / 20;
+  f.doc.setSelection({{ItemType::Track, 0}}, {});
+  EXPECT_FALSE(f.view.selectionIsSerpents());
+  f.view.serpentSelection();
+  ASSERT_EQ(b.serpents.size(), 1u);
+  EXPECT_EQ(f.doc.undoStack()->count(), 1);
+  EXPECT_TRUE(f.view.selectionIsSerpents());
+  EXPECT_NEAR(b.serpents[0].gap, 0.4 * mm, 1);
+  const double h0 = b.serpents[0].h1;
+  EXPECT_GT(h0, 0.5 * mm);
+  // The page: two tabs, the lengths.
+  auto* tabs = props.findChild<QTabWidget*>("serpent");
+  ASSERT_TRUE(tabs);
+  ASSERT_EQ(tabs->count(), 2);
+  EXPECT_EQ(tabs->tabText(0), "Общие");
+  EXPECT_EQ(tabs->tabText(1), "Задержка");
+  auto* len = props.findChild<QDoubleSpinBox*>("serpentLength");
+  ASSERT_TRUE(len && props.findChild<QLabel*>("serpentMin") && props.findChild<QLabel*>("serpentMax") && props.findChild<QDoubleSpinBox*>("serpentGap"));
+  EXPECT_NEAR(len->value(), toUnit(26.0 * mm, f.doc.unit()), 1e-6);
+  auto drawn = [&] { return serpentRun(b, 0)->drawn; };
+  len->setValue(toUnit(40.0 * mm, f.doc.unit()));
+  emit len->editingFinished();
+  EXPECT_NEAR(drawn(), 40.0 * mm, 200);
+  EXPECT_EQ(f.doc.undoStack()->count(), 2);
+  EXPECT_TRUE(f.view.selectionIsSerpents()) << "the serpent laid anew stays selected";
+  ASSERT_TRUE(props.findChild<QTabWidget*>("serpent"));
+  // More than the trapezoid holds: the longest, and the page says so.
+  const double most = serpentShape(serpentRun(b, 0)->a, serpentRun(b, 0)->b, b.serpents[0], mmToNm(0.2)).maxLength;
+  len = props.findChild<QDoubleSpinBox*>("serpentLength");
+  len->setValue(toUnit(most + 20.0 * mm, f.doc.unit()));
+  emit len->editingFinished();
+  EXPECT_NEAR(drawn(), most, 200);
+  bool said = false;
+  for (QLabel* l : props.findChildren<QLabel*>()) said = said || l->text().contains("Трапеция мала");
+  EXPECT_TRUE(said);
+  f.doc.undoStack()->undo();
+  EXPECT_NEAR(drawn(), 40.0 * mm, 200);
+  if (const char* dir = std::getenv("XR_SHOT_DIR")) {
+    f.look(Vec2{7.0 * kNmPerMm, 5.0 * kNmPerMm}, 14);
+    f.view.refresh();
+    if (const QImage img = f.view.picture(); f.view.drawable()) img.save(QString(dir) + "/serpent-markers.png");
+    f.look(Vec2{15.0 * kNmPerMm, 5.0 * kNmPerMm}, 40);
+    props.resize(360, 300);
+    props.show();
+    props.findChild<QTabWidget*>("serpent")->setCurrentIndex(1);
+    QTest::qWait(30);
+    props.grab().save(QString(dir) + "/serpent-delay-tab.png");
+  }
+  // A drag of a marker: pressed on it, moved (Shift held or not), released.
+  auto dragTo = [&](Vec2 from, Vec2 to, Qt::KeyboardModifiers mods = Qt::NoModifier) {
+    QTest::mousePress(&f.view, Qt::LeftButton, {}, f.at(from));
+    for (double k : {0.5, 1.0}) {
+      const QPoint pos = f.at(from + (to - from) * k);
+      QMouseEvent ev(QEvent::MouseMove, QPointF(pos), f.view.mapToGlobal(QPointF(pos)), Qt::NoButton, Qt::LeftButton, mods);
+      QApplication::sendEvent(&f.view, &ev);
+    }
+    QTest::mouseRelease(&f.view, Qt::LeftButton, mods, f.at(to));
+  };
+  auto corners = [&] { return serpentCorners(serpentRun(b, 0)->a, serpentRun(b, 0)->b, b.serpents[0]); };
+  int steps = f.doc.undoStack()->index();
+  // The corner of h1 a millimetre further from the chord: h1 alone.
+  Vec2 c0 = corners()[0];
+  const Vec2 out = (c0 - serpentRun(b, 0)->a) / (c0 - serpentRun(b, 0)->a).len();
+  dragTo(c0, c0 + out * mm);
+  EXPECT_NEAR(b.serpents[0].h1, h0 + mm, 2 * px);
+  EXPECT_NEAR(b.serpents[0].h2, h0, 1);
+  EXPECT_NEAR(b.serpents[0].h4, h0, 1);
+  EXPECT_EQ(f.doc.undoStack()->index(), ++steps) << "one step";
+  EXPECT_TRUE(f.view.selectionIsSerpents());
+  EXPECT_NEAR(drawn(), 40.0 * mm, 200) << "the length asked for is kept";
+  // The corner of h3 with Shift: h4 follows it.
+  const Vec2 c2 = corners()[2];
+  dragTo(c2, c2 - out * (0.5 * mm), Qt::ShiftModifier);
+  EXPECT_NEAR(b.serpents[0].h3, h0 + 0.5 * mm, 2 * px);
+  EXPECT_NEAR(b.serpents[0].h4, b.serpents[0].h3, 1);
+  EXPECT_EQ(f.doc.undoStack()->index(), ++steps);
+  // The middle of side B's base half a millimetre in: h2 and h3 by as much.
+  const double h2 = b.serpents[0].h2, h3 = b.serpents[0].h3;
+  const Vec2 mid = (corners()[1] + corners()[2]) * 0.5;
+  dragTo(mid, mid + out * (0.5 * mm));
+  EXPECT_NEAR(b.serpents[0].h2, h2 - 0.5 * mm, 2 * px);
+  EXPECT_NEAR(b.serpents[0].h3, h3 - 0.5 * mm, 2 * px);
+  EXPECT_EQ(f.doc.undoStack()->index(), ++steps);
+  // The serpent's end four millimetres in along the wire: a plain piece is left behind it.
+  const Vec2 end = serpentRun(b, 0)->b;
+  dragTo(end, end - Vec2{4.0 * mm, 0});
+  EXPECT_NEAR(serpentRun(b, 0)->b.x, 24.0 * mm, 2 * px);
+  EXPECT_EQ(r::count_if(b.tracks, [](const Track& t) { return t.serp < 0; }), 1);
+  EXPECT_EQ(f.doc.undoStack()->index(), ++steps);
+  // Past the wire's end it does not go.
+  const Vec2 start = serpentRun(b, 0)->a;
+  dragTo(start, start - Vec2{1.0 * mm, 0});
+  EXPECT_NEAR(serpentRun(b, 0)->a.x, 2.0 * mm, 1);
+  // A click on a piece selects the serpent whole.
+  f.doc.clearSelection();
+  const Track& piece = b.tracks[size_t(serpentRun(b, 0)->tracks[5])];
+  QTest::mouseClick(&f.view, Qt::LeftButton, {}, f.at((piece.a.v() + piece.b.v()) * 0.5));
+  EXPECT_TRUE(f.view.selectionIsSerpents());
+  EXPECT_EQ(f.doc.selectedItems().size(), serpentRun(b, 0)->tracks.size());
+  // «Преобразовать в проводник», and all undone.
+  f.view.serpentSelection();
+  EXPECT_TRUE(b.serpents.empty());
+  EXPECT_TRUE(r::none_of(b.tracks, [](const Track& t) { return t.locked || t.serp >= 0; }));
+  while (f.doc.undoStack()->canUndo()) f.doc.undoStack()->undo();
+  ASSERT_EQ(b.tracks.size(), 1u);
+  EXPECT_TRUE(b.serpents.empty());
+  EXPECT_FALSE(b.tracks[0].locked);
+}
+
+// The command's name follows the selection: on a serpent of TopoR's own design it is «Преобразовать в проводник».
+TEST(Gui, SerpentCommandOfTheMainWindow) {
+  app();
+  MainWindow w;
+  QTemporaryDir dir;
+  ASSERT_TRUE(QFile::copy(QString::fromStdString(data("topor/Example_06/Signals.fst")), dir.filePath("Signals.fst")));
+  ASSERT_TRUE(w.openFile(dir.filePath("Signals.fst")));
+  Document& doc = *w.document();
+  const Board& b = *doc.board();
+  QAction* a = (*w.commands())["Accel_Serpent"];
+  ASSERT_TRUE(a->isEnabled());
+  const auto run = serpentRun(b, 5);
+  ASSERT_TRUE(run);
+  std::vector<ItemRef> sel;
+  for (int ti : run->tracks) sel.push_back({ItemType::Track, ti});
+  doc.setSelection(sel, {});
+  EXPECT_EQ(a->text(), "П&реобразовать в проводник");
+  a->trigger();
+  EXPECT_EQ(b.serpents.size(), 60u);
+  EXPECT_EQ(a->text(), "П&реобразовать в змейку") << "plain pieces now";
+  doc.undoStack()->undo();
+  EXPECT_EQ(b.serpents.size(), 61u);
+  EXPECT_TRUE(serpentRun(b, 5));
 }
 
 TEST(Gui, ZippedPairSelectionAndProperties) {

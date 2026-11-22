@@ -6,6 +6,7 @@
 // across the chord between them, a lower one a single slanted piece (the «narrow» zigzag) —; the run begins and
 // ends with p/4 along the chord, what the chord has over a whole number of p goes to its end. The length is made
 // by the bends' height, the same for all, each held by the trapezoid's height where it stands.
+#include <array>
 #include <optional>
 #include <string>
 #include <vector>
@@ -37,6 +38,11 @@ struct SerpentRun {
   double drawn = 0;  // the length of the pieces
 };
 std::optional<SerpentRun> serpentRun(const Board& b, int serp);
+// The same for every serpent of the board at once (none: as serpentRun gives none).
+std::vector<std::optional<SerpentRun>> serpentRuns(const Board& b);
+// The corners of a serpent's trapezoid on the chord a → b, in the order of the heights: h1 (at a, side A), h2 (at
+// a, side B), h3 (at b, side B), h4 (at b, side A).
+std::array<Vec2, 4> serpentCorners(Vec2 a, Vec2 b, const Serpent& s);
 
 // «Преобразовать в змейку»: the tracks — straight pieces of one wire lying on one line, one after another —
 // become a serpent of the fragment's own length (straight yet) in a rectangle; the gap is two widths of the wire.

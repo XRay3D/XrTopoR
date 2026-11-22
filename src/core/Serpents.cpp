@@ -109,11 +109,41 @@ SerpentShape serpentShape(Vec2 a, Vec2 b, const Serpent& s, Coord width) {
   return out;
 }
 
+std::array<Vec2, 4> serpentCorners(Vec2 a, Vec2 b, const Serpent& s) {
+  const double C = (b - a).len();
+  const Vec2 dir = C > 0 ? (b - a) / C : Vec2{1, 0}, nA{dir.y, -dir.x};
+  return {a + nA * s.h1, a - nA * s.h2, b - nA * s.h3, b + nA * s.h4};
+}
+
+namespace {
+std::optional<SerpentRun> runOf(const Board& b, std::vector<int> tracks);
+}
+
 std::optional<SerpentRun> serpentRun(const Board& b, int serp) {
-  SerpentRun run;
+  std::vector<int> tracks;
   for (int ti = 0; ti < int(b.tracks.size()); ++ti)
-    if (b.tracks[size_t(ti)].serp == serp && b.tracks[size_t(ti)].zip < 0) run.tracks.push_back(ti);
-  if (serp < 0 || run.tracks.empty()) return std::nullopt;
+    if (b.tracks[size_t(ti)].serp == serp && b.tracks[size_t(ti)].zip < 0) tracks.push_back(ti);
+  if (serp < 0) return std::nullopt;
+  return runOf(b, std::move(tracks));
+}
+
+std::vector<std::optional<SerpentRun>> serpentRuns(const Board& b) {
+  std::vector<std::vector<int>> of(b.serpents.size());
+  for (int ti = 0; ti < int(b.tracks.size()); ++ti) {
+    const Track& t = b.tracks[size_t(ti)];
+    if (t.serp >= 0 && t.serp < int(of.size()) && t.zip < 0) of[size_t(t.serp)].push_back(ti);
+  }
+  std::vector<std::optional<SerpentRun>> out;
+  for (auto& tracks : of) out.push_back(runOf(b, std::move(tracks)));
+  return out;
+}
+
+namespace {
+
+std::optional<SerpentRun> runOf(const Board& b, std::vector<int> tracks) {
+  SerpentRun run;
+  run.tracks = std::move(tracks);
+  if (run.tracks.empty()) return std::nullopt;
   // The pieces are kept in order, each from its a to its b; pieces that are not are put in order by their ends.
   auto chained = [&] {
     for (size_t i = 0; i + 1 < run.tracks.size(); ++i)
@@ -153,6 +183,8 @@ std::optional<SerpentRun> serpentRun(const Board& b, int serp) {
   for (int ti : run.tracks) run.drawn += b.tracks[size_t(ti)].length();
   return run;
 }
+
+}  // namespace
 
 int makeSerpent(Board& b, std::vector<int> tracks, std::string* why) {
   auto no = [&](const char* reason) {

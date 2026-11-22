@@ -408,6 +408,22 @@ void BoardView::buildOverlayScene(gl::SceneData& out) const {
   if (mode_ == Mode::Select)
     for (int z : selectedZips())
       for (const Track& t : b.zips[size_t(z)].axis) sb.track(t, kHair, {255, 255, 255, 255});
+  // The trapezoids of the serpents: of the selected ones, and — «Области змеек» — of all on the visible layers.
+  if (mode_ == Mode::Select && !b.serpents.empty()) {
+    const std::vector<int> picked = selectedSerpents();
+    const bool all = doc_->display().flag("showSerpentArea");
+    if (all || !picked.empty()) {
+      const auto runs = serpentRuns(b);
+      for (int sp = 0; sp < int(runs.size()); ++sp) {
+        const bool sel = r::contains(picked, sp);
+        if (!runs[size_t(sp)] || (!sel && (!all || !layerVisible(runs[size_t(sp)]->layer)))) continue;
+        const auto c = serpentCorners(runs[size_t(sp)]->a, runs[size_t(sp)]->b, b.serpents[size_t(sp)]);
+        const QColor line = sel ? QColor(Qt::white) : brighter(doc_->layerColor(runs[size_t(sp)]->layer), 40);
+        sb.loop({c[0], c[1], c[2], c[3]}, kHair, col(line));
+      }
+      sb.flush();
+    }
+  }
   // The swap tool: the pins of every group in the group's colour, what is picked lighter (a pin, or its gate).
   if (mode_ == Mode::Swap) {
     const LayerMask vis = visibleCopper();

@@ -1,5 +1,6 @@
 #include "gui/PropertiesPanel.h"
 
+#include "core/Serpents.h"
 #include "core/DiffPairs.h"
 
 #include <QCheckBox>
@@ -200,7 +201,11 @@ void PropertiesPanel::rebuild() {
       const Board& bd = *doc_->board();
       const int z = bd.tracks[size_t(tracks.front())].zip;
       const bool oneZip = z >= 0 && r::all_of(tracks, [&](int t) { return bd.tracks[size_t(t)].zip == z; });
-      page = oneZip ? zipPage(z) : wirePage(tracks);
+      // All of one serpent (a single wire's): the serpent's page, with TopoR's «Задержка» tab.
+      const int sp = bd.tracks[size_t(tracks.front())].serp;
+      const bool oneSerpent = z < 0 && sp >= 0 && sp < int(bd.serpents.size()) &&
+                              r::all_of(tracks, [&](int t) { return bd.tracks[size_t(t)].serp == sp && bd.tracks[size_t(t)].zip < 0; }) && serpentRun(bd, sp);
+      page = oneZip ? zipPage(z) : oneSerpent ? serpentPage(sp) : wirePage(tracks);
     }
     else if (!vias.empty()) page = viaPage(vias);
     else if (!zones.empty()) page = zonePage(zones);
@@ -946,7 +951,7 @@ QWidget* PropertiesPanel::wirePage(const std::vector<int>& tracks) {
   fixed->setCheckState(!lock ? Qt::PartiallyChecked : *lock ? Qt::Checked : Qt::Unchecked);
   connect(fixed, &QCheckBox::clicked, this, [this, tracks](bool on) {
     edit(on ? tr("Фиксировать") : tr("Расфиксировать"), [&](Board& bd) {
-      for (int t : tracks) bd.tracks[t].locked = on;
+      for (int t : tracks) bd.tracks[t].locked = on || bd.tracks[t].serp >= 0;  // (a serpent's pieces stay fixed)
     });
   });
   f->addRow(tr("Фиксация:"), fixed);
@@ -955,6 +960,63 @@ QWidget* PropertiesPanel::wirePage(const std::vector<int>& tracks) {
     f->addRow(tr("Зазор:"), new QLabel(formatLength(clr, u, 3) + " " + unitName(u)));
   }
   return w;
+}
+
+// A serpent: «Общие» — the wire's net, layer, width and the serpent's length as drawn —, «Задержка» — TopoR's
+// tab: the least and the greatest length the trapezoid gives, the length asked for and the gap between the bends.
+QWidget* PropertiesPanel::serpentPage(int serp) {
+  const Board& b = *doc_->board();
+  const Unit u = doc_->unit();
+  const SerpentRun run = *serpentRun(b, serp);
+  const Serpent& sp = b.serpents[size_t(serp)];
+  const SerpentShape shape = serpentShape(run.a, run.b, sp, run.width);
+  auto shown = [&](double nm) { return new QLabel(formatLength(nm, u, 5) + " " + unitName(u)); };
+  auto* tabs = new QTabWidget;
+  tabs->setObjectName("serpent");
+  auto* general = new QWidget;
+  auto* f = new QFormLayout(general);
+  f->addRow(title(tr("Змейка")));
+  f->addRow(tr("Цепь:"), new QLabel(run.net >= 0 ? QString::fromStdString(b.nets[size_t(run.net)].name) : QString()));
+  f->addRow(tr("Слой:"), new QLabel(QString::fromStdString(b.layers[size_t(run.layer)].name)));
+  f->addRow(tr("Ширина:"), shown(double(run.width)));
+  f->addRow(tr("Длина:"), shown(run.drawn));
+  tabs->addTab(general, tr("Общие"));
+  // The serpent laid anew with a parameter changed; its pieces are other tracks after that.
+  auto set = [this, serp](const QString& what, const std::function<void(Serpent&)>& change) {
+    if (!doc_->hasBoard() || serp >= int(doc_->board()->serpents.size())) return;
+    Board& bd = *doc_->board();
+    auto before = doc_->beginEdit();
+    Serpent s = bd.serpents[size_t(serp)];
+    change(s);
+    if (!setSerpent(bd, serp, s)) return;
+    doc_->invalidateModel();
+    doc_->commitEdit(before, what);
+    std::vector<ItemRef> sel;
+    for (int i = 0; i < int(bd.tracks.size()); ++i)
+      if (bd.tracks[size_t(i)].serp == serp) sel.push_back({ItemType::Track, i});
+    doc_->setSelection(sel, {});
+  };
+  auto* delay = new QWidget;
+  auto* d = new QFormLayout(delay);
+  auto* least = shown(shape.minLength);
+  least->setObjectName("serpentMin");
+  least->setToolTip(tr("Минимальная допустимая длина"));
+  d->addRow(tr("Мин. длина:"), least);
+  QWidget* want = length(std::max(sp.length, shape.minLength), [set](double v) { set(tr("Требуемая длина змейки"), [v](Serpent& s) { s.length = v; }); }, 0);
+  want->setObjectName("serpentLength");
+  d->addRow(tr("Требуемая длина:"), want);
+  auto* most = shown(shape.maxLength);
+  most->setObjectName("serpentMax");
+  most->setToolTip(tr("Максимальная допустимая длина"));
+  d->addRow(tr("Макс. длина:"), most);
+  QWidget* gap = length(sp.gap, [set](double v) { set(tr("Зазор змейки"), [v](Serpent& s) { s.gap = v; }); }, 1000);
+  gap->setObjectName("serpentGap");
+  gap->setToolTip(tr("Зазор между соседними изломами змейки"));
+  d->addRow(tr("Зазор:"), gap);
+  if (sp.length > shape.maxLength + 50)
+    d->addRow(new QLabel(tr("Трапеция мала для требуемой длины: вписана наибольшая возможная")));
+  tabs->addTab(delay, tr("Задержка"));
+  return tabs;
 }
 
 QWidget* PropertiesPanel::zipPage(int zip) {

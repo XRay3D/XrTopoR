@@ -657,7 +657,7 @@ void BoardView::mousePressEvent(QMouseEvent* e) {
       // A marker of a selected segment edits it; the segment itself moves in parallel.
       if (!add)
         if (auto mk = markerAt(e->position())) {
-          startDrag(mk->kind == Marker::End ? Drag::Vertex : mk->kind == Marker::Middle ? Drag::Bend : Drag::Centre, w, mk);
+          startDrag(mk->serp >= 0 ? Drag::Serpent : mk->kind == Marker::End ? Drag::Vertex : mk->kind == Marker::Middle ? Drag::Bend : Drag::Centre, w, mk);
           if (pk.item || pk.component >= 0) pendingClick_ = pk;  // a click there still selects
           cyclePending_ = again;  // (... the next thing, when it is one more click at the same place)
           if (!again) cycleTook(pk);
@@ -860,6 +860,17 @@ void BoardView::clickSelect(const Pick& pk, Qt::KeyboardModifiers mods) {
     }
     cycleSeed_ = pk.item->index;
     cycleLevel_ = 1;
+  } else if (pk.item && pk.item->type == ItemType::Track && doc_->board()->tracks[pk.item->index].serp >= 0) {
+    // A piece of a serpent: the serpent whole, an object of its own (X: the wire, then the net).
+    const int serp = doc_->board()->tracks[pk.item->index].serp;
+    const bool had = r::contains(items, *pk.item);
+    for (int i = 0; i < int(doc_->board()->tracks.size()); ++i) {
+      if (doc_->board()->tracks[size_t(i)].serp != serp) continue;
+      std::erase(items, ItemRef{ItemType::Track, i});
+      if (!had) items.push_back({ItemType::Track, i});
+    }
+    cycleSeed_ = pk.item->index;
+    cycleLevel_ = 0;
   } else if (pk.item && pk.item->type != ItemType::Pad) {
     toggle(items, *pk.item);
     cycleSeed_ = pk.item->type == ItemType::Track ? pk.item->index : -1;
@@ -1180,7 +1191,7 @@ void BoardView::mouseMoveEvent(QMouseEvent* e) {
         dragMoved_ = true;
         pendingClick_.reset();
       }
-      bool locked = drag_ == Drag::FreestyleWire ? false
+      bool locked = drag_ == Drag::FreestyleWire || drag_ == Drag::Serpent ? false  // (a serpent's trapezoid is its own handle)
                     : drag_ == Drag::Freestyle ? edit::hasLocked(b, fsTarget_.fragment)
                     : drag_ == Drag::Fragment || drag_ == Drag::Segment ? edit::hasLocked(b, dragFragment_)
                     : drag_ == Drag::AxisPiece                          ? b.zips[size_t(dragZip_)].fixed
@@ -1208,6 +1219,7 @@ void BoardView::mouseMoveEvent(QMouseEvent* e) {
         fsLast_ = dragStart_;
       }
     }
+    dragSymmetric_ = e->modifiers() & Qt::ShiftModifier;
     if (drag_ == Drag::Freestyle) freestyleBy(snapped(cursor_) - fsLast_, 0);
     else if (drag_ == Drag::FreestyleWire) freestyleWireBy();
     else applyDrag();
@@ -1545,12 +1557,17 @@ std::vector<BoardView::Marker> BoardView::markers() const {
     }
   };
   std::vector<int> zips;  // the sections of the selected conductors: their axes take the handles
+  std::vector<int> serps;  // the serpents of the selected pieces: their trapezoids take the handles
   for (ItemRef r : items) {
     if (r.type == ItemType::Track) {
       if (r.index >= int(b.tracks.size())) continue;
       const Track& t = b.tracks[r.index];
       if (t.zip >= 0) {
         if (!r::contains(zips, t.zip)) zips.push_back(t.zip);
+        continue;
+      }
+      if (t.serp >= 0) {
+        if (!r::contains(serps, t.serp)) serps.push_back(t.serp);
         continue;
       }
       out.push_back({r, 0, Marker::End, 0});
@@ -1571,11 +1588,26 @@ std::vector<BoardView::Marker> BoardView::markers() const {
     for (int k = 0; k < int(axis.size()); ++k)
       if (roomy(axis[k].a.v(), axis[k].b.v())) out.push_back({{ItemType::Track, -1}, 0, Marker::Middle, k, z});
   }
+  for (int sp : serps)
+    if (serps.size() <= 8 && serpentRun(b, sp))
+      for (int k = 0; k < 8; ++k) out.push_back({{ItemType::Track, -1}, 0, k < 4 ? Marker::End : Marker::Middle, k, -1, sp});
   return out;
 }
 
 Vec2 BoardView::markerPos(const Marker& m) const {
   const Board& b = *doc_->board();
+  if (m.serp >= 0) {
+    const auto run = serpentRun(b, m.serp);
+    if (!run || m.serp >= int(b.serpents.size())) return {};
+    const auto c = serpentCorners(run->a, run->b, b.serpents[size_t(m.serp)]);
+    switch (m.vertex) {
+      case 4: return (c[0] + c[3]) * 0.5;
+      case 5: return (c[1] + c[2]) * 0.5;
+      case 6: return run->a;
+      case 7: return run->b;
+      default: return c[size_t(std::clamp(m.vertex, 0, 3))];
+    }
+  }
   if (m.zip >= 0) {
     const auto& axis = b.zips[size_t(m.zip)].axis;
     const int n = int(axis.size());
@@ -1688,6 +1720,43 @@ void BoardView::applyDrag() {
   switch (drag_) {
     case Drag::None:
     case Drag::Freestyle: break;
+    case Drag::Serpent: {
+      // A marker of a serpent's trapezoid. The corners (0–3) set the height there; the middles of the bases (4, 5)
+      // move the base, both its heights by as much; the serpent's start and end (6, 7) slide along its line.
+      // Shift: the other side of the chord follows (the trapezoid stays symmetric).
+      const int serp = dragMarker_.serp;
+      const auto run = serpentRun(b, serp);
+      if (!run || serp >= int(b.serpents.size())) break;
+      Serpent sp = b.serpents[size_t(serp)];
+      const double C = (run->b - run->a).len();
+      if (C < 1) break;
+      const Vec2 dir = (run->b - run->a) / C, nA{dir.y, -dir.x};
+      const double least = serpentMinHeight(run->width);
+      const auto corner = serpentCorners(run->a, run->b, sp);
+      double* h[4] = {&sp.h1, &sp.h2, &sp.h3, &sp.h4};
+      const int part = dragMarker_.vertex;
+      const Vec2 cursor = cursor_;  // (the heights are not on the grid: the chord need not be)
+      if (part < 4) {
+        const bool sideA = part == 0 || part == 3;
+        const Vec2 end = part < 2 ? run->a : run->b;
+        *h[part] = std::max(least, (cursor - end).dot(nA) * (sideA ? 1.0 : -1.0));
+        if (dragSymmetric_) *h[part ^ 1] = *h[part];  // (0 ↔ 1 at the start, 2 ↔ 3 at the end)
+        setSerpent(b, serp, sp);
+      } else if (part < 6) {
+        const bool sideA = part == 4;
+        const Vec2 mid = sideA ? (corner[0] + corner[3]) * 0.5 : (corner[1] + corner[2]) * 0.5;
+        const double by = (cursor - mid).dot(nA) * (sideA ? 1.0 : -1.0);
+        for (int k : sideA ? std::array{0, 3} : std::array{1, 2}) *h[k] = std::max(least, *h[k] + by);
+        if (dragSymmetric_)
+          for (int k : sideA ? std::array{1, 2} : std::array{0, 3}) *h[k] = std::max(least, *h[k] + by);
+        setSerpent(b, serp, sp);
+      } else {
+        const Vec2 end = part == 6 ? run->a : run->b;
+        const Vec2 at = end + dir * (to - end).dot(dir);
+        setSerpent(b, serp, sp, part == 6 ? &at : nullptr, part == 7 ? &at : nullptr);  // (refused: as it was)
+      }
+      break;
+    }
     case Drag::Fragment: {
       // A via or a lone pad alone, not turned: it swallows the segments it closes up on its way.
       const edit::Fragment& f = dragFragment_;
@@ -2302,9 +2371,16 @@ void BoardView::finishDrag() {
     r.index = r.index < int(map.size()) ? map[r.index] : -1;
     return r.index < 0;
   });
+  if (kind == Drag::Serpent) {  // (laid anew: other tracks)
+    items.clear();
+    for (int i = 0; i < int(b.tracks.size()); ++i)
+      if (b.tracks[size_t(i)].serp == dragMarker_.serp) items.push_back({ItemType::Track, i});
+    doc_->invalidateModel();
+  }
   const int zip = kind == Drag::AxisPiece ? dragZip_ : dragMarker_.zip;
   if ((kind == Drag::AxisPiece || ((kind == Drag::Vertex || kind == Drag::Bend) && zip >= 0)) && zip < int(b.zips.size())) items = sectionTracks(zip);
-  QString title = kind == Drag::Freestyle ? tr("Перемещение Freestyle")
+  QString title = kind == Drag::Serpent ? tr("Изменить змейку")
+                  : kind == Drag::Freestyle ? tr("Перемещение Freestyle")
                   : kind == Drag::Fragment ? (dragFragment_.components.empty() ? tr("Переместить") : tr("Переместить компонент"))
                   : kind == Drag::Segment ? tr("Переместить сегмент")
                   : kind == Drag::AxisPiece || dragMarker_.zip >= 0 ? tr("Изменить форму дифф. пары")
@@ -2392,6 +2468,74 @@ std::vector<int> BoardView::selectedZips() const {
   for (ItemRef r : doc_->selectedItems())
     if (r.type == ItemType::Track && b.tracks[r.index].zip >= 0 && !r::contains(out, b.tracks[r.index].zip)) out.push_back(b.tracks[r.index].zip);
   return out;
+}
+
+std::vector<int> BoardView::selectedSerpents() const {
+  std::vector<int> out;
+  if (!doc_->hasBoard()) return out;
+  const Board& b = *doc_->board();
+  for (ItemRef r : doc_->selectedItems())
+    if (r.type == ItemType::Track && r.index < int(b.tracks.size()) && b.tracks[r.index].zip < 0 && b.tracks[r.index].serp >= 0 &&
+        !r::contains(out, b.tracks[r.index].serp))
+      out.push_back(b.tracks[r.index].serp);
+  return out;
+}
+
+bool BoardView::selectionIsSerpents() const {
+  if (!doc_->hasBoard()) return false;
+  const Board& b = *doc_->board();
+  const auto items = doc_->selectedItems();
+  return !items.empty() && doc_->selectedComponents().empty() && r::all_of(items, [&](ItemRef r) {
+    return r.type == ItemType::Track && r.index < int(b.tracks.size()) && b.tracks[r.index].zip < 0 && b.tracks[r.index].serp >= 0;
+  });
+}
+
+void BoardView::serpentSelection() {
+  if (!doc_->hasBoard()) return;
+  Board& b = *doc_->board();
+  std::vector<int> tracks;
+  for (ItemRef r : doc_->selectedItems())
+    if (r.type == ItemType::Track) tracks.push_back(r.index);
+  if (tracks.empty()) {
+    emit status(tr("Преобразовать в змейку: выделите прямой фрагмент проводника"));
+    return;
+  }
+  if (selectionIsSerpents()) {  // «Преобразовать в проводник»
+    std::vector<int> serps = selectedSerpents();
+    r::sort(serps, std::greater{});  // (taken away from the last: the others keep their numbers)
+    auto before = doc_->beginEdit();
+    for (int sp : serps) unmakeSerpent(b, sp);
+    doc_->invalidateModel();
+    doc_->commitEdit(before, tr("Преобразовать в проводник"), false);
+    emit status(tr("Змейка преобразована в проводник"));
+    return;
+  }
+  auto before = doc_->beginEdit();
+  std::string why;
+  const int serp = makeSerpent(b, tracks, &why);
+  if (serp < 0) {  // (nothing changed: makeSerpent checks everything first)
+    static const std::map<std::string, const char*> said{
+        {"an arc", QT_TR_NOOP("в выделении есть дуга")},
+        {"a conductor of a zipped pair", QT_TR_NOOP("проводник застёгнутой дифф. пары")},
+        {"a serpent already", QT_TR_NOOP("в выделении есть участок змейки")},
+        {"fixed", QT_TR_NOOP("проводник зафиксирован")},
+        {"not one wire", QT_TR_NOOP("выделены участки разных проводников")},
+        {"not one after another", QT_TR_NOOP("участки не идут подряд")},
+        {"not a straight fragment", QT_TR_NOOP("фрагмент не прямой")},
+        {"too short", QT_TR_NOOP("фрагмент слишком короткий")},
+        {"too short for a bend", QT_TR_NOOP("фрагмент короче двух шагов змейки")},
+    };
+    const auto it = said.find(why);
+    emit status(tr("Преобразовать в змейку нельзя: %1").arg(it != said.end() ? tr(it->second) : QString::fromStdString(why)));
+    return;
+  }
+  doc_->invalidateModel();
+  doc_->commitEdit(before, tr("Преобразовать в змейку"), false);
+  std::vector<ItemRef> sel;
+  for (int i = 0; i < int(b.tracks.size()); ++i)
+    if (b.tracks[size_t(i)].serp == serp) sel.push_back({ItemType::Track, i});
+  doc_->setSelection(sel, {});
+  emit status(tr("Змейка создана: задайте требуемую длину на вкладке «Задержка» или меняйте трапецию маркерами"));
 }
 
 // «Застегнуть проводники»: the selected tracks of the two nets of a pair, a chain each on one layer.
@@ -3217,7 +3361,7 @@ void BoardView::toggleFix() {
   for (int ci : comps) allFixed = allFixed && b.components[ci].locked;
   auto before = doc_->beginEdit();
   for (ItemRef r : items) {
-    if (r.type == ItemType::Track) b.tracks[r.index].locked = !allFixed;
+    if (r.type == ItemType::Track) b.tracks[r.index].locked = !allFixed || b.tracks[r.index].serp >= 0;  // (a serpent's pieces stay fixed)
     if (r.type == ItemType::Via) b.vias[r.index].locked = !allFixed;
   }
   for (int ci : comps) b.components[ci].locked = !allFixed;

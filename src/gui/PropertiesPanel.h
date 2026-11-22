@@ -26,6 +26,7 @@ class PropertiesPanel : public QWidget {
   QWidget* padPage(int pad);
   QWidget* wirePage(const std::vector<int>& tracks);
   QWidget* zipPage(int zip);
+  QWidget* serpentPage(int serp);
   QWidget* viaPage(const std::vector<int>& vias);
   // «Область металлизации»: several areas are edited together; those poured are poured again.
   QWidget* zonePage(const std::vector<int>& zones);

@@ -1002,13 +1002,13 @@ void Tools::addEditTools() {
                   auto before = doc->beginEdit();
                   int count = 0;
                   for (auto v : a.value("tracks").toArray())
-                    if (int i = trackById(b, uint32_t(v.toInt())); i >= 0) b.tracks[size_t(i)].locked = on, ++count;
+                    if (int i = trackById(b, uint32_t(v.toInt())); i >= 0) b.tracks[size_t(i)].locked = on || b.tracks[size_t(i)].serp >= 0, ++count;
                   for (auto v : a.value("vias").toArray())
                     if (int i = viaById(b, uint32_t(v.toInt())); i >= 0) b.vias[size_t(i)].locked = on, ++count;
                   for (auto v : a.value("components").toArray())
                     if (int i = b.findComponent(v.toString().toStdString()); i >= 0) b.components[size_t(i)].locked = on, ++count;
                   for (Track& t : b.tracks)
-                    if (nets.contains(t.net)) t.locked = on, ++count;
+                    if (nets.contains(t.net)) t.locked = on || t.serp >= 0, ++count;  // (a serpent's pieces stay fixed)
                   for (Via& v : b.vias)
                     if (nets.contains(v.net)) v.locked = on, ++count;
                   doc->commitEdit(before, on ? tr("Фиксировать") : tr("Расфиксировать"), false);

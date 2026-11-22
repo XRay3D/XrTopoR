@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "core/Edit.h"
+#include "core/Serpents.h"
 #include "core/Swap.h"
 #include "gui/Document.h"
 #include "gui/gl/Renderer.h"
@@ -139,6 +140,12 @@ class BoardView : public QOpenGLWidget {
   // The differential pairs' zipped sections: zip the selected tracks of a pair, unzip the selected sections,
   // swap their nets.
   void zipSelection();
+  // «Преобразовать в змейку»: the selected straight fragment of a wire becomes a serpent; when the selection is of
+  // serpents — «Преобразовать в проводник»: they become plain pieces.
+  void serpentSelection();
+  // The serpents the selected tracks are pieces of (single wires').
+  std::vector<int> selectedSerpents() const;
+  bool selectionIsSerpents() const;  // every selected track is a piece of a serpent (and something is selected)
   void unzipSelection();
   void swapZipNets();
   std::vector<int> selectedZips() const;
@@ -175,6 +182,9 @@ class BoardView : public QOpenGLWidget {
     enum Kind { End, Middle, Centre } kind = End;  // Centre: an arc's (dragged along the chord's bisector)
     int vertex = 0;  // End: a track's end (0 = a, 1 = b) or a figure's vertex; Middle: a figure's side
     int zip = -1;    // the axis of a zipped section (item unused): End its vertex k, Middle the middle of piece k
+    // A serpent's trapezoid (item unused), `vertex`: 0–3 its corners in the order of the heights h1–h4; 4, 5 the
+    // middles of the bases of side A and side B; 6, 7 the serpent's start and end (the middles of the lateral sides).
+    int serp = -1;
   };
   std::optional<Marker> markerAt(QPointF screen) const;  // markers of the selected objects
   std::vector<Marker> markers() const;
@@ -185,7 +195,7 @@ class BoardView : public QOpenGLWidget {
   edit::Fragment selectedFragment() const;
   // Moves the selection by an edit::Motion built around its pivot (rotations and flips).
   void transformSelection(double rotate, bool mirror, const QString& title);
-  enum class Drag { None, Fragment, Segment, Vertex, Bend, Freestyle, FreestyleWire, AxisPiece, Centre };
+  enum class Drag { None, Fragment, Segment, Vertex, Bend, Freestyle, FreestyleWire, AxisPiece, Centre, Serpent };
   void freestyleBy(Vec2 shift, double rotate);  // one Freestyle move of fsTarget_
   topo::FreestyleTarget freestyleTarget() const;  // the selected components and vias
   void startDrag(Drag kind, Vec2 at, std::optional<Marker> marker = {});
@@ -303,6 +313,7 @@ class BoardView : public QOpenGLWidget {
   double dragRotate_ = 0;
   bool dragMirror_ = false;
   Marker dragMarker_;
+  bool dragSymmetric_ = false;  // Shift held: a serpent's trapezoid changed on both sides of the chord
   int dragZip_ = -1, dragPiece_ = -1;  // Drag::AxisPiece: the section and the piece of its axis
   // The tracks of a zipped section (its conductors); the selection made them after its axis was edited.
   std::vector<ItemRef> sectionTracks(int zip) const;

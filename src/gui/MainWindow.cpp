@@ -258,6 +258,16 @@ void MainWindow::bindCommands() {
   c.bind("Accel_Width", [this] { view_->changeTrackWidth(); });
   c.bind("Accel_ZipWire", [this] { view_->zipSelection(); });
   c.bind("Accel_UnZipWire", [this] { view_->unzipSelection(); });
+  c.bind("Accel_Serpent", [this] { view_->serpentSelection(); });
+  // On a serpent the command is «Преобразовать в проводник» (TopoR's two entries of the context menu).
+  auto nameSerpent = [this] {
+    const bool serpent = view_->selectionIsSerpents();
+    QAction* a = (*cmds_)["Accel_Serpent"];
+    a->setText(serpent ? tr("П&реобразовать в проводник") : tr("П&реобразовать в змейку"));
+    a->setToolTip(serpent ? tr("Преобразовать в проводник") : tr("Преобразовать в змейку"));
+  };
+  connect(doc_, &Document::selectionChanged, this, nameSerpent);
+  connect(doc_, &Document::boardChanged, this, nameSerpent);  // (the same tracks, a serpent no more)
   c.bind("Accel_SwapZipNets", [this] { view_->swapZipNets(); });
   c.bind("Accel_Pour", [this] { pourSelected(0); });
   c.bind("Accel_UnPourWithRestore", [this] { pourSelected(1); });
@@ -1264,7 +1274,7 @@ void MainWindow::showContextMenu(QPoint globalPos) {
   if (tracks || vias || pads || zones) m.addAction(tr("Выделить всю цепь"), view_, &BoardView::selectNet);
   if (tracks || vias || !comps.empty()) m.addAction(c["Accel_Fix"]);
   if (tracks || vias) m.addAction(c["Cmd_FlexFix"]);
-  if (tracks) c.fill(&m, {"Accel_Width", "Accel_Layer", "Accel_Reduce"});
+  if (tracks) c.fill(&m, {"Accel_Width", "Accel_Layer", "Accel_Reduce", "Accel_Serpent"});
   if (tracks || vias || pads || zones) m.addAction(c["Accel_ChangeNet"]);
   if (!comps.empty() || tracks || vias || zones) {
     c.fill(m.addMenu(tr("Повернуть")), {"Accel_RotateLeft", "Accel_RotateRight", "Cmd_RotateAngle"});
