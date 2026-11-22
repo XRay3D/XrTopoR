@@ -140,7 +140,8 @@ SinglePinNets removeSinglePinNets(Board& b);
 // A net named anew. Empty: done; else why not (the name is taken; the net's rules name it — width, clearance, pair
 // or layers would be other with the new name).
 std::string renameNet(Board& b, int net, const std::string& name);
-// «Удалить избыточные переходы»: unlocked vias connecting nothing or one layer only. Returns the count.
+// «Удалить избыточные переходы»: unlocked vias connecting nothing or one layer only. Returns the count. A fanout
+// (core/Fanouts.h) of a net that is not routed yet stays: its wire is to come.
 int removeExcessVias(Board& b);
 // The copper layers a via is needed on by what is not a track: a pad of its net it stands on, a copper area or
 // a plane of its net.

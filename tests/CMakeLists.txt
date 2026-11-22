@@ -11,6 +11,7 @@ add_executable(xrtests
   test_swap.cpp
   test_eco.cpp
   test_serpents.cpp
+  test_fanouts.cpp
   test_drc.cpp
   test_signals.cpp
   test_edit.cpp

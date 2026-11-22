@@ -49,6 +49,7 @@
 #include "core/Connectivity.h"
 #include "core/DiffPairs.h"
 #include "core/Edit.h"
+#include "core/Fanouts.h"
 #include "core/Swap.h"
 #include "core/Serpents.h"
 #include "core/Signals.h"
@@ -1275,6 +1276,76 @@ TEST(Gui, SerpentsCommandReports) {
   doc.undoStack()->undo();
   EXPECT_EQ(b.serpents.size(), 1u);
   EXPECT_FALSE(checkDelays(b).empty());
+}
+
+// «Расставить фанауты» of the main window: on a board without planar BGAs there is nothing to do; on TopoR's own
+// design with the routing taken off the BGAs get their fanouts in one step of undo, the pours are poured round the
+// new vias, the outcome is in the messages.
+TEST(Gui, FanoutCommandReports) {
+  app();
+  MainWindow w;
+  auto hinted = [&](const QString& part) {
+    for (QLabel* l : w.findChildren<QLabel*>())
+      if (l->text().contains(part)) return true;
+    return false;
+  };
+  QAction* fan = (*w.commands())["Cmd_Fanout"];
+  EXPECT_FALSE(fan->isEnabled()) << "no board";
+  QTemporaryDir dir;
+  ASSERT_TRUE(QFile::copy(QString::fromStdString(data("astable.kicad_pcb")), dir.filePath("astable.kicad_pcb")));
+  ASSERT_TRUE(w.openFile(dir.filePath("astable.kicad_pcb")));
+  ASSERT_TRUE(fan->isEnabled());
+  fan->trigger();
+  EXPECT_TRUE(hinted("Контактов, которым нужны фанауты, не обнаружено"));
+  EXPECT_FALSE(w.document()->undoStack()->canUndo());
+  ASSERT_TRUE(QFile::copy(QString::fromStdString(data("topor/Example_06/Signals.fst")), dir.filePath("Signals.fst")));
+  ASSERT_TRUE(w.openFile(dir.filePath("Signals.fst")));
+  Document& doc = *w.document();
+  Board& b = *doc.board();
+  {
+    auto before = doc.beginEdit();
+    b.tracks.clear();
+    b.vias.clear();
+    b.zips.clear();
+    b.serpents.clear();
+    doc.commitEdit(before, "strip", false);
+    doc.invalidateModel();
+  }
+  const int steps = doc.undoStack()->index();
+  fan->trigger();
+  EXPECT_TRUE(hinted("Расставлено фанаутов: ")) << "the outcome is told";
+  EXPECT_TRUE(hinted("компонентов BGA: 2"));
+  EXPECT_GT(b.vias.size(), 150u);
+  EXPECT_GE(b.tracks.size(), b.vias.size()) << "a track to every via (and one between pads that share a via)";
+  EXPECT_LE(b.tracks.size(), b.vias.size() + 5);
+  EXPECT_EQ(doc.undoStack()->index(), steps + 1);
+  ASSERT_FALSE(doc.log().empty());
+  EXPECT_TRUE(doc.log().back().text.startsWith("Расставлено фанаутов: "));
+  doc.setDrc(runDrc(b, {}));
+  EXPECT_EQ(r::count_if(doc.drc(), [](const DrcViolation& x) { return x.type == DrcViolation::Type::Clearance || x.type == DrcViolation::Type::Short; }), 0);
+  doc.undoStack()->undo();
+  EXPECT_TRUE(b.vias.empty());
+  EXPECT_TRUE(b.tracks.empty());
+  // Pictures of the middle of U1: TopoR's routed board, and ours with the fanouts alone.
+  if (const char* shots = std::getenv("XR_SHOT_DIR")) {
+    for (bool ours : {false, true}) {
+      Fixture f("topor/Example_06/Signals.fst");
+      Board& fb = *f.doc.board();
+      if (ours) {
+        fb.tracks.clear();
+        fb.vias.clear();
+        fb.zips.clear();
+        fb.serpents.clear();
+        placeFanouts(fb);
+        f.doc.invalidate();
+      }
+      for (Zone& z : fb.zones) z.filled.clear();  // (the pours hide the layers under them)
+      f.view.show();
+      f.look(fb.components[size_t(fb.findComponent("U1"))].pos.v(), 18);
+      f.view.refresh();
+      if (const QImage img = f.view.picture(); f.view.drawable()) img.save(QString(shots) + (ours ? "/fanouts-ours.png" : "/fanouts-topor.png"));
+    }
+  }
 }
 
 TEST(Gui, ZippedPairSelectionAndProperties) {

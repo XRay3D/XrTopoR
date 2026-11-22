@@ -31,6 +31,7 @@
 
 #include "core/DiffPairs.h"
 #include "core/Edit.h"
+#include "core/Fanouts.h"
 #include "core/Serpents.h"
 #include "topo/Sidecar.h"
 #include "core/ZoneFill.h"
@@ -396,6 +397,47 @@ void MainWindow::bindCommands() {
   // Инструменты
   c.bind("Accel_DRC", [this] { runDrc(); });
   c.bind("Cmd_WiresToCopper", [this] { WiresToCopperDialog::run(doc_, this); });
+  // «Расставить фанауты»: vias beside the planar pads of BGAs and of the plane layers' nets (core/Fanouts.h); the
+  // poured copper areas give way to them.
+  c.bind("Cmd_Fanout", [this] {
+    Board& b = *doc_->board();
+    const QString group = tr("Расстановка фанаутов");
+    doc_->clearLog(group);
+    auto before = doc_->beginEdit();
+    const FanoutResult r = placeFanouts(b);
+    auto told = [&] {
+      for (int pi : r.blocked) {
+        const Pad& p = b.pads[size_t(pi)];
+        const QString name = (p.component >= 0 ? QString::fromStdString(b.components[size_t(p.component)].ref) + "-" : QString()) + QString::fromStdString(p.number);
+        doc_->addLog({LogMessage::Kind::Warning, group,
+                      tr("Контакт %1 (цепь '%2', %3; %4 мм): для перехода нет места")
+                          .arg(name, p.net >= 0 ? QString::fromStdString(b.nets[size_t(p.net)].name) : QString())
+                          .arg(double(p.pos.x) / kNmPerMm, 0, 'f', 3)
+                          .arg(-double(p.pos.y) / kNmPerMm, 0, 'f', 3)});
+      }
+    };
+    if (!r.vias && !r.pads) {
+      told();
+      showHint(r.blocked.empty() ? tr("Контактов, которым нужны фанауты, не обнаружено")
+                                 : tr("Фанауты не расставлены: нет места. Контактов без перехода: %1").arg(r.blocked.size()));
+      return;
+    }
+    ZoneFillOptions pour;
+    for (int z = 0; z < int(b.zones.size()); ++z)
+      if (!b.zones[size_t(z)].filled.empty() && !b.zones[size_t(z)].alwaysCopper()) pour.only.push_back(z);
+    if (!pour.only.empty()) fillZones(b, pour);
+    doc_->clearSelection();
+    doc_->invalidateModel();
+    doc_->commitEdit(before, tr("Расставить фанауты"), false);
+    const QString said = tr("Расставлено фанаутов: %1, подключено контактов: %2, компонентов BGA: %3. Контактов без перехода: %4")
+                             .arg(r.vias)
+                             .arg(r.pads)
+                             .arg(r.components)
+                             .arg(r.blocked.size());
+    doc_->addLog({r.blocked.empty() ? LogMessage::Kind::Info : LogMessage::Kind::Warning, group, said});
+    told();
+    showHint(said);
+  });
   c.bind("Cmd_Eco", [this] { EcoDialog::run(doc_, this); });
   c.bind("Cmd_Teardrops", [this] {
     auto before = doc_->beginEdit();

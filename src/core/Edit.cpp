@@ -1,4 +1,6 @@
 #include "core/Edit.h"
+#include "core/Connectivity.h"
+#include "core/Fanouts.h"
 
 #include "core/Rules.h"
 
@@ -948,11 +950,24 @@ LayerMask viaTrackLayers(const Board& b, const Via& v) {
 
 int removeExcessVias(Board& b) {
   int n = 0;
+  // The nets with unrouted connections, found when first asked for.
+  std::optional<std::vector<char>> open;
+  auto unrouted = [&](int net) {
+    if (!open) {
+      open.emplace(b.nets.size(), 0);
+      for (const RatsLine& r : Connectivity::compute(b).ratsnest)
+        if (r.net >= 0 && r.net < int(open->size())) (*open)[size_t(r.net)] = 1;
+    }
+    return net >= 0 && net < int(open->size()) && (*open)[size_t(net)];
+  };
   for (int vi = int(b.vias.size()) - 1; vi >= 0; --vi) {
     const Via& v = b.vias[vi];
     if (v.locked || b.flexFixed(v.net)) continue;  // a flexibly fixed net keeps its vias
     const LayerMask used = viaTrackLayers(b, v) | viaHeldBy(b, v);
     if (std::popcount(used) > 1) continue;
+    // A fanout — a via beside a planar pad, with the pad's track alone — waits for its wire while its net is
+    // not routed.
+    if (used && fanoutPadOf(b, vi) >= 0 && unrouted(v.net)) continue;
     b.vias.erase(b.vias.begin() + vi);
     ++n;
   }
