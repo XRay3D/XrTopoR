@@ -29,6 +29,7 @@ struct Graph {
   struct Edge {
     int to;
     double length, ps;
+    int track;  // the track the edge is; -1: a joint at no length
   };
   std::vector<std::vector<Edge>> adj;
   std::map<int, int> padNode;  // pad → node
@@ -36,9 +37,9 @@ struct Graph {
     adj.emplace_back();
     return int(adj.size()) - 1;
   }
-  void join(int a, int b, double length, double ps) {
-    adj[size_t(a)].push_back({b, length, ps});
-    adj[size_t(b)].push_back({a, length, ps});
+  void join(int a, int b, double length, double ps, int track = -1) {
+    adj[size_t(a)].push_back({b, length, ps, track});
+    adj[size_t(b)].push_back({a, length, ps, track});
   }
 };
 
@@ -77,7 +78,7 @@ Graph graphOf(const Board& b, const std::set<int>& nets, const std::vector<std::
       // A conductor of a zipped pair: with what the pair's serpents add.
       if (auto it = zipScale.find({t.zip, t.net}); t.zip >= 0 && it != zipScale.end()) len *= it->second;
       const int a = endOf(t.a, t.layer), c = endOf(t.b, t.layer);
-      g.join(a, c, len, len / kNmPerMm * delayPsPerMm(b, t.layer));
+      g.join(a, c, len, len / kNmPerMm * delayPsPerMm(b, t.layer), ti);
     }
   // A pad or a via takes the wires that end on it, at no length: those that end at its centre; with none there,
   // the loose ends within it (a wire's bends inside the copper are of the wire — no way is cut short through it);
@@ -170,21 +171,34 @@ std::vector<SignalDelay> signalDelays(const Board& b) {
     const int from = source >= 0 && g.padNode.contains(source) ? g.padNode[source] : -1;
     // The shortest ways from the source, by the delay; a signal's passive components join their pins on the
     // cluster's nets at no length, so the ways are found per signal when it names any.
-    auto ways = [&](const Graph& gr) {
-      std::vector<std::pair<double, double>> best(gr.adj.size(), {-1.0, 0.0});  // (ps, length); -1: not reached
-      if (from < 0) return best;
-      using Item = std::tuple<double, double, int>;
-      std::priority_queue<Item, std::vector<Item>, std::greater<>> open;
-      open.emplace(0.0, 0.0, from);
-      while (!open.empty()) {
-        auto [ps, len, n] = open.top();
-        open.pop();
-        if (best[size_t(n)].first >= 0) continue;
-        best[size_t(n)] = {ps, len};
-        for (const Graph::Edge& e : gr.adj[size_t(n)])
-          if (best[size_t(e.to)].first < 0) open.emplace(ps + e.ps, len + e.length, e.to);
+    struct Ways {
+      std::vector<std::pair<double, double>> best;  // (ps, length); -1: not reached
+      std::vector<std::pair<int, int>> came;        // the node it was reached from and the track taken (-1: none)
+      // The tracks of the way to a node, from the source.
+      std::vector<int> tracksTo(int n) const {
+        std::vector<int> out;
+        for (; n >= 0 && came[size_t(n)].first >= 0; n = came[size_t(n)].first)
+          if (came[size_t(n)].second >= 0) out.push_back(came[size_t(n)].second);
+        r::reverse(out);
+        return out;
       }
-      return best;
+    };
+    auto ways = [&](const Graph& gr) {
+      Ways w{std::vector<std::pair<double, double>>(gr.adj.size(), {-1.0, 0.0}), std::vector<std::pair<int, int>>(gr.adj.size(), {-1, -1})};
+      if (from < 0) return w;
+      using Item = std::tuple<double, double, int, int, int>;  // ps, length, node, from, track
+      std::priority_queue<Item, std::vector<Item>, std::greater<>> open;
+      open.emplace(0.0, 0.0, from, -1, -1);
+      while (!open.empty()) {
+        auto [ps, len, n, prev, track] = open.top();
+        open.pop();
+        if (w.best[size_t(n)].first >= 0) continue;
+        w.best[size_t(n)] = {ps, len};
+        w.came[size_t(n)] = {prev, track};
+        for (const Graph::Edge& e : gr.adj[size_t(n)])
+          if (w.best[size_t(e.to)].first < 0) open.emplace(ps + e.ps, len + e.length, e.to, n, e.track);
+      }
+      return w;
     };
     const auto plain = ways(g);
     for (const Signal& s : c.signalList) {
@@ -201,8 +215,10 @@ std::vector<SignalDelay> signalDelays(const Board& b) {
           if (int ci = b.findComponent(ref); ci >= 0) passive.push_back(ci);
       std::pair<double, double> way{-1.0, 0.0};
       if (to >= 0) {
-        if (passive.empty()) way = plain[size_t(to)];
-        else {
+        if (passive.empty()) {
+          way = plain.best[size_t(to)];
+          d.tracks = plain.tracksTo(to);
+        } else {
           Graph through = g;
           for (int ci : passive) {
             int one = -1;
@@ -212,7 +228,9 @@ std::vector<SignalDelay> signalDelays(const Board& b) {
                 one = it->second;
               }
           }
-          way = ways(through)[size_t(to)];
+          const Ways via = ways(through);
+          way = via.best[size_t(to)];
+          d.tracks = via.tracksTo(to);
         }
       }
       d.routed = way.first >= 0;
@@ -335,6 +353,7 @@ std::vector<DelayViolation> checkDelays(const Board& b, const std::vector<Signal
         const bool leftShorter = wl->v <= wr->v;
         const Value &s = leftShorter ? *wl : *wr, &l = leftShorter ? *wr : *wl;
         v.shorter = s.name, v.netShorter = s.net, v.longer = l.name, v.netLonger = l.net;
+        v.left = wl->name, v.right = wr->name;
         v.value = wl->v - wr->v;
         v.low = rule.constant - rule.toleranceUnder, v.high = rule.constant + rule.toleranceOver;
         v.at = s.at;

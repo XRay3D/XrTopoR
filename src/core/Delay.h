@@ -31,6 +31,7 @@ struct SignalDelay {
   double ps = 0;
   int net = kNoNet;     // the first net of the signal's cluster
   Vec2 at;              // the receiver pad
+  std::vector<int> tracks;  // the tracks of the way, from the source
 };
 // Of every signal of the design, in the clusters' order.
 std::vector<SignalDelay> signalDelays(const Board& b);
@@ -39,6 +40,7 @@ struct DelayViolation {
   enum class Kind { Equal, Constant, Relation, Mismatch } kind = Kind::Equal;
   int rule = -1;               // into HiSpeed::delays; Mismatch: into HiSpeed::diffSignals
   std::string shorter, longer;  // the signals with the largest disagreement, the shorter first; Constant: one
+  std::string left, right;      // Relation: the two as the rule has them (value = left − right)
   std::string netShorter, netLonger;
   bool time = true;            // the values are ps; else nm
   double value = 0;            // the difference found (Constant: the delay itself)

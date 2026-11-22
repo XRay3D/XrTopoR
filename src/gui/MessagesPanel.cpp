@@ -75,30 +75,94 @@ QString describeViolation(const Board& b, Unit u, const DrcViolation& v) {
   return QString::fromStdString(v.message);
 }
 
-QString describeDelayViolation(const Board& b, Unit u, const DelayViolation& v) {
-  auto val = [&](double x) { return v.time ? QObject::tr("%1 пс").arg(x, 0, 'f', 2) : QString("%1 %2").arg(formatLength(x, u, 3), unitName(u)); };
-  // The rule's number among those of its kind: as its page of the design parameters numbers it.
-  int number = 0;
-  if (v.kind != DelayViolation::Kind::Mismatch)
-    for (int i = 0; i < v.rule && i < int(b.hispeed.delays.size()); ++i) number += b.hispeed.delays[size_t(i)].kind == b.hispeed.delays[size_t(v.rule)].kind;
-  auto net = [](const std::string& signal, const std::string& name) {
-    return signal == name || name.empty() ? QString("'%1'").arg(QString::fromStdString(signal))
-                                          : QObject::tr("'%1' (сигнал %2)").arg(QString::fromStdString(name), QString::fromStdString(signal));
-  };
-  const QString s = net(v.shorter, v.netShorter), l = net(v.longer, v.netLonger);
+namespace {
+
+// By how much a delay rule is not kept, as TopoR tells it: «0.08 пс (0.012 мм)» — the time and the length that
+// makes it (on an inner layer: the rule does not say where the wire is to be made longer); a rule in units of
+// length the other way round.
+QString delayExcess(const DelayViolation& v, Unit u) {
+  double over = 0;
   switch (v.kind) {
     case DelayViolation::Kind::Equal:
-      return QObject::tr("Выравнивание в группе, правило %1: цепи %2 – %3, расхождение %4 при допуске %5").arg(number).arg(s, l, val(v.value), val(v.high));
+    case DelayViolation::Kind::Mismatch: over = v.value - v.high; break;
+    default: over = std::max(v.value - v.high, v.low - v.value); break;
+  }
+  over = std::max(over, 0.0);
+  const double ps = v.time ? over : over / kNmPerMm * kDelayInnerPsPerMm, nm = v.time ? over / kDelayInnerPsPerMm * kNmPerMm : over;
+  const QString time = QObject::tr("%1 пс").arg(ps, 0, 'f', 2), length = QString("%1 %2").arg(formatLength(nm, u, 3), unitName(u));
+  return v.time ? QString("%1 (%2)").arg(time, length) : QString("%1 (%2)").arg(length, time);
+}
+
+// The rule's name as TopoR names it: «Выравнивание_Группы_#N» for a group's, «Взаимное_Выравнивание_#N» for the
+// others, numbered from one in the order of their pages.
+QString delayRuleName(const Board& b, const DelayViolation& v) {
+  const auto& rules = b.hispeed.delays;
+  if (v.rule < 0 || v.rule >= int(rules.size())) return {};
+  const bool group = rules[size_t(v.rule)].kind == DelayRule::Kind::Equal;
+  int number = 1;
+  for (int i = 0; i < v.rule; ++i) number += (rules[size_t(i)].kind == DelayRule::Kind::Equal) == group;
+  return (group ? QObject::tr("Выравнивание_Группы_#%1") : QObject::tr("Взаимное_Выравнивание_#%1")).arg(number);
+}
+
+}  // namespace
+
+// As TopoR's: «Предупреждение 2003: Правило 'Взаимное_Выравнивание_#1' не выполняется для сигналов 'A8' и
+// 'SDCLK_U2' на 0.08 пс (0.012 мм)».
+QString describeDelayViolation(const Board& b, Unit u, const DelayViolation& v) {
+  auto q = [](const std::string& s) { return QString::fromStdString(s); };
+  const QString by = delayExcess(v, u);
+  switch (v.kind) {
+    case DelayViolation::Kind::Equal:
+      return QObject::tr("Предупреждение 2003: Правило '%1' не выполняется для сигналов '%2' и '%3' на %4").arg(delayRuleName(b, v), q(v.shorter), q(v.longer), by);
     case DelayViolation::Kind::Relation:
-      return QObject::tr("Взаимное выравнивание, правило %1: цепи %2 – %3, разность задержек %4 вне %5 … %6")
-          .arg(number)
-          .arg(s, l, val(v.value), val(v.low), val(v.high));
+      return QObject::tr("Предупреждение 2003: Правило '%1' не выполняется для сигналов '%2' и '%3' на %4").arg(delayRuleName(b, v), q(v.left), q(v.right), by);
     case DelayViolation::Kind::Constant:
-      return QObject::tr("Абсолютное значение, правило %1: цепь %2, задержка %3 вне %4 … %5").arg(number).arg(s, val(v.value), val(v.low), val(v.high));
+      return QObject::tr("Предупреждение 2003: Правило '%1' не выполняется для сигнала '%2' на %3").arg(delayRuleName(b, v), q(v.shorter), by);
     case DelayViolation::Kind::Mismatch:
-      return QObject::tr("Дифференциальный сигнал '%1': цепи %2 – %3, разность длин %4 при допуске %5")
-          .arg(v.rule >= 0 && v.rule < int(b.hispeed.diffSignals.size()) ? QString::fromStdString(b.hispeed.diffSignals[size_t(v.rule)].name) : QString())
-          .arg(s, l, val(v.value), val(v.high));
+      return QObject::tr("Предупреждение 2003: Допустимый разброс длин дифф. сигнала '%1' не выполняется для сигналов '%2' и '%3' на %4")
+          .arg(v.rule >= 0 && v.rule < int(b.hispeed.diffSignals.size()) ? q(b.hispeed.diffSignals[size_t(v.rule)].name) : QString(), q(v.shorter), q(v.longer), by);
+  }
+  return {};
+}
+
+// TopoR's advice under the message: which signal to make longer, which shorter, by how much.
+QStringList delayAdvice(const Board&, Unit u, const DelayViolation& v) {
+  auto q = [](const std::string& s) { return QString::fromStdString(s); };
+  const QString by = delayExcess(v, u);
+  auto more = [&](const std::string& s) { return QObject::tr("Совет: Увеличить задержку на сигнале '%1' на %2.").arg(q(s), by); };
+  auto less = [&](const std::string& s) { return QObject::tr("Совет: Уменьшить задержку на сигнале '%1' на %2.").arg(q(s), by); };
+  switch (v.kind) {
+    case DelayViolation::Kind::Equal:
+    case DelayViolation::Kind::Mismatch: return {more(v.shorter), less(v.longer)};
+    case DelayViolation::Kind::Relation:  // (left − right is to be within the span)
+      return v.value < v.low ? QStringList{more(v.left), less(v.right)} : QStringList{more(v.right), less(v.left)};
+    case DelayViolation::Kind::Constant: return {v.value < v.low ? more(v.shorter) : less(v.shorter)};
+  }
+  return {};
+}
+
+QString describeSerpentConflict(const Board& b, const SerpentConflict& c) {
+  auto net = [&](int n) { return n >= 0 && n < int(b.nets.size()) ? QString::fromStdString(b.nets[size_t(n)].name) : QString(); };
+  const QString layer = c.layer >= 0 && c.layer < LayerId(b.layers.size()) ? QString::fromStdString(b.layers[size_t(c.layer)].name) : QString();
+  const QString mine = net(c.net), other = net(c.otherNet);
+  switch (c.code) {
+    case 5042: return QObject::tr("Ошибка 5042! На слое '%1' проводник цепи '%2' пересекается со змейкой цепи '%3'.").arg(layer, other, mine);
+    case 5043: {
+      QString pin;
+      if (c.other.type == ItemType::Pad && c.other.index >= 0 && c.other.index < int(b.pads.size())) {
+        const Pad& p = b.pads[size_t(c.other.index)];
+        pin = (p.component >= 0 ? QString::fromStdString(b.components[size_t(p.component)].ref) + "-" : QString()) + QString::fromStdString(p.number);
+      }
+      return QObject::tr("Ошибка 5043! На слое '%1' контакт %2 (цепь '%3') пересекается со змейкой цепи '%4'.").arg(layer, pin, other, mine);
+    }
+    case 5045: return QObject::tr("Ошибка 5045! На слое '%1' переход цепи '%2' пересекается со змейкой цепи '%3'.").arg(layer, other, mine);
+    case 5049: return QObject::tr("Ошибка 5049! На слое '%1' зафиксированный проводник цепи '%2' пересекается со змейкой цепи '%3'.").arg(layer, other, mine);
+    case 5050: return QObject::tr("Ошибка 5050! На слое '%1' змейка цепи '%2' пересекает запрет трассировки.").arg(layer, mine);
+    case 5051:
+      return c.otherNet >= 0 ? QObject::tr("Ошибка 5051! На слое '%1' змейка цепи '%2' пересекает область металлизации цепи '%3'.").arg(layer, mine, other)
+                             : QObject::tr("Ошибка 5051! На слое '%1' змейка цепи '%2' пересекает неподключённую область металлизации.").arg(layer, mine);
+    case 5052: return QObject::tr("Ошибка 5052! На слое '%1' змейка цепи '%2' пересекает контур платы.").arg(layer, mine);
+    case 5053: return QObject::tr("Ошибка 5053! На слое '%1' пересекаются змейки цепей '%2' и '%3'.").arg(layer, mine, other);
   }
   return {};
 }
@@ -212,12 +276,27 @@ void MessagesPanel::rebuild() {
       for (int i = 0; i < int(drc.size()); ++i)
         if (drc[size_t(i)].type == type && shown(drc[size_t(i)])) child(g, describeViolation(b, doc_->unit(), drc[size_t(i)]), kDrc, drc[size_t(i)].pos)->setData(0, DrcIndex, i);
     }
-    // The delay rules the board does not keep: the nets furthest apart, the shorter first.
-    if (const auto& delays = doc_->delayViolations(); !delays.empty()) {
-      auto* g = group(tr("Нарушение правила выравнивания задержек"), kDrc, int(delays.size()));
-      for (const DelayViolation& v : delays) {
-        auto* it = child(g, describeDelayViolation(b, doc_->unit(), v), kDrc, v.at);
-        if (int n = b.findNet(v.netShorter); n >= 0) it->setData(0, NetIndex, n);
+    // The delay rules the board does not keep, as TopoR shows them: the message with the two signals furthest
+    // apart and by how much, the advice under it.
+    for (const DelayViolation& v : doc_->delayViolations()) {
+      const QStringList advice = delayAdvice(b, doc_->unit(), v);
+      auto* g = group(describeDelayViolation(b, doc_->unit(), v), kDrc, int(advice.size()));
+      g->setData(0, HasPos, true);
+      g->setData(0, PosX, v.at.x);
+      g->setData(0, PosY, v.at.y);
+      const int net = b.findNet(v.netShorter);
+      if (net >= 0) g->setData(0, NetIndex, net);
+      for (const QString& a : advice) {
+        auto* it = child(g, a, kInfo, v.at);
+        if (net >= 0) it->setData(0, NetIndex, net);
+      }
+    }
+    // What the serpents' areas meet (TopoR's topological errors 5042–5053).
+    if (const auto& met = doc_->serpentConflicts(); !met.empty()) {
+      auto* g = group(tr("Топологическая ошибка: пересечение со змейкой"), kDrc, int(met.size()));
+      for (const SerpentConflict& c : met) {
+        auto* it = child(g, describeSerpentConflict(b, c), kDrc, c.at);
+        if (c.net >= 0) it->setData(0, NetIndex, c.net);
       }
     }
   }

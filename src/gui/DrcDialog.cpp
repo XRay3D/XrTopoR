@@ -202,7 +202,11 @@ int DrcDialog::run(Document* doc, QWidget* parent) {
                        .arg(QFileInfo(doc->path()).fileName())
                        .arg(v.size() + delays.size());
     for (auto& x : v) text += describeViolation(*doc->board(), doc->unit(), x) + "\n";
-    for (auto& x : delays) text += describeDelayViolation(*doc->board(), doc->unit(), x) + "\n";
+    for (auto& x : delays) {
+      text += describeDelayViolation(*doc->board(), doc->unit(), x) + "\n";
+      for (const QString& a : delayAdvice(*doc->board(), doc->unit(), x)) text += "    " + a + "\n";
+    }
+    for (auto& x : serpentConflicts(*doc->board())) text += describeSerpentConflict(*doc->board(), x) + "\n";
     if (auto r = io::writeFile(s.value("drc/reportPath").toString().toStdString(), text.toStdString()); !r)
       QMessageBox::warning(parent, QObject::tr("Отчет DRC"), QString::fromStdString(r.error()));
   }

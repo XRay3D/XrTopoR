@@ -1,5 +1,6 @@
 #include "gui/MainWindow.h"
 
+#include <set>
 #include <QApplication>
 #include <QCloseEvent>
 #include <QColorDialog>
@@ -30,6 +31,7 @@
 
 #include "core/DiffPairs.h"
 #include "core/Edit.h"
+#include "core/Serpents.h"
 #include "topo/Sidecar.h"
 #include "core/ZoneFill.h"
 #include "gui/AboutDialog.h"
@@ -259,6 +261,40 @@ void MainWindow::bindCommands() {
   c.bind("Accel_ZipWire", [this] { view_->zipSelection(); });
   c.bind("Accel_UnZipWire", [this] { view_->unzipSelection(); });
   c.bind("Accel_Serpent", [this] { view_->serpentSelection(); });
+  // «Создать змейки»: the signals the delay rules find short are made longer by serpents; the poured copper areas
+  // of the layers the serpents stand on are poured anew round them.
+  c.bind("Cmd_Serpents", [this] {
+    Board& b = *doc_->board();
+    const QString group = tr("Создание змеек");
+    doc_->clearLog(group);
+    if (b.hispeed.delays.empty() && r::none_of(b.hispeed.diffSignals, [](const DiffSignal& d) { return d.mismatch > 0; })) {
+      showHint(tr("Правила выравнивания задержек не заданы"));
+      return;
+    }
+    auto before = doc_->beginEdit();
+    const AutoSerpents r = autoSerpents(b);
+    if (!r.made && !r.raised) {
+      const QString said = r.left ? tr("Змейки не созданы: для выравнивания нет места. Не выполнено правил: %1").arg(r.left)
+                                  : tr("Проводники, нуждающиеся в выравнивании, не обнаружены");
+      if (r.left) doc_->addLog({LogMessage::Kind::Warning, group, said});
+      showHint(said);
+      return;
+    }
+    // The pours of the layers with new or longer serpents give way to them.
+    std::set<LayerId> layers;
+    for (const Track& t : b.tracks)
+      if (t.serp >= 0 && t.zip < 0) layers.insert(t.layer);
+    ZoneFillOptions pour;
+    for (int z = 0; z < int(b.zones.size()); ++z)
+      if (!b.zones[size_t(z)].filled.empty() && !b.zones[size_t(z)].alwaysCopper() && layers.contains(b.zones[size_t(z)].layer)) pour.only.push_back(z);
+    if (!pour.only.empty()) fillZones(b, pour);
+    doc_->clearSelection();
+    doc_->invalidateModel();
+    doc_->commitEdit(before, tr("Создать змейки"), false);
+    const QString said = tr("Создано змеек: %1, удлинено: %2. Не выполнено правил выравнивания: %3").arg(r.made).arg(r.raised).arg(r.left);
+    doc_->addLog({r.left ? LogMessage::Kind::Warning : LogMessage::Kind::Info, group, said});
+    showHint(said);
+  });
   // On a serpent the command is «Преобразовать в проводник» (TopoR's two entries of the context menu).
   auto nameSerpent = [this] {
     const bool serpent = view_->selectionIsSerpents();

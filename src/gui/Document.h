@@ -10,6 +10,7 @@
 
 #include "core/Connectivity.h"
 #include "core/Delay.h"
+#include "core/Serpents.h"
 #include "core/Teardrops.h"
 #include "drc/Drc.h"
 #include "geom/Ranges.h"
@@ -166,6 +167,8 @@ class Document : public QObject {
   void setDrc(std::vector<DrcViolation> v);
   bool drcRun() const { return drcRun_; }
   // The delay rules the board does not keep (core/Delay.h), found when DRC was run.
+  // What the serpents' areas meet (TopoR's 5042–5053), found with the DRC.
+  const std::vector<SerpentConflict>& serpentConflicts() const { return serpentConflicts_; }
   const std::vector<DelayViolation>& delayViolations() const { return delays_; }  // DRC was run on this board (an empty result means «no violations»)
   void clearDrc();
 
@@ -210,6 +213,7 @@ class Document : public QObject {
   std::vector<int> highlightNets_;
   std::vector<DrcViolation> drc_;
   std::vector<DelayViolation> delays_;
+  std::vector<SerpentConflict> serpentConflicts_;
   bool drcRun_ = false;
   std::vector<LogMessage> log_;
 };

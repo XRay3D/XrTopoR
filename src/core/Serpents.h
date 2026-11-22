@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "core/Board.h"
+#include "core/SpatialIndex.h"
 
 namespace xr {
 
@@ -62,5 +63,36 @@ bool setSerpent(Board& b, int serp, const Serpent& s, const Vec2* a = nullptr, c
 // for the whole area: 0.75 a side).
 double serpentDefaultHeight(Coord width, double gap);
 double serpentMinHeight(Coord width);
+
+// What the copper of a serpent's bends meets on its layer: TopoR's topological errors 5042–5053. (Not what the
+// trapezoid meets: in TopoR's own design trapezoids lie over neighbouring wires and over each other, the bends
+// keeping clear.) `code`: 5042 a wire of another net, 5049 a fixed one, 5043 a pad, 5045 a via,
+// 5050 a routing keepout, 5051 a copper area of another net (or of none), 5052 the board's outline (a bend is
+// not within the board), 5053 another serpent.
+struct SerpentConflict {
+  int code = 0;
+  int serp = -1;
+  LayerId layer = 0;
+  int net = kNoNet;                      // the serpent's
+  ItemRef other{ItemType::Track, -1};    // what it meets (none: the outline, another serpent)
+  int otherNet = kNoNet;
+  int otherSerp = -1;                    // 5053
+  Vec2 at;                               // where to look: the middle of the serpent's chord
+};
+std::vector<SerpentConflict> serpentConflicts(const Board& b);
+
+// «Создать змейки»: serpents on the wires of the signals the delay rules find too short (core/Delay.h) — in a
+// group to be equal, the shortest; of two to differ by so much, the one that lags; one to be of a length, when it
+// is short of it; the shorter conductor of a differential signal. A signal's own serpents are made longer first;
+// then its longest straight pieces that are not fixed nor of a zipped pair become serpents, each in a rectangle
+// as high on either side as the wires, pads and vias round it, the other serpents' trapezoids, the keepouts and
+// the board's edge leave room for (the roomiest part of the piece is taken), of the length wanted or the longest
+// that fits. Copper areas are not looked at: they are to be poured anew after. Goes on while the rules are not kept and something can still be made longer.
+struct AutoSerpents {
+  int made = 0;    // serpents made
+  int raised = 0;  // serpents there already, made longer
+  int left = 0;    // the rules still not kept
+};
+AutoSerpents autoSerpents(Board& b);
 
 }  // namespace xr

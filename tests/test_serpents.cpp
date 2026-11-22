@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <map>
 
 #include "core/Delay.h"
 #include "core/Serpents.h"
@@ -280,4 +281,133 @@ TEST(Serpent, GoesThroughTheFst) {
   }
   EXPECT_EQ(runs, 61);
   EXPECT_EQ(same, 60) << "TopoR's 59 and ours";
+}
+
+// What the copper of a serpent's bends meets is told by TopoR's numbers: a wire of another net (5042), a fixed
+// one (5049), a pad (5043), a via (5045), a routing keepout (5050), a copper area (5051), the board's outline
+// (5052), another serpent (5053). TopoR's own design has none of them; a serpent that is still straight, or whose
+// bends keep clear, meets nothing though its trapezoid lies over the things.
+TEST(Serpent, ConflictsOfTheBends) {
+  auto lb = io::loadBoard(data("topor/Example_06/Signals.fst"));
+  ASSERT_TRUE(lb) << lb.error();
+  EXPECT_TRUE(serpentConflicts(**lb).empty());
+
+  WireBoard w;
+  Board& b = w.b;
+  auto at = [](double x, double y) { return Vec2{x * kNmPerMm, y * kNmPerMm}; };
+  b.outline.push_back({at(-5, -5), at(15, -5), at(15, 5), at(-5, 5)});
+  const int s = makeSerpent(b, w.straight);
+  ASSERT_EQ(s, 0);
+  auto codes = [&] {
+    std::vector<int> out;
+    for (const SerpentConflict& c : serpentConflicts(b)) out.push_back(c.code);
+    r::sort(out);
+    return out;
+  };
+  const int other = b.addNet("O");
+  auto wire = [&](double x0, double y0, double x1, double y1, bool fixed) {
+    Track t;
+    t.a = Point(at(x0, y0));
+    t.b = Point(at(x1, y1));
+    t.width = mmToNm(0.15);
+    t.layer = w.top;
+    t.net = other;
+    t.locked = fixed;
+    b.tracks.push_back(t);
+  };
+  // Things half a millimetre off the chord, within the trapezoid (0.9 mm either side): the straight serpent is
+  // clear of them.
+  wire(2, 0.5, 4, 0.5, false);
+  wire(5, -0.5, 6, -0.5, true);
+  wire(2, 2, 4, 2, false);  // (outside the trapezoid)
+  Via v;
+  v.pos = Point(at(7, 0.6));
+  v.diameter = mmToNm(0.6);
+  v.drill = mmToNm(0.3);
+  v.layers = LayerMask(1) << w.top;
+  v.net = other;
+  b.vias.push_back(v);
+  Component c;
+  c.ref = "U1";
+  b.components.push_back(c);
+  Pad p;
+  p.number = "1";
+  p.component = 0;
+  p.net = other;
+  p.pos = Point(at(8.5, -0.7));
+  p.shape.kind = PadShapeKind::Rect;
+  p.shape.w = p.shape.h = mmToNm(0.5);
+  p.copper = LayerMask(1) << w.top;
+  b.components[0].pads.push_back(0);
+  b.pads.push_back(p);
+  EXPECT_TRUE(codes().empty());
+  // Bends of 0.3 mm keep clear of them still; as high as the trapezoid lets them, they meet all four.
+  Serpent sp = b.serpents[0];
+  const double full = serpentShape(at(0, 0), at(10, 0), sp, mmToNm(0.15)).maxLength;
+  sp.h1 = sp.h2 = sp.h3 = sp.h4 = 0.2 * kNmPerMm;
+  sp.length = full;
+  ASSERT_TRUE(setSerpent(b, s, sp));
+  EXPECT_TRUE(codes().empty());
+  sp.h1 = sp.h2 = sp.h3 = sp.h4 = 0.9 * kNmPerMm;
+  ASSERT_TRUE(setSerpent(b, s, sp));
+  EXPECT_EQ(codes(), (std::vector<int>{5042, 5043, 5045, 5049}));
+  for (const SerpentConflict& x : serpentConflicts(b)) {
+    EXPECT_EQ(x.serp, 0);
+    EXPECT_EQ(x.net, w.net);
+    EXPECT_EQ(x.otherNet, other);
+    EXPECT_GE(x.other.index, 0);
+  }
+  // The outline drawn closer than the bends reach.
+  b.outline[0] = {at(-5, -0.5), at(15, -0.5), at(15, 5), at(-5, 5)};
+  EXPECT_EQ(r::count(codes(), 5052), 1);
+  b.outline[0] = {at(-5, -5), at(15, -5), at(15, 5), at(-5, 5)};
+  // Another serpent whose bends cross this one's.
+  Track t;
+  t.a = Point(at(1, 1.2));
+  t.b = Point(at(9, 1.2));
+  t.width = mmToNm(0.15);
+  t.layer = w.top;
+  t.net = other;
+  b.tracks.push_back(t);
+  const int s2 = makeSerpent(b, {int(b.tracks.size()) - 1});
+  ASSERT_EQ(s2, 1);
+  EXPECT_EQ(r::count(codes(), 5053), 0) << "straight yet";
+  Serpent sp2 = b.serpents[1];
+  sp2.length = 1e12;
+  ASSERT_TRUE(setSerpent(b, s2, sp2));
+  const auto all = serpentConflicts(b);
+  EXPECT_EQ(r::count(all, 5053, &SerpentConflict::code), 1) << "once for the two";
+}
+
+// «Создать змейки» on TopoR's own design with its serpents taken out: the delay rules, broken by that, are kept
+// again by serpents of ours; nothing of them meets other copper, the board has no more violations than it had.
+TEST(Serpent, AutoEqualisesSignals) {
+  auto lb = io::loadBoard(data("topor/Example_06/Signals.fst"));
+  ASSERT_TRUE(lb) << lb.error();
+  Board& b = **lb;
+  ASSERT_TRUE(checkDelays(b).empty()) << "as TopoR matched it";
+  const size_t violations = runDrc(b, {}).size();
+  const double length = b.tracksLength();
+  // Every serpent of a single wire straightened and made a plain piece (the zipped pair's stays).
+  for (int s = int(b.serpents.size()) - 1; s >= 0; --s) {
+    if (!serpentRun(b, s)) continue;
+    Serpent flat = b.serpents[size_t(s)];
+    flat.length = 0;
+    ASSERT_TRUE(setSerpent(b, s, flat));
+    unmakeSerpent(b, s);
+  }
+  ASSERT_EQ(b.serpents.size(), 1u);
+  const size_t broken = checkDelays(b).size();
+  EXPECT_GT(broken, 0u);
+  const double straight = b.tracksLength();
+  EXPECT_LT(straight, length - 100.0 * kNmPerMm);
+  const AutoSerpents made = autoSerpents(b);
+  EXPECT_GT(made.made, 10);
+  EXPECT_EQ(made.left, int(checkDelays(b).size()));
+  EXPECT_EQ(made.left, 0);
+  EXPECT_TRUE(serpentConflicts(b).empty());
+  EXPECT_LE(runDrc(b, {}).size(), violations);
+  // Done again: nothing to do.
+  const AutoSerpents again = autoSerpents(b);
+  EXPECT_EQ(again.made + again.raised, 0);
 }

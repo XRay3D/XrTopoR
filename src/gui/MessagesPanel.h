@@ -4,6 +4,7 @@
 #include <QTreeWidget>
 #include <QWidget>
 
+#include "core/Serpents.h"
 #include "gui/Document.h"
 
 namespace xr::gui {
@@ -14,6 +15,9 @@ class BoardView;
 QString describeViolation(const Board& b, Unit u, const DrcViolation& v);
 // A delay rule the board does not keep, in words: the rule, the nets furthest apart (the shorter first), the value.
 QString describeDelayViolation(const Board& b, Unit u, const DelayViolation& v);
+QStringList delayAdvice(const Board& b, Unit u, const DelayViolation& v);  // TopoR's «Совет: …» lines under it
+// A serpent's area met by something: TopoR's message of that number, word for word.
+QString describeSerpentConflict(const Board& b, const SerpentConflict& c);
 
 class MessagesPanel : public QWidget {
   Q_OBJECT

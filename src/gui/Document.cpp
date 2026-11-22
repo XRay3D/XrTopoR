@@ -65,6 +65,7 @@ void Document::setBoard(std::unique_ptr<Board> b, const QString& path) {
   highlightNets_.clear();
   drc_.clear();
   delays_.clear();
+  serpentConflicts_.clear();
   drcRun_ = false;
   log_.clear();
   if (board_) {
@@ -282,6 +283,7 @@ void Document::setHighlightedNets(std::vector<int> nets) {
 void Document::setDrc(std::vector<DrcViolation> v) {
   drc_ = std::move(v);
   delays_ = board_ ? checkDelays(*board_) : std::vector<DelayViolation>{};
+  serpentConflicts_ = board_ ? xr::serpentConflicts(*board_) : std::vector<SerpentConflict>{};
   drcRun_ = true;
   emit drcChanged();
 }
@@ -289,6 +291,7 @@ void Document::setDrc(std::vector<DrcViolation> v) {
 void Document::clearDrc() {
   drc_.clear();
   delays_.clear();
+  serpentConflicts_.clear();
   drcRun_ = false;
   emit drcChanged();
 }

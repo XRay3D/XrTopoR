@@ -1,6 +1,7 @@
 // GUI smoke test: drives the board view with synthetic mouse/key events on the offscreen platform.
 #include <QCheckBox>
 #include <QLayout>
+#include <QRegularExpression>
 #include <QTabWidget>
 #include <QMimeData>
 #include <QTreeView>
@@ -1209,6 +1210,71 @@ TEST(Gui, SerpentCommandOfTheMainWindow) {
   doc.undoStack()->undo();
   EXPECT_EQ(b.serpents.size(), 61u);
   EXPECT_TRUE(serpentRun(b, 5));
+}
+
+// «Создать змейки» of the main window: on TopoR's own design, as it is, there is nothing to do; with its serpents
+// taken out the rules are kept again by serpents of ours, in one step of undo, and the outcome is in the messages.
+TEST(Gui, SerpentsCommandReports) {
+  app();
+  MainWindow w;
+  auto hinted = [&](const QString& part) {
+    for (QLabel* l : w.findChildren<QLabel*>())
+      if (l->text().contains(part)) return true;
+    return false;
+  };
+  QAction* make = (*w.commands())["Cmd_Serpents"];
+  EXPECT_FALSE(make->isEnabled()) << "no board";
+  QTemporaryDir dir;
+  ASSERT_TRUE(QFile::copy(QString::fromStdString(data("astable.kicad_pcb")), dir.filePath("astable.kicad_pcb")));
+  ASSERT_TRUE(w.openFile(dir.filePath("astable.kicad_pcb")));
+  ASSERT_TRUE(make->isEnabled());
+  make->trigger();
+  EXPECT_TRUE(hinted("Правила выравнивания задержек не заданы"));
+  ASSERT_TRUE(QFile::copy(QString::fromStdString(data("topor/Example_06/Signals.fst")), dir.filePath("Signals.fst")));
+  ASSERT_TRUE(w.openFile(dir.filePath("Signals.fst")));
+  Document& doc = *w.document();
+  Board& b = *doc.board();
+  make->trigger();
+  EXPECT_TRUE(hinted("Проводники, нуждающиеся в выравнивании, не обнаружены"));
+  EXPECT_FALSE(doc.undoStack()->canUndo());
+  {
+    auto before = doc.beginEdit();
+    for (int s = int(b.serpents.size()) - 1; s >= 0; --s) {
+      if (!serpentRun(b, s)) continue;
+      Serpent flat = b.serpents[size_t(s)];
+      flat.length = 0;
+      ASSERT_TRUE(setSerpent(b, s, flat));
+      unmakeSerpent(b, s);
+    }
+    doc.commitEdit(before, "straighten", false);
+  }
+  ASSERT_EQ(b.serpents.size(), 1u);
+  ASSERT_FALSE(checkDelays(b).empty());
+  const int steps = doc.undoStack()->index();
+  make->trigger();
+  EXPECT_TRUE(hinted("Создано змеек: ")) << "the outcome is told";
+  if (const char* shots = std::getenv("XR_SHOT_DIR")) {
+    BBox box;
+    for (const Track& t : b.tracks)
+      if (t.serp >= 0 && t.zip < 0) box.add(t.a.v()), box.add(t.b.v());
+    w.resize(1400, 1000);
+    w.show();
+    QTest::qWait(100);
+    w.view()->centerOn(Vec2{(box.minX + box.maxX) / 2, (box.minY + box.maxY) / 2}, (box.maxX - box.minX) / kNmPerMm * 1.1);
+    w.view()->refresh();
+    QTest::qWait(100);
+    if (const QImage img = w.view()->picture(); w.view()->drawable()) img.save(QString(shots) + "/serpents-auto.png");
+    w.hide();
+  }
+  EXPECT_TRUE(hinted("Не выполнено правил выравнивания: 0"));
+  EXPECT_GT(b.serpents.size(), 30u);
+  EXPECT_TRUE(checkDelays(b).empty());
+  EXPECT_EQ(doc.undoStack()->index(), steps + 1);
+  ASSERT_FALSE(doc.log().empty());
+  EXPECT_TRUE(doc.log().back().text.startsWith("Создано змеек: "));
+  doc.undoStack()->undo();
+  EXPECT_EQ(b.serpents.size(), 1u);
+  EXPECT_FALSE(checkDelays(b).empty());
 }
 
 TEST(Gui, ZippedPairSelectionAndProperties) {
@@ -5577,29 +5643,81 @@ TEST(Gui, DelayViolationIsShownInMessages) {
   MessagesPanel panel(&f.doc, &f.view);
   auto* tree = panel.findChild<QTreeWidget*>();
   ASSERT_TRUE(tree);
-  auto delayGroup = [&]() -> QTreeWidgetItem* {
+  auto delayItems = [&] {
+    std::vector<QTreeWidgetItem*> out;
     for (int i = 0; i < tree->topLevelItemCount(); ++i)
-      if (tree->topLevelItem(i)->text(0).startsWith("Нарушение правила выравнивания задержек")) return tree->topLevelItem(i);
-    return nullptr;
+      if (tree->topLevelItem(i)->text(0).startsWith("Предупреждение 2003: ")) out.push_back(tree->topLevelItem(i));
+    return out;
   };
   // As TopoR matched it the design keeps its rules.
   f.doc.setDrc({});
   EXPECT_TRUE(f.doc.delayViolations().empty());
-  EXPECT_FALSE(delayGroup());
-  // The clock must now stand 20 ps behind the address group: it stands 6.5.
+  EXPECT_TRUE(delayItems().empty());
+  // The clock must now stand 20 ps behind the address group: it stands 6.5. As TopoR words it: the rule by its
+  // name, the two signals, by how much (the time and the length that makes it), and two lines of advice.
   f.doc.board()->hispeed.delays[3].constant = -20;
   f.doc.setDrc({});
   ASSERT_EQ(f.doc.delayViolations().size(), 1u);
-  QTreeWidgetItem* g = delayGroup();
+  const auto items = delayItems();
+  ASSERT_EQ(items.size(), 1u);
+  const QString text = items[0]->text(0);
+  const QRegularExpression head("^Предупреждение 2003: Правило 'Взаимное_Выравнивание_#1' не выполняется для сигналов '([^']+)' и 'SDCLK_U2' на (\\d+\\.\\d\\d) пс \\((\\d+\\.\\d+) мм\\)");
+  const auto m = head.match(text);
+  ASSERT_TRUE(m.hasMatch()) << text.toStdString();
+  // 13.5 ps beyond the rule's span of ±1 ps is 12.5 ps over; the length is that time on an inner layer.
+  EXPECT_NEAR(m.captured(2).toDouble(), 12.5, 0.6) << text.toStdString();
+  EXPECT_NEAR(m.captured(3).toDouble(), m.captured(2).toDouble() / kDelayInnerPsPerMm, 0.002);
+  ASSERT_EQ(items[0]->childCount(), 2);
+  const QString by = QString("на %1 пс (%2 мм).").arg(m.captured(2), m.captured(3));
+  EXPECT_EQ(items[0]->child(0)->text(0), QString("Совет: Увеличить задержку на сигнале 'SDCLK_U2' ") + by);
+  EXPECT_EQ(items[0]->child(1)->text(0), QString("Совет: Уменьшить задержку на сигнале '%1' ").arg(m.captured(1)) + by);
+  // A group's rule is named as a group's, and numbered from one.
+  f.doc.board()->hispeed.delays[3].constant = -6.5;
+  f.doc.board()->hispeed.delays[1].tolerance = -1;  // (no spread is within it)
+  f.doc.setDrc({});
+  ASSERT_FALSE(delayItems().empty());
+  EXPECT_TRUE(delayItems()[0]->text(0).startsWith("Предупреждение 2003: Правило 'Выравнивание_Группы_#2' не выполняется для сигналов '")) << delayItems()[0]->text(0).toStdString();
+  f.doc.clearDrc();
+  EXPECT_TRUE(delayItems().empty());
+}
+
+// A serpent whose bends cross a wire of another net: TopoR's error 5042 in the window of messages after the DRC,
+// with the layer and the nets; none on TopoR's own design.
+TEST(Gui, SerpentConflictIsShownInMessages) {
+  Fixture f("topor/Example_06/Signals.fst");
+  MessagesPanel panel(&f.doc, &f.view);
+  auto* tree = panel.findChild<QTreeWidget*>();
+  ASSERT_TRUE(tree);
+  auto group = [&]() -> QTreeWidgetItem* {
+    for (int i = 0; i < tree->topLevelItemCount(); ++i)
+      if (tree->topLevelItem(i)->text(0).startsWith("Топологическая ошибка: пересечение со змейкой")) return tree->topLevelItem(i);
+    return nullptr;
+  };
+  f.doc.setDrc({});
+  EXPECT_TRUE(f.doc.serpentConflicts().empty());
+  EXPECT_FALSE(group());
+  // A wire of another net laid along a serpent's chord.
+  Board& b = *f.doc.board();
+  const auto run = serpentRun(b, 5);
+  ASSERT_TRUE(run);
+  Track t;
+  t.a = Point(run->a);
+  t.b = Point(run->b);
+  t.width = run->width;
+  t.layer = run->layer;
+  t.net = run->net == 0 ? 1 : 0;
+  b.tracks.push_back(t);
+  f.doc.invalidate();
+  f.doc.setDrc({});
+  ASSERT_EQ(f.doc.serpentConflicts().size(), 1u);
+  QTreeWidgetItem* g = group();
   ASSERT_TRUE(g);
   ASSERT_EQ(g->childCount(), 1);
   const QString text = g->child(0)->text(0);
-  EXPECT_TRUE(text.startsWith("Взаимное выравнивание, правило 0: цепи ")) << text.toStdString();
-  EXPECT_TRUE(text.contains("'SDCLK_B' (сигнал SDCLK_U2)")) << text.toStdString();
-  EXPECT_TRUE(text.contains("пс вне -21.00 пс … -19.00 пс")) << text.toStdString();
-  EXPECT_LT(text.indexOf("SDCLK_U2"), 0 + text.size());
+  EXPECT_TRUE(text.startsWith("Ошибка 5042! На слое '")) << text.toStdString();
+  EXPECT_TRUE(text.contains(QString("пересекается со змейкой цепи '%1'.").arg(QString::fromStdString(b.nets[size_t(run->net)].name)))) << text.toStdString();
   f.doc.clearDrc();
-  EXPECT_FALSE(delayGroup());
+  EXPECT_FALSE(group());
 }
 
 // «Фильтр сообщений»: a warning switched off is not in the window of messages; the setting is the design's and
